@@ -31,6 +31,7 @@ from urllib.parse import quote, urlparse
 from email.utils import formatdate
 
 from .errors import ApiError
+from . import gitpanel
 from . import webauthn_api
 from . import fscopy
 from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
@@ -5836,44 +5837,46 @@ async def host_run(host_id: int, body: RunIn, request: Request,
             "duration": resp.get("duration")}
 
 
-# ── Git: status/diff/stage/commit pe repo-ul din cwd-ul sesiunii ─────────────
-# Panoul de git rulează subcomenzi git prin op-ul `run` al agentului — NU op-uri
-# git noi în ptyd.py, deci FĂRĂ re-semnare. Diferă de /run prin: (1) whitelist
-# strict de subcomenzi, (2) argv shell-quotat server-side (fără injecție prin
-# cale/mesaj), (3) NU scrie în command_history (status/diff se cer des; ar inunda
-# istoricul). Scope: status/diff/stage/commit — merge/rebase/push rămân la CLI.
-_GIT_SUBCMDS = {"status", "diff", "rev-parse", "add", "reset", "restore", "commit"}
-_GIT_WRITE_SUBCMDS = {"add", "reset", "restore", "commit"}
-
-
+# ── Git panel: fixed operations, root-relative literal paths ─────────────────
 class GitIn(BaseModel):
-    args: list[str]
-    cwd: str
-    confirmed: bool = False    # guardrail `confirm` (doar subcomenzile care scriu)
-    stepup_grant: str = ""     # 2FA: la fel ca /run, orice acțiune pe host 2FA cere step-up
+    cwd: str = ""
+    operation: str = ""
+    path: str = ""
+    revision: str = ""
+    message: str = ""
+    sid: str = ""
+    args: Optional[list[str]] = None  # strictly validated compatibility for cached clients
+    confirmed: bool = False
+    stepup_grant: str = ""
     stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
+    stepup_totp: str = ""
 
 
 @router.post("/api/hosts/{host_id}/git")
 async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', host='host_id'))):
-    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
-    if not body.args or body.args[0] not in _GIT_SUBCMDS:
-        raise ApiError(400, "git.badSubcommand", "git subcommand not allowed")
-    cwd = (body.cwd or "").strip()
-    if not cwd.startswith("/"):
-        raise ApiError(400, "git.cwdAbsolute", "cwd must be an absolute path")
-    if len(body.args) > 24:
-        raise ApiError(400, "run.tooManyArgs", "too many arguments")
-    # argv → linie shell sigură: fiecare argument citat, deci o cale/mesaj cu
-    # spații, ghilimele sau `;` nu poate rupe comanda sau injecta alta.
-    cmd = " ".join(shlex.quote(p) for p in (["git", "-C", cwd] + list(body.args)))
-    if len(cmd) > 8000:
-        raise ApiError(400, "run.tooLong", "command too long")
-    # status/diff/rev-parse se cer la fiecare refresh şi nu schimbă nimic — guardrail-ul doar pe
-    # subcomenzile care SCRIU (add/reset/restore/commit), ca o regulă `git\s+reset` să conteze
-    if body.args[0] in _GIT_WRITE_SUBCMDS:
-        await _enforce_guard(cmd, body.confirmed)
+    await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
+    operation = body.operation
+    params = {"path": body.path, "revision": body.revision, "message": body.message}
+    if body.args is not None:
+        if operation:
+            raise ApiError(400, "git.badSubcommand", "choose one git request format")
+        if len(body.args) > 24:
+            raise ApiError(400, "run.tooManyArgs", "too many arguments")
+        operation, params = gitpanel.legacy_operation(body.args)
+    if operation == "cwd":
+        # Git uses run permission, including cwd discovery; it does not require files.read.
+        row = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", body.sid)
+        if row is None or row["host_id"] != host_id:
+            raise ApiError(404, "session.missing", "session not found")
+        try:
+            return {"cwd": await core.session_cwd(host_id, body.sid)}
+        except core.AgentGone:
+            raise ApiError(409, "host.offline", "host offline or has no agent")
+        except (core.FileError, TimeoutError) as e:
+            raise _file_api_error(e)
+    cmd, guard = gitpanel.command(body.cwd, operation, **params)
+    if operation in gitpanel.WRITE_OPS:
+        await _enforce_guard(guard, body.confirmed)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
         raise ApiError(409, "host.offline", "host offline or has no agent")

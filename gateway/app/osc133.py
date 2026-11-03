@@ -37,6 +37,7 @@ eventual B → E). Un C singur (job în fundal care tipăreşte `ESC]133;C`) e r
 ÎNCREDERE: fluxul e output-ul sesiunii — orice program rulat acolo poate tipări marcaje false, exact
 ca pe calea live din browser. Starea de aici doar rezumă acelaşi flux; nimic nu vine de la browser."""
 import re
+import logging
 from typing import Optional
 
 HEAD_MAX = 64                 # octeţi utili păstraţi dintr-un OSC (id + felul marcajului)
@@ -115,9 +116,10 @@ class Osc133Scanner:
     secvenţe pe care read_tail o scoate din replay."""
 
     __slots__ = ("integrated", "last", "last_exit", "last_start", "last_alt", "strip_end", "alt",
-                 "_phase", "alt_unknown", "_in_osc", "_start", "_head", "_size", "_taint", "_carry", "_carry_pos")
+                 "_on_mark", "_phase", "alt_unknown", "_in_osc", "_start", "_head", "_size", "_taint", "_carry", "_carry_pos")
 
-    def __init__(self) -> None:
+    def __init__(self, on_mark=None) -> None:
+        self._on_mark = on_mark
         self.integrated = False
         self.last: Optional[str] = None
         # exit code-ul ultimului marcaj „D" (int) sau None. ADITIV pentru notificările de task
@@ -140,12 +142,21 @@ class Osc133Scanner:
 
     # -- evenimente din afara fluxului ------------------------------------------------------
 
+    def _notify(self) -> None:
+        # Observers must never interrupt parsing or change guardrail state.
+        if self._on_mark is not None:
+            try:
+                self._on_mark(self.last, self.last_exit)
+            except Exception:
+                logging.getLogger("webterm").exception("OSC event observer failed")
+
     def _unknown(self) -> None:
         self.last = None
         self.last_exit = None
         self.last_start = None
         self.last_alt = False
         self._phase = None
+        self._notify()
 
     def gap(self) -> None:
         """Lipsesc octeţi din flux (agent repornit, inel depăşit): ultimul marcaj nu mai e de
@@ -269,6 +280,7 @@ class Osc133Scanner:
             self.last_exit = None
             self.last_start = None
             self.last_alt = False
+            self._notify()
             return
         else:
             self._phase = None
@@ -279,6 +291,7 @@ class Osc133Scanner:
         self.last_exit = exit_code if k == "D" else None
         self.last_start = start
         self.last_alt = self.alt or self.alt_unknown
+        self._notify()
 
     def _mode(self, params: bytes, set_: bool) -> None:
         ps = params.split(b";")

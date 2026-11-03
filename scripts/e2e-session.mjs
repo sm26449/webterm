@@ -918,6 +918,43 @@ try {
   check('istoric: după resync-ul de revenire din fundal, rândul 100 e tot în scrollback, o dată',
     bgOk && histAfterResync === 1, `bg=${bgOk} ${histAfterResync}× WT_HIST_100`)
 
+  // Git regression: real agent, cwd in a subfolder, status/diff and history tabs.
+  {
+    const root = `/tmp/wt_git_${RUN}`
+    const fixture = await fetch(`${BASE}/api/hosts/${host.id}/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: BASE },
+      body: JSON.stringify({ command: `mkdir -p ${root}/sub && git -C ${root} init -q && git -C ${root} config user.name Fixture && git -C ${root} config user.email fixture@example.invalid && printf 'before\n' > ${root}/sub/a.txt && git -C ${root} add . && git -C ${root} commit -qm fixture && printf 'after\n' > ${root}/sub/a.txt` }),
+    }).then((r) => r.json())
+    check('Git: fixture repository created on the agent', fixture.exit_code === 0, JSON.stringify(fixture))
+    await activePane.locator('.xterm-screen').click()
+    await page.keyboard.type(`cd ${root}/sub\n`)
+    await page.waitForTimeout(800)
+    await activePane.getByRole('button', { name: 'Git (status, diff, commit on the repo in cwd)', exact: true }).click()
+    const gp = page.locator('aside[aria-label="Git"]').last()
+    const path = gp.getByRole('textbox', { name: 'Repository folder (absolute path)' })
+    check('Git: follows terminal cwd in subfolder',
+      await pollValue(() => path.inputValue(), (v) => v === `${root}/sub`) === `${root}/sub`)
+    const file = gp.getByRole('button', { name: 'sub/a.txt', exact: true })
+    await file.waitFor({ state: 'visible', timeout: 15000 })
+    await file.click()
+    check('Git: subfolder diff contains the actual change',
+      (await pollValue(() => gp.textContent(), (v) => v.includes('+after'))).includes('+after'))
+    await gp.getByRole('tab', { name: 'Commits', exact: true }).click()
+    check('Git: commits tab loads server-formatted history',
+      (await pollValue(() => gp.textContent(), (v) => v.includes('fixture'))).includes('fixture'))
+    await gp.getByRole('tab', { name: 'Branches', exact: true }).click()
+    check('Git: branches tab loads',
+      (await pollValue(() => gp.textContent(), (v) => /master|main/.test(v))).match(/master|main/) != null)
+    await path.fill('relative-path')
+    await path.press('Enter')
+    check('Git: invalid path shows translated validation message',
+      (await gp.textContent()).includes('The working directory must be an absolute path.'))
+    await gp.getByRole('button', { name: 'Close git panel', exact: true }).click()
+    await activePane.locator('.xterm-screen').click()
+    await page.keyboard.type('cd /tmp\n')
+    await page.waitForTimeout(600)
+  }
+
   // ── Faza 2 (Val 5): panoul de fișiere — drawer, follow-cwd, operații ──
   await activePane.locator('.xterm-screen').click()
   await page.keyboard.type('cd /tmp\n')

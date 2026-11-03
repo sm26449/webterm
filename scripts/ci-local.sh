@@ -286,7 +286,7 @@ fi
 # ── E2E (cere tmux în container, ca în CI) ──────────────────────────────────
 if want e2e; then
 say "E2E sessions"
-docker exec -u root $C1 sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends tmux' >/dev/null 2>&1
+docker exec -u root $C1 sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends tmux git' >/dev/null 2>&1
 docker exec $C1 sh -c 'command -v tmux' >/dev/null || { no "tmux în container"; }
 # Scriptul E2E porneşte agentul cu `docker exec`, dar containerul Playwright n-are CLI-ul
 # docker. Calea prevăzută pentru asta e AGENT_TOKEN_FILE: scriptul scrie tokenul pe disc

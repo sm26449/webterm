@@ -1,0 +1,299 @@
+"""Git panel: real Git in temporary repositories behind the authenticated API."""
+import asyncio
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import time
+
+import rbac_util as U
+from app import authz, core, db, gitpanel
+
+check = U.Checker()
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout
+
+
+class LocalAgent(core.AgentConnection):
+    async def run_command(self, cmd, timeout):
+        p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=timeout)
+        return {"ok": True, "exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+
+    async def request(self, op, **kwargs):
+        assert op == "session_cwd"
+        return {"ok": True, "cwd": self.cwd}
+
+
+async def content_filter_tests(base, agent):
+    """The exact production command must not run clean/smudge/process, even cross-owner."""
+    repo = base / "filtered-repo"
+    repo.mkdir()
+    git(repo, "init"); git(repo, "config", "user.name", "Fixture")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    f = repo / "evil.txt"; f.write_text("aaaa\n")
+    (repo / ".gitattributes").write_text("*.txt filter=pwn\n")
+    git(repo, "add", "."); git(repo, "commit", "-m", "unfiltered baseline")
+    f.write_text("bbbb\n")
+    stamp = f.stat().st_mtime + 2
+    os.utime(f, (stamp, stamp))             # same size: force actual content comparison
+    marker = base / "content-filter-ran"
+    driver = base / "content-filter.sh"
+    driver.write_text("#!/bin/sh\nid -u > " + shlex.quote(str(marker)) + "\ncat\n")
+    driver.chmod(0o755)
+    git(repo, "config", "filter.pwn.clean", str(driver))
+    git(repo, "config", "filter.pwn.smudge", str(driver))
+    # Positive control: without the panel's isolation this really does execute code.
+    git(repo, "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--", "evil.txt")
+    check("clean-filter positive control executes the fixture", marker.exists())
+    marker.unlink()
+    async def inspect(label):
+        for op, params in [("status", {}), ("diff", {"path": "evil.txt"}),
+                           ("staged_diff", {"path": "evil.txt"}),
+                           ("untracked_diff", {"path": "evil.txt"})]:
+            cmd, _ = gitpanel.command(str(repo), op, **params)
+            r = await agent.run_command(cmd, 30)
+            check(label + " " + op + " blocks content filters",
+                  r["exit_code"] in (0, 1) and not marker.exists(), str(r)[:200])
+            if marker.exists():
+                marker.unlink()
+    await inspect("same-owner clean/smudge")
+    git(repo, "config", "filter.pwn.process", str(driver))
+    await inspect("process filter")
+    git(repo, "config", "--unset", "filter.pwn.process")
+    if os.geteuid() == 0:
+        os.chown(repo, 65534, 65534)
+        await inspect("cross-owner clean/smudge")
+        os.chown(repo, os.geteuid(), os.getegid())
+    if os.geteuid() == 0:
+        # $GIT_DIR/info/attributes is a layer --attr-source cannot suppress. A filter assigned there
+        # must still never run as a more-privileged user than the repo's git-dir owner: a root read
+        # of a repo owned by another user is re-executed as that owner.
+        ia = base / "info-attr-repo"; ia.mkdir()
+        git(ia, "init"); git(ia, "config", "user.name", "x"); git(ia, "config", "user.email", "x@y.z")
+        (ia / "g.txt").write_text("aaaa\n"); git(ia, "add", "."); git(ia, "commit", "-m", "base")
+        (ia / "g.txt").write_text("bbbb\n")
+        rootmark = base / "info-attr-ran-as-root"
+        asroot = base / "asroot.sh"
+        asroot.write_text('#!/bin/sh\n[ "$(id -u)" = 0 ] && : > ' + shlex.quote(str(rootmark)) + '\ncat\n')
+        asroot.chmod(0o755)
+        git(ia, "config", "filter.pwn.clean", str(asroot))
+        (ia / ".git" / "info" / "attributes").write_text("g.txt filter=pwn\n")
+        base.chmod(0o755)
+        subprocess.run(["chown", "-R", "65534:65534", str(ia)], check=True)
+        try:
+            for op, params in [("status", {}), ("diff", {"path": "g.txt"})]:
+                cmd, _ = gitpanel.command(str(ia), op, **params)
+                r = await agent.run_command(cmd, 30)
+                check("info/attributes filter is confined to the owner, never root (" + op + ")",
+                      not rootmark.exists() and r["exit_code"] in (0, 1), str(r)[:200])
+                if rootmark.exists():
+                    rootmark.unlink()
+        finally:
+            subprocess.run(["chown", "-R", "%d:%d" % (os.geteuid(), os.getegid()), str(ia)], check=True)
+    # Configured includes must not restore an executable driver in the read view.
+    include = base / "included-filter.config"
+    include.write_text('[filter "pwn"]\nclean = ' + str(driver) + '\nsmudge = ' + str(driver) + '\n')
+    git(repo, "config", "--unset", "filter.pwn.clean")
+    git(repo, "config", "--unset", "filter.pwn.smudge")
+    git(repo, "config", "include.path", str(include))
+    await inspect("included filter")
+    git(repo, "config", "--unset", "include.path")
+    previous = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM")}
+    try:
+        os.environ["GIT_CONFIG_GLOBAL"] = str(include)
+        os.environ["GIT_CONFIG_SYSTEM"] = str(include)
+        os.environ.pop("GIT_CONFIG_NOSYSTEM", None)
+        await inspect("global/system filter")
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    git(repo, "update-index", "--split-index")
+    cmd, _ = gitpanel.command(str(repo), "diff", path="evil.txt")
+    r = await agent.run_command(cmd, 30)
+    check("split-index diff is preserved", r["exit_code"] == 0 and "+bbbb" in r["stdout"], str(r)[:200])
+
+
+async def main():
+    await U.boot()
+    original = core.source_for
+    agent = LocalAgent.__new__(LocalAgent)
+    try:
+        with tempfile.TemporaryDirectory(prefix="wt-git-test-") as tmp:
+            base = Path(tmp)
+            # Ignore the operator machine's global trust/config and sudo identity in fixtures.
+            os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+            os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+            os.environ.pop("SUDO_UID", None)
+            repo = base / "repo with 'quotes'"
+            repo.mkdir()
+            git(repo, "init"); git(repo, "config", "user.name", "Fixture")
+            git(repo, "config", "user.email", "fixture@example.invalid")
+            sub = repo / "sub"; sub.mkdir()
+            file = sub / "a.txt"; file.write_text("before\n")
+            git(repo, "add", "."); git(repo, "commit", "-m", "fixture")
+            file.write_text("after\n")
+            owner = await U.owner_client()
+            hid = await U.add_host(owner, "git-fixture")
+            other = await U.add_host(owner, "other-fixture")
+            sid = await U.add_session(hid)
+            agent.cwd = str(sub)
+            core.source_for = lambda host_id: agent
+            core.sources[hid] = agent
+
+            async def call(operation=None, cwd=sub, client=owner, **body):
+                if operation is not None:
+                    body["operation"] = operation
+                return await client.post(f"/api/hosts/{hid}/git", json={"cwd": str(cwd), **body})
+
+            async def good(operation, **params):
+                r = await call(operation, **params)
+                check(operation + " accepted", r.status_code == 200, r.text[:150])
+                return r.json()
+
+            r = await good("root")
+            check("subfolder discovers actual root", r["stdout"].rstrip("\n") == str(repo))
+            r = await good("status")
+            check("status contains literal root-relative path", " M sub/a.txt\0" in r["stdout"])
+            r = await good("diff", path="sub/a.txt")
+            check("diff from subfolder shows actual changes", "+after" in r["stdout"] and r["exit_code"] == 0)
+            weird = 'space -> ă\n"quote".txt'
+            (repo / weird).write_text("new file\n")
+            r = await good("status")
+            check("status preserves unicode, newline, quotes and arrow", "?? " + weird + "\0" in r["stdout"])
+            r = await good("untracked_diff", path=weird)
+            check("untracked diff preserves literal filename", r["exit_code"] == 1 and "+new file" in r["stdout"])
+            marker = base / "driver-ran"
+            driver = base / "driver.sh"
+            driver.write_text("#!/bin/sh\nprintf executed > " + shlex.quote(str(marker)) + "\nprintf converted\\n\n")
+            driver.chmod(0o755)
+            (repo / ".gitattributes").write_text("*.txt diff=fixture\n")
+            git(repo, "config", "diff.fixture.textconv", str(driver))
+            git(repo, "config", "diff.fixture.command", str(driver))
+            git(repo, "config", "core.fsmonitor", str(driver))
+            r = await good("diff", path="sub/a.txt")
+            check("diff does not invoke textconv/external driver", not marker.exists() and "+after" in r["stdout"])
+            await good("status")
+            check("status does not invoke fsmonitor", not marker.exists())
+            head = git(repo, "rev-parse", "HEAD").strip()
+            for op, fields in [("commits", {}), ("branches", {}), ("activity", {}), ("show", {"revision": head})]:
+                r = await good(op, **fields)
+                check(op + " exits successfully", r["exit_code"] == 0)
+            check("history never invokes drivers", not marker.exists())
+
+            outside = base / "outside.txt"; outside.write_text("keep\n")
+            before = git(repo, "reflog")
+            hostile = [["diff", "--output=" + str(outside)], ["reflog", "expire", "--expire=all", "--all"],
+                       ["reflog", "delete", "HEAD@{0}"], ["log", "--output=" + str(outside)],
+                       ["diff", "--ext-diff", "--", "sub/a.txt"], ["show", "--textconv", "HEAD"],
+                       ["commit", "--no-verify", "-m", "bad"], ["status", "--porcelain", "--branch", "--short"]]
+            for args in hostile:
+                r = await call(args=args)
+                check("reject unsafe legacy arguments " + args[0], r.status_code == 400, r.text[:100])
+            check("outside file not overwritten", outside.read_text() == "keep\n")
+            check("reflog not pruned", git(repo, "reflog") == before)
+            for fields in [{"path": "../outside.txt"}, {"path": str(outside)}, {"path": "bad\0file"}]:
+                r = await call("diff", **fields)
+                check("reject path traversal/absolute/NUL", r.status_code == 400)
+            r = await call("show", revision="HEAD --output=bad")
+            check("reject revision/options injection", r.status_code == 400)
+            r = await call("status", args=["status"])
+            check("reject contradictory request formats", r.status_code == 400)
+            # A shell-looking filename remains data, including command substitutions.
+            injection = "$(touch marker); file.txt"; (repo / injection).write_text("literal\n")
+            r = await good("untracked_diff", path=injection)
+            check("shell metacharacters remain literal", "+literal" in r["stdout"] and not (repo / "marker").exists())
+
+            await db.execute("INSERT INTO app_settings(key,value) VALUES('command_guard',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                             json.dumps({"enabled": True, "rules": [{"pattern": "git.*add", "action": "block"},
+                                                                      {"pattern": "git.*reset", "action": "confirm"}]}))
+            r = await call("stage", path="sub/a.txt")
+            check("structured stage obeys guardrail", r.status_code == 403 and "guardrail" in r.text)
+            r = await call(args=["add", "--", "sub/a.txt"])
+            check("legacy stage obeys same guardrail", r.status_code == 403)
+            r = await call("unstage", path="sub/a.txt")
+            check("unstage requires configured confirmation", r.status_code == 409 and "guardrail" in r.text)
+            r = await call("unstage", path="sub/a.txt", confirmed=True)
+            check("confirmed unstage succeeds", r.status_code == 200 and r.json()["exit_code"] == 0)
+            await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'", json.dumps({"enabled": False, "rules": []}))
+            r = await good("stage", path="sub/a.txt")
+            check("stage from subfolder succeeds", r["exit_code"] == 0)
+            r = await good("staged_diff", path="sub/a.txt")
+            check("staged diff shows changes", "+after" in r["stdout"])
+            # Drop the clean filter settings before testing a normal trusted write.
+            r = await good("commit", message="panel fixture commit")
+            check("trusted commit succeeds", r["exit_code"] == 0)
+
+            # Ownership checks must remain on writes even though safe reads work cross-user.
+            if os.geteuid() == 0:
+                os.chown(repo, 65534, 65534)
+                r = await good("status")
+                check("cross-owner read works from subfolder", r["exit_code"] == 0)
+                await good("diff", path="sub/a.txt")
+                check("cross-owner read cannot execute repository config", not marker.exists())
+                r = await good("stage", path="sub/a.txt")
+                check("cross-owner write keeps Git ownership protection", r["exit_code"] != 0 and "dubious ownership" in r["stderr"])
+                os.chown(repo, os.geteuid(), os.getegid())
+                base.chmod(0o755)
+                repo.chmod(0o755)
+                def unprivileged():
+                    os.setgroups([])
+                    os.setgid(65534)
+                    os.setuid(65534)
+                cmd, _ = gitpanel.command(str(sub), "status")
+                r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True,
+                                   preexec_fn=unprivileged, timeout=30)
+                check("unprivileged agent can inspect a readable cross-owner repo", r.returncode == 0, r.stderr)
+                repo.chmod(0o700)
+                r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True,
+                                   preexec_fn=unprivileged, timeout=30)
+                check("safe reads never bypass private directory permissions", r.returncode != 0 and "cd" in r.stderr and not r.stdout, r.stderr)
+                repo.chmod(0o755)
+
+            # A role with run but without files.read can still discover its terminal directory.
+            uid = await U.add_user("run-only@example.invalid")
+            rid = await db.execute("INSERT INTO roles(name,perms,builtin,created,updated) VALUES(?,?,0,?,?)", "Run only", '["run"]', time.time(), time.time())
+            await db.execute("INSERT INTO role_bindings(user_id,role_id,scope_kind,scope_value,source,created) VALUES(?,?,'host',?,'manual',?)", uid, rid, str(hid), time.time())
+            authz.bump_epoch()
+            run_only = await U.login("run-only@example.invalid")
+            r = await call("cwd", client=run_only, sid=sid)
+            check("run-only role can discover cwd", r.status_code == 200 and r.json().get("cwd") == str(sub), r.text[:100])
+            r = await run_only.get(f"/api/hosts/{hid}/fs/cwd?sid={sid}")
+            check("files.read remains required on file API", r.status_code == 403)
+            other_sid = await U.add_session(other)
+            r = await call("cwd", client=run_only, sid=other_sid)
+            check("cwd rejects another host's session", r.status_code == 404)
+            viewer = await U.add_user("viewer@example.invalid", bindings=[("viewer", "all", "")])
+            assert viewer
+            view_client = await U.login("viewer@example.invalid")
+            r = await call("status", client=view_client)
+            check("viewer without run cannot use Git", r.status_code == 403)
+            await run_only.aclose(); await view_client.aclose(); await owner.aclose()
+            # Normal worktrees (.git file) retain root-relative paths too.
+            wt = base / "worktree"
+            git(repo, "worktree", "add", "-b", "fixture-wt", str(wt))
+            (wt / "sub" / "a.txt").write_text("worktree change\n")
+            cmd, _ = gitpanel.command(str(wt / "sub"), "diff", path="sub/a.txt")
+            r = await agent.run_command(cmd, 30)
+            check("linked worktree/subfolder diff works", r["exit_code"] == 0 and "+worktree change" in r["stdout"])
+            if os.geteuid() == 0:
+                os.chown(wt, 65534, 65534)
+                r = await agent.run_command(cmd, 30)
+                check("cross-owner linked worktree diff works", r["exit_code"] == 0 and "+worktree change" in r["stdout"], str(r)[:200])
+                os.chown(wt, os.geteuid(), os.getegid())
+            await content_filter_tests(base, agent)
+    finally:
+        core.source_for = original
+        core.sources.clear()
+        await db.close()
+    return check.summary()
+
+
+if __name__ == "__main__":
+    raise SystemExit(0 if asyncio.run(main()) else 1)

@@ -2,24 +2,44 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, Host, withGuardConfirm } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
 import { getCwd } from '../lib/cwd'
+import { parseGitStatus, type GitFile, type RepoInfo } from '../lib/gitStatus'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
 import { SHEET_CLS } from '../lib/sheet'
+import { lsGet, lsSet } from '../lib/storage'
 import { useDrawer } from '../lib/useDrawer'
 import SheetBar from './SheetBar'
-import { ArrowDownIcon, ArrowUpIcon, CloseIcon, GitBranchIcon, RefreshIcon } from './Icons'
+import { ArrowDownIcon, ArrowsLeftRightIcon, ArrowUpIcon, CloseIcon, FolderIcon, GitBranchIcon, RefreshIcon } from './Icons'
 
-// Panou git în limbajul panoului de fișiere: status/diff/stage/commit pentru
-// repo-ul din directorul curent al sesiunii (OSC 7). Rulează totul prin
-// /api/hosts/{id}/git (op-ul `run` al agentului, argv shell-quotat server-side)
-// → NICIO schimbare de agent, deci fără re-semnare. Scope conștient restrâns:
-// merge/rebase/push/branch rămân la CLI (au prea multe stări-limită pt. un UI).
+// Panou git ca lentilă de SUPRAVEGHERE: pune-l pe folderul din terminal (chiar
+// după `su`/`sudo su`) sau pe orice cale manual, și vezi live ce se întâmplă în
+// repo — status/diff, commit-uri (cu conținut), branch-uri, mișcările HEAD
+// (reset/rebase). Rulează tot prin /api/hosts/{id}/git (op-ul `run` al agentului,
+// argv shell-quotat server-side) → NICIO schimbare de agent, deci fără re-semnare.
+// Observarea e STRICT read-only (log/show/for-each-ref/reflog); scrierea rămâne
+// la stage/commit. checkout/merge/rebase/push rămân la CLI.
 
 interface GitResult { exit_code: number; stdout: string; stderr: string }
 
-// XY din `git status --porcelain`: X=stage (index), Y=arbore de lucru.
-interface GitFile { path: string; index: string; work: string; untracked: boolean }
-interface RepoInfo { branch: string; ahead: number; behind: number; detached: boolean }
+// Field separator for server-formatted commit metadata; subjects may contain it.
+const US = '\u001f'
+
+interface Commit { hash: string; short: string; author: string; date: string; subject: string }
+interface Branch { name: string; current: boolean; upstream: string; track: string; date: string }
+interface ReflogEntry { short: string; selector: string; subject: string }
+
+type Tab = 'changes' | 'commits' | 'branches' | 'activity'
+
+// lăţimea coloanei (desktop) — acelaşi tipar „window splitter" ca la FilePanel,
+// cu cheie proprie în localStorage. Diff-urile/`git show` au nevoie de lăţime.
+const WIDTH_KEY = 'wt_git_w'
+const W_MIN = 260, W_DEF = 320, W_MAX = 900
+const clampW = (w: number) => Math.round(Math.max(W_MIN, Math.min(W_MAX,
+  typeof window !== 'undefined' ? Math.max(W_MIN, window.innerWidth - 360) : W_MAX, w)))
+function loadWidth(): number {
+  const v = Number(lsGet(WIDTH_KEY))
+  return v >= W_MIN && v <= W_MAX ? v : W_DEF
+}
 
 // litera de status → etichetă scurtă + culoare (wt-* ca în restul UI-ului)
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -34,35 +54,48 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 }
 function statusOf(ch: string) { return STATUS[ch] ?? { label: ch, cls: 'text-slate-400' } }
 
-/** Parsează `git status --porcelain --branch` → info de branch + fișiere. */
-function parseStatus(out: string, t: (key: string) => string): { repo: RepoInfo; files: GitFile[] } {
-  const repo: RepoInfo = { branch: '?', ahead: 0, behind: 0, detached: false }
-  const files: GitFile[] = []
+/** `git log --format=%H<US>%h<US>%an<US>%ar<US>%s` → listă de commit-uri. */
+function parseLog(out: string): Commit[] {
+  const res: Commit[] = []
   for (const line of out.split('\n')) {
     if (!line) continue
-    if (line.startsWith('## ')) {
-      const info = line.slice(3)
-      if (info.startsWith('HEAD (no branch)')) { repo.detached = true; repo.branch = t('git.detachedHead'); continue }
-      const noCommits = info.match(/^No commits yet on (.+)$/)
-      if (noCommits) { repo.branch = noCommits[1].trim(); continue }
-      repo.branch = info.split('...')[0].split(' ')[0]
-      const ab = info.match(/\[(.+)\]/)
-      if (ab) {
-        const a = ab[1].match(/ahead (\d+)/); if (a) repo.ahead = +a[1]
-        const b = ab[1].match(/behind (\d+)/); if (b) repo.behind = +b[1]
-      }
-      continue
-    }
-    const index = line[0], work = line[1]
-    let path = line.slice(3)
-    const arrow = path.indexOf(' -> ')            // redenumire: „vechi -> nou"
-    if (arrow >= 0) path = path.slice(arrow + 4)
-    if (path.startsWith('"') && path.endsWith('"')) {
-      try { path = JSON.parse(path) } catch { /* caractere speciale: păstrează bruta */ }
-    }
-    files.push({ path, index, work, untracked: index === '?' && work === '?' })
+    const [hash, short, author, date, ...rest] = line.split(US)
+    res.push({ hash, short, author, date, subject: rest.join(US) })
   }
-  return { repo, files }
+  return res
+}
+
+/** `git for-each-ref …refs/heads` → branch-uri (câmp HEAD = „*" pe cel curent). */
+function parseBranches(out: string): Branch[] {
+  const res: Branch[] = []
+  for (const line of out.split('\n')) {
+    if (!line) continue
+    const [head, name, upstream, track, date] = line.split(US)
+    if (!name) continue
+    res.push({ name, current: head === '*', upstream: upstream || '', track: track || '', date: date || '' })
+  }
+  return res
+}
+
+/** `git reflog --format=%h<US>%gd<US>%gs` → mișcările recente ale HEAD. */
+function parseReflog(out: string): ReflogEntry[] {
+  const res: ReflogEntry[] = []
+  for (const line of out.split('\n')) {
+    if (!line) continue
+    const [short, selector, ...rest] = line.split(US)
+    res.push({ short, selector, subject: rest.join(US) })
+  }
+  return res
+}
+
+// acțiunea din subiectul reflog → culoare: rescrierile de istorie (reset/rebase/
+// amend/gc) ies în evidență — exact ce caută un supervizor la un AI.
+function reflogTone(subject: string): string {
+  const head = subject.split(':')[0].toLowerCase()
+  if (/reset|rebase|filter|gc|prune/.test(head) || /amend/.test(subject)) return 'wt-danger'
+  if (/commit|merge|pull/.test(head)) return 'wt-good'
+  if (/checkout|branch|clone|switch/.test(head)) return 'wt-link'
+  return 'text-slate-400'
 }
 
 // marcaj: omul a refuzat confirmarea unei reguli guardrail (nu e eroare, nimic nu s-a rulat)
@@ -79,6 +112,7 @@ function DiffView({ text }: { text: string }) {
         let cls = 'text-slate-400'
         if (l.startsWith('@@')) cls = 'wt-link'
         else if (l.startsWith('+++') || l.startsWith('---') || l.startsWith('diff ') || l.startsWith('index ')) cls = 'text-slate-600'
+        else if (l.startsWith('commit ') || l.startsWith('Author:') || l.startsWith('Date:') || l.startsWith('Merge:')) cls = 'text-slate-500'
         else if (l.startsWith('+')) cls = 'wt-good bg-emerald-950/30'
         else if (l.startsWith('-')) cls = 'wt-danger bg-rose-950/30'
         return <div key={i} className={`whitespace-pre ${cls}`}>{l || ' '}</div>
@@ -94,32 +128,74 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const asideRef = useRef<HTMLElement>(null)
   const drawer = useDrawer(asideRef, props.onClose)
   const asideCls = drawer.sheet ? SHEET_CLS : 'fixed inset-y-0 right-0 z-40 flex w-[90vw] max-w-sm flex-col border-l border-ink-800 bg-ink-900 shadow-2xl outline-none'
-    + (props.overlay ? '' : ' sm:static sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
+    + (props.overlay ? '' : ' sm:relative sm:inset-auto sm:z-auto sm:w-80 sm:max-w-none sm:shrink-0 sm:shadow-none')
   const scrimCls = 'fixed inset-0 z-30 bg-black/60' + (props.overlay ? '' : ' sm:hidden')
+  // coloana statică de pe desktop se poate lăţi trăgând de marginea stângă (ca Files)
+  const columnMode = !drawer.sheet && !props.overlay
+  const [colW, setColW] = useState(loadWidth)
+  const dragCleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanup.current?.(), [])
+  const saveW = (w: number) => lsSet(WIDTH_KEY, String(w))
+  const dragWidth = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const x0 = e.clientX
+    const w0 = asideRef.current?.getBoundingClientRect().width ?? colW
+    const at = (ev: PointerEvent) => clampW(w0 + (x0 - ev.clientX))   // lipit de dreapta: spre stânga = mai lat
+    const move = (ev: PointerEvent) => setColW(at(ev))
+    const detach = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      dragCleanup.current = null
+    }
+    const up = (ev: PointerEvent) => { detach(); saveW(at(ev)) }
+    dragCleanup.current = detach
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
   const [cwd, setCwdState] = useState('')
+  const [repoRoot, setRepoRoot] = useState('')
+  const [cwdError, setCwdError] = useState('')
+  const [following, setFollowing] = useState(true)   // urmărește cwd-ul terminalului; navigarea manuală îl oprește
+  const [pathInput, setPathInput] = useState('')
+  const [tab, setTab] = useState<Tab>('changes')
+  const [live, setLive] = useState(false)
+
   const [repo, setRepo] = useState<RepoInfo | null>(null)
   const [notRepo, setNotRepo] = useState(false)
+  const [repoErr, setRepoErr] = useState('')     // stderr de la rev-parse (ex. permisiuni) — ajută diagnoza
   const [files, setFiles] = useState<GitFile[]>([])
+  const [commits, setCommits] = useState<Commit[] | null>(null)
+  const [branches, setBranches] = useState<Branch[] | null>(null)
+  const [reflog, setReflog] = useState<ReflogEntry[] | null>(null)
   const [error, setError] = useState('')
   const [note, setNote] = useState('')   // notă neutră (ex. guardrail anulat) — nu eroare
   // eroare sau anulare de guardrail: fiecare în locul ei
-  const fail = (e: unknown, fallback: string) => {
+  const fail = useCallback((e: unknown, fallback: string) => {
     if (e === GUARD_CANCELLED) setNote(t('guard.cancelled'))
     else setError(errText(e, t) || fallback)
-  }
+  }, [t])
   const [busy, setBusy] = useState(false)
   const [sel, setSel] = useState<{ path: string; staged: boolean } | null>(null)
   const [diff, setDiff] = useState('')
+  const [commitView, setCommitView] = useState<{ hash: string; subject: string } | null>(null)
+  const [showText, setShowText] = useState('')
   const [msg, setMsg] = useState('')
   const loadSeq = useRef(0)
+  const cSeq = useRef(0)
+  const bSeq = useRef(0)
+  const rSeq = useRef(0)
+  const detailSeq = useRef(0)
+  const invalidateRequests = useCallback(() => {
+    loadSeq.current++; cSeq.current++; bSeq.current++; rSeq.current++; detailSeq.current++
+  }, [])
 
   // subcomenzile care scriu (add/reset/restore/commit) trec prin guardrail pe server: la o regulă
   // `confirm` întrebăm aici şi retrimitem; un refuz devine eroarea obişnuită de mai jos
-  const gitcmd = useCallback(async (args: string[]): Promise<GitResult> => {
+  const gitcmd = useCallback(async (operation: string, params: { path?: string; revision?: string; message?: string } = {}): Promise<GitResult> => {
     const r = await withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
       (confirmed) => api<GitResult>(`/api/hosts/${props.host.id}/git`, {
-        method: 'POST', body: JSON.stringify({ args, cwd, confirmed }),
+        method: 'POST', body: JSON.stringify({ operation, ...params, cwd, confirmed }),
       }))
     // refuzul omului la o regulă `confirm` NU e o eroare: aruncăm un marcaj recunoscut mai jos
     // şi-l afişăm ca notă neutră („Anulat — nu s-a rulat"), nu cu roşu
@@ -132,70 +208,198 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     const my = ++loadSeq.current
     setError(''); setNote('')
     try {
-      const rp = await gitcmd(['rev-parse', '--show-toplevel'])
+      const rp = await gitcmd('root')
       if (my !== loadSeq.current) return
-      if (rp.exit_code !== 0) { setNotRepo(true); setRepo(null); setFiles([]); setSel(null); return }
-      setNotRepo(false)
-      const st = await gitcmd(['status', '--porcelain', '--branch'])
+      if (rp.exit_code !== 0) {
+        setNotRepo(true); setRepoErr((rp.stderr || '').split('\n')[0] || '')
+        setRepo(null); setRepoRoot(''); setFiles([]); setSel(null); return
+      }
+      setNotRepo(false); setRepoErr('')
+      setRepoRoot(rp.stdout.replace(/\n$/, ''))
+      const st = await gitcmd('status')
       if (my !== loadSeq.current) return
-      const parsed = parseStatus(st.stdout, t)
+      if (st.exit_code !== 0) {
+        setRepo(null); setFiles([]); setSel(null)
+        throw new Error(st.stderr || st.stdout || t('git.error.generic'))
+      }
+      const parsed = parseGitStatus(st.stdout, t)
       setRepo(parsed.repo)
       setFiles(parsed.files)
     } catch (e) {
       if (my !== loadSeq.current) return
       fail(e, t('git.error.generic'))
     }
-  }, [cwd, gitcmd, t])
+  }, [cwd, gitcmd, t, fail])
 
-  // cwd-ul sesiunii: OSC 7 dacă e activ shell integration, altfel îl cerem
-  // agentului (ca panoul de fișiere). Fără el, nu știm pe ce repo lucrăm.
+  const loadCommits = useCallback(async () => {
+    if (!cwd) return
+    const my = ++cSeq.current
+    try {
+      const r = await gitcmd('commits')
+      if (my !== cSeq.current) return
+      setCommits(r.exit_code === 0 ? parseLog(r.stdout) : [])
+    } catch (e) { if (my === cSeq.current) fail(e, t('git.error.generic')) }
+  }, [cwd, gitcmd, t, fail])
+
+  const loadBranches = useCallback(async () => {
+    if (!cwd) return
+    const my = ++bSeq.current
+    try {
+      const r = await gitcmd('branches')
+      if (my !== bSeq.current) return
+      setBranches(r.exit_code === 0 ? parseBranches(r.stdout) : [])
+    } catch (e) { if (my === bSeq.current) fail(e, t('git.error.generic')) }
+  }, [cwd, gitcmd, t, fail])
+
+  const loadReflog = useCallback(async () => {
+    if (!cwd) return
+    const my = ++rSeq.current
+    try {
+      const r = await gitcmd('activity')
+      if (my !== rSeq.current) return
+      setReflog(r.exit_code === 0 ? parseReflog(r.stdout) : [])
+    } catch (e) { if (my === rSeq.current) fail(e, t('git.error.generic')) }
+  }, [cwd, gitcmd, t, fail])
+
+  // reîncarcă DOAR datele tab-ului vizibil (+ bara de status), ca Live/refresh să
+  // nu ceară degeaba log/branches/reflog pe care nu le vede nimeni.
+  const loadTab = useCallback((which: Tab) => {
+    if (which === 'commits') loadCommits()
+    else if (which === 'branches') loadBranches()
+    else if (which === 'activity') loadReflog()
+  }, [loadCommits, loadBranches, loadReflog])
+
+  // Agent lookup is best-effort: changing user in the terminal does not change
+  // the agent's identity or grant it access to that user's private directories.
+  const pullCwd = useCallback(async () => {
+    try {
+      const r = await api<{ cwd: string }>(`/api/hosts/${props.host.id}/git`, {
+        method: 'POST', body: JSON.stringify({ operation: 'cwd', sid: props.sessionId }),
+      })
+      if (r.cwd?.startsWith('/')) {
+        setCwdError('')
+        setCwdState((prev) => (prev === r.cwd ? prev : r.cwd))
+      } else setCwdError(t('git.cwdUnavailable'))
+    } catch (e) { setCwdError(errText(e, t) || t('git.cwdUnavailable')) }
+  }, [props.host.id, props.sessionId, t])
+
+  const tick = useCallback(async () => {
+    if (following) await pullCwd()
+    refresh()
+    loadTab(tab)
+  }, [following, pullCwd, refresh, loadTab, tab])
+
+  // On mount/session change, show OSC 7 immediately and ask the agent as well.
   useEffect(() => {
     if (!isAgent) return
     const known = getCwd(props.sessionId)
-    if (known) { setCwdState(known); return }
-    api<{ cwd: string }>(`/api/hosts/${props.host.id}/fs/cwd?sid=${encodeURIComponent(props.sessionId)}`)
-      .then((r) => setCwdState(r.cwd || ''))
-      .catch(() => setCwdState(''))
+    if (known) setCwdState(known)
+    pullCwd()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAgent])
+  }, [isAgent, props.host.id, props.sessionId])
 
-  // la fiecare `cd` din terminal (OSC 7), re-evaluează repo-ul: `cd` într-un alt
-  // proiect → panoul îl arată. Fără navigare manuală, deci urmărim mereu.
+  // la fiecare `cd` din terminal (OSC 7), urmează-l — DOAR cât urmărim terminalul.
   useEffect(() => {
     if (!isAgent) return
     const onCwd = (e: Event) => {
       const d = (e as CustomEvent<{ sid: string; cwd: string }>).detail
-      if (d.sid === props.sessionId) setCwdState(d.cwd)
+      if (d.sid === props.sessionId && following) setCwdState(d.cwd)
     }
     window.addEventListener('wt-cwd', onCwd)
     return () => window.removeEventListener('wt-cwd', onCwd)
-  }, [isAgent, props.sessionId])
+  }, [isAgent, props.sessionId, following])
 
-  useEffect(() => { if (cwd) { setSel(null); setDiff(''); refresh() } }, [cwd, refresh])
+  // schimbarea cwd-ului resetează tot (alt repo → alte date) și reîncarcă status + tab
+  useEffect(() => {
+    if (!cwd) return
+    setSel(null); setDiff(''); setCommitView(null); setShowText('')
+    // caches → null: efectul de mai jos (pe tab) reîncarcă tab-ul activ
+    setCommits(null); setBranches(null); setReflog(null)
+    refresh()
+    return invalidateRequests
+  }, [cwd, refresh, invalidateRequests])
+
+  // input-ul de cale urmează cwd-ul (până îl editezi tu)
+  useEffect(() => { setPathInput(cwd) }, [cwd])
+
+  // comutarea pe un tab încarcă datele lui dacă nu-s deja (null = neîncărcat)
+  useEffect(() => {
+    if (!cwd || notRepo) return
+    if (tab === 'commits' && commits === null) loadCommits()
+    else if (tab === 'branches' && branches === null) loadBranches()
+    else if (tab === 'activity' && reflog === null) loadReflog()
+  }, [tab, cwd, notRepo, commits, branches, reflog, loadCommits, loadBranches, loadReflog])
+
+  // Live: la ~5s, cât panoul e vizibil și tab-ul browserului e în focus
+  useEffect(() => {
+    if (!live || !cwd) return
+    const id = window.setInterval(() => {
+      if (document.visibilityState === 'visible') tick()
+    }, 5000)
+    return () => window.clearInterval(id)
+  }, [live, cwd, tick])
+
+  function applyPath() {
+    const p = pathInput.trim()
+    if (!p) return
+    if (!p.startsWith('/')) { setError(t('err.git.cwdAbsolute')); return }
+    setError('')
+    setFollowing(false)
+    setCwdError('')
+    if (p === cwd) { refresh(); loadTab(tab) } else setCwdState(p)
+  }
+
+  function backToTerminal() {
+    setFollowing(true)
+    setError('')
+    pullCwd()
+  }
 
   async function openDiff(f: GitFile, staged: boolean) {
+    const my = ++detailSeq.current
+    setCommitView(null); setShowText('')
     setSel({ path: f.path, staged })
     setDiff(t('git.loading'))
     try {
       let r: GitResult
       if (f.untracked) {
         // untracked: arată tot fișierul ca adăugat (--no-index iese cu 1, e ok)
-        r = await gitcmd(['diff', '--no-index', '--', '/dev/null', f.path])
+        r = await gitcmd('untracked_diff', { path: f.path })
       } else {
-        r = await gitcmd(staged ? ['diff', '--staged', '--', f.path] : ['diff', '--', f.path])
+        r = await gitcmd(staged ? 'staged_diff' : 'diff', { path: f.path })
       }
+      if (my !== detailSeq.current) return
+      if (r.exit_code !== 0 && !(f.untracked && r.exit_code === 1)) throw new Error(r.stderr || t('git.error.diff'))
       setDiff(r.stdout || t('git.nothingToShow'))
     } catch (e) {
+      if (my !== detailSeq.current) return
       setDiff('')
       fail(e, t('git.error.diff'))
     }
   }
 
-  async function mutate(args: string[]) {
+  async function openShow(c: Commit) {
+    const my = ++detailSeq.current
+    setSel(null); setDiff('')
+    setCommitView({ hash: c.hash, subject: c.subject })
+    setShowText(t('git.loading'))
+    try {
+      const r = await gitcmd('show', { revision: c.hash })
+      if (my !== detailSeq.current) return
+      if (r.exit_code !== 0) throw new Error(r.stderr || t('git.error.diff'))
+      setShowText(r.stdout || t('git.nothingToShow'))
+    } catch (e) {
+      if (my !== detailSeq.current) return
+      setShowText('')
+      fail(e, t('git.error.diff'))
+    }
+  }
+
+  async function mutate(operation: string, path: string) {
     setBusy(true)
     setError(''); setNote('')
     try {
-      const r = await gitcmd(args)
+      const r = await gitcmd(operation, { path })
       if (r.exit_code !== 0) setError((r.stderr || r.stdout || t('git.error.opFailed')).trim())
     } catch (e) {
       fail(e, t('git.error.generic'))
@@ -206,8 +410,8 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     }
   }
 
-  const stage = (f: GitFile) => mutate(['add', '--', f.path])
-  const unstage = (f: GitFile) => mutate(['reset', '-q', 'HEAD', '--', f.path])
+  const stage = (f: GitFile) => mutate('stage', f.path)
+  const unstage = (f: GitFile) => mutate('unstage', f.path)
 
   async function commit() {
     const m = msg.trim()
@@ -215,11 +419,12 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     setBusy(true)
     setError(''); setNote('')
     try {
-      const r = await gitcmd(['commit', '-m', m])
+      const r = await gitcmd('commit', { message: m })
       if (r.exit_code === 0) {
         setMsg(''); setSel(null); setDiff('')
         notify(t('git.commitDone'), r.stdout.split('\n')[0] || m, 'info')
         refresh()
+        if (tab !== 'changes') loadTab(tab)
       } else {
         setError((r.stderr || r.stdout || t('git.error.commitFailed')).trim())
       }
@@ -237,8 +442,13 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const header = (
     <header className="flex items-center gap-2 border-b border-ink-800 px-3 py-2">
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('git.title')}</span>
-      <button onClick={refresh} disabled={!cwd || busy}
-        className="wt-touch ml-auto rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
+      <button onClick={() => setLive((v) => !v)} disabled={!cwd}
+        className={`wt-touch ml-auto inline-flex items-center gap-1 rounded-md px-1.5 text-2xs disabled:opacity-30 ${live ? 'wt-good' : 'text-slate-500 hover:bg-ink-800 hover:text-slate-300'}`}
+        title={t('git.liveTitle')} aria-pressed={live}>
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${live ? 'animate-pulse bg-emerald-400' : 'bg-slate-600'}`} />{t('git.live')}
+      </button>
+      <button onClick={() => tick()} disabled={!cwd || busy}
+        className="wt-touch rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300 disabled:opacity-30"
         title={t('git.reloadStatus')} aria-label={t('git.reloadStatus')}><RefreshIcon /></button>
       <button onClick={props.onClose} aria-label={t('git.closeAria')}
         className="wt-touch rounded-md px-1.5 text-slate-500 hover:bg-ink-800 hover:text-slate-300"><CloseIcon size={14} /></button>
@@ -262,6 +472,48 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       </>
     )
   }
+
+  // bara de director: cale editabilă + „urmează terminalul". Fixarea unei căi
+  // oprește urmărirea; butonul ⟲ o repornește și sare la cwd-ul sesiunii.
+  const pathBar = (
+    <div className="flex items-center gap-1 border-b border-ink-800 px-2 py-1.5">
+      <FolderIcon size={14} />
+      <input
+        value={pathInput}
+        onChange={(e) => setPathInput(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyPath() } }}
+        spellCheck={false} autoCapitalize="off" autoCorrect="off"
+        placeholder={t('git.pathPlaceholder')}
+        aria-label={t('git.pathLabel')}
+        className="min-w-0 flex-1 rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"
+      />
+      <button onClick={applyPath} disabled={!pathInput.trim() || pathInput.trim() === cwd}
+        className="wt-touch shrink-0 rounded-md px-1.5 py-1 text-2xs text-slate-400 hover:bg-ink-800 hover:text-slate-200 disabled:opacity-30"
+        title={t('git.goPath')}>{t('git.goPath')}</button>
+      {/* toggle „urmează cwd-ul terminalului" — ca în FilePanel (verde + ring când e activ);
+          iconiță distinctă de refresh-ul din header, ca să nu fie două cercuri la fel */}
+      <button onClick={following ? () => setFollowing(false) : backToTerminal} aria-pressed={following}
+        className={`wt-touch inline-flex min-h-[28px] shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs ${following ? 'wt-good ring-1 ring-emerald-600/40' : 'text-slate-500 hover:bg-ink-800 hover:text-slate-200'}`}
+        title={following ? t('git.followingTitle') : t('git.backToTerminal')} aria-label={t('git.backToTerminal')}><ArrowsLeftRightIcon size={12} /> cwd</button>
+    </div>
+  )
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'changes', label: t('git.tab.changes') },
+    { id: 'commits', label: t('git.tab.commits') },
+    { id: 'branches', label: t('git.tab.branches') },
+    { id: 'activity', label: t('git.tab.activity') },
+  ]
+  const tabBar = (
+    <div role="tablist" className="flex items-stretch border-b border-ink-800 text-2xs">
+      {tabs.map((tb) => (
+        <button key={tb.id} role="tab" aria-selected={tab === tb.id} onClick={() => setTab(tb.id)}
+          className={`wt-touch flex-1 border-b-2 px-2 py-1.5 ${tab === tb.id ? 'border-sky-500 text-slate-200' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
+          {tb.label}
+        </button>
+      ))}
+    </div>
+  )
 
   // rând de fișier: status, cale, buton stage/unstage
   const row = (f: GitFile, group: 'staged' | 'modified' | 'untracked') => {
@@ -296,17 +548,142 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     </div>
   )
 
+  const emptyHint = (text: string) => (
+    <div className="px-3 py-6 text-center text-2xs text-slate-500">{text}</div>
+  )
+
+  // ── conținutul fiecărui tab ────────────────────────────────────────────────
+  const changesTab = (
+    <>
+      <div className={`overflow-y-auto ${sel ? 'max-h-[45%]' : 'flex-1'}`}>
+        {staged.length > 0 && groupHead(t('git.groupStaged'), staged.length)}
+        {staged.map((f) => row(f, 'staged'))}
+        {modified.length > 0 && groupHead(t('git.groupModified'), modified.length)}
+        {modified.map((f) => row(f, 'modified'))}
+        {untracked.length > 0 && groupHead(t('git.groupUntracked'), untracked.length)}
+        {untracked.map((f) => row(f, 'untracked'))}
+        {files.length === 0 && emptyHint(t('git.nothingToCommit'))}
+      </div>
+
+      {sel && (
+        <div className="flex min-h-0 flex-1 flex-col border-t border-ink-800">
+          <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-2xs text-slate-500">
+            <span className="truncate font-mono" title={sel.path}>{sel.path}</span>
+            <span className="ml-auto shrink-0">{sel.staged ? t('git.diffStaged') : t('git.diffWorktree')}</span>
+            <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
+          </div>
+          <DiffView text={diff} />
+        </div>
+      )}
+
+      {/* commit — doar ce e în stage */}
+      <div className="border-t border-ink-800 p-2">
+        <textarea
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit() } }}
+          placeholder={staged.length ? t('git.commitPlaceholder') : t('git.commitPlaceholderEmpty')}
+          rows={2}
+          className="w-full resize-none rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"
+        />
+        <div className="mt-1 flex items-center gap-2">
+          <span className="text-2xs text-slate-500">{t('git.stagedCount', { n: staged.length })}</span>
+          <button
+            onClick={commit}
+            disabled={busy || !msg.trim() || staged.length === 0}
+            className="ml-auto rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+          >{t('git.commit')}</button>
+        </div>
+      </div>
+    </>
+  )
+
+  const commitsTab = (
+    <>
+      <div className={`overflow-y-auto ${commitView ? 'max-h-[45%]' : 'flex-1'}`}>
+        {commits === null ? emptyHint(t('git.loading'))
+          : commits.length === 0 ? emptyHint(t('git.noCommits'))
+            : commits.map((c) => (
+              <button key={c.hash} onClick={() => openShow(c)}
+                className={`flex w-full items-baseline gap-2 px-3 py-1 text-left text-xs hover:bg-ink-800/60 ${commitView?.hash === c.hash ? 'bg-ink-800' : ''}`}>
+                <span className="shrink-0 font-mono text-2xs text-amber-400/90">{c.short}</span>
+                <span className="min-w-0 flex-1 truncate text-slate-200" title={c.subject}>{c.subject}</span>
+                <span className="shrink-0 text-2xs text-slate-500" title={c.author}>{c.date}</span>
+              </button>
+            ))}
+      </div>
+      {commitView && (
+        <div className="flex min-h-0 flex-1 flex-col border-t border-ink-800">
+          <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-2xs text-slate-500">
+            <span className="truncate font-mono" title={commitView.hash}>{commitView.subject}</span>
+            <button onClick={() => { setCommitView(null); setShowText('') }} className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
+          </div>
+          <DiffView text={showText} />
+        </div>
+      )}
+    </>
+  )
+
+  const branchesTab = (
+    <div className="flex-1 overflow-y-auto">
+      {branches === null ? emptyHint(t('git.loading'))
+        : branches.length === 0 ? emptyHint(t('git.noBranches'))
+          : branches.map((b) => (
+            <div key={b.name} className={`flex items-center gap-2 px-3 py-1 text-xs ${b.current ? 'bg-ink-800/50' : ''}`}>
+              <span className={`shrink-0 ${b.current ? 'wt-good' : 'text-slate-600'}`}><GitBranchIcon size={12} /></span>
+              <span className={`min-w-0 flex-1 truncate font-mono ${b.current ? 'font-medium text-slate-100' : 'text-slate-300'}`} title={b.name}>{b.name}</span>
+              {b.track && b.track !== '[gone]' && <span className="shrink-0 text-2xs text-slate-500" title={b.upstream}>{b.track}</span>}
+              {b.track === '[gone]' && <span className="shrink-0 text-2xs wt-warn" title={b.upstream}>{t('git.upstreamGone')}</span>}
+              <span className="shrink-0 text-2xs text-slate-600">{b.date}</span>
+            </div>
+          ))}
+    </div>
+  )
+
+  const activityTab = (
+    <div className="flex-1 overflow-y-auto">
+      {reflog === null ? emptyHint(t('git.loading'))
+        : reflog.length === 0 ? emptyHint(t('git.noActivity'))
+          : reflog.map((e, i) => (
+            <div key={e.selector + i} className="flex items-baseline gap-2 px-3 py-1 text-xs">
+              <span className="shrink-0 font-mono text-2xs text-amber-400/90">{e.short}</span>
+              <span className={`min-w-0 flex-1 truncate ${reflogTone(e.subject)}`} title={e.subject}>{e.subject}</span>
+              <span className="shrink-0 font-mono text-2xs text-slate-600" title={e.selector}>{e.selector.replace(/^HEAD/, '')}</span>
+            </div>
+          ))}
+    </div>
+  )
+
   return (
     <>
       <div className={scrimCls} onClick={props.onClose} aria-hidden="true" />
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape pe regiunea drawer-ului (vezi useDrawer): intenţionat pe <aside>, nu pe document */}
-      <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls} onKeyDown={drawer.onKeyDown}>
+      <aside ref={asideRef} aria-label={t('git.panelAria')} className={asideCls}
+        style={columnMode ? { width: clampW(colW) } : undefined} onKeyDown={drawer.onKeyDown}>
+        {/* mâner de lăţime (coloana de pe desktop): drag, ←/→ de la tastatură, dublu-click = reset */}
+        {columnMode && (
+          <div role="separator" aria-orientation="vertical" tabIndex={0}
+            aria-label={t('git.resizeAria')} title={t('git.resizeAria')}
+            aria-valuenow={colW} aria-valuemin={W_MIN} aria-valuemax={W_MAX}
+            onPointerDown={dragWidth}
+            onDoubleClick={() => { setColW(W_DEF); saveW(W_DEF) }}
+            onKeyDown={(e) => {
+              const d = e.key === 'ArrowLeft' ? 16 : e.key === 'ArrowRight' ? -16 : 0
+              if (!d) return
+              e.preventDefault()
+              const w = clampW(colW + d)
+              setColW(w); saveW(w)
+            }}
+            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize rounded-md hover:bg-sky-500/30 focus:outline-none focus-visible:bg-sky-500/50" />
+        )}
         {drawer.sheet && <SheetBar title={'Git'} onBack={props.onClose} />}
         {header}
+        {pathBar}
+        {cwdError && <p role="status" className="border-b border-ink-800 px-3 py-1.5 text-2xs wt-warn">{cwdError}</p>}
 
         {/* bara de branch */}
         {repo && (
-          <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5 text-2xs">
+          <div title={repoRoot} className="flex items-center gap-2 border-b border-ink-800 px-3 py-1.5 text-2xs">
             <span className="inline-flex items-center gap-1 font-mono font-medium text-slate-300" title={cwd}><GitBranchIcon size={12} /> {repo.branch}</span>
             {repo.ahead > 0 && <span className="wt-good inline-flex items-center tabular-nums" title={t('git.aheadTitle')}><ArrowUpIcon size={11} />{repo.ahead}</span>}
             {repo.behind > 0 && <span className="wt-warn inline-flex items-center tabular-nums" title={t('git.behindTitle')}><ArrowDownIcon size={11} />{repo.behind}</span>}
@@ -319,56 +696,23 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
 
         {notRepo && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
-            <p className="text-xs text-slate-500">{t('git.notRepo')}</p>
+            <p className="text-xs text-slate-500">{t(repoErr ? 'git.repoUnavailable' : 'git.notRepo')}</p>
             <p className="font-mono text-2xs text-slate-600" title={cwd}>{cwd || '—'}</p>
+            {repoErr && <>
+              <p className="max-w-full break-words font-mono text-2xs text-slate-600">{repoErr}</p>
+              <p className="text-2xs text-slate-500">{t('git.agentPermissions')}</p>
+            </>}
+            <p className="text-2xs text-slate-600">{t('git.notRepoHint')}</p>
           </div>
         )}
 
         {repo && (
           <>
-            <div className={`overflow-y-auto ${sel ? 'max-h-[45%]' : 'flex-1'}`}>
-              {staged.length > 0 && groupHead(t('git.groupStaged'), staged.length)}
-              {staged.map((f) => row(f, 'staged'))}
-              {modified.length > 0 && groupHead(t('git.groupModified'), modified.length)}
-              {modified.map((f) => row(f, 'modified'))}
-              {untracked.length > 0 && groupHead(t('git.groupUntracked'), untracked.length)}
-              {untracked.map((f) => row(f, 'untracked'))}
-              {files.length === 0 && (
-                <div className="px-3 py-6 text-center text-2xs text-slate-500">{t('git.nothingToCommit')}</div>
-              )}
-            </div>
-
-            {/* diff-ul fișierului selectat */}
-            {sel && (
-              <div className="flex min-h-0 flex-1 flex-col border-t border-ink-800">
-                <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-1 text-2xs text-slate-500">
-                  <span className="truncate font-mono" title={sel.path}>{sel.path}</span>
-                  <span className="ml-auto shrink-0">{sel.staged ? t('git.diffStaged') : t('git.diffWorktree')}</span>
-                  <button onClick={() => { setSel(null); setDiff('') }} className="grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-ink-800 hover:text-slate-300" title={t('git.closeDiff')} aria-label={t('git.closeDiff')}><CloseIcon size={14} /></button>
-                </div>
-                <DiffView text={diff} />
-              </div>
-            )}
-
-            {/* commit — doar ce e în stage */}
-            <div className="border-t border-ink-800 p-2">
-              <textarea
-                value={msg}
-                onChange={(e) => setMsg(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit() } }}
-                placeholder={staged.length ? t('git.commitPlaceholder') : t('git.commitPlaceholderEmpty')}
-                rows={2}
-                className="w-full resize-none rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"
-              />
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-2xs text-slate-500">{t('git.stagedCount', { n: staged.length })}</span>
-                <button
-                  onClick={commit}
-                  disabled={busy || !msg.trim() || staged.length === 0}
-                  className="ml-auto rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
-                >{t('git.commit')}</button>
-              </div>
-            </div>
+            {tabBar}
+            {tab === 'changes' && changesTab}
+            {tab === 'commits' && commitsTab}
+            {tab === 'branches' && branchesTab}
+            {tab === 'activity' && activityTab}
           </>
         )}
       </aside>

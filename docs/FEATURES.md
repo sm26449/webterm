@@ -205,10 +205,16 @@ Press `?` for the cheatsheet.
   checkpoint on disk after you re-allow writing the file, and offer **Start over** if the file
   changed on the host meanwhile (ETag from size + mtime). Blob downloads (Firefox/Safari, small
   files) and folder archives resume only within the session.
-- **Git panel** (toolbar button): for the repo in the session's current directory
-  (follows `cd` via OSC 7) — status, **colored diff**, stage/unstage and
-  **commit**, without opening GitHub. Focused scope: merge/rebase/push/branch stay
-  in the CLI
+- **Git panel** (toolbar button, agent hosts): follows the session directory or accepts a
+  pinned absolute path. Shows status, colored diffs, commits, branches and reflog activity;
+  stage/unstage and commit stay available. Commands use the repository root, including when
+  the terminal is in a subfolder or linked worktree. Merge/rebase/push/checkout stay in the CLI.
+  The panel runs as the **agent account**, not as a user reached through `su` inside a terminal:
+  that account needs OS permission to read the directory. For a private directory, use the
+  intended agent identity or grant narrowly scoped group/ACL access. Read operations disable
+  hooks, fsmonitor, external diff/textconv and signature helpers. Cross-owner reads are scoped
+  to that repository for that invocation; writes keep Git's normal ownership checks and run
+  through command guardrails. No global `safe.directory` configuration is changed.
 - **Docker panel** (toolbar button, agent hosts): tabs for **containers / images /
   volumes / networks**, **start/stop/restart** a container, and open a **shell inside a
   container** in its own terminal tab (`docker exec`, bash with an sh fallback for minimal
