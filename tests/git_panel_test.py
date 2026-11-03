@@ -114,6 +114,24 @@ async def content_filter_tests(base, agent):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+    # A .git FILE pointing to another location's metadata must not run the pointed-to config's
+    # filter (isolation borrows objects/refs/index as data, never the pointed-to config).
+    gm = base / "gitfile-meta"; gm.mkdir()
+    git(gm, "init"); git(gm, "config", "user.name", "x"); git(gm, "config", "user.email", "x@y.z")
+    (gm / "p.txt").write_text("one\n"); git(gm, "add", "."); git(gm, "commit", "-m", "b")
+    gm_marker = base / "gitfile-ran"
+    gm_drv = base / "gitfile-drv.sh"
+    gm_drv.write_text("#!/bin/sh\nid -u > " + shlex.quote(str(gm_marker)) + "\ncat\n"); gm_drv.chmod(0o755)
+    git(gm, "config", "filter.pwn.clean", str(gm_drv))
+    (gm / ".git" / "info" / "attributes").write_text("p.txt filter=pwn\n")
+    view = base / "gitfile-view"; view.mkdir()
+    (view / "p.txt").write_text("two\n")
+    (view / ".git").write_text("gitdir: " + str(gm / ".git") + "\n")
+    cmd, _ = gitpanel.command(str(view), "diff", path="p.txt")
+    r = await agent.run_command(cmd, 30)
+    check("a .git-file pointer never runs the pointed-to config's filter",
+          not gm_marker.exists() and r["exit_code"] in (0, 1), str(r)[:200])
+
     git(repo, "update-index", "--split-index")
     cmd, _ = gitpanel.command(str(repo), "diff", path="evil.txt")
     r = await agent.run_command(cmd, 30)
@@ -229,6 +247,47 @@ async def main():
             # Drop the clean filter settings before testing a normal trusted write.
             r = await good("commit", message="panel fixture commit")
             check("trusted commit succeeds", r["exit_code"] == 0)
+
+            # A staged rename must unstage BOTH sides, or the delete of the original stays staged.
+            rn = base / "rename-repo"; rn.mkdir()
+            git(rn, "init"); git(rn, "config", "user.name", "x"); git(rn, "config", "user.email", "x@y.z")
+            (rn / "old.txt").write_text("hi\n"); git(rn, "add", "."); git(rn, "commit", "-m", "base")
+            git(rn, "mv", "old.txt", "new.txt")
+            r = (await call("status", cwd=rn)).json()
+            check("staged rename shows R with both paths", "R  new.txt\0old.txt\0" in r["stdout"], str(r)[:150])
+            r = await call("unstage", cwd=rn, path="new.txt", orig="old.txt")
+            check("rename unstage accepted", r.status_code == 200 and r.json()["exit_code"] == 0, r.text[:150])
+            r = (await call("status", cwd=rn)).json()
+            check("rename unstage resets BOTH sides (no staged delete left)",
+                  " D old.txt\0" in r["stdout"] and "?? new.txt\0" in r["stdout"] and "R  " not in r["stdout"], str(r)[:150])
+            r = await call("unstage", cwd=rn, path="new.txt", orig="../escape")
+            check("unstage rejects a traversal in orig", r.status_code == 400)
+
+            # Config isolation must keep non-executable fidelity: upstream/ahead-behind, the local
+            # ignore + filemode toggles, and shallow-clone history (all regressed in the first pass).
+            bare = base / "upstream.git"; subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+            up = base / "up"; up.mkdir()
+            git(up, "init"); git(up, "config", "user.name", "x"); git(up, "config", "user.email", "x@y.z")
+            (up / "f.txt").write_text("one\n"); git(up, "add", "."); git(up, "commit", "-m", "c1")
+            git(up, "remote", "add", "origin", str(bare)); git(up, "push", "-q", "origin", "master")
+            git(up, "branch", "--set-upstream-to=origin/master", "master")
+            (up / "f.txt").write_text("one\ntwo\n"); git(up, "add", "."); git(up, "commit", "-m", "c2")
+            r = (await call("status", cwd=up)).json()
+            check("isolation keeps upstream + ahead/behind", "## master...origin/master [ahead 1]\0" in r["stdout"], str(r)[:150])
+            git(up, "config", "core.filemode", "false")
+            (up / ".git" / "info" / "exclude").write_text("ignored.log\n")
+            (up / "ignored.log").write_text("x\n"); os.chmod(up / "f.txt", 0o755)
+            r = (await call("status", cwd=up)).json()
+            check("isolation honors core.filemode=false and info/exclude",
+                  "f.txt" not in r["stdout"] and "ignored.log" not in r["stdout"], str(r)[:150])
+            deep = base / "deep"; deep.mkdir()
+            git(deep, "init"); git(deep, "config", "user.name", "x"); git(deep, "config", "user.email", "x@y.z")
+            for i in range(4):
+                (deep / "f.txt").write_text("l%d\n" % i); git(deep, "add", "."); git(deep, "commit", "-m", "c%d" % i)
+            shal = base / "shal"
+            subprocess.run(["git", "clone", "-q", "--depth", "1", "file://" + str(deep), str(shal)], check=True)
+            r = (await call("commits", cwd=shal)).json()
+            check("isolation loads shallow-clone history (no parent-traversal crash)", r["exit_code"] == 0, str(r)[:150])
 
             # Ownership checks must remain on writes even though safe reads work cross-user.
             if os.geteuid() == 0:

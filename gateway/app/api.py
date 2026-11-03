@@ -5842,6 +5842,7 @@ class GitIn(BaseModel):
     cwd: str = ""
     operation: str = ""
     path: str = ""
+    orig: str = ""          # original path of a staged rename (unstage resets both sides)
     revision: str = ""
     message: str = ""
     sid: str = ""
@@ -5856,7 +5857,7 @@ class GitIn(BaseModel):
 async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', host='host_id'))):
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     operation = body.operation
-    params = {"path": body.path, "revision": body.revision, "message": body.message}
+    params = {"path": body.path, "revision": body.revision, "message": body.message, "orig": body.orig}
     if body.args is not None:
         if operation:
             raise ApiError(400, "git.badSubcommand", "choose one git request format")

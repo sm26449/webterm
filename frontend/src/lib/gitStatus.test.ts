@@ -9,10 +9,12 @@ describe('Git porcelain -z', () => {
     expect(r.repo).toEqual({ branch: 'main', ahead: 2, behind: 3, detached: false })
     expect(r.files).toEqual([{ path, index: ' ', work: 'M', untracked: false }])
   })
-  it('uses rename destination and consumes the source record', () => {
+  it('uses rename destination, keeps the original, and consumes the source record', () => {
     const r = parseGitStatus('## main\0R  new -> name.txt\0old\nname.txt\0?? next.txt\0', t)
     expect(r.files.map((f) => f.path)).toEqual(['new -> name.txt', 'next.txt'])
+    expect(r.files[0].orig).toBe('old\nname.txt')   // needed so unstage resets both sides
     expect(r.files[1].untracked).toBe(true)
+    expect(r.files[1].orig).toBeUndefined()
   })
   it('handles an unborn branch and detached HEAD', () => {
     expect(parseGitStatus('## No commits yet on main\0', t).repo.branch).toBe('main')

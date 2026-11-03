@@ -1,4 +1,4 @@
-export interface GitFile { path: string; index: string; work: string; untracked: boolean }
+export interface GitFile { path: string; index: string; work: string; untracked: boolean; orig?: string }
 export interface RepoInfo { branch: string; ahead: number; behind: number; detached: boolean }
 
 /** Porcelain v1 -z: literal UTF-8 paths; a rename has destination then source. */
@@ -22,8 +22,11 @@ export function parseGitStatus(out: string, t: (key: string) => string): { repo:
     }
     const index = line[0], work = line[1], path = line.slice(3)
     if (line.length < 4 || line[2] !== ' ') continue
-    files.push({ path, index, work, untracked: index === '?' && work === '?' })
-    if (index === 'R' || index === 'C' || work === 'R' || work === 'C') i++
+    // A rename/copy carries its ORIGINAL path in the next NUL record; keep it so an unstage can
+    // reset both sides (otherwise the delete of the original stays staged).
+    const renamed = index === 'R' || index === 'C' || work === 'R' || work === 'C'
+    files.push({ path, index, work, untracked: index === '?' && work === '?', orig: renamed ? records[i + 1] : undefined })
+    if (renamed) i++
   }
   return { repo, files }
 }

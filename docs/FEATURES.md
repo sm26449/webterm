@@ -211,10 +211,14 @@ Press `?` for the cheatsheet.
   the terminal is in a subfolder or linked worktree. Merge/rebase/push/checkout stay in the CLI.
   The panel runs as the **agent account**, not as a user reached through `su` inside a terminal:
   that account needs OS permission to read the directory. For a private directory, use the
-  intended agent identity or grant narrowly scoped group/ACL access. Read operations disable
-  hooks, fsmonitor, external diff/textconv and signature helpers. Cross-owner reads are scoped
-  to that repository for that invocation; writes keep Git's normal ownership checks and run
-  through command guardrails. No global `safe.directory` configuration is changed.
+  intended agent identity or grant narrowly scoped group/ACL access. Read operations run against
+  an isolated, application-controlled Git directory that borrows the repository's objects, refs,
+  HEAD, index and logs as data but **never loads its configuration** — so a clean/smudge/process
+  filter, textconv or external diff driver defined anywhere (the repo's config, an include, or
+  `.git/info/attributes`) cannot execute on a read, whatever the agent's privilege. Hooks,
+  fsmonitor, global and system config are off for reads too. Writes keep Git's normal ownership
+  checks, run their filters only for repositories the writer owns, and pass through command
+  guardrails. No global `safe.directory` configuration is changed.
 - **Docker panel** (toolbar button, agent hosts): tabs for **containers / images /
   volumes / networks**, **start/stop/restart** a container, and open a **shell inside a
   container** in its own terminal tab (`docker exec`, bash with an sh fallback for minimal

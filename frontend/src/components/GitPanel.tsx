@@ -192,7 +192,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
 
   // subcomenzile care scriu (add/reset/restore/commit) trec prin guardrail pe server: la o regulă
   // `confirm` întrebăm aici şi retrimitem; un refuz devine eroarea obişnuită de mai jos
-  const gitcmd = useCallback(async (operation: string, params: { path?: string; revision?: string; message?: string } = {}): Promise<GitResult> => {
+  const gitcmd = useCallback(async (operation: string, params: { path?: string; revision?: string; message?: string; orig?: string } = {}): Promise<GitResult> => {
     const r = await withGuardConfirm((pattern) => confirm({ title: t('guard.confirmTitle'), message: t('guard.confirmMsg', { pattern }), danger: true, confirmLabel: t('guard.confirmRun') }),
       (confirmed) => api<GitResult>(`/api/hosts/${props.host.id}/git`, {
         method: 'POST', body: JSON.stringify({ operation, ...params, cwd, confirmed }),
@@ -395,11 +395,11 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     }
   }
 
-  async function mutate(operation: string, path: string) {
+  async function mutate(operation: string, params: { path: string; orig?: string }) {
     setBusy(true)
     setError(''); setNote('')
     try {
-      const r = await gitcmd(operation, { path })
+      const r = await gitcmd(operation, params)
       if (r.exit_code !== 0) setError((r.stderr || r.stdout || t('git.error.opFailed')).trim())
     } catch (e) {
       fail(e, t('git.error.generic'))
@@ -410,8 +410,9 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     }
   }
 
-  const stage = (f: GitFile) => mutate('stage', f.path)
-  const unstage = (f: GitFile) => mutate('unstage', f.path)
+  const stage = (f: GitFile) => mutate('stage', { path: f.path })
+  // a staged rename resets BOTH the new path and its original, else the delete stays staged
+  const unstage = (f: GitFile) => mutate('unstage', { path: f.path, orig: f.orig })
 
   async function commit() {
     const m = msg.trim()
