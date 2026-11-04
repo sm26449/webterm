@@ -5887,8 +5887,16 @@ async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', hos
         raise ApiError(504, "host.noAnswer", "the host did not answer in time")
     if not resp.get("ok"):
         raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
-    return {"exit_code": resp.get("exit_code"), "stdout": resp.get("stdout", ""),
-            "stderr": resp.get("stderr", "")}
+    stdout = resp.get("stdout", "")
+    # A read that could not open the directory carries a structured diagnosis (gitpanel._cd_or_diag);
+    # turn it into an access decision for the panel and strip it from the visible output. Policy lives
+    # in gitpanel.access_fix — the gateway never proposes a grant for a system path or a root agent.
+    access = None
+    stdout, diag = gitpanel.parse_diag(stdout)
+    if diag is not None:
+        access = gitpanel.access_fix(diag)
+    return {"exit_code": resp.get("exit_code"), "stdout": stdout,
+            "stderr": resp.get("stderr", ""), "access": access}
 
 
 # ── Docker: containere / volume / reţele, prin op-ul `run` (agent NEatins) ───

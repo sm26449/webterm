@@ -9,6 +9,11 @@ back.
 
 ## [Unreleased]
 
+## [3.6.28] — 2026-11-04 · agent (58)
+
+### Added
+- **When the Git panel can't open a folder, it now says why — and, only for the safe case, offers the exact fix.** Git runs as the agent's own account (often an unprivileged `webterm`), not as whoever you become in the terminal with `su`/`sudo su`, so a repository inside another user's home (e.g. `/home/alice`, mode `0750`) is unreadable to the agent even though the repo itself is world-readable. The panel used to show a generic "permission" message for this *and* for a simple typo. It now diagnoses the real cause as the agent's identity: a **missing** directory is reported as such (no fix suggested), and a directory the agent genuinely cannot traverse is reported with the account that blocks it. For the one safe, obvious case — the blocker is a **real user's home** (owner and group id ≥ 1000, a non-privileged named group) and the agent is not already root — it offers a single scoped command, `usermod -aG <that user's group> <agent>` plus an agent restart, pre-filled with the real names and **typed into your terminal for you to review and run** (bracketed paste at a prompt, never executed for you; Copy otherwise). Anything outside that case — a system path, a root-owned directory, a privileged group (`root`/`sudo`/`docker`/…), or an agent already running as root — gets a plain explanation and **no command**: WebTerm never proposes loosening permissions on arbitrary or system locations. The proposed command is built server-side from validated POSIX names only, so it can never become `usermod -aG root …` or a `chmod` on a system directory. New tests cover every branch of the gate (system path, root agent, privileged/numeric group, low ids, non-POSIX names) and real dropped-privilege `EACCES`/`ENOENT` diagnoses.
+
 ## [3.6.27] — 2026-11-03 · agent (58)
 
 ### Security

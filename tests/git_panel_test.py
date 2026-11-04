@@ -312,7 +312,12 @@ async def main():
                 repo.chmod(0o700)
                 r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True,
                                    preexec_fn=unprivileged, timeout=30)
-                check("safe reads never bypass private directory permissions", r.returncode != 0 and "cd" in r.stderr and not r.stdout, r.stderr)
+                # The read fails and leaks no repo data: git never runs, and stdout carries ONLY our
+                # own access diagnosis (directory metadata anyone could already `stat`), not status.
+                _, d = gitpanel.parse_diag(r.stdout)
+                check("safe reads never bypass private directory permissions",
+                      r.returncode != 0 and bool(d) and d["code"] == "EACCES" and d["comp"] == str(repo),
+                      r.stdout[:120] or r.stderr)
                 repo.chmod(0o755)
 
             # A role with run but without files.read can still discover its terminal directory.
@@ -333,6 +338,12 @@ async def main():
             view_client = await U.login("viewer@example.invalid")
             r = await call("status", client=view_client)
             check("viewer without run cannot use Git", r.status_code == 403)
+            # A missing directory is diagnosed as "missing" through the API (even root gets ENOENT,
+            # not EACCES, here) and never carries a fix command.
+            r = await good("root", cwd=base / ("nope-" + os.urandom(3).hex()))
+            acc = r.get("access") or {}
+            check("missing directory → access.reason 'missing', no command",
+                  acc.get("reason") == "missing" and acc.get("offer") is False and not acc.get("command"), str(acc))
             await run_only.aclose(); await view_client.aclose(); await owner.aclose()
             # Normal worktrees (.git file) retain root-relative paths too.
             wt = base / "worktree"
@@ -346,6 +357,53 @@ async def main():
                 r = await agent.run_command(cmd, 30)
                 check("cross-owner linked worktree diff works", r["exit_code"] == 0 and "+worktree change" in r["stdout"], str(r)[:200])
                 os.chown(wt, os.geteuid(), os.getegid())
+            # ── Access diagnosis: why a directory can't be opened, and the one safe fix we offer ──
+            # Policy gate (deterministic): we offer ONLY `usermod` into a real user's own NAMED group,
+            # for a path under a home — never for system paths, a root agent, privileged or numeric
+            # groups, low ids, or non-POSIX names (so the command can never become dangerous).
+            def diagf(**kw):
+                d = dict(code="EACCES", comp="/home/alice", ouid="1000", ouser="alice",
+                         ggid="1000", ggroup="alice", auid="1000", auser="webterm")
+                d.update(kw); return d
+            off = gitpanel.access_fix(diagf())
+            check("home + user-private group → offers scoped usermod",
+                  off["offer"] and off["command"] == "sudo usermod -aG alice webterm && sudo systemctl restart webterm-agent", str(off))
+            check("agent running as root → never offers a grant", not gitpanel.access_fix(diagf(auid="0"))["offer"])
+            check("path outside /home → never offers a grant", not gitpanel.access_fix(diagf(comp="/usr/sbin"))["offer"])
+            check("root-owned directory → never offers a grant", not gitpanel.access_fix(diagf(ouid="0", ggid="0", ggroup="root"))["offer"])
+            check("privileged group → never offers a grant", not gitpanel.access_fix(diagf(ggroup="docker"))["offer"])
+            check("system gid → never offers a grant", not gitpanel.access_fix(diagf(ggid="27", ggroup="sudo"))["offer"])
+            check("numeric (unnamed) group → never offers a grant", not gitpanel.access_fix(diagf(ggroup="1000"))["offer"])
+            check("agent name must be POSIX → no command injection", not gitpanel.access_fix(diagf(auser="x;reboot"))["offer"])
+
+            if os.geteuid() == 0:
+                def nobody():
+                    os.setgroups([]); os.setgid(65534); os.setuid(65534)
+                base.chmod(0o755)
+                # Real EACCES from a dropped-privilege agent, blocked by a non-home directory → facts,
+                # then policy says "system" (no command).
+                sysp = base / "sysblk"; (sysp / "repo").mkdir(parents=True)
+                os.chown(sysp, 4242, 4242); sysp.chmod(0o750)
+                cmd, _ = gitpanel.command(str(sysp / "repo"), "root")
+                p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, preexec_fn=nobody, timeout=30)
+                _, d = gitpanel.parse_diag(p.stdout)
+                check("dropped agent on unreadable dir → EACCES fact names the blocking component",
+                      bool(d) and d["code"] == "EACCES" and d["comp"] == str(sysp) and d["auid"] == "65534", str(d))
+                check("EACCES outside /home → policy 'system', no command",
+                      gitpanel.access_fix(d)["reason"] == "system" and not gitpanel.access_fix(d)["offer"])
+                # Blocked by a real user home → EACCES fact carries the owner and a /home path.
+                hp = Path("/home") / ("wt-git-acl-" + os.urandom(4).hex())
+                (hp / "repo").mkdir(parents=True)
+                os.chown(hp, 4242, 4242); hp.chmod(0o750)
+                try:
+                    cmd, _ = gitpanel.command(str(hp / "repo"), "root")
+                    p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, preexec_fn=nobody, timeout=30)
+                    _, d = gitpanel.parse_diag(p.stdout)
+                    check("dropped agent blocked by a /home dir → EACCES fact under /home with owner",
+                          bool(d) and d["code"] == "EACCES" and d["comp"] == str(hp) and d["comp"].startswith("/home/") and d["ouid"] == "4242", str(d))
+                finally:
+                    subprocess.run(["rm", "-rf", str(hp)])
+
             await content_filter_tests(base, agent)
     finally:
         core.source_for = original

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errText, api, Host, withGuardConfirm } from '../lib/api'
 import { useConfirm } from '../lib/confirm'
+import { copyText } from '../lib/clipboard'
 import { getCwd } from '../lib/cwd'
 import { parseGitStatus, type GitFile, type RepoInfo } from '../lib/gitStatus'
 import { useI18n } from '../lib/i18n'
 import { notify } from '../lib/notify'
+import { typeCommandOutcome } from '../lib/rootmove'
 import { SHEET_CLS } from '../lib/sheet'
 import { lsGet, lsSet } from '../lib/storage'
 import { useDrawer } from '../lib/useDrawer'
@@ -19,7 +21,11 @@ import { ArrowDownIcon, ArrowsLeftRightIcon, ArrowUpIcon, CloseIcon, FolderIcon,
 // Observarea e STRICT read-only (log/show/for-each-ref/reflog); scrierea rămâne
 // la stage/commit. checkout/merge/rebase/push rămân la CLI.
 
-interface GitResult { exit_code: number; stdout: string; stderr: string }
+// When the agent cannot open the directory, the gateway diagnoses why (gitpanel.access_fix):
+// a missing path, a path the agent account can't read, or — only for a real user's home — a
+// scoped `usermod` grant to offer. `offer` gates whether we show a command at all.
+interface GitAccess { reason: 'missing' | 'denied' | 'system'; path: string; offer: boolean; command: string; group?: string; agent?: string }
+interface GitResult { exit_code: number; stdout: string; stderr: string; access?: GitAccess | null }
 
 // Field separator for server-formatted commit metadata; subjects may contain it.
 const US = '\u001f'
@@ -164,6 +170,8 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   const [repo, setRepo] = useState<RepoInfo | null>(null)
   const [notRepo, setNotRepo] = useState(false)
   const [repoErr, setRepoErr] = useState('')     // stderr de la rev-parse (ex. permisiuni) — ajută diagnoza
+  const [access, setAccess] = useState<GitAccess | null>(null)   // diagnoza structurată de la gateway
+  const [grantNote, setGrantNote] = useState('')
   const [files, setFiles] = useState<GitFile[]>([])
   const [commits, setCommits] = useState<Commit[] | null>(null)
   const [branches, setBranches] = useState<Branch[] | null>(null)
@@ -212,9 +220,10 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       if (my !== loadSeq.current) return
       if (rp.exit_code !== 0) {
         setNotRepo(true); setRepoErr((rp.stderr || '').split('\n')[0] || '')
+        setAccess(rp.access ?? null); setGrantNote('')
         setRepo(null); setRepoRoot(''); setFiles([]); setSel(null); return
       }
-      setNotRepo(false); setRepoErr('')
+      setNotRepo(false); setRepoErr(''); setAccess(null)
       setRepoRoot(rp.stdout.replace(/\n$/, ''))
       const st = await gitcmd('status')
       if (my !== loadSeq.current) return
@@ -353,6 +362,18 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     setFollowing(true)
     setError('')
     pullCwd()
+  }
+
+  // Grant: type the gateway-built `sudo usermod …` command into THIS session's terminal, at a
+  // prompt, as a bracketed paste with no newline — the person reads it and presses Enter (same
+  // path as rootmove.ts). We never run it. If the foreground isn't a shell prompt, nothing is
+  // typed and we point at Copy instead.
+  function grantAccess(cmd: string) {
+    const outcome = typeCommandOutcome(props.sessionId, cmd)
+    setGrantNote(outcome === 'typed' ? t('git.access.typed') : t('git.access.notPrompt'))
+  }
+  async function copyGrant(cmd: string) {
+    if (await copyText(cmd)) setGrantNote(t('git.access.copied'))
   }
 
   async function openDiff(f: GitFile, staged: boolean) {
@@ -697,13 +718,43 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
 
         {notRepo && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
-            <p className="text-xs text-slate-500">{t(repoErr ? 'git.repoUnavailable' : 'git.notRepo')}</p>
-            <p className="font-mono text-2xs text-slate-600" title={cwd}>{cwd || '—'}</p>
-            {repoErr && <>
-              <p className="max-w-full break-words font-mono text-2xs text-slate-600">{repoErr}</p>
-              <p className="text-2xs text-slate-500">{t('git.agentPermissions')}</p>
-            </>}
-            <p className="text-2xs text-slate-600">{t('git.notRepoHint')}</p>
+            {access?.reason === 'missing' ? (
+              <>
+                <p className="text-xs text-slate-500">{t('git.access.missing')}</p>
+                <p className="font-mono text-2xs text-slate-600" title={access.path}>{access.path || cwd || '—'}</p>
+                <p className="text-2xs text-slate-600">{t('git.notRepoHint')}</p>
+              </>
+            ) : access?.reason === 'denied' && access.offer ? (
+              <>
+                <p className="text-xs text-slate-500">{t('git.access.denied')}</p>
+                <p className="font-mono text-2xs text-slate-600" title={access.path}>{access.path}</p>
+                <p className="max-w-full text-2xs text-slate-500">{t('git.access.hint', { agent: access.agent || '' })}</p>
+                <code className="max-w-full select-all break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-2xs text-slate-300 ring-1 ring-ink-700">{access.command}</code>
+                <div className="flex gap-2">
+                  <button onClick={() => grantAccess(access.command)}
+                    className="wt-touch rounded-md px-2 py-1 text-2xs text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800 hover:text-slate-100">{t('git.access.openInTerminal')}</button>
+                  <button onClick={() => copyGrant(access.command)}
+                    className="wt-touch rounded-md px-2 py-1 text-2xs text-slate-400 hover:bg-ink-800 hover:text-slate-200">{t('git.access.copy')}</button>
+                </div>
+                {grantNote && <p role="status" className="text-2xs text-slate-400">{grantNote}</p>}
+                <p className="max-w-full text-2xs text-slate-600">{t('git.access.restartNote')}</p>
+              </>
+            ) : access ? (
+              <>
+                <p className="text-xs text-slate-500">{t('git.access.system')}</p>
+                <p className="font-mono text-2xs text-slate-600" title={access.path}>{access.path || cwd || '—'}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-slate-500">{t(repoErr ? 'git.repoUnavailable' : 'git.notRepo')}</p>
+                <p className="font-mono text-2xs text-slate-600" title={cwd}>{cwd || '—'}</p>
+                {repoErr && <>
+                  <p className="max-w-full break-words font-mono text-2xs text-slate-600">{repoErr}</p>
+                  <p className="text-2xs text-slate-500">{t('git.agentPermissions')}</p>
+                </>}
+                <p className="text-2xs text-slate-600">{t('git.notRepoHint')}</p>
+              </>
+            )}
           </div>
         )}
 

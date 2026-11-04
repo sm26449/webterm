@@ -7,6 +7,23 @@ from .errors import ApiError
 US = "\x1f"
 WRITE_OPS = frozenset({"stage", "unstage", "commit"})
 
+# ── Access diagnosis ─────────────────────────────────────────────────────────
+# When the panel cannot open a directory, we don't just say "can't cd": the agent diagnoses WHY —
+# as its OWN identity — and reports facts; the gateway (access_fix) decides what, if anything, to
+# propose. A grant command is offered ONLY for a real user's home directory and ONLY as
+# `usermod -aG <that user's own group> <agent>`. Everything else (missing path, system/root-owned,
+# privileged group, or an agent already running as root) gets no command at all. The person always
+# reviews and runs it themselves.
+_DIAG_MARK = "\x1e"                 # RS: starts the one diagnosis line; US separates its fields
+# Groups we never add the agent to (membership here is a privilege grant, not a read-access grant).
+_PRIVILEGED_GROUPS = frozenset({
+    "root", "sudo", "wheel", "admin", "adm", "docker", "lxd", "libvirt", "kvm", "qemu",
+    "shadow", "disk", "staff", "sys", "daemon", "bin", "systemd-journal", "systemd-network",
+    "users", "tty", "dialout", "video", "audio", "cdrom", "plugdev", "netdev", "input",
+})
+_POSIX_NAME = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}\$?$")
+_SUPERVISABLE = ("/home/",)         # only ever propose a grant for a path inside a user home
+
 
 def _bad():
     raise ApiError(400, "git.badSubcommand", "unsupported git operation or arguments")
@@ -84,6 +101,82 @@ def operation_args(operation, *, path="", revision="", message="", orig=""):
             _bad()
         return ["commit", "-m", message]
     _bad()
+
+
+def _cd_or_diag(cwd):
+    """cd into the panel directory; on failure, emit a structured diagnosis and stop.
+
+    The agent walks the path top-down, finds the first component that is missing (ENOENT) or that
+    it cannot enter (EACCES), stats it, and prints ONE line (RS-marked, US-separated so a path with
+    spaces survives) with: code, blocking component, its owner uid/name and group gid/name, and the
+    agent's own uid/name. No policy here — just facts for gitpanel.access_fix."""
+    q = shlex.quote(cwd)
+    return (
+        'wt_target=' + q + '\n'
+        'if cd -P -- "$wt_target" 2>/dev/null; then :\n'
+        'else\n'
+        '  wt_auid=$(id -u 2>/dev/null); wt_auser=$(id -un 2>/dev/null)\n'
+        '  wt_code=EACCES; wt_blk=$wt_target; wt_acc=""; wt_oifs=$IFS; IFS=/; set -f\n'
+        '  for wt_seg in $wt_target; do\n'
+        '    [ -n "$wt_seg" ] || continue\n'
+        '    wt_acc="$wt_acc/$wt_seg"\n'
+        '    if [ ! -e "$wt_acc" ]; then wt_code=ENOENT; wt_blk=$wt_acc; break; fi\n'
+        '    if ! (cd -P -- "$wt_acc" 2>/dev/null); then wt_code=EACCES; wt_blk=$wt_acc; break; fi\n'
+        '  done\n'
+        '  IFS=$wt_oifs; set +f\n'
+        '  wt_si=$(stat -c "%u %U %g %G" "$wt_blk" 2>/dev/null || echo "- - - -"); set -- $wt_si\n'
+        '  printf \'\\036code=%s\\037comp=%s\\037ouid=%s\\037ouser=%s\\037ggid=%s\\037ggroup=%s\\037auid=%s\\037auser=%s\\n\''
+        ' "$wt_code" "$wt_blk" "$1" "$2" "$3" "$4" "${wt_auid:--}" "${wt_auser:--}"\n'
+        '  exit 128\n'
+        'fi\n'
+    )
+
+
+def parse_diag(stdout):
+    """Split the diagnosis line (if any) out of a read's stdout. Returns (clean_stdout, fields|None)."""
+    if _DIAG_MARK not in stdout:
+        return stdout, None
+    lines = stdout.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith(_DIAG_MARK):
+            fields = {}
+            for tok in line[len(_DIAG_MARK):].split(US):
+                k, _, v = tok.partition("=")
+                if k:
+                    fields[k] = v
+            return "\n".join(lines[:i] + lines[i + 1:]), fields
+    return stdout, None
+
+
+def access_fix(diag):
+    """Policy over the agent's facts. We ONLY ever propose `usermod -aG <user's own group> <agent>`
+    for a real user's home directory; otherwise no command. Built from validated POSIX names only,
+    so it can never become `usermod -aG root …` or touch a system path."""
+    comp = diag.get("comp", "")
+    if diag.get("code") == "ENOENT":
+        return {"reason": "missing", "path": comp, "offer": False, "command": ""}
+    deny = {"reason": "system", "path": comp, "offer": False, "command": ""}
+    try:
+        auid = int(diag.get("auid", "x"))
+        ouid = int(diag.get("ouid", "x"))
+        ggid = int(diag.get("ggid", "x"))
+    except ValueError:
+        return deny
+    agent = diag.get("auser", "")
+    group = diag.get("ggroup", "")
+    if auid == 0:                                   # root never gets EACCES; nothing to grant
+        return deny
+    if not comp.startswith(_SUPERVISABLE):          # outside user homes → never propose
+        return deny
+    if ouid < 1000 or ggid < 1000:                  # system-owned directory or group → never propose
+        return deny
+    if group in _PRIVILEGED_GROUPS or not _POSIX_NAME.match(group):
+        return deny
+    if not _POSIX_NAME.match(agent):
+        return deny
+    cmd = "sudo usermod -aG %s %s && sudo systemctl restart webterm-agent" % (group, agent)
+    return {"reason": "denied", "path": comp, "offer": True, "command": cmd,
+            "group": group, "agent": agent}
 
 
 # Root discovery (physical worktree top) shared by reads and writes.
@@ -165,7 +258,7 @@ def command(cwd, operation, **params):
         raise ApiError(400, "git.cwdAbsolute", "cwd must be an absolute path")
     args = operation_args(operation, **params)
     readonly = operation not in WRITE_OPS
-    script = 'cd -P -- ' + shlex.quote(cwd) + ' || exit\n' + _DISCOVER_ROOT
+    script = _cd_or_diag(cwd) + _DISCOVER_ROOT
     quoted = " ".join(shlex.quote(a) for a in args)
     if readonly:
         script += _ISOLATE_READS
