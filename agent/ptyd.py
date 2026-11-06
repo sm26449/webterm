@@ -2854,6 +2854,18 @@ class Agent:
                         break
                 if capped:
                     break
+            if not open_fds and not capped and not timed_out:
+                # Ieşirile la EOF NU înseamnă „proces terminat". Uneltele GNU (tar, cp, ls…)
+                # îşi închid singure stdout/stderr într-un handler de ieşire, deci EOF-ul
+                # soseşte cu o clipă ÎNAINTE ca procesul să iasă. Până la v58 `finally` de
+                # mai jos îl găsea încă viu şi îi trimitea SIGKILL: o comandă REUŞITĂ ieşea
+                # cu -9 în câteva procente din rulări („tar failed" fără niciun mesaj la
+                # descărcarea unui dosar, exit -9 în consola de flotă). Aşteptăm ieşirea
+                # reală, în limita timeout-ului cerut; ce nu iese până atunci e un timeout.
+                try:
+                    p.wait(timeout=max(0.0, deadline - time.time()))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
         finally:
             if p.poll() is None:
                 try:

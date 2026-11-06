@@ -23,6 +23,7 @@ Acoperă:
     blocat, ritm) şi eşecurile care devin „nu era în istoric".
 """
 import asyncio
+import inspect
 import os
 import shutil
 import subprocess
@@ -569,6 +570,52 @@ async def gw():
 
 
 asyncio.run(gw())
+
+# ── 7. op-ul `run`: ieşirile la EOF nu înseamnă proces terminat ──────────────────────────────
+# Uneltele GNU îşi închid stdout/stderr într-un handler de ieşire, deci EOF-ul pe ambele pipe-uri
+# soseşte înainte ca procesul să iasă. Până la v58 agentul îl omora atunci cu SIGKILL şi o
+# comandă reuşită ieşea cu -9 (prins de poarta locală: „tar failed" la descărcarea unui dosar,
+# ~2-5% din rulări). Aici cursa e făcută DETERMINISTĂ: comanda îşi închide singură ieşirile,
+# mai lucrează puţin, apoi iese cu un cod ales.
+print("\n[7] run: EOF pe ieşiri ≠ proces terminat")
+
+
+class RunSelf:
+    def __init__(self):
+        self.reply = None
+
+    def send_ctrl(self, obj):
+        self.reply = obj
+
+
+def run_once(cmd, timeout):
+    rs = RunSelf()
+    t0 = time.time()
+    ptyd.Agent._run_command(rs, "r", cmd, timeout)
+    return rs.reply or {}, time.time() - t0
+
+
+r, dt = run_once("printf gata; exec >&- 2>&-; sleep 0.4; exit 7", 10)
+check("ieşiri închise, apoi exit 7 → codul REAL (nu -9)", r.get("exit_code") == 7, r)
+check("  … fără timed_out, cu output-ul de dinainte păstrat",
+      r.get("timed_out") is False and r.get("stdout") == "gata", r)
+check("  … a aşteptat ieşirea reală (≥0.3s), nu timeout-ul (<5s)", 0.3 <= dt < 5, "%.2fs" % dt)
+r, dt = run_once("exec >&- 2>&-; sleep 0.3; exit 0", 10)
+check("ieşiri închise, apoi exit 0 → reuşită", r.get("exit_code") == 0 and r.get("timed_out") is False, r)
+r, dt = run_once("exec >&- 2>&-; sleep 30", 1)
+check("ieşiri închise şi proces care NU iese → timed_out la termenul cerut",
+      r.get("timed_out") is True and r.get("exit_code") is None, r)
+check("  … oprit la ~1s, nu atârnă 30s", dt < 4, "%.2fs" % dt)
+bad = []
+for _i in range(150):
+    r, _dt = run_once("tar -C / -cf /dev/null -- etc/hostname 2>/dev/null; true", 10)
+    if r.get("exit_code") != 0:
+        bad.append(r.get("exit_code"))
+check("150 de rulări scurte la rând: niciuna cu exit fals", not bad, bad[:5])
+src_run = inspect.getsource(ptyd.Agent._run_command)
+check("codul aşteaptă procesul după EOF, în limita termenului",
+      "p.wait(timeout=max(0.0, deadline - time.time()))" in src_run)
+
 shutil.rmtree(os.environ["TMUX_TMPDIR"], ignore_errors=True)
 print("\n%d/%d checks passed" % (ok_n, total))
 sys.exit(0 if ok_n == total else 1)
