@@ -3186,6 +3186,7 @@ const ro: Lang = {
     'session.inputUnknownDesc': "Textul conține taste de editare (de exemplu Ctrl+U, Backspace sau completarea cu Tab), deci linia pe care ar rula-o shell-ul nu e textul pe care îl poate verifica guardrail-ul. Rulezi oricum?",
     'session.echoUnknownTitle': "Încă nu pot verifica linia",
     'session.echoUnknownDesc': "Ultimele taste (de exemplu ↑, Ctrl+P sau Tab) n-au primit încă ecou de la host, deci guardrail-ul nu vede linia care ar rula. Rulezi oricum?",
+    'session.backAtPrompt': "Te-ai întors la prompt. Tasta nu a fost trimisă — apas-o din nou ca să rulezi linia.",
     'session.sureToRunAll': "Le rulezi în toate panourile?",
     'session.insertGuarded': "Netastat — o linie s-ar potrivi regulii de guardrail /{pattern}/: {cmd}",
     'session.queuedNotSent.one': "{count} tastă apăsată în timpul verificării panourilor nu a fost trimisă.",

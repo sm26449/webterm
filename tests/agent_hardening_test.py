@@ -186,7 +186,10 @@ check("sid cu sintaxă tmux respins", not ptyd._is_hex_sid("=" + "a" * 31))
 check("sid cu majuscule/altele respins", not ptyd._is_hex_sid("A" * 32) and not ptyd._is_hex_sid("g" * 32))
 
 # default-shell cu apostrofă e escapat în conf (nu rupe linia / nu injectează)
-check("_tmux_q escapează apostrofa", ptyd._tmux_q("/bin/o'sh") == "'/bin/o'\\''sh'")
+# v59: între ghilimele, nu `'\\''` — idiomul de shell e respins de parserul tmux < 3.0
+check("_tmux_q escapează apostrofa", ptyd._tmux_q("/bin/o'sh") == '"/bin/o\'sh"')
+check("_tmux_q: o valoare cu apostrofă nu poate închide şirul / începe altă linie",
+      ptyd._tmux_q("x'\"; run-shell id\nset -g status on") == '"x\'\\"; run-shell id set -g status on"')
 check("conf-ul folosește quoting-ul", "set -g default-shell '" in ptyd.TMUX_CONF_CONTENT)
 
 print(f"\n{ok}/{total} PASS")

@@ -1,6 +1,7 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { navigateDialogButtons } from '../lib/dialogNav'
 
 // Confirmare mică, reutilizabilă (stil AboutModal: glass, focus-trap, Escape/backdrop închid).
 // Folosită pentru acţiuni cu cost de revenire — prima: logout-ul (pierzi sesiunea web şi re-auth).
@@ -16,6 +17,16 @@ export default function ConfirmModal(props: {
   const { t } = useI18n()
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onCancel)
+  // Tab / Shift+Tab şi ← / → mută focusul între cele două butoane, explicit (lib/dialogNav: Tab-ul
+  // nativ sare peste butoane în Safari, iar săgeţile nu făceau nimic). În CAPTURE pe dialog, ca să
+  // ruleze înaintea capcanei de focus — care lasă în pace un Tab deja consumat (defaultPrevented).
+  useEffect(() => {
+    const el = dialogRef.current
+    if (!el) return
+    const onKey = (e: KeyboardEvent) => { navigateDialogButtons(e, el) }
+    el.addEventListener('keydown', onKey, true)
+    return () => el.removeEventListener('keydown', onKey, true)
+  }, [])
   const confirmBtn = props.danger
     ? 'bg-rose-600 hover:bg-rose-700'
     : 'bg-sky-600 hover:bg-sky-700'

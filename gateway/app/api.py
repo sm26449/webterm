@@ -12561,6 +12561,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                     await client.send_text(json.dumps({
                         "type": "lock_at",
                         "lock_at": (hub.last_interaction + hub.lock_idle) if hub.lock_idle else None}))
+                elif ctl.get("type") == "unscroll":
+                    # „întoarce-mă la prompt" (agent 59): scoate sesiunea din istoricul tmux fără
+                    # nicio tastă. Porţile (writable, blocare, ritm) sunt în hub; răspundem MEREU,
+                    # ca UI-ul să nu aştepte un timeout când răspunsul e „nu era în istoric".
+                    was = await hub.scroll_exit(client)
+                    await client.send_text(json.dumps({"type": "unscrolled", "was": was}))
                 elif ctl.get("type") == "rtt":
                     # echo pentru măsurarea RTT în UI. Coerce n la întreg: fără
                     # asta, un client putea trimite un payload arbitrar (string

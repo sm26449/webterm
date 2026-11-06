@@ -60,7 +60,8 @@ def check(name, cond, detail=""):
     print("  %s %s%s" % ("PASS" if cond else "FAIL", name, "" if cond else "  --  %s" % (detail,)))
 
 
-check("AGENT_VERSION == 58", ptyd.AGENT_VERSION == 58, ptyd.AGENT_VERSION)
+# pin pe „cel puţin 58", ca testul să nu se spargă la fiecare creştere de AGENT_VERSION (ca în v54)
+check("AGENT_VERSION >= 58", ptyd.AGENT_VERSION >= 58, ptyd.AGENT_VERSION)
 
 
 def mode_of(p):

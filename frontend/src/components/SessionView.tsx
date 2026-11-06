@@ -46,6 +46,7 @@ import { notify, notifyError, notifyOs, notifyToast } from '../lib/notify'
 import { parseOscNotify, sanitizeOscText, shouldNotifyCommand, shouldNotifyDone, taskNotifyEnabled, taskNotifySeconds } from '../lib/taskNotify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { navigateDialogButtons } from '../lib/dialogNav'
 import { dismissUpload, lingerDone, startUpload } from '../lib/uploads'
 import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
 import { uploadStore } from '../lib/uploadStore'
@@ -86,6 +87,9 @@ export function shortAgent(ua?: string): string {
 // Prag watchdog client: fără niciun mesaj de la server (nici măcar ping-ul aplicativ de
 // keepalive, ~25s pe idle) în acest interval, tratăm conexiunea ca moartă și reconectăm.
 const WATCHDOG_MS = 60_000
+// „Întoarce-mă la prompt": op-ul `scroll_exit` există din agentul 59 (vezi requestUnscroll)
+const UNSCROLL_MIN_AGENT = 59
+const UNSCROLL_TIMEOUT_MS = 1500
 
 /** Setări → Preferinţe → Terminal → „Randarea terminalului" (3.6.19): 'webgl' (implicit) | 'canvas' | 'dom',
     per browser; citită la fiecare (re)încărcare a renderer-ului. */
@@ -969,7 +973,39 @@ export default function SessionView(props: {
   useEffect(() => () => {
     clearTimeout(submitTimerRef.current)
     submitWaitRef.current = null
+    unscrollWaitRef.current?.(false)
   }, [])
+  // „Întoarce-mă la prompt" (agent 59): rotiţa bagă pane-ul în copy-mode-ul tmux, iar ecranul arată
+  // istoricul — guardrail-ul nu mai are ce linie să citească, deci un Enter dat de acolo ajungea în
+  // dialogul „Încă nu pot verifica linia". Înainte de dialog întrebăm agentul (prin gateway) dacă
+  // sesiunea e în istoric; dacă da, o scoate, iar Enter-ul NU pleacă: omul vede promptul şi decide.
+  // Tastele obişnuite n-au nevoie de asta — pleacă spre agent, care iese singur din copy-mode.
+  const unscrollWaitRef = useRef<((was: boolean) => void) | null>(null)
+  const hostRef = useRef(props.host)
+  hostRef.current = props.host
+  /** sesiunea poate fi în istoricul tmux şi avem pe cine întreba (altfel: dialogul, sincron, ca înainte) */
+  const canUnscroll = useCallback((): boolean => {
+    const h = hostRef.current
+    return !!h && h.backend === 'tmux' && (h.agent_version ?? 0) >= UNSCROLL_MIN_AGENT
+      && wsRef.current?.readyState === WebSocket.OPEN && !unscrollWaitRef.current
+  }, [])
+  const requestUnscroll = useCallback((): Promise<boolean> => {
+    const ws = wsRef.current
+    if (!canUnscroll() || !ws) return Promise.resolve(false)
+    return new Promise<boolean>((resolve) => {
+      // fără răspuns (gateway vechi, agent plecat): „nu era în istoric" → dialogul de până acum
+      const timer = window.setTimeout(() => done(false), UNSCROLL_TIMEOUT_MS)
+      const done = (was: boolean) => {
+        if (unscrollWaitRef.current !== done) return
+        unscrollWaitRef.current = null
+        clearTimeout(timer)
+        resolve(was)
+      }
+      unscrollWaitRef.current = done
+      // un send care aruncă n-are voie să lase aşteptarea agăţată (input-ul ar rămâne în coadă)
+      try { ws.send(JSON.stringify({ type: 'unscroll' })) } catch { done(false) }
+    })
+  }, [canUnscroll])
   /** Starea ACESTUI panou pentru guardrail-ul broadcast: citită de App pentru celelalte panouri şi
       de checkPeers pentru panoul de origine (care e şi el o ţintă — re-review 3.6.12, L-b). */
   const paneState = useCallback((): PeerState => {
@@ -1082,12 +1118,33 @@ export default function SessionView(props: {
       const key = submit ? run : undefined
       if (v.kind === 'rule') applyRule(v.rule, v.cmd, held, undefined, undefined, v.below === true, key)
       else if (v.kind === 'unknown') {
-        // „Rulează" re-judecă linia ACUM (review 3.6.13, L4): între timp ecoul a sosit, iar o regulă
-        // care atinge linia devenită vizibilă nu trebuie ocolită
-        setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run: held, submit: key, echo: true, localRecheck: () => verdict(true) })
-        // diagnoză (fără conţinutul tastelor): de ce linia n-a fost confirmată
-        console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current,
-          lost: trackerRef.current?.promptLostReason() ?? null, ...echoRef.current.debug() }))
+        const openDialog = () => {
+          // „Rulează" re-judecă linia ACUM (review 3.6.13, L4): între timp ecoul a sosit, iar o regulă
+          // care atinge linia devenită vizibilă nu trebuie ocolită
+          setCmdConfirm({ cmd: (lineOf(trackerRef.current?.pendingCommand() ?? null) ?? '').trim(), pattern: '', unknown: true, run: held, submit: key, echo: true, localRecheck: () => verdict(true) })
+          // diagnoză (fără conţinutul tastelor): de ce linia n-a fost confirmată
+          console.warn('[wt-echo] ' + JSON.stringify({ now: Math.round(performance.now()), rtt: rttRef.current,
+            lost: trackerRef.current?.promptLostReason() ?? null, ...echoRef.current.debug() }))
+        }
+        if (submit && canUnscroll()) {
+          // Tasta de trimitere e reţinută şi linia nu se poate verifica: poate fiindcă ecranul arată
+          // istoricul tmux. Întrebăm agentul înainte de dialog; cât aşteptăm, input-ul intră în coadă
+          // (aceeaşi regulă ca la aşteptarea ecoului) şi NU pleacă orbeşte. În ambele ramuri tasta
+          // rămâne netrimisă — drumul ăsta poate doar să înlocuiască un dialog cu „nimic trimis".
+          const hold: (string | Uint8Array)[] = []
+          submitWaitRef.current = hold
+          void requestUnscroll().then((was) => {
+            if (submitWaitRef.current !== hold) return   // demontat între timp
+            submitWaitRef.current = null
+            const dropped = [...queued, ...hold]
+            if (!was) openDialog()
+            // un singur anunţ sub cortină: tastele nelivrate au prioritate (omul trebuie să ştie de ele)
+            if (dropped.length) noticeQueued(dropped)
+            else if (was) showInputNotice(tRef.current('session.backAtPrompt'))
+          })
+          return
+        }
+        openDialog()
       }
       noticeQueued(queued)
     }
@@ -1228,17 +1285,12 @@ export default function SessionView(props: {
   useEffect(() => {
     if (!cmdConfirm) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Tab') {
-        const el = cmdDialogRef.current
-        if (!el || !el.contains(document.activeElement)) return
-        const f = Array.from(el.querySelectorAll<HTMLElement>('button:not([disabled])'))
-        if (f.length === 0) { e.preventDefault(); return }
-        const first = f[0]
-        const last = f[f.length - 1]
-        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
-        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
-        return
-      }
+      // Tab / Shift+Tab şi ← / → mută focusul între butoane, EXPLICIT (lib/dialogNav): Tab-ul nativ
+      // sare peste butoane în Safari, iar săgeţile nu făceau nimic. ↑ / ↓ rămân fără efect („↑ Enter"
+      // tastat din reflex nu confirmă). Doar cu focusul în dialog — din terminalul altui panou tastele
+      // rămân ale lui.
+      const el = cmdDialogRef.current
+      if (el && el.contains(document.activeElement) && navigateDialogButtons(e, el)) return
       if (e.key !== 'Escape') return
       const scope = escapeScope(document.activeElement, document.body, cmdDialogRef.current, rootRef.current, !!actionTargetRef.current)
       if (scope === 'none') return
@@ -2142,6 +2194,8 @@ export default function SessionView(props: {
           setLockReason(typeof msg.reason === 'string' ? msg.reason : '')
           // idle-lock: history-ul de clipboard (posibile parole/tokenuri) nu supravieţuieşte blocării
           clearClipHistory(); setPasteItems(null)
+        } else if (msg.type === 'unscrolled') {
+          unscrollWaitRef.current?.(msg.was === true)
         } else if (msg.type === 'unlocked') {
           setLocked(false); setUnlocking(false); setLockErr(''); unlockCodeRef.current = ''; setUnlockCode('')
         } else if (msg.type === 'unlock_failed') {

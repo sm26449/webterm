@@ -53,6 +53,12 @@ what it does not cover, is in [Security](SECURITY-FEATURES.md) and
   raw output. When you split the session's tmux window into panes (agent 58), you get the
   **active pane's** history, marked as such; a zoomed pane counts as a single pane
   ([details](design/SESSION-LIFECYCLE.md))
+- **Typing brings you back to the prompt**: on a tmux host the mouse wheel scrolls tmux's own
+  history (copy-mode), which takes over the keyboard — arrows and letters did nothing until you
+  scrolled all the way down. From agent 59 (tmux ≥ 2.4) a key leaves the history first and is then
+  delivered, like in a desktop terminal; `PgUp`/`PgDn` keep paging; `Esc` and `Ctrl+C` only return
+  (they never reach the running program). A key that would *run* the line — Enter, `Ctrl+J`,
+  `Ctrl+O`, a multi-line paste — also only returns: you see the prompt first, then press Enter
 - **Instant tabs**: recent sessions stay mounted (terminal + buffer), and
   switching is just a visibility change. The stream flows **only** on visible
   panes; background tabs are paused at the gateway and re-sync on return if they

@@ -556,6 +556,10 @@ def read_tail(sid: str, limit: int = config.BROWSER_TAIL_BYTES,
 #    comportamentul de azi, fără nicio urmă în UI.
 # Se aplică şi la resync-ul FULL (resume/unlock, vezi `_resync`), cu acelaşi bloc; lossy nu cere istoric.
 HISTORY_MIN_AGENT = 57
+# Op-ul `scroll_exit` („întoarce-mă la prompt": scoate pane-ul din copy-mode-ul tmux fără nicio
+# tastă) există din agentul 59. Sub el nu-l trimitem: un agent vechi ar răspunde `bad_op`.
+SCROLL_EXIT_MIN_AGENT = 59
+SCROLL_EXIT_MIN_INTERVAL = 0.25      # per hub: fiecare cerere e un subprocess tmux pe loop-ul agentului
 HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
 HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
 HISTORY_MAX_Z = 2 * 1024 * 1024      # plafon pe câmpul base64 primit (agentul îl ţine ≤ 1 MiB)
@@ -1107,6 +1111,7 @@ class SessionHub:
         # la re-auth cu passkey. `lock_idle=0` → dezactivat. Setat la connect din host.
         self.lock_idle = 0
         self.locked = False
+        self._last_scroll_exit = 0.0
         self.lock_reason = ""        # "idle" | "stepup" (ataşare fără step-up) | "stepup_max"
         self.last_interaction = time.time()
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
@@ -1783,6 +1788,35 @@ class SessionHub:
         if client.is_owner and getattr(client, "writable", True):
             self.last_interaction = now
 
+    async def scroll_exit(self, client) -> bool:
+        """„Întoarce-mă la prompt": scoate pane-ul din copy-mode-ul tmux (istoricul în care te
+        bagă rotiţa), fără să trimită vreo tastă. True = sesiunea chiar era în istoric.
+
+        UI-ul îl cere când a REŢINUT un Enter: guardrail-ul de comenzi nu poate citi linia cât
+        ecranul arată istoricul, deci Enter-ul nu pleacă şi nu ajunge la agent, care altfel ar
+        ieşi singur din copy-mode la prima tastă. Aceleaşi porţi ca la input (handle_input): e
+        gestul unei taste — un client read-only sau blocat nu mişcă ecranul celorlalţi, iar un
+        hub blocat nu e atins. Orice eşec (agent < 59, sursă fără tmux, agent plecat) = False:
+        UI-ul cade pe dialogul lui de până acum."""
+        if self.closed or not getattr(client, "writable", True):
+            return False
+        if self.locked or getattr(client, "locked", False):
+            return False
+        now = time.time()
+        if now - self._last_scroll_exit < SCROLL_EXIT_MIN_INTERVAL:
+            return False
+        self._last_scroll_exit = now
+        client.last_interaction = now
+        if client.is_owner:
+            self.last_interaction = now
+        source = self._source()
+        if not source:
+            return False
+        try:
+            return bool(await source.scroll_exit(self.sid))
+        except Exception:                # noqa: BLE001 — AgentGone / timeout / răspuns ciudat
+            return False
+
     async def resize(self, rows: int, cols: int) -> None:
         if self.closed:
             return
@@ -1891,6 +1925,11 @@ class SessionSource:
         # poate reconstrui părțile statice ale unui TUI. Implicit no-op — sursele fără
         # tmux (ssh/telnet/serial) n-au echivalent fără să schimbe dimensiunea.
         return None
+
+    async def scroll_exit(self, sid: str) -> bool:
+        # Ieşirea din copy-mode-ul tmux (vezi SessionHub.scroll_exit). Implicit „nu era în
+        # istoric": sursele fără tmux (ssh/telnet/serial) îşi ţin scrollback-ul în browser.
+        return False
 
     async def reap(self, sid: str) -> None:
         raise NotImplementedError
@@ -2283,6 +2322,12 @@ class AgentConnection(SessionSource):
 
     async def redraw(self, sid) -> None:
         await self.request("redraw", sid=sid)
+
+    async def scroll_exit(self, sid) -> bool:
+        if (self.agent_version or 0) < SCROLL_EXIT_MIN_AGENT or self.backend != "tmux":
+            return False
+        r = await self.request("scroll_exit", sid=sid, timeout=5)
+        return bool(r.get("ok")) and r.get("was") is True
 
     async def reap(self, sid) -> None:
         await self.request("reap", sid=sid)

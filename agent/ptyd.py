@@ -46,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 58
+AGENT_VERSION = 59
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -492,11 +492,19 @@ _TMUX_21_OPTIONS = [
 TMUX_EXTRA_OPTIONS = _TMUX_BASE_OPTIONS + (_TMUX_21_OPTIONS if _TMUX_HAS_21 else [])
 
 
-# tmux foloseşte quoting stil-shell în conf: o apostrofă în valoare (ex. un shell din
-# passwd cu ' în cale) ar rupe linia. `_login_shell` respinge deja nologin/false, dar
-# escapăm defensiv oricum — ieftin, şi închide orice injectare printr-o valoare cu ' .
+# Quoting pentru tmux.conf. O valoare fără apostrofă stă între apostrofe (totul e literal acolo —
+# `\E` din terminal-overrides rămâne `\E`). Una CU apostrofă stă între ghilimele, cu `\`, `"` şi
+# `$` escapate: idiomul de shell `'…'\''…'` merge doar de la tmux 3.0 (parserul nou). Parserul vechi
+# nu are escape în afara ghilimelelor, deci pe 2.1–2.9 linia `word-separators` (care conţine o
+# apostrofă) era respinsă cu „invalid or unknown command", iar tmux afişa eroarea peste prima
+# sesiune a serverului (v59; forma asta e verificată pe 2.1, 2.6, 3.0a, 3.2a, 3.3a, 3.4, 3.5a).
+# Închide şi orice injectare printr-o valoare ostilă (ex. un shell din passwd cu ' în cale):
+# un sfârşit de rând ar începe o linie nouă de config, deci nu trece.
 def _tmux_q(v):
-    return "'" + str(v).replace("'", "'\\''") + "'"
+    v = str(v).replace("\r", " ").replace("\n", " ")
+    if "'" not in v:
+        return "'" + v + "'"
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
 TMUX_CONF_CONTENT = (
@@ -527,6 +535,124 @@ def tmux_cmd(*args, **kw):
     return subprocess.run(
         [TMUX_BIN, "-L", TMUX_SOCKET, "-f", TMUX_CONF] + list(args),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Copy-mode: tastatura te scoate din istoric (v59)
+# ---------------------------------------------------------------------------
+# Cu `mouse on`, rotiţa bagă pane-ul în copy-mode-ul tmux (`copy-mode -e`), iar copy-mode ia
+# TASTATURA: săgeţile îi mută cursorul, literele şi Enter sunt aruncate, iar singura ieşire e
+# q / Esc / Ctrl+C sau derulatul până jos. Pentru cine nu ştie de tmux (adică aproape oricine
+# foloseşte un terminal în browser), „am dat scroll şi nu mai pot scrie". Mai rău: Space e
+# „pagină în jos" şi IESE singur când ajunge jos, deci o comandă tastată orbeşte ajungea la
+# prompt TRUNCHIATĂ (`echo HI` → `HI`).
+#
+# De ce în agent şi nu în tmux.conf (`bind -T copy-mode Any …`): legările se poartă diferit de
+# la o versiune la alta — pe 3.2+ evenimentele de FOCUS şi mouse-ul nelegat nimeresc şi ele în
+# `Any` (schimbi tabul din browser şi ai ieşit din istoric), paste-ul e aruncat pe 3.4+, iar
+# sub 3.0 `Any` nu există. În plus, legările rămân în serverul tmux (care supravieţuieşte
+# agentului) şi după un rollback. Aici regula e una, pe orice tmux: input de TASTATURĂ cu
+# pane-ul în copy-mode → ieşim din copy-mode ÎNTÂI, apoi livrăm tastele (mai puţin cele care ar
+# trimite linia — vezi _COPY_MODE_SUBMITS).
+#
+# Costul: un `tmux display-message` e un subprocess pe loop, deci NU întrebăm la fiecare tastă.
+# Sesiunea e „armată" doar după un raport de mouse care poate intra în copy-mode (rotiţă / drag);
+# prima tastă de după întreabă o dată şi dezarmează.
+# Doar de la tmux 2.4 (`send-keys -X cancel`, care ţinteşte EXACT copy-mode-ul: într-un alt mod
+# dă eroare şi nu atinge nimic). Sub 2.4 singura cale ar fi tasta `q` trimisă pane-ului — dar acolo
+# prefixul Ctrl-B e activ (vezi _TMUX_HAS_NONE_KEY), deci pane-ul poate fi într-un chooser, unde
+# `q` l-ar închide şi tasta omului (poate un Enter) ar ajunge în shell; iar dacă copy-mode-ul se
+# închide între întrebare şi `q`, litera s-ar tasta la prompt. Pe tmux 2.1–2.3 rămâne ca înainte.
+_TMUX_HAS_COPY_X = _TMUX_VER is None or _TMUX_VER >= (2, 4)
+COPY_MODE_TIMEOUT = 2          # per comandă tmux — pe loop, deci scurt (un wedge costă o dată)
+COPY_MODE_SETTLE = 0.5         # cât după un raport de mouse rămânem armaţi orice ar spune tmux
+COPY_MODE_MIN_INTERVAL = 0.05  # cel mult o întrebare către tmux la atât, per sesiune
+
+_SGR_MOUSE = re.compile(rb"\x1b\[<(\d{1,4});\d{1,5};\d{1,5}[Mm]")
+# Ce trimite TERMINALUL singur, nu omul: mouse (SGR / X10), focus, CPR, DA, DECRPM, rapoarte de
+# fereastră, răspunsuri DCS / OSC. Un chunk făcut DOAR din ele nu e tastatură. Clasificarea poate
+# greşi într-un singur sens fără pagubă: o tastă luată drept raport (Shift+F3 arată ca un CPR) te
+# lasă în istoric, ca până acum; invers ai ieşi din istoric fără să fi tastat.
+_TERM_REPORTS_ONLY = re.compile(
+    rb"(?:\x1b\[<\d{1,4};\d{1,5};\d{1,5}[Mm]"      # mouse SGR
+    rb"|\x1b\[M[\x20-\xff]{3}"                       # mouse X10
+    rb"|\x1b\[[IO]"                                   # focus in / out
+    rb"|\x1b\[\??\d{1,5};\d{1,5}(?:;\d{1,5})?R"      # CPR / DECXCPR
+    rb"|\x1b\[\??\d{1,5}n"                          # DSR (stare)
+    rb"|\x1b\[[?>=][\d;]{0,32}c"                     # DA1 / DA2 / DA3
+    rb"|\x1b\[\?[\d;]{1,32}\$y"                      # DECRPM
+    rb"|\x1b\[\d{1,5}(?:;\d{1,5}){0,4}t"             # rapoarte de fereastră
+    rb"|\x1bP[^\x1b]{0,4096}\x1b\\"                  # DCS … ST
+    rb"|\x1b\][^\x07\x1b]{0,4096}(?:\x07|\x1b\\)"   # OSC … BEL / ST
+    rb")+\Z")
+# PageUp / PageDown rămân ale copy-mode-ului: după rotiţă, cu ele citeşti mai departe.
+_COPY_MODE_PAGING = re.compile(rb"(?:\x1b\[[56]~)+\Z")
+# Esc / Ctrl+C: „scoate-mă de aici". Ies din copy-mode şi NU ajung la program — un Ctrl+C dat ca
+# să te întorci la prompt nu are voie să omoare jobul care rulează dedesubt (nici Esc să întrerupă
+# un TUI). E şi comportamentul tmux de până acum (tabela emacs); în tabela vi Esc doar ştergea
+# selecţia, aici e la fel în ambele.
+_COPY_MODE_QUITS = (b"\x1b", b"\x03")
+# Octeţi care TRIMIT linia (Enter CR / LF, Ctrl+O). Un chunk care îi conţine şi care a scos pane-ul
+# din copy-mode NU se livrează: omul se uita la istoric, nu la linia de la prompt, iar până la v58
+# copy-mode înghiţea oricum acel Enter. Fără regula asta, v59 ar fi făcut dintr-un Enter inert unul
+# care RULEAZĂ o linie nevăzută — şi guardrail-ul din browser, care citeşte linia de pe ecran, nu
+# poate garanta singur contrariul (pe ecran e istoricul). Aici nu depinde de browser: te întorci la
+# prompt, vezi linia, apeşi din nou. Preţul: un text lipit cu Enter în el, lipit din istoric, nu
+# ajunge — îl lipeşti iar, de data asta văzând unde.
+_COPY_MODE_SUBMITS = re.compile(rb"[\r\n\x0f]")
+
+
+def copy_mode_arms(data):
+    """True dacă `data` conţine un raport de mouse care poate băga pane-ul în copy-mode:
+    rotiţă (bitul 64) sau drag = mişcare CU un buton apăsat (bitul 32, butonul 0–2). Un click
+    simplu nu armează — altfel fiecare tastă de după un click într-un TUI cu mouse (mc, vim) ar
+    costa un subprocess; nici mişcarea fără buton (butonul „3", trimisă la fiecare pixel de
+    aplicaţiile cu any-motion)."""
+    if b"\x1b[M" in data:
+        return True                     # X10: nu decodăm butonul (tmux cere SGR; caz rar)
+    for m in _SGR_MOUSE.finditer(data):
+        b = int(m.group(1))
+        if b & 64 or (b & 32 and b & 3 != 3):
+            return True
+    return False
+
+
+def copy_mode_action(data):
+    """Ce face un chunk de input cu un pane aflat în copy-mode:
+      "report" — doar rapoarte ale terminalului: nu e tastatură, nu atingem nimic;
+      "page"   — PageUp / PageDown: rămân în copy-mode (navigare în istoric);
+      "quit"   — Esc / Ctrl+C singur, sau un chunk care ar TRIMITE linia (Enter, Ctrl+O):
+                 ieşim din copy-mode, chunk-ul NU se livrează;
+      "exit"   — orice altceva (litere, săgeţi, Tab, paste pe un rând): ieşim, apoi livrăm."""
+    if not data or _TERM_REPORTS_ONLY.match(data):
+        return "report"
+    if _COPY_MODE_PAGING.match(data):
+        return "page"
+    if data in _COPY_MODE_QUITS or _COPY_MODE_SUBMITS.search(data):
+        return "quit"
+    return "exit"
+
+
+def tmux_copy_mode_exit(sid):
+    """Scoate pane-ul activ al sesiunii din copy-mode, dacă e în el.
+    True = era în copy-mode şi l-am scos; False = nu era; None = n-am putut afla / n-a mers
+    (tmux < 2.4, server lipsă sau înţepenit, alt mod decât copy-mode). Blocant (subprocess), scurt."""
+    if not _TMUX_HAS_COPY_X:
+        return None
+    target = TMUX_SESSION_PREFIX + sid + ":"     # `name:`, nu `=name` — vezi session_cwd
+    try:
+        r = tmux_cmd("display-message", "-p", "-t", target, "#{pane_in_mode}",
+                     timeout=COPY_MODE_TIMEOUT)
+        if r.returncode != 0:
+            return None
+        if r.stdout.strip() in (b"", b"0"):
+            return False
+        # `-X cancel` e al copy-mode-ului: într-un alt mod (sau dacă pane-ul a ieşit între timp
+        # singur — `-e` la capătul de jos) dă eroare şi nu atinge nimic → None, tastele pleacă
+        r = tmux_cmd("send-keys", "-t", target, "-X", "cancel", timeout=COPY_MODE_TIMEOUT)
+        return True if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def tmux_session_state(sid):
@@ -1395,6 +1521,11 @@ class Session:
         self.client_started = 0.0     # când a pornit clientul tmux curent (vezi TMUX_CLIENT_HEALTHY)
         self.retry_at = 0.0           # >0 = fără client ataşat, reîncercăm la momentul ăsta
         self.pending_input = b""
+        # v59: „poate fi în copy-mode" (vezi _copy_mode_gate). Pornim armaţi: o sesiune tmux
+        # re-adoptată după un restart de agent putea fi lăsată în istoric — prima tastă verifică.
+        self.copy_armed = True
+        self.copy_armed_at = 0.0
+        self.copy_checked_at = 0.0
         self.ring = []                # list of (offset, bytes)
         self.ring_bytes = 0
         self.stream_offset = 0
@@ -3089,6 +3220,20 @@ class Agent:
                         pass          # best-effort: fără repaint, nu o eroare de sesiune
                 ok()
 
+            elif op == "scroll_exit":
+                # v59: „întoarce-mă la prompt" FĂRĂ nicio tastă. Îl cere gateway-ul când UI-ul a
+                # reţinut un Enter (guardrail-ul de comenzi nu vede linia cât ecranul arată
+                # istoricul) — Enter-ul nu ajunge deci la _copy_mode_gate. `was` îi spune UI-ului
+                # dacă pane-ul chiar era în copy-mode, ca să nu ghicească după propriile rotiţe.
+                sid = msg.get("sid")
+                s = self.sessions.get(sid) if isinstance(sid, str) else None
+                if not s:
+                    return err("no_session")
+                was = False
+                if s.backend == "tmux" and s.alive:
+                    was = tmux_copy_mode_exit(s.sid) is True
+                ok(was=was)
+
             elif op == "kill":
                 s = self.sessions.get(msg["sid"])
                 if not s:
@@ -3801,8 +3946,46 @@ class Agent:
             log("session %s: input backlog over %d KB — input dropped"
                 % (sid, PENDING_INPUT_MAX // 1024))
             return
+        if s.backend == "tmux":
+            data = self._copy_mode_gate(s, data)
+            if not data:
+                return
         s.pending_input += data
         self._flush_input(s)
+
+    def _copy_mode_gate(self, s, data):
+        """v59: tastatura te scoate din istoricul tmux (vezi blocul „Copy-mode" de sus).
+        Întoarce octeţii de livrat pane-ului (gol = tasta doar a închis copy-mode-ul)."""
+        arms = copy_mode_arms(data)
+        if arms:
+            s.copy_armed = True
+            s.copy_armed_at = time.time()
+        # getattr: o sesiune construită fără __init__ (doar în teste) = nearmată — pe drumul
+        # fiecărei taste nu vrem nici AttributeError, nici un subprocess tmux neaşteptat
+        if not getattr(s, "copy_armed", False):
+            return data
+        action = copy_mode_action(data)
+        if action in ("report", "page"):
+            return data                  # rămânem armaţi: omul încă citeşte istoricul
+        now = time.time()
+        # Plafon de ritm: cât rămânem armaţi (vezi mai jos), fiecare chunk ar fi un subprocess pe
+        # loop-ul care serveşte TOATE sesiunile. Între două întrebări tastele trec neverificate —
+        # adică, în cel mai rău caz, ca până la v59 — şi rămânem armaţi pentru următoarea.
+        if now - getattr(s, "copy_checked_at", 0.0) < COPY_MODE_MIN_INTERVAL:
+            return data
+        s.copy_checked_at = now
+        was = tmux_copy_mode_exit(s.sid)
+        # Dezarmăm după o verificare — cu excepţia cazurilor în care răspunsul poate fi depăşit
+        # imediat: rapoarte de mouse abia plecate (tmux nu le-a procesat) sau încă în coada de
+        # input, nescrise. Ele pot (re)băga pane-ul în copy-mode DUPĂ ce am întrebat, oricare a
+        # fost răspunsul, aşa că mai întrebăm la tasta următoare. `None` (tmux n-a răspuns)
+        # dezarmează mereu: nu repetăm un subprocess care eşuează.
+        unsettled = was is not None and (bool(s.pending_input) or s.master is None
+                                         or now - getattr(s, "copy_armed_at", 0.0) < COPY_MODE_SETTLE)
+        s.copy_armed = arms or unsettled
+        if was and action == "quit":
+            return b""
+        return data
 
     def _flush_input(self, s):
         if s.master is None:
