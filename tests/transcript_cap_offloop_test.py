@@ -126,12 +126,21 @@ def temps():
 _real_copy = core._cap_copy
 
 
-def slow_copy(delay):
-    """Încetineşte copierea de pe THREAD (nu şi restul de pe loop, apelat cu abort=None)."""
+def slow_copy(delay, gate=None):
+    """Încetineşte copierea de pe THREAD (nu şi restul de pe loop, apelat cu abort=None).
+
+    `gate` (threading.Event): după PRIMA felie, thread-ul aşteaptă până îl deschide testul. Doar
+    întârzierea fixă nu garanta că scriitorul apucă să scrie ceva cât copierea rulează: pe un runner
+    CI lent copierea s-a terminat după 2 rafale („chunks written during copy: 2"), iar testul cere
+    ≥5 ca să exercite rundele de catch-up. Cu poarta, numărul minim e determinist."""
     def wrapped(src, dst, start, end, abort):
         if abort is not None:
             pos = start
+            first = True
             while pos < end:
+                if gate is not None and not first:
+                    gate.wait(10)
+                first = False
                 if abort.is_set():
                     raise core._CapAborted()
                 nxt = min(end, pos + 256 * 1024)
@@ -197,7 +206,8 @@ async def t_writes_during_copy():
     make_fixture(out_path, cast_path, 4 * MiB + 1000, seed=3)
     pre_out = open(out_path, "rb").read()
     hub = make_hub(sid)
-    core._cap_copy = slow_copy(0.01)
+    gate = threading.Event()
+    core._cap_copy = slow_copy(0.01, gate)
     try:
         sent = []
         # primul chunk trece de plafon → _checkpoint (forţat de ≥64 KiB) declanşează tăierea
@@ -224,7 +234,10 @@ async def t_writes_during_copy():
             await hub._process_output(data)
             sent.append(data)
             i += 1
+            if i >= 5:
+                gate.set()               # minimul garantat e atins: copierea poate continua
             await asyncio.sleep(0.001)
+        gate.set()
         await task
     finally:
         core._cap_copy = _real_copy
