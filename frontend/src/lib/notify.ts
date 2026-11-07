@@ -6,8 +6,10 @@ export type ToastKind = 'info' | 'warn' | 'error'
 /** `key` (3.6.16): un toast nou cu aceeaşi cheie îl ÎNLOCUIEŞTE pe loc pe cel vechi (acelaşi loc în
     stivă, temporizator nou) — un paste = un singur toast („Se încarcă…" → rezultatul), nu două stivuite.
     `onClick` (3.6.24): un toast poate fi acţionabil — ex. „terminalul X a terminat" care, la click, te
-    duce în panoul X (dispatch `wt-open-session`). Opţional; absenţa lui = toast pur informativ. */
-type ToastHost = (msg: string, kind: ToastKind, key?: string, onClick?: () => void) => void
+    duce în panoul X (dispatch `wt-open-session`). Opţional; absenţa lui = toast pur informativ.
+    `actionLabel` (3.6.30): cu el, `onClick` nu mai e pe mesaj ci pe un BUTON separat cu textul ăsta
+    (ex. „Redeschide") — acţiunea e vizibilă, nu ascunsă într-un mesaj subliniat la hover. */
+type ToastHost = (msg: string, kind: ToastKind, key?: string, onClick?: () => void, actionLabel?: string) => void
 let toastHost: ToastHost | null = null
 
 export function registerToast(fn: ToastHost) {
@@ -70,8 +72,9 @@ export function notifyOs(title: string, body: string, tag?: string): boolean {
     API a OS-ului. De ce nu `notify()`: confirmările de acţiune (paste/drop → „salvat, calea
     inserată") se întâmplă fix când tabul e în faţă şi omul se uită la ecran — un pop-up de
     sistem ar fi spam şi redundant. Mesajul se anunţă oricum prin regiunea live a stivei. */
-export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key?: string, onClick?: () => void) {
-  toastHost?.(message, kind, key, onClick)
+export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key?: string, onClick?: () => void,
+                            actionLabel?: string) {
+  toastHost?.(message, kind, key, onClick, actionLabel)
 }
 
 /** Eroare acţionabilă (ex. „nu m-am putut conecta: port greşit"): MEREU un toast ÎN PAGINĂ,

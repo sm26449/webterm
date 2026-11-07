@@ -275,6 +275,9 @@ function MainApp() {
   const { confirm } = useConfirm()
   const [hosts, setHosts] = useState<Host[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
+  // lista curentă pentru callback-uri amânate (ex. „Redeschide" din toast, apăsat după un refresh)
+  const sessionsRef = useRef<Session[]>([])
+  sessionsRef.current = sessions
   // eroare ≠ gol (audit funcţional 3.6.3, #1): ce parte a flotei a venit măcar o dată / a picat acum
   const fleetRef = useRef<FleetState<Host, Session>>(initialFleet())
   const [fleet, setFleet] = useState<FleetStatus>({ hostsLoaded: false, hostsErr: null, sessionsErr: null })
@@ -577,9 +580,9 @@ function MainApp() {
     }
   }, [])
   useEffect(() => {
-    registerToast((message, kind, key, onClick) => {
+    registerToast((message, kind, key, onClick, actionLabel) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((t) => upsertToast(t, { id, message, kind, key, onClick }))
+      setToasts((t) => upsertToast(t, { id, message, kind, key, onClick, actionLabel }))
       // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
       setTimeout(() => expireToast(id), kind === 'error' ? 12000 : 6000)
     })
@@ -895,7 +898,7 @@ function MainApp() {
     },
     // într-un split Alt+W nu face nimic (tasta trece mai departe): tabul panoului selectat s-ar
     // redeschide singur, iar „închide panoul" nu e o operaţie — panourile se schimbă din Edit
-    closeTab: splitActive ? undefined : () => { if (selectedSid) closeTab(selectedSid) },
+    closeTab: splitActive ? undefined : () => { if (selectedSid) closeTabByUser(selectedSid) },
     reopenTab: () => {
       const sid = closedTabsRef.current.pop()
       if (sid && sessions.some((s) => s.id === sid)) selectSession(sid)
@@ -1378,6 +1381,22 @@ function MainApp() {
       if (sid === selectedSid) navigate(next[idx] ?? next[idx - 1] ?? null)
       return next
     })
+  }
+
+  // închiderea unui tab DE CĂTRE OM (X pe tab, meniul de tab-uri, Alt+W). Nu şterge nimic — sesiunea
+  // rulează mai departe — dar tab-ul dispărea fără niciun semn, iar drumul înapoi (Alt+T, bara
+  // laterală) nu era evident: părea pierdută. Un toast spune că trăieşte şi o redeschide într-un
+  // click. NU şi la ştergerea sesiunii (deleteSession / onDeleted): acolo chiar nu mai există.
+  // Cheie unică: închideri repetate înlocuiesc toast-ul (Alt+T le redeschide şi pe cele dinainte).
+  const closeTabByUser = (sid: string) => {
+    closeTab(sid)
+    const s = sessions.find((x) => x.id === sid)
+    const name = (s && sessionTitle(s.title, t)) || t('tabbar.session')
+    notifyToast(t('tabbar.closedToast', { name }), 'info', 'wt-tab-closed', () => {
+      closedTabsRef.current = closedTabsRef.current.filter((x) => x !== sid)
+      if (sessionsRef.current.some((x) => x.id === sid)) selectSession(sid)
+      else notifyToast(t('tabbar.reopenGone'), 'warn', 'wt-tab-closed')
+    }, t('tabbar.reopen'))
   }
 
   // click pe o sesiune (sidebar/paletă) → deschide-o ca tab şi ieşi din orice split-view activ
@@ -1968,7 +1987,7 @@ function MainApp() {
             // în bară → revii oricând). Altfel takeover-ul split-ului ignora navigarea pe taburi.
             onHome={() => { setActiveSplitId(null); navigate(null) }}
             onSelect={(sid) => { setPendingSearch(null); setActiveSplitId(null); navigate(sid) }}
-            onClose={closeTab}
+            onClose={closeTabByUser}
             onReorder={(order) => {
               // drag & drop = control manual: fixăm ordinea DRAG-uită şi comutăm pe „manual"
               // (altfel sortarea pe activitate ar re-muta tab-ul imediat). Păstrăm la coadă

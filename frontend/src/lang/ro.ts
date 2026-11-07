@@ -2562,6 +2562,9 @@ const ro: Lang = {
     'tabbar.closedWithExit': "închisă cu exit {code}",
     'tabbar.closeTabTitle': "Închide tab-ul (sesiunea rămâne activă)",
     'tabbar.closeTab': "Închide tab-ul",
+    'tabbar.closedToast': "Tab-ul „{name}” s-a închis — sesiunea rulează în continuare.",
+    'tabbar.reopen': "Redeschide",
+    'tabbar.reopenGone': "Sesiunea aceea nu mai există.",
     // reordonare din tastatură (alternativa la drag & drop) + numele rolului pentru cititoare
     'tabbar.sessionTabs': "Taburile de sesiune",
     'tabbar.tabRole': "tab de sesiune",

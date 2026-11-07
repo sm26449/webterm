@@ -9,6 +9,9 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Closing a tab now says the session is still running, with a Reopen button.** Closing a tab (the × on the tab, the tab list or `Alt+W`) only detaches: the session keeps running on the host. But the tab vanished without a trace and the way back (`Alt+T`, or the session in the sidebar) was not obvious, so a misclick looked like a lost session. A toast now names the tab, says the session is still running and reopens it in one click or with `Enter`; it disappears after a few seconds like any other notice. Deliberately a toast and not a confirmation: closing loses nothing, so a dialog on every close would only add friction. Deleting a session shows no such toast, since there is nothing to reopen. Toasts gained an optional separate action button for this; existing clickable toasts are unchanged.
+
 ## [3.6.29] — 2026-11-06 · agent (59)
 
 ### Fixed

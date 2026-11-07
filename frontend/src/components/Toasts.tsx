@@ -12,6 +12,8 @@ export interface ToastItem {
   /** 3.6.24: toast acţionabil — click pe mesaj = `onClick` + închidere (ex. „terminalul X a
       terminat" → focus pe panoul X). Absent = toast pur informativ. */
   onClick?: () => void
+  /** 3.6.30: cu etichetă, acţiunea e un buton separat după mesaj (mesajul rămâne text simplu) */
+  actionLabel?: string
 }
 
 /* Stiva de toast-uri. Trei lucruri pe care auditul de accesibilitate (2026-10, 2.1 şi 5.3) le-a
@@ -61,7 +63,18 @@ export default function Toasts(props: {
       {item.kind === 'error' && <span aria-hidden="true" className="mt-0.5 shrink-0"><WarningIcon /></span>}
       {/* toast acţionabil (3.6.24): mesajul e un buton; containerul rămâne role status/alert, iar
           numele accesibil al butonului e chiar mesajul. Click = acţiunea + închidere. */}
-      {item.onClick ? (
+      {item.onClick && item.actionLabel ? (
+        <>
+          <span className="min-w-0 flex-1 break-words">{item.message}</span>
+          <button
+            type="button"
+            onClick={() => { item.onClick?.(); props.onDismiss(item.id) }}
+            className="-my-0.5 shrink-0 rounded-md px-2 py-0.5 text-sm font-medium text-sky-300 ring-1 ring-sky-500/40 hover:bg-ink-700 hover:text-sky-200"
+          >
+            {item.actionLabel}
+          </button>
+        </>
+      ) : item.onClick ? (
         <button
           type="button"
           onClick={() => { item.onClick?.(); props.onDismiss(item.id) }}
