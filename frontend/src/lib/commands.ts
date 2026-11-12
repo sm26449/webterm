@@ -74,6 +74,12 @@ export class CommandTracker {
   private anchorTried = false
   /** un Enter a plecat după B şi n-a venit C (continuare PS2) — vezi noteSubmitSent */
   private submitted = false
+  /** Instantaneul liniei înainte de copy-mode-ul tmux (vezi noteMouseReport / restoreFromShadow).
+      Rotiţa intră în istoricul tmux, care îşi pictează paginile peste ecran cu derulări în regiune:
+      rândurile împinse afară sunt ŞTERSE din bufferul xterm, iar markerii lor odată cu ele. La ieşire
+      tmux repictează ecranul exact cum era, dar markerul promptului nu mai există — linia devenea
+      „necunoscută" şi primul Enter cerea dialogul. */
+  private shadow: Shadow | null = null
   /** sesiunea rulează sub tmux (hostul are backend „tmux"): ultimul rând al ecranului poate fi bara
       de stare tmux (vezi lastNonBlank) — setat de SessionView */
   tmuxBacked = false
@@ -317,6 +323,7 @@ export class CommandTracker {
     this.promptCol = col
     this.promptSnap = null
     this.screenSuspect = false
+    this.shadow = null          // instantaneul descria poziţia dinainte
   }
 
   private clearPrompt(): void {
@@ -330,6 +337,7 @@ export class CommandTracker {
     this.screenSuspect = false
     this.anchorTried = false
     this.submitted = false
+    this.shadow = null
   }
 
   /** A plecat spre shell un terminator de linie (Enter, un chunk / paste cu \r sau \n) cât suntem la
@@ -346,6 +354,10 @@ export class CommandTracker {
 
   constructor(term: Terminal) {
     this.term = term
+    // o derulare reală a bufferului (output, wrap la ultimul rând) mută rândurile faţă de ecran: un
+    // instantaneu de dinainte nu mai descrie aceleaşi rânduri. Copy-mode-ul tmux nu derulează bufferul
+    // (îşi pictează istoricul în regiune), deci nu-l atinge.
+    term.onScroll?.(() => { this.shadow = null })
   }
 
   /** Uită starea acumulată: după un `term.reset()` (replay de istoric la (re)conectare)
@@ -476,6 +488,80 @@ export class CommandTracker {
       dar în ordinea PARSĂRII, nu la sosire (e2e 3.6.13). */
   endChunk(): void {
     this.justEnded = null
+    if (this.shadow === null) return
+    const why = this.promptLostReason()
+    // doar markeri ŞTERŞI (semnătura copy-mode-ului); un marker viu dar mutat / alt motiv rămâne pierdut
+    if (why === 'marker-gone' || why === 'orig-gone') this.restoreFromShadow()
+  }
+
+  /** O tastă / un text a plecat spre shell cât linia e CUNOSCUTĂ: linia s-a putut schimba (paste,
+      wrap, derulare), deci instantaneul nu mai descrie ecranul — se ia din nou la următorul raport
+      de mouse (review: un instantaneu vechi putea pune promptul în mijlocul liniei). Cât linia e
+      pierdută (tastarea care scoate din copy-mode) instantaneul rămâne: e exact cazul pe care îl acoperă. */
+  noteKeySent(): void {
+    if (this.shadow !== null && this.promptLostReason() === null) this.shadow = null
+  }
+
+  /** Un raport de mouse a plecat spre tmux (rotiţă / clic / tragere): poate intra în copy-mode, care
+      şterge din buffer rândurile pe care stau markerii. Reţinem — o singură dată per B, şi doar cât
+      linia e CUNOSCUTĂ (promptLostReason null) — unde erau markerii faţă de ecran şi textul exact al
+      rândurilor de la cel de deasupra promptului până la cursor. */
+  noteMouseReport(): void {
+    if (!this.tmuxBacked || this.shadow !== null) return
+    const b = this.term.buffer.active
+    if (b.type === 'alternate' || this.promptLostReason() !== null) return
+    const p = this.promptMarker
+    const o = this.origMarker
+    if (!alive(p) || !alive(o)) return
+    const cur = this.absCursor()
+    const first = Math.min(p.line, o.line)
+    if (first > cur.row) return
+    const top = Math.max(0, first - 1)
+    if (cur.row - top > LINE_ROWS_MAX + 2) return
+    const rows: string[] = []
+    for (let r = top; r <= cur.row; r++) {
+      const l = b.getLine(r)
+      if (!l) return
+      rows.push(r === cur.row ? l.translateToString(false, 0, cur.col) : l.translateToString(false))
+    }
+    this.shadow = { top: top - b.baseY, p: p.line - b.baseY, o: o.line - b.baseY, same: p === o,
+      cur: cur.row - b.baseY, curCol: cur.col, rows, cols: this.term.cols, nrows: this.term.rows }
+  }
+
+  /** După copy-mode: dacă ecranul arată EXACT ca la instantaneu (aceleaşi rânduri, acelaşi text, de la
+      rândul de deasupra promptului până la cursorul de atunci; cursorul nu e mai sus; aceeaşi
+      dimensiune), markerii se pun înapoi unde erau. Nu e o euristică nouă de citire: starea refăcută e
+      exact cea verificată la instantaneu, iar toate verificările obişnuite (promptLostReason) rulează
+      din nou peste ea. Orice nepotrivire → linia rămâne necunoscută (fail-closed, ca înainte). */
+  private restoreFromShadow(): boolean {
+    const s = this.shadow
+    const b = this.term.buffer.active
+    if (!s || !this.tmuxBacked || b.type === 'alternate') return false
+    if (this.term.cols !== s.cols || this.term.rows !== s.nrows) return false
+    const pAt = alive(this.promptMarker) ? this.promptMarker.line - b.baseY : null
+    const oAt = alive(this.origMarker) ? this.origMarker.line - b.baseY : null
+    if (pAt === s.p && oAt === s.o) return false        // nimic de refăcut
+    const cur = this.absCursor()
+    if (cur.row - b.baseY < s.cur) return false
+    // promptul nu poate începe în mijlocul unei linii: rândul de deasupra nu are voie să continue în el
+    if (s.top < Math.min(s.p, s.o) && this.rowContinues(b.baseY + s.top)) return false
+    for (let i = 0; i < s.rows.length; i++) {
+      const vr = s.top + i
+      const l = b.getLine(b.baseY + vr)
+      if (!l) return false
+      const got = vr === s.cur ? l.translateToString(false, 0, s.curCol) : l.translateToString(false)
+      if (got !== s.rows[i]) return false
+    }
+    const mark = (vr: number) => this.term.registerMarker(b.baseY + vr - cur.row) ?? null
+    const p = mark(s.p)
+    const o = s.same ? p : mark(s.o)
+    if (!p || !o) { p?.dispose(); if (o !== p) o?.dispose(); return false }
+    if (this.promptMarker && this.promptMarker !== this.origMarker && !this.promptMarker.isDisposed) this.promptMarker.dispose()
+    if (this.origMarker && !this.origMarker.isDisposed) this.origMarker.dispose()
+    this.promptMarker = p
+    this.origMarker = o
+    this.shadow = null          // o singură folosire: următoarea derulare ia un instantaneu nou
+    return true
   }
 
   /** Shell-ul aşteaptă la prompt, după marcajele shell integration: B (sfârşit de prompt) văzut,
@@ -946,4 +1032,21 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   out.set(a, 0)
   out.set(b, a.length)
   return out
+}
+
+/** instantaneul din noteMouseReport: rânduri relative la începutul ecranului (baseY) */
+interface Shadow {
+  top: number
+  p: number
+  o: number
+  same: boolean
+  cur: number
+  curCol: number
+  rows: string[]
+  cols: number
+  nrows: number
+}
+
+function alive(m: IMarker | null): m is IMarker {
+  return !!m && !m.isDisposed && typeof m.line === 'number' && m.line >= 0
 }

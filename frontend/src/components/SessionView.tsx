@@ -904,6 +904,7 @@ export default function SessionView(props: {
       inputSeqRef.current += 1     // input real: contextul unui paste de fişiere în curs s-a schimbat (3.6.16)
       // prima tastă de după B: promptul e pictat — rândul lui se verifică la Enter (review 3.6.13, H1)
       // fără taste în aşteptare (nimic tastat încă după B, niciun typeahead): linia începe la cursor
+      trackerRef.current?.noteKeySent()
       trackerRef.current?.notePromptPainted(!echoRef.current.waiting)
       // un accept-line adevărat a plecat (CR / LF / Ctrl+O — nu `ESC a`, vezi acceptsLine): fără C,
       // rândurile următoare continuă comanda (PS2)
@@ -1210,6 +1211,8 @@ export default function SessionView(props: {
     // sunt niciodată rapoarte (un text lipit poate avea exact forma unui răspuns OSC)
     if (reportOnly(d, report, pastingRef.current, cprRef.current > 0)) {
       if (typeof d === 'string') cprRef.current = Math.max(0, cprRef.current - countCprReplies(d))
+      // un raport de mouse poate pune tmux în copy-mode: tracker-ul îşi notează linia cât e încă la zi
+      if (typeof d !== 'string' || d.startsWith('\x1b[<') || d.startsWith('\x1b[M')) trackerRef.current?.noteMouseReport()
       send(d, 'report')
       broadcastOut(d, 'report')   // panourile-ţintă primesc clasificarea originii (review 3.6.13, L-a)
       return
