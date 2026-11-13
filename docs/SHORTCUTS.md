@@ -109,6 +109,8 @@ is in front) and for paths with control, invisible or bidirectional characters.
 | Gesture | Action |
 |---|---|
 | Right-click / long-press in a terminal | Terminal menu: open the selected path in Files (when the selection looks like a path), upload into the session's folder, new file/folder here, clear the terminal |
+| Long-press a word in a terminal (touch) | Selects it in place: drag the two handles to extend, then **Copy** in the bubble (also Paste and `⋯` for the terminal menu). Tap the terminal to dismiss. A long press on empty space opens the terminal menu instead |
+| **Select text…** in the terminal menu | The terminal's contents as ordinary page text, for long passages: the system's own selection handles work there. Wrapped commands copy as one line |
 | Double-click a session in Host overview | Open it |
 | Drag a split pane's title bar onto another pane | Swap the two panes (or use the pane's **Move to…** menu) |
 | Drag a tab onto a split pane | Show that session in the pane (if it is already another pane, the two swap) |

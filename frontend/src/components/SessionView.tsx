@@ -40,12 +40,16 @@ import { shortcutFor } from '../lib/shortcuts'
 import StatusBar from './StatusBar'
 import HostOfflineOverlay from './HostOfflineOverlay'
 import { copyText, readText } from '../lib/clipboard'
-import { clearAll as clearClipHistory, copySession, history as clipHistory, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
+import { showCopyToast } from '../lib/copytoast'
+import { clearAll as clearClipHistory, copySession, history as clipHistory, record as recordClip, remove as removeClip, setLabel as setClipLabel, type ClipEntry } from '../lib/cliphistory'
 import PastePicker from './PastePicker'
 import { notify, notifyError, notifyOs, notifyToast } from '../lib/notify'
 import { parseOscNotify, sanitizeOscText, shouldNotifyCommand, shouldNotifyDone, taskNotifyEnabled, taskNotifySeconds } from '../lib/taskNotify'
 import { useConfirm } from '../lib/confirm'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { terminalLines } from '../lib/seltext'
+import SelectTextOverlay from './SelectTextOverlay'
+import TouchSelection, { type TouchSelectionHandle } from './TouchSelection'
 import { navigateDialogButtons } from '../lib/dialogNav'
 import { dismissUpload, lingerDone, startUpload } from '../lib/uploads'
 import { isWriteDenied, uploadAndMoveAsRoot } from '../lib/rootmove'
@@ -700,6 +704,17 @@ export default function SessionView(props: {
     setLinks(extractUrls(termRef.current))
     setLinksOpen(true)
   }, [])
+  // modul „Selectează text" (3.6.32): xterm n-are selecţie pe touch, deci arătăm un instantaneu al
+  // bufferului ca text nativ, peste terminal (vezi SelectTextOverlay)
+  const [selText, setSelText] = useState<{ lines: string[]; fg: string } | null>(null)
+  const openSelectText = () => {
+    setSelText({ lines: terminalLines(termRef.current), fg: termTheme(hostScheme(props.host?.id)).foreground || '#d6dee8' })
+  }
+  const closeSelectText = useCallback(() => {
+    setSelText(null)
+    // pe touch NU redăm focusul terminalului: ar ridica tastatura virtuală peste ce tocmai ai copiat
+    if (!window.matchMedia('(pointer: coarse)').matches) termRef.current?.focus()
+  }, [])
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   // meniu contextual → acţiuni de fişiere. `filesReveal`/`filesAction` conduc FilePanel prin
   // `revealPath`/`initialAction`; `filesNonce` FORŢEAZĂ remontarea (prop-ul de reveal se citeşte
@@ -714,6 +729,20 @@ export default function SessionView(props: {
   // deci handlerul global de Escape al meniului nu trebuie să închidă TOT meniul peste el
   const submenuOpenRef = useRef(false)
   const longPressRef = useRef<number | null>(null)
+  // selecţia cu degetul (3.6.32): apăsarea lungă pe un CUVÂNT îl selectează (mânere + bulă, vezi
+  // TouchSelection); pe loc gol deschide meniul terminalului, ca înainte. Android trimite şi
+  // `contextmenu` la apăsare lungă, iOS nu — ambele drumuri ajung aici, o singură dată per gest.
+  const touchSelRef = useRef<TouchSelectionHandle>(null)
+  const lastPointerTouch = useRef(false)
+  const longPressAt = useRef(0)
+  const onLongPress = (x: number, y: number) => {
+    if (Date.now() - longPressAt.current < 1000) return
+    longPressAt.current = Date.now()
+    if (touchSelRef.current?.startAt(x, y)) return
+    setCtxMenu({ x, y })
+  }
+  const getTerm = useCallback(() => termRef.current, [])
+  const getTermHost = useCallback(() => containerRef.current, [])
   const remoteResizeReloadRef = useRef<number | null>(null)   // debounce pt. recrearea rendererului la resize de la alt client
   // Escape închide meniul contextual (înainte ca xterm să trimită Esc în shell)
   useEffect(() => {
@@ -1816,6 +1845,9 @@ export default function SessionView(props: {
       // doar butonul principal: click-dreapta (meniul contextual) nu trebuie să
       // suprascrie clipboardul chiar înainte ca utilizatorul să aleagă „Lipește"
       if (e.button !== 0) return
+      // pe touch selecţia are mânere şi bula cu „Copiază" (TouchSelection): copierea la ridicarea
+      // degetului ar suprascrie clipboardul la fiecare atingere cât selecţia e pe ecran
+      if (e.pointerType === 'touch') return
       const sel = term.getSelection()
       if (sel) {
         copySession(session.id, sel).then(flashCopied)
@@ -2976,6 +3008,7 @@ export default function SessionView(props: {
                   <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><ExternalLinkIcon /> {t('session.links')}</MoreItem>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
                   <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>
+                  <MoreItem onClick={() => { openSelectText(); setMoreOpen(false) }}><CopyIcon /> {t('seltext.menu')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize - 1)}>A− {t('session.fontSmaller')}</MoreItem>
                   {!props.popout && (
@@ -3227,16 +3260,24 @@ export default function SessionView(props: {
         onMouseDownCapture={(e) => { if (e.button === 2) e.stopPropagation() }}
         onContextMenu={(e) => {
           e.preventDefault()
-          setCtxMenu({ x: e.clientX, y: e.clientY })
+          if (lastPointerTouch.current) {
+            // Android: `contextmenu` E apăsarea lungă (vine înaintea cronometrului nostru)
+            if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null }
+            onLongPress(e.clientX, e.clientY)
+          } else setCtxMenu({ x: e.clientX, y: e.clientY })
         }}
         onPointerDown={(e) => {
+          lastPointerTouch.current = e.pointerType === 'touch'
           // long-press = click-dreapta pe touch: iOS nu emite `contextmenu` la
           // apăsare lungă, deci meniul n-ar fi accesibil deloc pe iPhone/iPad
           if (e.pointerType !== 'touch') return
+          // orice altă atingere a terminalului închide selecţia cu degetul (mânerele şi bula îşi
+          // opresc singure propagarea, deci nu ajung aici)
+          touchSelRef.current?.clear()
           const { clientX, clientY } = e
           longPressRef.current = window.setTimeout(() => {
             longPressRef.current = null
-            setCtxMenu({ x: clientX, y: clientY })
+            onLongPress(clientX, clientY)
           }, 550)
         }}
         onPointerMove={() => {
@@ -3434,6 +3475,26 @@ export default function SessionView(props: {
         )}
         {/* cortina de replay: acoperă construcția istoricului; e pe fundalul
             terminalului, deci vizual e doar „terminalul încă respiră" */}
+        <TouchSelection
+          ref={touchSelRef}
+          term={getTerm}
+          host={getTermHost}
+          canPaste={isLive}
+          onCopy={(text) => copySession(session.id, text)}
+          onPaste={() => { void paste() }}
+          onMore={(x, y) => setCtxMenu({ x, y })}
+        />
+        {selText && (
+          <SelectTextOverlay
+            lines={selText.lines}
+            background={termBg}
+            foreground={selText.fg}
+            fontSize={fontSize}
+            onCopy={(text) => copySession(session.id, text)}
+            onNativeCopy={(text) => { recordClip(session.id, text); showCopyToast() }}
+            onClose={closeSelectText}
+          />
+        )}
         {replaying && (
           <div
             role="status"
@@ -3564,6 +3625,10 @@ export default function SessionView(props: {
             )}
             <MoreItem onClick={() => { termRef.current?.selectAll(); setCtxMenu(null) }}>
               <span className="inline-block w-4" aria-hidden="true" /> {t('session.selectAll')}
+            </MoreItem>
+            {/* pe touch e SINGURA cale de a copia o bucată de ecran (xterm n-are selecţie cu degetul) */}
+            <MoreItem onClick={() => { openSelectText(); setCtxMenu(null) }}>
+              <span className="inline-block w-4" aria-hidden="true" /> {t('seltext.menu')}
             </MoreItem>
             {/* Clear terminal: trimite Ctrl-L (\x0c), NU `term.clear()` local — pe tmux serverul
                 rejoacă bufferul la reconectare, deci un clear local reapare; Ctrl-L e ce vrea

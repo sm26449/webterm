@@ -206,7 +206,7 @@ async function auditDevice(cfg) {
   // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt
   // OBLIGATORII — o etapă sărită e bug, ca şi celelalte din REQUIRED
   const isPhone = (cfg.device.viewport?.width ?? 1024) < 640
-  const required = isPhone ? [...REQUIRED, 'keybar', 'foaie-panou', 'lista-taburi'] : REQUIRED
+  const required = isPhone ? [...REQUIRED, 'keybar', 'selectie-text', 'foaie-panou', 'lista-taburi'] : REQUIRED
   let blocker = ''            // de ce s-a oprit fluxul, raportat o singură dată
   page.on('pageerror', (e) => errors.push(String(e).slice(0, 120)))
 
@@ -535,6 +535,130 @@ async function auditDevice(cfg) {
           note(cfg.name, 'keybar', 'bug', `keybar: pe viewport scund aştept 1 rând + comutator (rows=${kb.rows})`)
         } else {
           reached.add('keybar')
+        }
+      }
+
+      // ── selecţia cu DEGETUL (3.6.32): xterm n-are selecţie pe touch. Apăsare lungă pe un cuvânt →
+      //    cuvântul selectat + două mânere + bula cu „Copy"; tragerea mânerului de sfârşit întinde
+      //    selecţia; apăsare lungă pe loc gol → meniul terminalului, de unde „Select text…" deschide
+      //    ecranul ca text nativ. Gesturile sunt PointerEvent-uri sintetice (Playwright n-are
+      //    apăsare lungă pe WebKit); cum se simte pe un deget real se verifică pe dispozitiv. ──
+      if (isPhone || cfg.device.hasTouch) {
+        const fail = (m) => note(cfg.name, 'selectie-text', 'bug', m)
+        const ev = (sel, type, x, y) => page.evaluate(([sel, type, x, y]) => {
+          const el = typeof sel === 'string' ? document.querySelector(sel) : document.elementFromPoint(x, y)
+          el?.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', pointerId: 7, isPrimary: true, button: 0, clientX: x, clientY: y, bubbles: true, cancelable: true }))
+        }, [sel, type, x, y])
+        const termSel = () => page.evaluate(() => {
+          const terms = window.__wtTerms
+          const term = terms.get(location.hash.replace('#/s/', '')) ?? [...terms.values()][0]
+          return term.getSelection()
+        })
+        // unde e pe ecran output-ul „MOBIL_OK" (rândul care NU e comanda) şi un loc gol de sub prompt
+        const geo = await page.evaluate(() => {
+          const terms = window.__wtTerms
+          const term = terms.get(location.hash.replace('#/s/', '')) ?? [...terms.values()][0]
+          const b = term.buffer.active
+          const r = document.querySelector('.xterm-screen').getBoundingClientRect()
+          const cw = r.width / term.cols, ch = r.height / term.rows
+          for (let y = b.viewportY; y < b.viewportY + term.rows; y++) {
+            const text = b.getLine(y)?.translateToString(true) ?? ''
+            if (text === 'MOBIL_OK') {
+              return { x: r.left + 3.5 * cw, y: r.top + (y - b.viewportY + 0.5) * ch, cw, ch, size: `${term.cols}×${term.rows}`,
+                emptyX: r.left + r.width - 2 * cw, emptyY: r.top + (y - b.viewportY + 0.5) * ch }
+            }
+          }
+          return null
+        })
+        if (!geo) {
+          fail('nu găsesc output-ul MOBIL_OK pe ecran pentru testul de selecţie')
+        } else {
+          let okSel = true
+          // 1. apăsare lungă pe cuvânt
+          await ev(null, 'pointerdown', geo.x, geo.y)
+          await page.waitForTimeout(800)
+          await ev(null, 'pointerup', geo.x, geo.y)
+          const s1 = await termSel()
+          const handles = await page.locator('[data-testid="wt-touchsel-start"], [data-testid="wt-touchsel-end"]').count()
+          const bubble = await page.locator('[data-testid="wt-touchsel-copy"]').isVisible().catch(() => false)
+          await shot('06b-selectie-deget')
+          await check('selectie-deget')
+          if (s1 !== 'MOBIL_OK') {
+            const menu = await page.locator('[role="menu"][aria-label="Terminal actions"]').isVisible().catch(() => false)
+            okSel = false; fail(`apăsarea lungă pe un cuvânt a selectat „${s1.slice(0, 40)}", nu „MOBIL_OK" (mânere=${handles}, meniu=${menu}, ${geo.size})`)
+            if (menu) await page.keyboard.press('Escape').catch(() => {})
+          }
+          else if (handles !== 2) { okSel = false; fail(`aştept 2 mânere de selecţie, am ${handles}`) }
+          else if (!bubble) { okSel = false; fail('bula cu „Copy" nu apare lângă selecţie') }
+          // 2. trag mânerul de sfârşit un rând mai jos → selecţia trece pe rândul următor (promptul)
+          if (okSel) {
+            const hb = await page.locator('[data-testid="wt-touchsel-end"]').boundingBox({ timeout: 3000 }).catch(() => null)
+            if (!hb) {
+              const d = await page.evaluate(() => {
+                const terms = window.__wtTerms
+                const term = terms.get(location.hash.replace('#/s/', '')) ?? [...terms.values()][0]
+                return `sel=„${term.getSelection()}" ${term.cols}×${term.rows} alt=${term.buffer.active.type}`
+              })
+              okSel = false; fail(`selecţia a dispărut singură înainte de tragerea mânerului (${d}; la selectare ${geo.size})`)
+            } else {
+            const hx = hb.x + hb.width / 2, hy = hb.y + hb.height - 10
+            await ev('[data-testid="wt-touchsel-end"]', 'pointerdown', hx, hy)
+            await ev('[data-testid="wt-touchsel-end"]', 'pointermove', hx + 4 * geo.cw, hy + geo.ch)
+            await ev('[data-testid="wt-touchsel-end"]', 'pointerup', hx + 4 * geo.cw, hy + geo.ch)
+            await page.waitForTimeout(200)
+            const s2 = await termSel()
+            if (!(s2.startsWith('MOBIL_OK') && s2.includes('\n') && s2.length > s1.length + 1)) {
+              okSel = false; fail(`tragerea mânerului n-a întins selecţia pe rândul următor („${s2.slice(0, 60)}"; mâner ${Math.round(hb.x)},${Math.round(hb.y)} ${Math.round(hb.width)}×${Math.round(hb.height)}, celulă ${geo.cw.toFixed(1)}×${geo.ch.toFixed(1)})`)
+            }
+            await shot('06c-selectie-intinsa')
+            }
+          }
+          // 3. o atingere a terminalului închide selecţia
+          if (okSel) {
+            await ev(null, 'pointerdown', geo.emptyX, geo.emptyY)
+            await ev(null, 'pointerup', geo.emptyX, geo.emptyY)
+            await page.waitForTimeout(200)
+            if (await page.locator('[data-testid="wt-touchsel-copy"]').isVisible().catch(() => false)) {
+              okSel = false; fail('selecţia cu degetul nu se închide la atingerea terminalului')
+            }
+          }
+          // 4. apăsare lungă pe loc GOL → meniul terminalului → „Select text…" → foaia cu text nativ
+          await ev(null, 'pointerdown', geo.emptyX, geo.emptyY)
+          await page.waitForTimeout(1300)   // şi fereastra de 1 s în care un al doilea long-press e ignorat
+          await ev(null, 'pointerup', geo.emptyX, geo.emptyY)
+          const menuItem = page.locator('[role="menu"] >> text=Select text…')
+          const sheet = page.locator('[data-testid="wt-seltext"]')
+          if (!(await menuItem.isVisible().catch(() => false))) {
+            okSel = false; fail('apăsarea lungă pe loc gol nu deschide meniul terminalului cu „Select text…"')
+            await page.keyboard.press('Escape').catch(() => {})
+          } else {
+            await menuItem.click()
+            const opened = await sheet.waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)
+            if (!opened) { okSel = false; fail('modul „Select text" nu s-a deschis din meniu') }
+            else {
+              const st = await page.evaluate(() => {
+                const pre = document.querySelector('[data-testid="wt-seltext"] pre')
+                if (!pre) return { text: '', selectable: false }
+                const r = document.createRange()
+                r.selectNodeContents(pre)
+                const s = getSelection()
+                s.removeAllRanges()
+                s.addRange(r)
+                const us = getComputedStyle(pre)
+                return { text: pre.textContent ?? '', selectable: (us.userSelect || us.webkitUserSelect) !== 'none' }
+              })
+              await page.waitForTimeout(300)
+              const copyOn = await page.locator('[data-testid="wt-seltext-copy"]').isEnabled().catch(() => false)
+              await shot('06d-selectie-text')
+              await check('selectie-text')
+              if (!st.text.includes('MOBIL_OK')) { okSel = false; fail('foaia de selecţie nu conţine output-ul terminalului') }
+              else if (!st.selectable) { okSel = false; fail('textul din foaia de selecţie are user-select: none') }
+              else if (!copyOn) { okSel = false; fail('cu text selectat, butonul Copy a rămas dezactivat') }
+              await sheet.locator('button[aria-label="Close"]').click().catch(() => {})
+              if (await sheet.isVisible().catch(() => false)) { okSel = false; fail('foaia de selecţie nu se închide din X') }
+            }
+          }
+          if (okSel) reached.add('selectie-text')
         }
       }
 
