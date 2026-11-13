@@ -47,7 +47,7 @@ def _secret(name, default=""):
     return default
 
 
-GATEWAY_VERSION = "3.6.31"
+GATEWAY_VERSION = "3.6.32"
 
 # Referința imaginii care rulează (setată la deploy prin compose), afișată în UI
 # ca să știi mereu ce versiune e live. Gol în dev (rulare din surse).

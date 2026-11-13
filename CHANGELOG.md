@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.32] — 2026-11-13 · agent (59)
+
 ### Added
 - **On a phone you can now select and copy part of the terminal, the way you do everywhere else on the phone.** The terminal had no touch selection — a finger scrolls, a long press opened the terminal menu — so the only thing you could copy on a phone was *everything* ("Select all"), not the one command or paragraph you wanted to run somewhere else. Now **press and hold a word**: it is selected in place, with two handles you drag left/right and up/down (the terminal scrolls when you reach its edge) and a small bubble with **Copy**, **Paste** and `⋯` for the rest of the terminal menu. Tapping the terminal dismisses it. There is no new button: a long press on *empty* space still opens the terminal menu as before. The handles are drawn by WebTerm — the terminal is painted on a canvas, so the system's own handles can never appear over it. A "word" is everything between spaces, because in a terminal you want the whole path, URL or flag. A command wrapped over several rows is copied as *one* line — a newline in the middle would run the first half on its own when pasted into another shell.
 - **"Select text…" in the terminal menu**, for long passages or while output is still streaming: a snapshot of the terminal as ordinary page text over the pane, where the system's own selection (handles, magnifier, Copy bubble) works. On a tmux host it shows the screen as it is, so scroll back first to reach older output.
