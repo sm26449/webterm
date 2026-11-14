@@ -1,6 +1,6 @@
 # Pinned to exact, tested versions for reproducible builds (security-critical:
 # cryptography / asyncssh / argon2-cffi / webauthn). Bump deliberately + re-test.
-fastapi==0.162.2
+fastapi==0.162.4
 uvicorn[standard]==0.54.0
 aiosqlite==0.22.1
 argon2-cffi==25.1.0
