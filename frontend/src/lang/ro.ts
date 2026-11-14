@@ -3114,6 +3114,7 @@ const ro: Lang = {
     'session.linksEmpty': "Niciun link pe ecran. Deschide-l după ce o comandă afișează un URL — chiar și unul rupt pe mai multe rânduri.",
     'session.copyLink': "Copiază linkul",
     'session.copySelection': "Copiază selecția",
+    'session.copyNothing': "Copiază selecția — selectează întâi text în terminal",
     'session.fontSmaller': "Font mai mic",
     'session.fontLarger': "Font mai mare",
     'session.shareLinkTooltip': "Link de partajare (read-only sau writable)",

@@ -622,7 +622,49 @@ async function auditDevice(cfg) {
               okSel = false; fail('selecţia cu degetul nu se închide la atingerea terminalului')
             }
           }
+          // 3b. fără butoane MOARTE (3.6.33): „Copy selection" din ⋯ nu făcea nimic fără selecţie, iar
+          //     „Copy" din meniul de apăsare lungă era mereu gri pe touch. Fără selecţie nu apar; „Select
+          //     all" din meniul de touch aduce bula cu „Copy", iar ⋯ capătă atunci „Copy selection".
+          const moreBtn = page.locator('button[aria-controls][aria-label="More"]:visible').first()
+          const moreHasCopy = async () => {
+            if (!(await moreBtn.isVisible().catch(() => false))) return null   // pane lat: fără ⋯
+            await moreBtn.click()
+            const sheetMore = page.locator('[data-testid="session-more"]')
+            await sheetMore.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {})
+            const has = await sheetMore.locator('button', { hasText: 'Copy selection' }).count() > 0
+            await page.keyboard.press('Escape')
+            await sheetMore.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
+            return has
+          }
+          if (okSel && (await moreHasCopy()) === true) { okSel = false; fail('⋯ arată „Copy selection" fără nicio selecţie (buton mort)') }
+          await page.waitForTimeout(1100)   // fereastra în care un al doilea long-press e ignorat
+          await ev(null, 'pointerdown', geo.emptyX, geo.emptyY)
+          await page.waitForTimeout(800)
+          await ev(null, 'pointerup', geo.emptyX, geo.emptyY)
+          const tmenu = page.locator('[role="menu"][aria-label="Terminal actions"]')
+          if (!(await tmenu.isVisible().catch(() => false))) {
+            const top = await page.evaluate(([x, y]) => {
+              const el = document.elementFromPoint(x, y)
+              return el ? `${el.tagName}.${String(el.className).slice(0, 60)} testid=${el.closest('[data-testid]')?.getAttribute('data-testid')}` : 'nimic'
+            }, [geo.emptyX, geo.emptyY])
+            await shot('06x-meniu-lipsa')
+            okSel = false; fail(`apăsarea lungă pe loc gol nu deschide meniul terminalului (sub deget: ${top})`)
+          } else {
+            const deadCopy = await tmenu.getByRole('button', { name: 'Copy', exact: true }).count()
+            if (deadCopy) { okSel = false; fail('meniul de apăsare lungă arată „Copy" fără nicio selecţie (rând mereu gri)') }
+            await tmenu.getByRole('button', { name: 'Select all', exact: true }).click()
+            await page.waitForTimeout(300)
+            const allSel = await termSel()
+            const allBubble = await page.locator('[data-testid="wt-touchsel-copy"]').isVisible().catch(() => false)
+            await shot('06c2-select-all')
+            if (!allSel.includes('MOBIL_OK')) { okSel = false; fail('„Select all" din meniul de touch n-a selectat conţinutul terminalului') }
+            else if (!allBubble) { okSel = false; fail('după „Select all" pe touch nu apare bula cu „Copy" (selecţie fără nicio cale de copiere)') }
+            else if ((await moreHasCopy()) === false) { okSel = false; fail('cu o selecţie pe ecran, ⋯ nu arată „Copy selection"') }
+            await ev(null, 'pointerdown', geo.emptyX, geo.emptyY)
+            await ev(null, 'pointerup', geo.emptyX, geo.emptyY)
+          }
           // 4. apăsare lungă pe loc GOL → meniul terminalului → „Select text…" → foaia cu text nativ
+          await page.waitForTimeout(1100)
           await ev(null, 'pointerdown', geo.emptyX, geo.emptyY)
           await page.waitForTimeout(1300)   // şi fereastra de 1 s în care un al doilea long-press e ignorat
           await ev(null, 'pointerup', geo.emptyX, geo.emptyY)

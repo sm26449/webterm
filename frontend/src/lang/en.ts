@@ -3057,6 +3057,7 @@ const en: Lang = {
     'session.linksEmpty': "No links on screen. Open this after a command prints a URL — even one wrapped across lines.",
     'session.copyLink': "Copy link",
     'session.copySelection': "Copy selection",
+    'session.copyNothing': "Copy selection — select text in the terminal first",
     'session.fontSmaller': "Smaller font",
     'session.fontLarger': "Larger font",
     'session.shareLinkTooltip': "Share link (read-only or writable)",

@@ -18,6 +18,11 @@ export interface TouchSelectionHandle {
   /** apăsare lungă la (x, y): selectează cuvântul de acolo; false = sub deget nu e text */
   startAt(x: number, y: number): boolean
   clear(): void
+  /** „Selectează tot" pe touch: tot bufferul, CU bula de copiere (altfel ai o selecţie cu care nu
+      poţi face nimic fără tastatură); false = bufferul e gol */
+  selectAll(): boolean
+  /** textul selecţiei cu degetul (rândurile rupte unite), sau null dacă nu există una */
+  text(): string | null
 }
 
 const HANDLE = 44      // ţinta de atingere a unui mâner (px)
@@ -83,6 +88,24 @@ const TouchSelection = forwardRef<TouchSelectionHandle, {
       return true
     },
     clear() { if (selRef.current) apply(null) },
+    selectAll() {
+      const term = getTerm()
+      if (!term) return false
+      const buf = term.buffer.active
+      const blank = (y: number) => (buf.getLine(y)?.translateToString(true) ?? '') === ''
+      let first = 0
+      let last = buf.length - 1
+      while (first <= last && blank(first)) first++
+      while (last >= first && blank(last)) last--
+      if (first > last) return false
+      apply({ a: { col: 0, row: first }, b: { col: Math.max(0, filledCells(term, last).lastIndexOf(true)), row: last } })
+      return true
+    },
+    text() {
+      const term = getTerm()
+      const cur = selRef.current
+      return term && cur ? rangeText(term, cur) : null
+    },
   }), [apply, grid, getTerm])
 
   // cât există o selecţie: urmărim terminalul. Selecţia golită de xterm (tastă, clic, buffer tăiat)

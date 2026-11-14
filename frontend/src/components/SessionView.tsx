@@ -612,6 +612,10 @@ export default function SessionView(props: {
   // per dispozitiv, nu per tab: vezi lib/font.ts pentru clase și migrare
   const [fontSize, setFontSize] = useState(preferredFont)
   const [copied, setCopied] = useState(false)
+  // există o selecţie în terminal? „Copiază selecţia" fără selecţie nu făcea NIMIC, fără niciun
+  // semn (butonul din toolbar, rândul din ⋯) — pe telefon, unde selecţia nici nu exista până în
+  // 3.6.32, erau butoane moarte. Acum: dezactivat cu motiv (toolbar) / ascuns (⋯, meniul de touch).
+  const [hasSel, setHasSel] = useState(false)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
   // după „Generate link" butonul apăsat dispare odată cu formularul → focusul cădea pe <body>.
   // Îl mutăm pe primul buton al barei cu linkul generat (Copy) — audit funcţional 3.6.3
@@ -687,10 +691,15 @@ export default function SessionView(props: {
       // focusul e pe trigger / în panou → închidem şi îl lăsăm pe trigger; din terminal (focusul
       // rămâne acolo la clic, onMouseDown preventDefault) doar închidem, fără să-l furăm
       const ours = a === moreBtnRef.current || !!morePanelRef.current?.contains(a)
+      // În faza de CAPTURĂ, şi oprim tasta: cu focusul în terminal xterm îşi opreşte singur
+      // propagarea, deci un listener obişnuit nu vedea niciodată Escape — meniul rămânea deschis,
+      // iar Esc pleca în shell (prins de auditul mobil, 3.6.33). La fel ca meniul contextual.
+      e.preventDefault()
+      e.stopPropagation()
       closeMore(ours)
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [moreOpen, closeMore])
   // paste picker: history-ul de clipboard GLOBAL, comun tuturor terminalelor (Cmd+Shift+V) — vezi
   // lib/cliphistory. Eticheta sursei = titlul sesiunii sau numele hostului, ţinută la zi aici.
@@ -1720,6 +1729,7 @@ export default function SessionView(props: {
     }
     containerRef.current!.addEventListener('paste', onPasteFiles, true)
 
+    const selSub = term.onSelectionChange(() => setHasSel(term.hasSelection()))
     const onData = term.onData((d) => {
       lastInputRef.current = Date.now()
       // local + broadcast (App difuzează către CELELALTE panouri din grilă; fără broadcast
@@ -2006,6 +2016,7 @@ export default function SessionView(props: {
       container?.removeEventListener('touchend', onTouchEnd)
       container?.removeEventListener('touchcancel', onTouchEnd)
       onData.dispose()
+      selSub.dispose()
       onBinary.dispose()
       // Pentru un TIMER vrem valoarea curentă a ref-ului la cleanup, nu cea capturată la
       // montare — altfel am anula un timer care nu mai există şi l-am lăsa pe cel viu.
@@ -2477,7 +2488,8 @@ export default function SessionView(props: {
   }
 
   async function copySelection() {
-    const sel = termRef.current?.getSelection()
+    // selecţia cu degetul îşi dă singură textul: rândurile rupte unite, ca din bula ei
+    const sel = touchSelRef.current?.text() ?? termRef.current?.getSelection()
     if (sel) {
       if (await copySession(session.id, sel)) {
         setCopied(true)
@@ -2932,7 +2944,7 @@ export default function SessionView(props: {
             <span className="mx-0.5 h-4 w-px bg-ink-700" aria-hidden="true" />
             <ToolButton title={t('session.linksTooltip')} active={linksOpen} onClick={openLinks}><ExternalLinkIcon /></ToolButton>
             <ToolButton title={t('session.note')} active={showNote} toggle onClick={() => setShowNote(!showNote)}><NoteIcon /></ToolButton>
-            <ToolButton title={t('session.copySelection')} onClick={copySelection}>{copied ? <CheckIcon size={16} /> : <CopyIcon />}</ToolButton>
+            <ToolButton title={hasSel ? t('session.copySelection') : t('session.copyNothing')} name={t('session.copySelection')} disabled={!hasSel} onClick={copySelection}>{copied ? <CheckIcon size={16} /> : <CopyIcon />}</ToolButton>
             <ToolButton title={t('session.fontSmaller')} name={`A− ${t('session.fontSmaller')}`} onClick={() => setPreferredFont(fontSize - 1)}><span className="text-sm">A−</span></ToolButton>
             <ToolButton title={t('session.fontLarger')} name={`A+ ${t('session.fontLarger')}`} onClick={() => setPreferredFont(fontSize + 1)}><span className="text-sm">A+</span></ToolButton>
             {!props.popout && (
@@ -3007,7 +3019,7 @@ export default function SessionView(props: {
                   )}
                   <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><ExternalLinkIcon /> {t('session.links')}</MoreItem>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
-                  <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>
+                  {hasSel && <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>}
                   <MoreItem onClick={() => { openSelectText(); setMoreOpen(false) }}><CopyIcon /> {t('seltext.menu')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize - 1)}>A− {t('session.fontSmaller')}</MoreItem>
@@ -3610,9 +3622,14 @@ export default function SessionView(props: {
               top: Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 360)),
             }}
           >
-            <MoreItem disabled={!termRef.current?.hasSelection()} onClick={() => { copySelection(); setCtxMenu(null) }}>
-              <CopyIcon /> {t('session.copy')}
-            </MoreItem>
+            {/* cu mouse-ul: „Copy" gri când nu e nimic selectat (convenţia oricărui meniu contextual).
+                Pe touch meniul se deschide de pe loc GOL (pe un cuvânt apăsarea lungă selectează),
+                deci ar fi mereu gri: îl arătăm doar când chiar are ce copia (venit din bula ⋯). */}
+            {(hasSel || !lastPointerTouch.current) && (
+              <MoreItem disabled={!hasSel} onClick={() => { copySelection(); setCtxMenu(null) }}>
+                <CopyIcon /> {t('session.copy')}
+              </MoreItem>
+            )}
             {isLive && (
               <MoreItem onClick={() => { paste(); setCtxMenu(null) }}>
                 <PasteIcon /> {t('session.pasteMenu')}
@@ -3623,7 +3640,12 @@ export default function SessionView(props: {
                 <PasteIcon /> {t('paste.fromHistory')}
               </MoreItem>
             )}
-            <MoreItem onClick={() => { termRef.current?.selectAll(); setCtxMenu(null) }}>
+            {/* pe touch „Select all" trece prin selecţia cu degetul: apare bula cu „Copy". Înainte
+                rămâneai cu tot ecranul selectat şi fără nicio cale de a-l copia. */}
+            <MoreItem onClick={() => {
+              if (!(lastPointerTouch.current && touchSelRef.current?.selectAll())) termRef.current?.selectAll()
+              setCtxMenu(null)
+            }}>
               <span className="inline-block w-4" aria-hidden="true" /> {t('session.selectAll')}
             </MoreItem>
             {/* pe touch e SINGURA cale de a copia o bucată de ecran (xterm n-are selecţie cu degetul) */}
