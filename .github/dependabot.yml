@@ -41,6 +41,13 @@ updates:
       # (TypeError _isDisposed, renderer WebGL mort — prins de e2e, 2026-09-27). Le blocăm
       # de tot până facem upgrade-ul DELIBERAT la xterm 6, atunci scoatem linia asta.
       - dependency-name: "@xterm/addon-*"
+      # vitest: de la 4.1.12, bundler-ul lui nativ (rolldown) cere instrucţiuni de procesor pe care
+      # unele maşini virtuale nu le expun (CPU „QEMU Virtual", fără AVX): `vitest run` moare cu
+      # „Illegal instruction" (rc 132). Pe runner-ele GitHub merge, deci PR-ul ar fi VERDE şi ar
+      # rupe poarta locală (`ci-local.sh lint`) pe maşina de dezvoltare (PR #64, 2026-11-14).
+      # Rămâne pe 4.1.11 din lockfile. Se scoate linia când maşina expune CPU-ul gazdei (sau
+      # când vitest revine la un binar fără AVX) — şi se verifică `npx vitest run` LOCAL, nu în CI.
+      - dependency-name: "vitest"
     open-pull-requests-limit: 5
     groups:
       npm-minor:
