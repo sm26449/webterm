@@ -9,11 +9,18 @@ rules (signing the agent, style, the CI gates you must keep green) are in
 ```sh
 python3 -m venv .venv && .venv/bin/pip install \
   -r gateway/requirements.txt -r gateway/requirements-dev.txt
-cd frontend && npm ci && npm run build && cd ..
+cd frontend && npm ci && npm run build && cd ..   # needs Node (the image builds with 26); without it, see below
 
 # backend with reload + frontend vite dev (proxy to :8000)
 PYTHONPATH=gateway .venv/bin/uvicorn app.main:app --reload &
 cd frontend && npm run dev
+```
+
+No Node on the machine? The Playwright image used by the gates has it:
+
+```sh
+cd frontend && docker run --rm -v "$PWD":/work -w /work mcr.microsoft.com/playwright:v1.63.0-noble \
+  bash -c 'npx tsc --noEmit && npm run lint && npx vitest run'
 ```
 
 ### Tests
@@ -61,50 +68,83 @@ that token, as above.
 
 ## Layout
 
+The big picture first; every gateway module starts with a docstring that says what it owns.
+
 ```
 agent/
-  ptyd.py                  single-file agent (stdlib, Python 3.6+), Ed25519-signed
+  ptyd.py                  single-file agent (stdlib, Python 3.6+), Ed25519-signed.
+                           class Agent → handle_ctrl (every op the gateway can ask for)
   shell-integration.sh     OSC 133 markers (bash/zsh), installed with the agent (opt out
                            with WEBTERM_NO_SHELL_INTEGRATION=1); appends one line to ~/.bashrc
 gateway/app/
-  main.py                  FastAPI, security headers, static, periodic reapers
-  api.py                   REST + WS agent/browser + installer + idle-lock 2FA
-  core.py                  session hubs, liveness reconciliation, file transfer,
-                          telnet-via-agent, port forwarding
+  main.py                  FastAPI app, security headers, static files, periodic reapers
+  api.py                   every REST route + the agent / browser / shared websockets + the
+                           installer. 12k lines: navigate by its "# ── Section ──" banners
+  core.py                  runtime: SessionHub, AgentConnection, liveness reconciliation, the
+                           per-connection sources (SSH, SSH-jump, telnet, serial), forwards,
+                           file transfer
+  db.py · config.py        SQLite (aiosqlite, no ORM) + migrations · env configuration, version
+  errors.py · audit.py     API errors with stable codes · audit log of every changing request
+  -- identity and access --
+  security.py              passwords, web sessions, host tokens, secret vault, brute-force
+  authz.py                 roles and scoped bindings: the one place that decides who may do what
+  accounts.py              disabled accounts
+  totp.py · webauthn_api.py   second factor · passkeys
+  oidc.py · oidc_api.py · ssomap.py   SSO (OIDC + PKCE) · its endpoints · group → role mapping
+  scim.py                  SCIM 2.0 provisioning
+  -- terminal and hosts --
   telnet.py                IAC shim + OSC filter for the telnet bastion (untrusted device)
-  security.py              passwords, sessions, rate-limit, brute-force, passkey step-up
-  email_alerts.py          security alerts + resource thresholds (hysteresis)
-  webauthn_api.py          passkeys
-  backup.py                backup/restore from Settings (VACUUM INTO snapshot,
-                          scrypt→AES-GCM encryption, restore at boot)
-  db.py / config.py        SQLite + configuration
+  osc133.py                shell-integration state seen by the hub (command guardrail)
+  replay.py                public read-only replay links
+  fscopy.py · rootmove.py  host → host copy · uploads into folders the agent user cannot write
+  gitpanel.py              the Git panel's fixed, read-only operations
+  pyruntime.py             portable Python for agent hosts
+  signing.py               per-deployment agent signing key
+  -- operations --
+  backup.py · backup_dest.py · cloudbackup.py   backup/restore · SFTP/FTPS · Drive/Dropbox
+  email_alerts.py · alert_history.py · push.py  e-mail alerts · in-app history · Web Push
+  syshealth.py · healthcmd.py · hoststatus.py · health.py   System health and its fixed commands
+  certmon.py               TLS certificate monitoring + renew
+  updatecheck.py           "is there a newer version?"
+  admin.py                 recovery from the server: python3 -m app.admin …
 frontend/src/
-  components/              SessionView, TabBar, CommandsPanel, ForwardsPanel,
-                          FleetRunModal, HistoryModal, TranscriptPlayer…
-  lib/                     shortcuts (single registry), commands (OSC 133),
-                           termtheme (schemes + iTerm/VSCode import), metrics
+  App.tsx                  shell: tabs, split views, hash routing, toasts, global shortcuts
+  components/              one file per surface. SessionView = a terminal pane (the largest);
+                           settings/*Tab.tsx = Settings; ui/ = design-system primitives
+  lib/                     pure logic, one module per concern, each with <name>.test.ts beside
+                           it (vitest): commands (OSC 133), echo + broadcastGuard (guardrail),
+                           uploads/downloads/transfers, shortcuts, termtheme, splitLayout,
+                           touchsel/seltext (selection), i18n…
+  lang/en.ts · lang/ro.ts  the two string catalogs (kept symmetric by tests/i18n_catalog_test.py)
 scripts/
+  run-tests.sh             THE list of Python suites (ci · local · all) — CI and `make test` use it
+  ci-local.sh              the CI job, locally: unit sig lint build smoke e2e a11y fs fwd mobile
+                           sso backup features jump (or `all`)
   e2e-session.mjs          E2E with a REAL agent (runs in CI)
-  e2e-jump.mjs             jump-host UI: nesting, form, host hub (CI, no agent)
+  e2e-jump.mjs · e2e-features.mjs · e2e-backup.mjs · e2e-restore.mjs   UI flows gated in CI
+  e2e-links*.mjs · e2e-clipboard-*.mjs · e2e-tab-reorder.mjs · e2e-host-edit-input.mjs
+                           focused browser checks, run by hand
   fs-test.sh · fwd-test.sh file operations · port forwarding (CI)
-  mobile-audit.mjs         responsive audit on real devices (CI)
+  mobile-audit.mjs         responsive audit on emulated devices (CI)
   smoke-boot.mjs           boot smoke test (UI starts with no JS errors)
   sso-login.mjs            SSO login UI contract when OIDC is on (CI)
-  sign-agent.py            signs the agent at release (the key stays offline)
+  sign-agent.py · gen-signing-key.py · check-rollover.py   agent signing (the key stays offline)
+  check-reqs-lock.py       requirements.txt ↔ requirements.lock drift (CI)
   changelog-section.py     a release's CHANGELOG section → GitHub Release notes (CI)
+  route-matrix.py          every route with its declared permission
+  load-test.mjs            load test, by hand
+  backup.sh · restore.sh · host-health.sh · cert-check.sh · cert-renew.sh ·
+  docker-cleanup.sh · authentik-upgrade.sh   host-side helpers shipped to production
   social-preview/          renders docs/social-preview.png (GitHub social card)
-tests/                     unit + integration suite (dev): telnet (shim/bastion),
-                          session reconciliation, agent hygiene+hardening, idle-lock,
-                          security, ssh, transcript, provisioning…
-docs/                      RUNBOOK · SHORTCUTS · SHELL-INTEGRATION ·
-                          PORT-FORWARDING · FLEET (Run on hosts) · SERIAL-CONSOLE ·
-                          SSH-KEYS · SSH-JUMP · DATABASE-TOOLBOX · SSO ·
-                          TRANSFERS · THREAT-MODEL · HOSTS ·
-                          AUTOMATION-TOKENS · ALERTS · GUARDRAIL · AI-TOOLS
-  design/                  architecture notes: ARCHITECTURE · SIGNED-UPDATES ·
-                          SESSION-LIFECYCLE · SPLIT-VIEWS ·
-                          TELNET-BASTION · FUTURE-DIRECTIONS
-deploy.sh · rollback.sh    production: pin, health gate, rollback
+tests/                     <feature>_test.py: plain Python scripts (no pytest), run through
+                           scripts/run-tests.sh — a test file that is not listed there fails
+                           the runner. ui_review.mjs = the axe-core accessibility gate
+docs/                      user and operator docs, indexed in docs/README.md
+  design/                  architecture notes: ARCHITECTURE · SESSION-LIFECYCLE ·
+                           ROLES-AND-SSH · SPLIT-VIEWS · SIGNED-UPDATES · TELNET-BASTION ·
+                           GIT-PANEL-SUPERVISION · DESIGN-SYSTEM · FUTURE-DIRECTIONS
+deploy.sh · upgrade.sh · rollback.sh   production: first install · upgrade (backup, host files,
+                           image pin, health gate) · the panic button
 ```
 
 ## Testing & release gates
@@ -136,12 +176,28 @@ administer your servers with. The CI chain, in order:
    WebSocket proxy + **https targets**, **configurable domain**, **SSH hosts**
    (real sshd), and security tests (slug-bound token, anti-SSRF, the 2FA gate,
    anti-CSWSH).
-6. **Mobile audit** (`scripts/mobile-audit.mjs`) — 10 real devices (iPhone/iPad/
-   Android, WebKit + Chromium); any layout regression blocks the image.
+6. **Mobile audit** (`scripts/mobile-audit.mjs`) — 11 emulated device profiles (iPhone/iPad/
+   Android, WebKit + Chromium, plus a 320 px reflow case); any layout regression blocks the image.
 7. **Accessibility** (axe-core, `A11Y_MAX_SERIOUS=0`) — a single serious violation
    fails the build.
+8. **SSO login UI** (`scripts/sso-login.mjs`) — the frontend contract when OIDC is on.
+9. **Backup UI + restore round-trip** (`scripts/e2e-backup.mjs`, `e2e-restore.mjs`) — against
+   SFTP/FTPS fixture servers.
+10. **Feature UI** (`scripts/e2e-features.mjs`) — group enrollment tokens and host tags.
+11. **Jump-host UI** (`scripts/e2e-jump.mjs`) — nesting, the form, the host hub.
 
-Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` keeps the
+Frontend `eslint` and `vitest` run in the `unit-tests` job with the Python suite. Two CI checks
+have no local equivalent in `ci-local.sh`: the **counts in the docs** (`unit-tests`: the number of
+`check(` calls in `e2e-session.mjs` must match the README, the number of suites in `run-tests.sh`
+must match CONTRIBUTING.md — a mismatch fails the job, and then no image is built) and
+**`AGENT_VERSION` bumped when `agent/ptyd.py` changed** (`build`, compared with the previous push).
+
+Run the same chain locally with `scripts/ci-local.sh` (steps: `unit sig lint build smoke e2e a11y
+fs fwd mobile sso backup features jump`, or `all` — about half an hour). `build` produces the image
+the browser steps run against, so repeat it after a code change; `a11y` and `mobile` log in with
+the account that `e2e` creates, so run them together with it (`ci-local.sh build e2e mobile`).
+
+Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` (which `upgrade.sh` calls after its backup and host-file sync) keeps the
 previous image and does an **automatic rollback** if the new container doesn't
 become healthy; `rollback.sh` is the panic button over SSH. Full recovery:
 [docs/RUNBOOK.md](RUNBOOK.md).
