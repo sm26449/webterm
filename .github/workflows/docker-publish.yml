@@ -104,6 +104,15 @@ jobs:
       # după un return timpuriu → crash post-login, React #310) ar fi fost prins de
       # `rules-of-hooks`, nu de `tsc`. Erorile blochează; avertismentele rămân vizibile —
       # aceeaşi filozofie ca `ruff --select F` pe Python.
+      # Node fixat, nu „ce are runner-ul azi": Node-ul implicit al runner-ului vine cu npm 10, iar
+      # Dependabot regenerează package-lock.json cu npm 11, care nu mai scrie dependenţele opţionale
+      # imbricate (esbuild sub vitest). npm 10 le cere → `npm ci` pica la ORICE PR npm al lui cu
+      # „Missing: esbuild@… from lock file" (PR #64, #68; reprodus: Node 20/22 pică, Node 24 trece).
+      # Pasul se numea „Lint", dar murea la instalare. Imaginea se construieşte oricum cu Node 26;
+      # runner-ul era singurul rămas pe npm 10. Lockfile-ul de pe main se instalează cu ambele.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
       - name: Lint frontend (eslint — react-hooks, bugs not style)
         run: |
           cd frontend

@@ -48,6 +48,12 @@ updates:
       # Rămâne pe 4.1.11 din lockfile. Se scoate linia când maşina expune CPU-ul gazdei (sau
       # când vitest revine la un binar fără AVX) — şi se verifică `npx vitest run` LOCAL, nu în CI.
       - dependency-name: "vitest"
+      # playwright: versiunea e fixată în 11 locuri care trebuie mutate ÎMPREUNĂ — imaginea
+      # mcr.microsoft.com/playwright din workflow, ci-local.sh şi scripturile de capturi, plus
+      # `npm install playwright@X` din workflow. Dependabot schimbă doar package.json; cu CI-ul
+      # instalând explicit versiunea veche, PR-ul lui ar fi VERDE cu două versiuni diferite în
+      # repo (PR #68). Se mută deliberat: `grep -rn "1\.63\.0"` şi toate odată.
+      - dependency-name: "playwright"
     open-pull-requests-limit: 5
     groups:
       npm-minor:

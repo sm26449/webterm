@@ -7,7 +7,8 @@ Imaginea instalează din `requirements.lock` (--require-hashes), dar CI testeaz�
 tocmai la pachetele critice (cryptography/asyncssh/webauthn). Scriptul pică dacă vreun
 pin `name==versiune` din `.txt` lipsește ori diferă ca versiune în `.lock`.
 
-Regenerare lock: pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+Regenerare lock: scripts/relock-reqs.py [nume==versiune …] (rulează pip-compile --generate-hashes
+cu Python-ul imaginii şi spune ce pachete noi au intrat).
 """
 import re
 import sys

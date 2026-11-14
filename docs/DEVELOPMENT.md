@@ -130,6 +130,8 @@ scripts/
   sso-login.mjs            SSO login UI contract when OIDC is on (CI)
   sign-agent.py · gen-signing-key.py · check-rollover.py   agent signing (the key stays offline)
   check-reqs-lock.py       requirements.txt ↔ requirements.lock drift (CI)
+  relock-reqs.py           bump gateway pins and regenerate the hashed lock (what a Dependabot
+                           pip PR cannot do); lists new transitive packages
   changelog-section.py     a release's CHANGELOG section → GitHub Release notes (CI)
   route-matrix.py          every route with its declared permission
   load-test.mjs            load test, by hand
