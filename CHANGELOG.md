@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.6.33] — 2026-11-14 · agent (59)
+
 ### Fixed
 - **Copy buttons that did nothing are gone.** "Copy selection" — the toolbar button and the row in the `⋯` menu — silently did nothing when no text was selected, with no hint why; on a phone, where the terminal could not be selected at all until 3.6.32, that was every time. The toolbar button is now disabled until there is a selection and says so; the `⋯` row appears only when there is something to copy. In the long-press menu on touch, "Copy" was always greyed out (a long press on a word now selects it, so the menu only opens on empty space) and is shown only when it can act; with a mouse it stays greyed, as in any context menu. And **"Select all" on touch** left the whole terminal selected with no way to copy it short of a keyboard: it now goes through the finger selection, so the Copy bubble appears. "Copy selection" also copies a finger selection the way its bubble does — a command wrapped over several rows as one line.
 - **Escape closes the `⋯` menu when the terminal has the focus.** Opening `⋯` with a click leaves the focus in the terminal on purpose, and the terminal stops the keys it handles from reaching the rest of the page — so Escape never reached the menu: it stayed open and the Esc went to the shell instead. The menu now takes the key first, as the right-click menu already did.
