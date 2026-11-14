@@ -9,6 +9,10 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Dependencies.** Gateway: fastapi 0.141.1 → 0.162.2, cryptography 50.0.1 → 50.0.2, asyncssh 2.24.0 → 2.24.1, with `requirements.lock` regenerated (hashes). The new fastapi brings one new transitive package, `opentelemetry-api` — the API shim only: without an SDK and an exporter, which WebTerm does not install, it records and sends nothing. Frontend build tooling: autoprefixer, globals, postcss, typescript-eslint. CI: five GitHub Actions moved to newer pinned SHAs. vitest and Playwright were left where they are: vitest 4.1.12's native bundler needs CPU instructions some virtual machines do not expose, and Playwright moves only together with the browser image pinned in CI.
+- Dependabot no longer proposes a new Python minor for the image (3.12 → 3.15 arrived labelled "minor"): the hashed lock is generated for the image's interpreter, so that jump is deliberate work, not an automatic PR. Patch updates of the image still arrive.
+
 ## [3.6.33] — 2026-11-14 · agent (59)
 
 ### Fixed

@@ -91,6 +91,12 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # Python: 3.12 → 3.15 e „minor" ca număr, dar e o versiune NOUĂ de limbaj. `requirements.lock`
+      # e generat cu hash-uri pentru interpretorul din imagine, deci build-ul pică la instalare
+      # (PR #65, 2026-11-13) — şi chiar dacă ar trece, e muncă deliberată: lock regenerat pe noul
+      # Python + poarta completă. Patch-urile de imagine (digest nou pe acelaşi 3.12-slim) continuă.
+      - dependency-name: "python"
+        update-types: ["version-update:semver-minor"]
     groups:
       docker-minor:
         update-types: ["minor", "patch"]
