@@ -396,6 +396,7 @@ async def save_config(provider: str, client_id: str, client_secret: str,
     await _set(K_INCLUDE_TX, "1" if include_transcripts else "0")
 
 
+# INV-01 (docs/design/INVARIANTS.md): secretul unei destinații de backup nu urmează o destinație mutată.
 async def save_config_direct(kind: str, host: str, port: int, user: str, path: str,
                              ssh_key: str, password: str, hostkey: str, ca: str,
                              passphrase: str, keep: int, include_transcripts: bool) -> None:
@@ -446,7 +447,14 @@ async def save_config_direct(kind: str, host: str, port: int, user: str, path: s
         await _set(K_SSH_KEY, "")
     if kind == "sftp" and hostkey.strip():
         await _set(K_HOSTKEY, " ".join(hostkey.split()[:2]))
-    await _set(K_CA, ca.strip())
+    # CA-ul FTPS: UI-ul spune „gol = păstrează" (settings.direct.caKeep), dar aici se scria
+    # necondiţionat, deci orice re-salvare din Settings îl ştergea şi backup-ul spre un server
+    # self-signed începea să pice. Ca secretul (INV-01): pe ACEEAŞI destinaţie FTPS, gol =
+    # păstrează; mutată (sau trecută pe SFTP), CA-ul vechi era al altui server → se goleşte.
+    if ca.strip():
+        await _set(K_CA, ca.strip())
+    elif moved or kind != "ftps":
+        await _set(K_CA, "")
     await _set(K_PASSPHRASE, security.encrypt_secret(passphrase))
     await _set(K_KEEP, max(1, min(365, int(keep))))
     await _set(K_INCLUDE_TX, "1" if include_transcripts else "0")

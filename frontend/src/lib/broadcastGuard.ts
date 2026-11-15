@@ -13,6 +13,7 @@ import { matchCommandRule } from './commands'
     Ambele = „nu pot verifica" → confirmare explicită (fail-closed), după o scurtă aşteptare a
     ecoului. Fără reguli de guardrail active nu e nimic de verificat. */
 
+// INV-08 (docs/design/INVARIANTS.md): euristicile doar ADAUGĂ citiri; prima regulă potrivită câștigă; paste = consimțământ.
 /** Ce raportează un panou-ţintă (PaneHandle.state) la momentul unui Enter difuzat. */
 export interface PeerState {
   /** tastele NU ajung la host (doar-vizualizare, sesiune încheiată, socket închis, replay în curs):

@@ -36,7 +36,7 @@ from . import webauthn_api
 from . import fscopy
 from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
                db, email_alerts, health, healthcmd, push, pyruntime, replay, rootmove, scim,
-               security, signing, ssomap,
+               security, shares, conntypes, fwddomain, signing, ssomap,
                syshealth, totp, updatecheck)
 
 log = logging.getLogger("webterm")
@@ -46,6 +46,8 @@ router = APIRouter(dependencies=[Depends(authz.declared)])
 # task-uri de fundal fire-and-forget (ex. curăţenie după un răspuns anulat) — ţinem referinţe
 # ca event loop-ul să nu le colecteze înainte să ruleze
 _bg_tasks: set = set()
+
+# ── [setup] First-run setup token, /healthz, /api/state, /api/setup ───────────────────────────────
 
 _START_TIME = time.time()      # pentru uptime în /api/status
 
@@ -290,6 +292,8 @@ async def setup(creds: Credentials, request: Request, response: Response):
     return {"ok": True}
 
 
+# ── [errors] Password policy + shared ApiError mappers (fs, runtime, backup, cloud, hostkey alarm) ───
+
 # Parola avea doar prag INFERIOR. Nimic nu oprea un body de câţiva MB să ajungă la argon2 —
 # şi la fiecare încercare de login, unde e gratuit de repetat. Impactul e mic (intrarea e
 # pre-hashuită, login-ul e plafonat), dar un plafon costă un `if`. Generos intenţionat: nu vrem
@@ -529,6 +533,8 @@ def _hostkey_alarm(row):
             "first": bool(a.get("first"))}
 
 
+# ── [auth] Login, session cookie, logout, share/replay link revocation ────────────────────────────
+
 LOGIN_MAX_BODY = 4096   # 4 KiB: un corp de login legitim are ~200 B; peste atât e abuz pre-auth
 
 
@@ -619,75 +625,13 @@ async def _issue_cookie(response: Response, user_id: int, request: Request,
     security.set_session_cookie(response, token)
 
 
-async def _revoke_all_shares(owner_email: str | None = None,
-                             owner_id: int | None = None) -> int:
-    """Share-urile (PTY live, opţional writable) sunt acces DERIVAT — mor la logout /
-    schimbare de parolă, ca token-urile de forward (M3). Altfel un share creat cu un
-    cookie furat supravieţuieşte deconectării owner-ului până la expirare (max 24h).
-
-    `owner_email` limitează revocarea la share-urile create de ACEL cont. Înainte era
-    global, iar de la conturile multiple (1.0.137) asta însemna: logout-ul lui A omoară
-    link-urile lui B, într-un mod imposibil de diagnosticat („de ce a murit share-ul de
-    incident?"). Semnalat de un audit extern. Fără argument (sau pe share-uri vechi, fără
-    `share_by`) rămâne global — la schimbarea parolei după compromitere vrei exact asta.
-
-    Întoarce câte link-uri ÎNCĂ ACTIVE (neexpirate) au fost revocate — „Revocă tot" din
-    inventarul de share-uri (3.5.4) îl arată omului. Rândurile expirate se curăţă şi ele, dar
-    nu se numără: n-ar mai fi deschis nimic."""
-    now = time.time()
-    if owner_email or owner_id is not None:
-        # id-ul e cheia; emailul rămâne rezervă pentru share-urile create înainte de migrare.
-        # Cheiat DOAR pe email, o schimbare de email scotea share-urile de sub orice revocare.
-        where = " WHERE share_token IS NOT NULL AND (share_by_id=? OR share_by=?)"
-        args = (owner_id, owner_email)
-    else:
-        where = " WHERE share_token IS NOT NULL"
-        args = ()
-    rows = await db.fetchall("SELECT id, share_expires FROM sessions" + where, *args)
-    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                     " share_writable=0" + where, *args)
-    sids = {r["id"] for r in rows}
-    for sid, hub in list(core.hubs.items()):
-        if sid in sids:
-            await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
-    return sum(1 for r in rows if (r["share_expires"] or 0) > now)
-
-
-async def _delete_replay_links(where: str, *args) -> int:
-    """Şterge link-urile de replay care se potrivesc (+ jurnalul lor de deschideri) şi întoarce
-    câte erau ÎNCĂ ACTIVE. Ştergere, nu marcaj: un link revocat nu mai are ce arăta, iar urma
-    durabilă a deschiderilor stă oricum în audit_log."""
-    rows = await db.fetchall("SELECT id, expires FROM replay_links" + where, *args)
-    if not rows:
-        return 0
-    ids = [r["id"] for r in rows]
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        marks = ",".join("?" * len(chunk))
-        await db.execute("DELETE FROM replay_opens WHERE link_id IN (%s)" % marks, *chunk)
-        await db.execute("DELETE FROM replay_links WHERE id IN (%s)" % marks, *chunk)
-    now = time.time()
-    return sum(1 for r in rows if r["expires"] > now)
-
-
-async def _revoke_replay_links(owner_id: int | None = None) -> int:
-    """Revocarea link-urilor de replay pe căile pe care mor şi share-urile live: schimbarea
-    parolei (global — după un compromis vrei TOT acest acces derivat tăiat), ştergerea contului
-    (doar ale lui), „Revocă tot" din inventar (global). NU şi la logout: un link de replay nu e
-    o vedere a unui terminal viu, ci o înregistrare încheiată, cu expirare de maxim 7 zile — iar
-    omul care partajează o înregistrare şi apoi se deconectează nu se aşteaptă s-o fi retras."""
-    if owner_id is None:
-        return await _delete_replay_links("")
-    return await _delete_replay_links(" WHERE user_id=?", owner_id)
-
-
 @router.post("/api/logout")
 async def logout(request: Request, response: Response):
     tok = request.cookies.get(security.COOKIE_NAME)
     u = await security.user_for_token(tok)
     if not u:
         # Fără sesiune validă nu e NIMIC de revocat — şi tocmai asta era gaura: `u` era None,
-        # deci `_revoke_all_shares(None)` intra pe ramura GLOBALĂ (gândită pentru „schimbare de
+        # deci `shares.revoke_all_shares(None)` intra pe ramura GLOBALĂ (gândită pentru „schimbare de
         # parolă după compromitere") şi ştergea toate share-urile din instanţă, iar
         # `bump_forward_epoch()` invalida toate tokenurile de forward. Un simplu
         # `curl -X POST /api/logout`, fără cont şi fără cookie, de oriunde din lume, rupea toate
@@ -698,14 +642,16 @@ async def logout(request: Request, response: Response):
     security.clear_stepup_for(u["id"])       # H1: nici o fereastră de „sudo" nu supraviețuiește logout-ului
     # M3: token-urile de port-forward mor la logout — dar numai ALE LUI. Global, asta însemna
     # că ieşirea unui cont rupea tunelurile deschise din alt cont, fără nimic în UI care să
-    # explice de ce. Vezi `_revoke_all_shares`, care primise deja aceeaşi restrângere.
+    # explice de ce. Vezi `shares.revoke_all_shares`, care primise deja aceeaşi restrângere.
     security.bump_forward_epoch(u["id"])
-    # doar share-urile CONTULUI care se deconectează — vezi _revoke_all_shares
-    await _revoke_all_shares(u["email"], u["id"])
+    # doar share-urile CONTULUI care se deconectează — vezi shares.revoke_all_shares
+    await shares.revoke_all_shares(u["email"], u["id"])
     await security.destroy_web_session(tok)
     security.clear_session_cookie(response)
     return {"ok": True}
 
+
+# ── [account] Account self-service: password/email change, re-auth, break-glass guard ─────────────
 
 class AccountUpdate(BaseModel):
     current_password: str = ""
@@ -909,8 +855,8 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
             user["id"], security.sha256_hex(current) if current else "")
         security.clear_stepup_for(user["id"])   # H1: rotirea parolei închide ferestrele de step-up
         security.bump_forward_epoch()           # M3: și invalidează token-urile de port-forward
-        await _revoke_all_shares()              # M3-shares: rotirea parolei omoară share-urile derivate
-        await _revoke_replay_links()            # …şi link-urile de replay (aceeaşi regulă, globală)
+        await shares.revoke_all_shares()              # M3-shares: rotirea parolei omoară share-urile derivate
+        await shares.revoke_replay_links()            # …şi link-urile de replay (aceeaşi regulă, globală)
     # Modulul de alerte promitea asta din prima zi („schimbare de parolă"), dar nimeni nu chema
     # alerta: o parolă schimbată de un cookie furat trecea neanunţată (3.5.2). Emailul vechi
     # primeşte tot alerta — `cfg["to"]` e cutia de alerte a instanţei, nu adresa contului.
@@ -930,6 +876,8 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
 # ---------------------------------------------------------------------------
 # TOTP (2FA opțional peste parolă). Passkey-urile rămân o cale separată.
 # ---------------------------------------------------------------------------
+
+# ── [totp] TOTP status + recovery codes (setup/activate further down, [totp]) ─────────────────────
 
 def _gen_recovery_codes(n: int = 10) -> list:
     # coduri lizibile xxxx-xxxx din alfabet fără caractere ambigue
@@ -966,7 +914,7 @@ class TotpSetup(BaseModel):
     current_password: str = ""
 
 
-# ── Conturi + roluri (3.6.0) ─────────────────────────────────────────────────
+# ── [accounts] Conturi + roluri (3.6.0) ─────────────────────────────────────────────────
 # Până la 3.5 orice cont era administrator deplin peste toată flota (atribuire, nu izolare).
 # De la 3.6 fiecare cont are LEGĂTURI de rol (docs/design/ROLES-AND-SSH.md, authz.py): Owner /
 # Admin / Operator / Viewer peste un scope (toată flota, un folder, un tag, un host). Migrarea a
@@ -1103,28 +1051,7 @@ async def _after_access_change(uid: int) -> None:
     e retras pe hosturile unde a pierdut dreptul."""
     authz.bump_epoch()
     security.bump_forward_epoch(uid)
-    await _revoke_unauthorized_derived(uid)
-
-
-async def _revoke_unauthorized_derived(uid: int) -> None:
-    g = await authz.grants_for_user(uid)
-    rows = await db.fetchall(
-        "SELECT id, host_id, share_writable FROM sessions WHERE share_token IS NOT NULL"
-        " AND share_by_id=?", uid)
-    for r in rows:
-        have = await authz.perms_on(g, r["host_id"])
-        if "share.live" not in have or (r["share_writable"] and "share.live_write" not in have):
-            await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                             " share_writable=0 WHERE id=?", r["id"])
-            hub = core.hubs.get(r["id"])
-            if hub:
-                await hub.revoke_shares()
-    links = await db.fetchall(
-        "SELECT l.id, s.host_id FROM replay_links l LEFT JOIN sessions s ON s.id=l.sid"
-        " WHERE l.user_id=?", uid)
-    for ln in links:
-        if ln["host_id"] is None or "share.replay" not in await authz.perms_on(g, ln["host_id"]):
-            await _delete_replay_links(" WHERE id=?", ln["id"])
+    await shares.revoke_unauthorized_derived(uid)
 
 
 def _scope_label(kind: str, value: str) -> str:
@@ -1328,8 +1255,8 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
     await accounts.revoke_enroll_groups(uid, row["email"])   # revizuirea 3.6.11: şi tokenurile de grup
     security.clear_stepup_for(uid)
     security.bump_forward_epoch(uid)      # şi biletele lui de port-forward, ca la logout
-    await _revoke_all_shares(row["email"], uid)
-    await _revoke_replay_links(uid)
+    await shares.revoke_all_shares(row["email"], uid)
+    await shares.revoke_replay_links(uid)
     if ntok:
         log.warning("account deleted: revoked %d automation token(s) issued by %s",
                     ntok, row["email"])
@@ -1483,7 +1410,7 @@ async def sweep_expired_bindings() -> int:
     gone = await authz.sweep_expired_bindings()
     for uid in {g["user_id"] for g in gone}:
         security.bump_forward_epoch(uid)
-        await _revoke_unauthorized_derived(uid)
+        await shares.revoke_unauthorized_derived(uid)
     for g in gone:
         scope = _scope_label(g["scope_kind"], g["scope_value"])
         what = "role binding expired: %s lost %s @ %s" % (g["email"] or "#%s" % g["user_id"],
@@ -1616,7 +1543,7 @@ async def list_roles(request: Request,
     return await authz.roles_json(authz.grants_of(request))
 
 
-# ── Roluri custom (3.6.2; design „3.6.1", §A.6.6 regula 5) ───────────────────────────────
+# ── [roles] Roluri custom (3.6.2; design „3.6.1", §A.6.6 regula 5) ───────────────────────────────
 # Un rol custom = un set de permisiuni din catalog. Reguli, toate pe server:
 #   * rolurile predefinite sunt IMUABILE (codul e sursa lor de adevăr, re-scrise la boot);
 #   * anti-escaladare: orice permisiune din rol (setul VECHI şi cel NOU, la editare) trebuie
@@ -1777,7 +1704,7 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
         authz.bump_epoch()
         for uid in uids:
             security.bump_forward_epoch(uid)
-            await _revoke_unauthorized_derived(uid)
+            await shares.revoke_unauthorized_derived(uid)
     added, removed = sorted(perms - role.perms), sorted(role.perms - perms)
     what = "role '%s' changed: +%s -%s" % (name, ",".join(added) or "none",
                                            ",".join(removed) or "none")
@@ -1840,7 +1767,7 @@ async def delete_role(rid: int, body: ReauthOnly, request: Request,
     return await authz.roles_json(g)
 
 
-# ── Maparea grupurilor SSO → roluri (3.6.2; design „3.6.1", §A.7; logica în ssomap.py) ────
+# ── [sso] Maparea grupurilor SSO → roluri (3.6.2; design „3.6.1", §A.7; logica în ssomap.py) ────
 # Cine mapează un grup la un rol îl ACORDĂ (la următorul login SSO) oricui e în grup: aceleaşi
 # reguli ca o legătură — users.manage, anti-escaladare peste scope, doar un Owner mapează la
 # Owner — plus re-auth + al doilea factor, audit, alertă. O mapare NOUĂ are efect la următorul
@@ -2025,7 +1952,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     return await _oidc_roles_json()
 
 
-# ── SCIM provisioning (3.6.11, scim.py) ─────────────────────────────────────────────────────
+# ── [scim] SCIM provisioning (3.6.11, scim.py) ─────────────────────────────────────────────────────
 # Starea o vede oricine administrează conturile (users.manage — vede oricum conturile „gestionate
 # de SCIM"); tokenul îl creează / roteşte / revocă şi provizionarea o porneşte DOAR un Owner, cu
 # parola contului + al doilea factor: tokenul SCIM creează conturi şi le dezactivează. Oprirea
@@ -2137,7 +2064,7 @@ async def me_permissions(user=Depends(security.require_user)):
     return out
 
 
-# ── Token-uri de automatizare ────────────────────────────────────────────────
+# ── [tokens] Token-uri de automatizare ────────────────────────────────────────────────
 # Cerute de auditul extern pentru joburi de mentenanţă / monitorizare. Nu sunt conturi:
 # merg pe o listă albă mică (`security.require_scope`), au expirare obligatorie şi NU pot
 # atinge hosturile cu 2FA. Crearea/revocarea se fac doar din browser, cu re-auth.
@@ -2186,7 +2113,7 @@ async def _tokens_json(user, grants) -> list:
     return [_token_row(r) for r in rows]
 
 
-# ── Token de înrolare DE GRUP (onboarding la scară de flotă) ─────────────────
+# ── [enroll] Token de înrolare DE GRUP (onboarding la scară de flotă) ─────────────────
 ENROLL_GROUP_MAX_DAYS = 365
 ENROLL_GROUP_MAX_USES = 10000
 
@@ -2214,7 +2141,7 @@ def _enroll_group_row(r) -> dict:
             "creator_gone": not r["creator_ok"]}
 
 
-# ── Dispozitivele conectate (sesiuni web) ────────────────────────────────────
+# ── [devices] Dispozitivele conectate (sesiuni web) ────────────────────────────────────
 # Până acum, dacă bănuiai un cookie furat aveai două opţiuni, amândouă prea mari: schimbi
 # parola (omoară TOATE sesiunile, inclusiv a ta) sau intri prin SSH pe server. Lipsea exact
 # lucrul dintre ele — „vezi ce dispozitive sunt logate şi scoate-l pe ăla".
@@ -2293,6 +2220,8 @@ async def revoke_other_web_sessions(request: Request, user=Depends(security.requ
     return {"ok": True, "revoked": n["c"] if n else 0}
 
 
+# ── [tokens] Automation token routes ──────────────────────────────────────────────────────────────
+
 @router.get("/api/tokens")
 async def list_tokens(request: Request, user=Depends(authz.perm('tokens.create'))):
     return await _tokens_json(user, authz.grants_of(request))
@@ -2364,6 +2293,8 @@ async def revoke_token(tid: int, request: Request, user=Depends(authz.perm('toke
     return await _tokens_json(user, grants)
 
 
+# ── [enroll] Group enrolment token routes ─────────────────────────────────────────────────────────
+
 @router.get("/api/enroll-groups")
 async def list_enroll_groups(user=Depends(authz.perm('hosts.create'))):
     rows = await db.fetchall(
@@ -2431,6 +2362,8 @@ async def revoke_enroll_group(gid: int, user=Depends(authz.perm('hosts.create'))
     log.warning("group enroll token revoked: %s (by %s)", row["name"], user["email"])
     return await list_enroll_groups(user)
 
+
+# ── [totp] TOTP setup / activate / disable / recovery codes ───────────────────────────────────────
 
 @router.post("/api/totp/setup")
 async def totp_setup(body: TotpSetup, user=Depends(security.require_user)):
@@ -2698,6 +2631,8 @@ async def _enforce_guard(cmd: str, confirmed: bool) -> None:
                        % rule["pattern"], vars={"pattern": rule["pattern"]})
 
 
+# ── [settings] Command guard, watermark, SMTP, webhook, alert settings ────────────────────────────
+
 @router.get("/api/settings/command-guard")
 async def get_command_guard(user=Depends(authz.perm("settings.manage"))):
     return await _load_command_guard()
@@ -2892,6 +2827,8 @@ class AlertPrefsIn(BaseModel):
     prefs: dict[str, AlertPrefIn]
 
 
+# ── [alerts] In-app alerts + per-user alert prefs ─────────────────────────────────────────────────
+
 @router.get("/api/alerts")
 async def list_alerts(limit: int = 50, before: Optional[int] = None, unread: bool = False,
                       user=Depends(security.require_user)):
@@ -2972,6 +2909,8 @@ def _clamp_push_seconds(n) -> int:
 MAX_PUSH_SUBS = 20                 # plafon de dispozitive/cont (anti-DoS + limitează amplificarea)
 _push_test_at: dict = {}           # user_id → ultimul /api/push/test (rate-limit în memorie)
 
+
+# ── [push] Web Push subscriptions ─────────────────────────────────────────────────────────────────
 
 @router.get("/api/push/status")
 async def push_status(user=Depends(security.require_user)):
@@ -3064,6 +3003,8 @@ async def push_test(user=Depends(security.require_user)):
 # ---------------------------------------------------------------------------
 # Hosts
 # ---------------------------------------------------------------------------
+
+# ── [hosts] HostIn model, tags, stored credentials, direct SSH/telnet dial, host JSON ─────────────
 
 class HostIn(BaseModel):
     name: str
@@ -3326,8 +3267,6 @@ def _host_supervision(row) -> dict | None:
     return core.supervision_summary({"supervision": s})
 
 
-_JUMP_TYPES = ("ssh-jump", "telnet-jump")
-
 
 def _host_online(row) -> bool:
     """Hostul e „online" = i se poate deschide o sesiune ACUM. Pentru agent/ssh/telnet direct
@@ -3340,9 +3279,9 @@ def _host_online(row) -> bool:
     Primeşte orice rând cu `id`, `connection_type`, `via_host_id` (nu doar `SELECT *`)."""
     if row["id"] in core.sources:
         return True
-    ctype = (row["connection_type"] if "connection_type" in row.keys() else None) or "agent"
+    ctype = conntypes.of(row["connection_type"] if "connection_type" in row.keys() else None)
     via = row["via_host_id"] if "via_host_id" in row.keys() else None
-    if ctype in _JUMP_TYPES and via:
+    if ctype in conntypes.JUMP and via:
         return isinstance(core.sources.get(via), core.AgentConnection)
     return False
 
@@ -3360,7 +3299,7 @@ def _sees_crown(request) -> bool:
 
 def _host_json(row, crown: bool = False) -> dict:
     conn = core.sources.get(row["id"])
-    ctype = row["connection_type"] or "agent"
+    ctype = conntypes.of(row)
     is_agent = ctype == "agent"
     expected = core.agent_expected()["version"]
     out = {
@@ -3426,6 +3365,8 @@ def _host_json(row, crown: bool = False) -> dict:
         out["crown_jewel"] = bool(row["crown_jewel"]) if "crown_jewel" in row.keys() else False
     return out
 
+
+# ── [install] Step-up / re-auth helpers + agent install one-liners ────────────────────────────────
 
 AGENT_USER = "webterm"          # userul dedicat propus în varianta cu privilegii minime
 
@@ -3504,6 +3445,8 @@ def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
             "sudo -iu %s sh -c '%s'" % (AGENT_USER, AGENT_USER, AGENT_USER, inner))
 
 
+# ── [status] /api/status, version + update check ──────────────────────────────────────────────────
+
 @router.get("/api/status")
 async def status(request: Request, user=Depends(authz.perm('host.view', list=True, tokens='read'))):
     """Rezumat operațional: hosturi online, sesiuni, disc (transcripturi +
@@ -3548,6 +3491,11 @@ def _with_command(data: dict) -> dict:
     out = {**data, "configurable": config.UPDATE_CHECK}
     if data.get("update_available") and data.get("latest"):
         out["update_command"] = config.UPDATE_COMMAND.replace("{version}", data["latest"])
+        # changelog-ul din aplicaţie e al versiunii INSTALATE; ce aduce cea nouă stă în release
+        # notes-urile ei. Construit doar din valori validate (owner/repo + tag), nu din text liber.
+        if (re.fullmatch(r"[\w.-]+/[\w.-]+", config.UPDATE_REPO)
+                and re.fullmatch(r"v?\d+(\.\d+)*", data["latest"])):
+            out["release_url"] = "https://github.com/%s/releases/tag/%s" % (config.UPDATE_REPO, data["latest"])
     return out
 
 
@@ -3569,7 +3517,9 @@ async def version_check_toggle(body: UpdateCheckIn, user=Depends(authz.perm('set
     din proprie inițiativă spre exterior — de-aia merită să fie la un click."""
     await _set_setting("update_check", "1" if body.enabled else "0")
     updatecheck.reset_cache()          # răspuns imediat, nu la următoarea fereastră
-    return await updatecheck.check(force=True, enabled=body.enabled)
+    # aceeaşi formă ca GET /api/version şi /refresh: UI-ul înlocuieşte starea cu acest răspuns,
+    # deci fără comanda şi link-ul de release notes ele dispăreau până la redeschiderea panoului
+    return _with_command(await updatecheck.check(force=True, enabled=body.enabled))
 
 
 @router.post("/api/version/refresh")
@@ -3581,6 +3531,8 @@ async def version_refresh(user=Depends(authz.perm('settings.manage'))):
         raise ApiError(400, "updates.checkOff", "the version check is turned off")
     return _with_command(await updatecheck.check(force=True, enabled=True))
 
+
+# ── [hosts] List / create hosts ───────────────────────────────────────────────────────────────────
 
 @router.get("/api/hosts")
 async def list_hosts(request: Request,
@@ -3606,34 +3558,32 @@ async def list_hosts(request: Request,
     return out
 
 
-_HOST_TYPES = ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump")
-
 
 async def _validate_host(host: HostIn, user, grants=None) -> dict:
     """SINGURA cale de validare pentru un host nou — `POST /api/hosts` şi importul CSV trec
     amândouă pe aici, ca un rând de CSV să nu poată crea ceva ce formularul ar refuza (sau
     invers). Întoarce valorile normalizate pe care le scrie `_insert_host`."""
-    ctype = host.connection_type or "agent"
+    ctype = conntypes.of(host.connection_type)
     # Un tip necunoscut („SSH", typo de script) era coerce TĂCUT la agent: 200 cu un host agent
     # şi credenţialul aruncat de _credential_blob. PATCH-ul dădea deja 400 — acum şi POST-ul.
-    if ctype not in _HOST_TYPES:
+    if ctype not in conntypes.ALL:
         raise ApiError(400, "host.badType", "unknown connection type")
     # Numele gol trecea: UI-ul are `required`, dar API-ul (şi acum CSV-ul) nu — un host fără
     # nume e un rând pe care nu-l mai găseşti în sidebar.
     if not host.name.strip():
         raise ApiError(400, "host.nameRequired", "a host name is required")
     _check_cred_policy(host.credential_policy)
-    if ctype in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not host.hostname.strip():
+    if ctype in conntypes.NETWORK and not host.hostname.strip():
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if ctype in ("ssh", "ssh-jump") and not host.ssh_username.strip():
+    if ctype in conntypes.SSH_FAMILY and not host.ssh_username.strip():
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
     # metoda de autentificare era scrisă orbeşte; un „pasword" dintr-un CSV ar fi dat un host
     # care nu se mai conectează niciodată, fără nicio explicaţie
-    if ctype in ("ssh", "ssh-jump") and host.auth_method not in ("password", "key"):
+    if ctype in conntypes.SSH_FAMILY and host.auth_method not in ("password", "key"):
         raise ApiError(400, "host.badAuthMethod", "auth_method must be password or key")
     if host.ssh_port is not None and not 1 <= host.ssh_port <= 65535:
         raise ApiError(400, "host.badPort", "the port must be between 1 and 65535")
-    if ctype in ("ssh-jump", "telnet-jump"):
+    if ctype in conntypes.JUMP:
         # 3.6 (§A.11.4): o ţintă jump deschide TCP DIN hostul `via` — un pivot de reţea, deci
         # cere `forward.manage` acolo. Verificat înaintea existenţei: un `via` invizibil dă
         # acelaşi 404 ca unul inexistent. `grants=None` doar din apelanţi interni fără cerere.
@@ -3641,16 +3591,16 @@ async def _validate_host(host: HostIn, user, grants=None) -> dict:
             raise authz.not_found("host_id")
         await authz.require_on(grants, host.via_host_id, "forward.manage")
         via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
-        if not via or (via["connection_type"] or "agent") != "agent":
+        if not via or not conntypes.is_agent(via):
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
-    port = host.ssh_port or (23 if ctype in ("telnet", "telnet-jump") else 22)
+    port = host.ssh_port or conntypes.default_port(ctype)
     # pin din testul de conexiune: doar cheia pe care TESTUL a văzut-o pe aceeaşi ţintă
     known = None
     if host.pin_hostkey:
-        if ctype not in ("ssh", "ssh-jump"):
+        if ctype not in conntypes.SSH_FAMILY:
             raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
         known = _verified_pin(user["id"], ctype, host.hostname, port, host.via_host_id, host.pin_hostkey)
-    if host.pending_key_id and ctype not in ("ssh", "ssh-jump"):
+    if host.pending_key_id and ctype not in conntypes.SSH_FAMILY:
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     return {"ctype": ctype, "port": port, "known": known}
 
@@ -3683,8 +3633,8 @@ async def _insert_host(host: HostIn, user, v: dict):
         ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
         port, auth_method, cred_blob,
         int(host.require_2fa), policy, _norm_tags(host.tags),
-        host.via_host_id if ctype in ("ssh-jump", "telnet-jump") else None,
-        1 if (host.ephemeral and ctype in ("ssh-jump", "telnet-jump")) else 0, known)
+        host.via_host_id if ctype in conntypes.JUMP else None,
+        1 if (host.ephemeral and ctype in conntypes.JUMP) else 0, known)
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     return row, enroll, pw
 
@@ -3698,7 +3648,7 @@ async def create_host(host: HostIn, request: Request, user=Depends(authz.perm('h
                 enroll_expires=row["enroll_expires"])
 
 
-# ── Export / import CSV ──────────────────────────────────────────────────────
+# ── [hosts-csv] Export / import CSV ──────────────────────────────────────────────────────
 # Mutarea unui subset de hosturi pe alt gateway, sau o listă editabilă într-un spreadsheet.
 # NICIUN secret nu intră în fişier: nici credenţiale/chei/passphrase-uri, nici tokenuri de
 # enroll/agent, nici instance id-uri, nici pinurile known_hosts, nici tokenuri de share. Exportul
@@ -3726,9 +3676,9 @@ def _hosts_csv(rows, names_by_id: dict) -> str:
     w = csv.writer(buf, lineterminator="\r\n")          # RFC 4180: CRLF, ghilimele doar la nevoie
     w.writerow(HOSTS_CSV_COLUMNS)
     for r in rows:
-        ctype = r["connection_type"] or "agent"
+        ctype = conntypes.of(r)
         agent = ctype == "agent"
-        via = r["via_host_id"] if ctype in _JUMP_TYPES else None
+        via = r["via_host_id"] if ctype in conntypes.JUMP else None
         w.writerow([_csv_cell(x) for x in (
             r["name"], ctype, r["hostname"] or "",
             "" if agent else (r["ssh_port"] or ""),
@@ -3737,7 +3687,7 @@ def _hosts_csv(rows, names_by_id: dict) -> str:
             r["folder"] or "", " ".join(_tag_list(r["tags"] or "", None)), r["note"] or "",
             1 if r["require_2fa"] else 0,
             "" if agent else (r["credential_policy"] or ""),
-            (r["auth_method"] or "") if ctype in ("ssh", "ssh-jump") else "",
+            (r["auth_method"] or "") if ctype in conntypes.SSH_FAMILY else "",
             HOSTS_CSV_AGENT_NOTE if agent else "")])
     return buf.getvalue()
 
@@ -3827,7 +3777,7 @@ async def _resolve_via(name: str) -> int:
         raise ApiError(400, "hostcsv.viaRequired", "a jump host needs via_host (the agent's name)")
     cands = await db.fetchall(
         "SELECT id, connection_type FROM hosts WHERE ephemeral=0 AND lower(name)=lower(?)", name)
-    agents = [c for c in cands if (c["connection_type"] or "agent") == "agent"]
+    agents = [c for c in cands if conntypes.is_agent(c)]
     if len(agents) > 1:
         raise ApiError(400, "hostcsv.viaAmbiguous", "more than one agent host has this name",
                        vars={"name": name})
@@ -3846,7 +3796,7 @@ async def _check_duplicate(h: HostIn, v: dict) -> None:
                             h.name.strip())
     if not dup and v["ctype"] != "agent":
         dup = await db.fetchone(
-            "SELECT 1 FROM hosts WHERE ephemeral=0 AND coalesce(connection_type,'agent')!='agent'"
+            "SELECT 1 FROM hosts WHERE ephemeral=0 AND NOT " + conntypes.SQL_IS_AGENT +
             " AND lower(hostname)=lower(?) AND ssh_port=?"
             " AND lower(coalesce(ssh_username,''))=lower(?)",
             h.hostname.strip(), v["port"], h.ssh_username.strip())
@@ -3863,7 +3813,7 @@ async def _import_row(r: HostCsvRow, opts: HostImportOptions, user, grants=None)
         raise ApiError(400, "hostcsv.typeRequired", "connection_type is required")
     agent = ctype == "agent"
     port = None if agent else _csv_port(r.port)
-    via_id = await _resolve_via(r.via_host) if ctype in _JUMP_TYPES else 0
+    via_id = await _resolve_via(r.via_host) if ctype in conntypes.JUMP else 0
     h = HostIn(
         name=r.name, note=r.note, folder=opts.folder.strip() or r.folder,
         connection_type=ctype, hostname=r.hostname, ssh_username="" if agent else r.username,
@@ -3916,7 +3866,7 @@ async def import_hosts(body: HostImportIn, request: Request, user=Depends(authz.
             continue
         created += 1
         res = {"index": i, "ok": True, "id": row["id"], "name": row["name"]}
-        if (row["connection_type"] or "agent") == "agent":
+        if conntypes.is_agent(row):
             res.update(install_command=_install_command(enroll, pw),
                        install_command_dedicated=_install_command_dedicated(enroll, pw),
                        enroll_expires=row["enroll_expires"])
@@ -4254,7 +4204,7 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str,
     return {"ok": True}
 
 
-# ── Upload and move as root (3.6.9, rootmove.py) ────────────────────────────────────────
+# ── [files-root] Upload and move as root (3.6.9, rootmove.py) ────────────────────────────────────────
 # Files writes as the agent's user. For a folder that user cannot write (root-owned
 # /srv/bin/lists), the file is staged in the agent's inbox and the client TYPES — never runs — a
 # `sudo` command into the person's own terminal. Two steps:
@@ -4375,7 +4325,7 @@ async def fs_root_move_command(host_id: int, plan_id: str, request: Request,
     return {"ok": True, "command": cmd}
 
 
-# ── Copiere host → host, pe server (3.5.5) ───────────────────────────────────────────────
+# ── [files-copy] Copiere host → host, pe server (3.5.5) ───────────────────────────────────────────────
 # Octeţii curg agent A → gateway → agent B (fs_read + maşinăria de upload resumabil), nu prin
 # browser. Aceleaşi porţi ca rutele fs: cookie (`require_user` — un token de automatizare primeşte
 # 401), step-up pe AMBELE hosturi (citire pe sursă = /fs/download, scriere pe destinaţie =
@@ -4399,7 +4349,7 @@ async def _copy_host(host_id: int, what: str):
     row = await db.fetchone("SELECT id, name, connection_type FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "agent":
+    if not conntypes.is_agent(row):
         raise ApiError(400, "copy.notAgent", "the %s host has no agent (file copy needs one)" % what)
     return row
 
@@ -4562,7 +4512,7 @@ async def fs_preview(host_id: int, path: str, user=Depends(authz.perm('files.rea
             "text": text}
 
 
-# ── Port forwarding ──────────────────────────────────────────────────────────
+# ── [forward] Port forwarding ──────────────────────────────────────────────────────────
 # antete hop-by-hop: nu se propagă printr-un proxy (RFC 7230 §6.1). Antetul se numeşte
 # `Trailer` (RFC 7230 §4.4); „trailers" e doar o VALOARE posibilă a lui `TE` — cu forma greşită
 # în set, un `Trailer:` din browser ajungea la ţintă (audit 2026-10-04; `_WS_SKIP` îl avea bine).
@@ -4634,6 +4584,7 @@ def _host_header_port(host_header: str, scheme: str):
     return _DEFAULT_PORTS.get(scheme)
 
 
+# INV-11 (docs/design/INVARIANTS.md): orice cerere de forward e autentificată; Origin comparat complet, cu port.
 def _fwd_origin_for_target(origin: str, fwd_host: str, scheme: str, thost: str, tport: int):
     """Antetul `Origin` trimis ţintei unui forward. Aplicaţiile cu protecţie CSRF proprie
     (Grafana: `POST /api/ds/query`, Grafana Live; la fel Gitea, Home Assistant…) compară
@@ -4789,7 +4740,7 @@ async def proxy_forward_http(request: Request, host_id: int, thost: str,
     return response
 
 
-# ── Probă de accesibilitate (bulinele de stare din UI) ───────────────────────
+# ── [forward] Probă de accesibilitate (bulinele de stare din UI) ───────────────────────
 # Pe FORWARD-ID: folosește ținta STOCATĂ (declarată de admin), nu un host:port din
 # URL — fără suprafață SSRF de „probează orice".
 @router.get("/api/forwards/{fid}/probe")
@@ -4839,12 +4790,11 @@ async def forward_probe(fid: int, stepup_grant: str = "", stepup_password: str =
             "head": buf[:400].decode("latin1", "replace")}
 
 
-# ── Port forwards: declarare & management (CRUD) ─────────────────────────────
+# ── [forward] Port forwards: declarare & management (CRUD) ─────────────────────────────
 # Domeniul de forward: implicit = gazda aplicației (din PUBLIC_URL), dar poate fi
 # suprascris din Settings (util dacă vrei forward-urile pe alt domeniu decât app-ul).
 # Sursa de adevăr pentru APP e app_settings['forward_domain']; infra (Traefik cert +
 # rutare) se aliniază prin FORWARD_DOMAIN în .env — vezi verificarea de readiness.
-_FWD_DEFAULT_DOMAIN = os.environ.get("WEBTERM_FORWARD_DOMAIN") or urlparse(config.PUBLIC_URL).hostname or "localhost"
 _FWD_SCHEME = urlparse(config.PUBLIC_URL).scheme or "https"   # https în prod; http la test
 
 
@@ -4870,30 +4820,7 @@ _FWD_PORT = _fwd_port_suffix(config.PUBLIC_URL)
 
 def _fwd_base(slug: str) -> str:
     """Originea publică a unui forward: schema PUBLIC_URL + subdomeniu + (portul, dacă nu e implicit)."""
-    return "%s://%s.%s%s" % (_FWD_SCHEME, slug, forward_domain(), _FWD_PORT)
-_fwd_domain_cache = _FWD_DEFAULT_DOMAIN
-
-
-def forward_domain() -> str:
-    """Domeniul de forward curent (memoizat; reîncărcat la pornire și la salvare)."""
-    return _fwd_domain_cache
-
-
-async def load_forward_domain() -> None:
-    global _fwd_domain_cache
-    row = await db.fetchone("SELECT value FROM app_settings WHERE key='forward_domain'")
-    _fwd_domain_cache = (row["value"].strip() if row and row["value"] and row["value"].strip()
-                         else _FWD_DEFAULT_DOMAIN)
-
-
-_HOSTNAME_RE = re.compile(
-    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
-
-
-def _valid_domain(d: str) -> bool:
-    return bool(_HOSTNAME_RE.match(d))
-
+    return "%s://%s.%s%s" % (_FWD_SCHEME, slug, fwddomain.forward_domain(), _FWD_PORT)
 
 def _readiness_blocking(app_domain: str, domain: str) -> dict:
     """DNS wildcard + certificat Traefik pentru domeniu, verificate din exterior.
@@ -4923,7 +4850,7 @@ def _readiness_blocking(app_domain: str, domain: str) -> dict:
 
 
 async def _forward_settings_json() -> dict:
-    domain = forward_domain()
+    domain = fwddomain.forward_domain()
     app_domain = urlparse(config.PUBLIC_URL).hostname or ""
     st = await asyncio.to_thread(_readiness_blocking, app_domain, domain)
     return {"domain": domain, "app_domain": app_domain,
@@ -4943,10 +4870,10 @@ async def get_forward_settings(user=Depends(authz.perm('settings.manage'))):
 async def save_forward_settings(body: ForwardDomainIn,
                                 user=Depends(authz.perm('settings.manage'))):
     d = body.domain.strip().lower().rstrip(".")
-    if not _valid_domain(d):
+    if not fwddomain.valid_domain(d):
         raise ApiError(400, "settings.badForwardDomain", "invalid domain (e.g. apps.example.com)")
     # Un domeniu de forward care e PĂRINTE al domeniului aplicaţiei o înghite: `route_forward`
-    # decide „e subdomeniu de forward" prin `host.endswith("." + forward_domain())` şi nu
+    # decide „e subdomeniu de forward" prin `host.endswith("." + fwddomain.forward_domain())` şi nu
     # compară niciodată cu domeniul app-ului. Aplicaţia la `wt.exemplu.com` + forward pe
     # `exemplu.com` → de la cererea următoare TOT (UI, API, inclusiv endpointul ăsta) răspunde
     # 404, iar recuperarea cere editarea manuală a SQLite pe server. Salvarea răspundea 200.
@@ -4962,11 +4889,11 @@ async def save_forward_settings(body: ForwardDomainIn,
                        "pick a domain that does NOT contain it (e.g. apps.%s)" % (app_host, d),
                        vars={"app_host": app_host, "domain": d})
     await _set_setting("forward_domain", d)
-    await load_forward_domain()
+    await fwddomain.load_forward_domain()
     return await _forward_settings_json()
 
 
-# ── TLS certificates (3.6.7) ─────────────────────────────────────────────────
+# ── [certs] TLS certificates (3.6.7) ─────────────────────────────────────────────────
 # Monitoring is read-only (certmon.py: a TLS handshake to Traefik, the leaf it serves). Renewal is
 # a HOST action the gateway cannot perform — and must not be able to: the app container gets no
 # ACME volume and no docker-socket write. What it can do, for an Owner (`certs.renew`) with a fresh
@@ -4989,7 +4916,7 @@ async def _certs_json(request: Request) -> dict:
     grants = getattr(request.state, "grants", None)
     can_renew = bool(grants and grants.has_global("certs.renew"))
     st = certmon.status()
-    fwd = forward_domain()
+    fwd = fwddomain.forward_domain()
     allowed = certmon.renew_domains(fwd)
     items = []
     for it in st["items"]:
@@ -5036,7 +4963,7 @@ async def certs_check(request: Request, user=Depends(authz.perm('settings.manage
         raise ApiError(429, "certs.rateLimited", "a check just ran; retry in %ds" % retry,
                        headers={"Retry-After": str(retry)}, vars={"retry": retry})
     certmon.mark_manual()
-    await certmon.check_all(forward_domain())
+    await certmon.check_all(fwddomain.forward_domain())
     return await _certs_json(request)
 
 
@@ -5054,7 +4981,7 @@ async def certs_renew_host(body: CertRenewHostIn, request: Request,
                                 body.host_id)
         if not row:
             raise ApiError(404, "host.missing", "no such host")
-        if (row["connection_type"] or "agent") != "agent":
+        if not conntypes.is_agent(row):
             raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
         await authz.require_on(request, body.host_id, "session.open")
         await _set_setting(K_CERT_RENEW_HOST, str(row["id"]))
@@ -5094,7 +5021,7 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
     if want != host_id:
         raise ApiError(409, "certs.wrongRenewHost", "this is not the host picked for renewals")
     domain = (body.domain or "").strip()
-    if domain not in certmon.renew_domains(forward_domain()):
+    if domain not in certmon.renew_domains(fwddomain.forward_domain()):
         raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
     try:
         command = certmon.renew_command(domain)
@@ -5122,7 +5049,7 @@ async def _open_gateway_terminal(host_id: int, user, body, command: str, title: 
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "agent":
+    if not conntypes.is_agent(row):
         raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
     # OP-01 (audit 2026-10-17): the gateway host is the crown jewel (database + vault) and the
     # command typed here runs as root — a real second factor ALWAYS, whatever the host's
@@ -5147,7 +5074,7 @@ async def _open_gateway_terminal(host_id: int, user, body, command: str, title: 
         raise _runtime_api_error(e, "session.createFailed")
 
 
-# ── System health (3.6.8, syshealth.py) ──────────────────────────────────────
+# ── [health] System health (3.6.8, syshealth.py) ──────────────────────────────────────
 # One list of everything that can fail silently, with why it matters, what to do, and — when the
 # fix needs root on the gateway host — the exact command (copy, or for an Owner: typed, not run,
 # into a terminal there; the same gates as the certificate renewal above).
@@ -5294,7 +5221,7 @@ async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request
         raise ApiError(400, "health.noCommand", "this check has no such command")
     spec = stored[body.index]
     if spec.get("t") == "cert_renew" and (spec.get("p") or {}).get("domain") not in \
-            certmon.renew_domains(forward_domain()):
+            certmon.renew_domains(fwddomain.forward_domain()):
         raise ApiError(400, "certs.badDomain", "not a certificate name WebTerm monitors")
     try:
         command = healthcmd.render(spec.get("t"), spec.get("p") or {})["text"]
@@ -5309,7 +5236,7 @@ async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request
     return dict(result, command=command)
 
 
-# ── Backup / restore (din Settings) ──────────────────────────────────────────
+# ── [backup] Backup / restore (din Settings) ──────────────────────────────────────────
 # Un backup conține cheia seifului (decriptează toate credențialele) → descărcările
 # sunt MEREU criptate cu o parolă dată de user. Vezi backup.py.
 
@@ -5333,7 +5260,7 @@ def _backup_filename() -> str:
     return "webterm-backup-%s.wtbk" % time.strftime("%Y%m%d-%H%M%S")
 
 
-# ── backup programat: scadenţă, rulare, stare persistată ────────────────────────
+# ── [backup] backup programat: scadenţă, rulare, stare persistată ────────────────────────
 # Chei în app_settings (fără schimbare de schemă):
 #   backup_last        ts al ultimului backup programat REUŞIT (scadenţa se calculează faţă de el)
 #   backup_last_run    JSON {ts, ok, name, error}: ultima ÎNCERCARE, reuşită sau nu
@@ -5558,7 +5485,7 @@ async def backup_seen(user=Depends(authz.perm('backups.manage'))):
     return {"ok": True}
 
 
-# ── Backup off-host în cloud (Google Drive / Dropbox) ────────────────────────
+# ── [backup] Backup off-host în cloud (Google Drive / Dropbox) ────────────────────────
 # Vezi cloudbackup.py. Un backup care stă doar pe mașina salvată nu te apără de
 # pierderea mașinii; aici e varianta la îndemână (rclone rămâne calea de ops).
 
@@ -5698,7 +5625,7 @@ async def cloud_disconnect(user=Depends(authz.perm('backups.manage'))):
     return await cloudbackup.status()
 
 
-# ── Cheie de semnare a flotei (per-deployment) ───────────────────────────────
+# ── [signing] Cheie de semnare a flotei (per-deployment) ───────────────────────────────
 # Vezi docs/design/SIGNED-UPDATES.md. Gateway-ul semnează update-urile de
 # agent cu ACEASTĂ cheie → nimeni nu depinde de cheia mentainerului upstream.
 
@@ -5822,7 +5749,7 @@ async def signing_backup(body: SigningPassIn, user=Depends(authz.perm('signing.m
                     headers={"Content-Disposition": 'attachment; filename="webterm-signing-key.wtbk"'})
 
 
-# ── Consola de flotă: rulare non-interactivă a unei comenzi pe un host ────────
+# ── [run] Consola de flotă: rulare non-interactivă a unei comenzi pe un host ────────
 # Frontend-ul cheamă endpoint-ul ăsta o dată PER host (în paralel) și umple grila
 # de rezultate pe măsură ce fiecare răspunde. Fără stare de „job" pe server.
 class RunIn(BaseModel):
@@ -5869,7 +5796,7 @@ async def host_run(host_id: int, body: RunIn, request: Request,
             "duration": resp.get("duration")}
 
 
-# ── Git panel: fixed operations, root-relative literal paths ─────────────────
+# ── [git] Git panel: fixed operations, root-relative literal paths ─────────────────
 class GitIn(BaseModel):
     cwd: str = ""
     operation: str = ""
@@ -5931,7 +5858,7 @@ async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', hos
             "stderr": resp.get("stderr", ""), "access": access}
 
 
-# ── Docker: containere / volume / reţele, prin op-ul `run` (agent NEatins) ───
+# ── [docker] Docker: containere / volume / reţele, prin op-ul `run` (agent NEatins) ───
 # Acelaşi tipar ca panoul de git: CLI-ul docker rulează prin `run_command`, argv
 # shell-quotat server-side, ZERO op-uri noi în agent (deci fără re-semnare). Doar
 # citire + acţiuni de lifecycle (start/stop/restart) + logs; shell-ul în container
@@ -6023,7 +5950,7 @@ async def docker_list(host_id: int, kind: str, user=Depends(authz.perm('docker.v
     return {"kind": kind, "rows": rows}
 
 
-# ── Statistici per container (`docker stats --no-stream`) ────────────────────
+# ── [docker] Statistici per container (`docker stats --no-stream`) ────────────────────
 # docker scrie mărimile pentru oameni: memoria în unităţi BINARE („12.3MiB / 7.6GiB", go-units
 # BytesSize), reţeaua şi discul în ZECIMALE („1.2kB / 0B", HumanSize), procentele cu „%". Un
 # container care porneşte/se opreşte chiar în timpul eşantionării dă „--" (sau „-- / --"). Le
@@ -6239,7 +6166,7 @@ def _docker_exec_cmd(container: str) -> str:
     return _docker_session_cmd("docker exec -it %s sh -c %s" % (shlex.quote(container), shlex.quote(inner)))
 
 
-# ── systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
+# ── [services] systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
 #    în agent → fără re-semnare). Doar host-uri de agent (systemctl/ss sunt locale pe host). ──
 async def _host_run(host_id: int, cmd: str, timeout: int = 20) -> dict:
     conn = core.source_for(host_id)
@@ -6388,7 +6315,7 @@ async def diag_probe(host_id: int, kind: str = "storage", user=Depends(authz.per
     return {"text": (resp.get("stdout", "") or "")[:60000]}
 
 
-# ── Database connection launchers ────────────────────────────────────────────
+# ── [toolbox-db] Database connection launchers ────────────────────────────────────────────
 # O conexiune salvată → o sesiune care rulează CLI-ul potrivit pe hostul agentului, cu ţinta
 # pre-completată. Lansator, nu client. Slice 1: politica `ask` — clientul îşi cere singur parola,
 # deci WebTerm nu atinge niciun secret (cel mai sigur). Comanda e construită dintr-o hartă FIXĂ
@@ -6532,6 +6459,7 @@ async def create_connection(host_id: int, body: ConnectionIn, user=Depends(authz
     return _connection_json(await db.fetchone("SELECT * FROM connections WHERE id=?", cid))
 
 
+# INV-01 (docs/design/INVARIANTS.md): parola unei conexiuni Toolbox DB rămâne legată de destinația ei.
 @router.patch("/api/hosts/{host_id}/connections/{conn_id}")
 async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
                             user=Depends(authz.perm('toolbox.manage', host='host_id'))):
@@ -6572,7 +6500,7 @@ async def delete_connection(host_id: int, conn_id: int, stepup_grant: str = "",
     return {"ok": True}
 
 
-# ── Split-views: layout-uri denumite de 2-4 sesiuni, per user, sincronizate ──────
+# ── [split-views] Split-views: layout-uri denumite de 2-4 sesiuni, per user, sincronizate ──────
 # Un split-view NU ţine niciun secret — e metadată de layout care REFERĂ sesiuni
 # gated independent la attach. Deci CRUD = doar require_user, FĂRĂ step-up (spre
 # deosebire de conexiunile `stored`). Vezi docs/design/SPLIT-VIEWS.md.
@@ -6892,7 +6820,7 @@ async def delete_split_view(sv_id: int, user=Depends(security.require_user)):
     return {"ok": True}
 
 
-# ── Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
+# ── [wol] Wake-on-LAN: un agent VECIN trezeşte o maşină oprită din acelaşi LAN ──────
 # Prefixe de interfeţe virtuale (bridge-uri, veth-uri, VPN-uri): n-au NIC fizic în spate, deci
 # MAC-ul lor nu poate fi trezit şi subnetul lor (ex. 172.17/16 al Docker-ului) nu e un LAN real.
 _VIRTUAL_IF_PREFIXES = ("docker", "br-", "virbr", "veth", "vnet", "tap", "tun",
@@ -6946,7 +6874,7 @@ async def wake_host(host_id: int, request: Request, user=Depends(authz.perm('hos
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "agent":
+    if not conntypes.is_agent(row):
         raise ApiError(400, "wake.notAgent", "Wake-on-LAN is only for agent hosts")
     await _require_host_stepup(host_id, user)   # acţiune de host
     # MAC + subnet al ţintei: preferă interfaţa cu IP-ul pe care gateway-ul l-a văzut ultima dată
@@ -6967,7 +6895,7 @@ async def wake_host(host_id: int, request: Request, user=Depends(authz.perm('hos
     # ACŢIUNE pe vecin, iar răspunsul îl numeşte (`via`): un vecin doar vizibil (sau invizibil)
     # n-are voie să fie folosit (şi n-ar trebui nici să-i apară numele)
     peers_vis = await authz.visible_hosts(authz.grants_of(request), "host.wake")
-    for h in await db.fetchall("SELECT id, name, diagnostics FROM hosts WHERE connection_type='agent'"):
+    for h in await db.fetchall("SELECT id, name, diagnostics FROM hosts WHERE " + conntypes.SQL_IS_AGENT):
         if h["id"] == host_id or not authz.in_visible(peers_vis, h["id"]):
             continue
         conn = core.source_for(h["id"])
@@ -6995,7 +6923,7 @@ async def wake_host(host_id: int, request: Request, user=Depends(authz.perm('hos
     return {"ok": True, "via": peer_name, "mac": resp.get("sent", mac)}
 
 
-# ── Istoric global de comenzi (căutabil, audit-lite) ─────────────────────────
+# ── [history] Istoric global de comenzi (căutabil, audit-lite) ─────────────────────────
 # Comenzile interactive sunt raportate de client (din marcajele OSC 133); cele de
 # flotă se scriu automat mai sus. Un singur cont → istoricul e ca `~/.bash_history`,
 # doar căutabil peste toate hosturile și sesiunile.
@@ -7219,6 +7147,8 @@ def _forward_json(row) -> dict:
     }
 
 
+# ── [forward] Per-host forwards list, apps, audit log ─────────────────────────────────────────────
+
 @router.get("/api/hosts/{host_id}/forwards")
 async def list_forwards(host_id: int, request: Request, stepup_grant: str = "",
                         stepup_password: str = "", stepup_totp: str = "",
@@ -7301,6 +7231,8 @@ class HostKeyAcceptIn(BaseModel):
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
+# ── [ssh] Host key alarm: read / accept (fingerprint-bound) ───────────────────────────────────────
+
 @router.get("/api/hosts/{host_id}/hostkey")
 async def host_hostkey(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
     """Starea pinului de host-key al unui host SSH (direct/jump): amprenta curentă (cea pinată,
@@ -7319,6 +7251,7 @@ async def host_hostkey(host_id: int, user=Depends(authz.perm('host.diagnostics',
             "pinned": bool(row["known_hosts"]), "alarm": False}
 
 
+# INV-03 (docs/design/INVARIANTS.md): acceptul e legat de amprenta văzută; altă cheie între timp = ssh.hostKeyStale.
 @router.post("/api/hosts/{host_id}/hostkey/accept")
 async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Request,
                               user=Depends(authz.perm('host.edit', host='host_id'))):
@@ -7368,6 +7301,8 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
         what_key="host_key_repinned", what_params={"host": row["name"], "old_fp": old_fp, "new_fp": new_fp})
     return {"ok": True, "fingerprint": new_fp if new_key else None, "pinned": bool(new_key)}
 
+
+# ── [agent] Agent events, agent log, diagnostics refresh ──────────────────────────────────────────
 
 @router.get("/api/hosts/{host_id}/events")
 async def host_events(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
@@ -7440,6 +7375,8 @@ async def diagnostics_refresh(host_id: int, user=Depends(authz.perm('host.diagno
     except (core.AgentGone, TimeoutError):
         raise ApiError(409, "host.offline", "host offline")
 
+
+# ── [forward] Forward create / update / delete, telnet forwards ───────────────────────────────────
 
 @router.post("/api/hosts/{host_id}/forwards")
 async def create_forward(host_id: int, body: ForwardIn,
@@ -7565,7 +7502,7 @@ async def open_forward_telnet(fid: int, body: TelnetOpenIn, request: Request,
         raise _runtime_api_error(e, "session.createFailed")
 
 
-# ── Console seriale (RS232/RS485/USB) prin agent ─────────────────────────────
+# ── [serial] Console seriale (RS232/RS485/USB) prin agent ─────────────────────────────
 class SerialOpenIn(BaseModel):
     device: str
     baud: int = 115200
@@ -7629,7 +7566,7 @@ async def serial_open(host_id: int, body: SerialOpenIn, user=Depends(authz.perm(
         raise _runtime_api_error(e, "session.createFailed")
 
 
-# ── Routing pe subdomeniu + handshake de auth ────────────────────────────────
+# ── [forward] Routing pe subdomeniu + handshake de auth ────────────────────────────────
 async def _forward_stepup_ok(slug: str, request: Request) -> bool:
     """Pe hosturile marcate `require_2fa`, un tunel deschis se închide când se închide
     fereastra de step-up. Pentru restul, mereu adevărat (zero cost).
@@ -7667,6 +7604,7 @@ async def _forward_window_ok(slug: str, ticket: str | None) -> bool:
     return uid is not None and security.stepup_window_is_open(uid, row["host_id"])
 
 
+# INV-06 (docs/design/INVARIANTS.md): biletul de forward e re-verificat pe grant-urile CURENTE la fiecare cerere (și INV-11).
 async def _forward_authz_ok(slug: str, ticket: str | None) -> bool:
     """3.6 (§A.6.4): biletul de forward trăieşte până la 12 h, mai mult decât un rol. Deci la
     FIECARE cerere (HTTP) şi la fiecare revalidare (WS) re-verificăm că acel cont care a emis
@@ -7700,7 +7638,7 @@ async def route_forward(request: Request):
     proxy) și întoarce un Response; altfel None (merge la rutele normale).
     Apelat din middleware-ul din main.py, ÎNAINTE de restul rutelor."""
     host = (request.headers.get("host") or "").split(":")[0].lower()
-    if not host or host == forward_domain() or not host.endswith("." + forward_domain()):
+    if not host or host == fwddomain.forward_domain() or not host.endswith("." + fwddomain.forward_domain()):
         return None                            # domeniul principal → app normal
     # Plasă de siguranţă pentru o instanţă deja configurată greşit (sau pentru o setare care
     # ajunge în DB pe altă cale decât endpointul validat): domeniul APLICAŢIEI nu poate fi
@@ -7709,7 +7647,7 @@ async def route_forward(request: Request):
     # editând SQLite pe server.
     if host == (urlparse(config.PUBLIC_URL).hostname or "").lower():
         return None
-    slug = host[:-(len(forward_domain()) + 1)]
+    slug = host[:-(len(fwddomain.forward_domain()) + 1)]
     if not slug or "." in slug:
         return PlainTextResponse("no such forward", status_code=404)
     # pasul 3 din handshake: setează cookie-ul pe subdomeniu
@@ -7805,7 +7743,7 @@ async def forward_auth(request: Request, slug: str, next: str = "/"):
     return RedirectResponse(loc, status_code=302)
 
 
-# ── WebSocket proxy prin tunel (codec propriu: gateway = client WS către țintă) ─
+# ── [forward] WebSocket proxy prin tunel (codec propriu: gateway = client WS către țintă) ─
 # L3: plafon anti-OOM pe un singur frame WS și pe reasamblarea continuărilor. Un dispozitiv ostil din
 # spatele unui forward putea anunța un frame de 2^64 octeți → pbuf/acc creșteau nemărginit.
 FWD_WS_MAX_FRAME = 8 * 1024 * 1024
@@ -7881,7 +7819,7 @@ async def handle_forward_ws(scope, receive, send):
     headers = {k.decode("latin1").lower(): v.decode("latin1")
                for k, v in scope.get("headers", [])}
     host = headers.get("host", "").split(":")[0].lower()
-    slug = host[:-(len(forward_domain()) + 1)] if host.endswith("." + forward_domain()) else ""
+    slug = host[:-(len(fwddomain.forward_domain()) + 1)] if host.endswith("." + fwddomain.forward_domain()) else ""
     if (await receive())["type"] != "websocket.connect":
         return
     # anti-CSWSH: browserul atașează cookie-ul de forward chiar și la un handshake WS
@@ -8096,6 +8034,8 @@ class FsDelete(BaseModel):
     recursive: bool = False
 
 
+# ── [files] mkdir / rename / delete ───────────────────────────────────────────────────────────────
+
 @router.post("/api/hosts/{host_id}/fs/mkdir")
 async def fs_mkdir(host_id: int, body: FsPath, user=Depends(authz.perm('files.write', host='host_id'))):
     await _require_host_stepup(host_id, user)   # H1
@@ -8142,6 +8082,8 @@ async def fs_delete(host_id: int, body: FsDelete, request: Request,
     return {"ok": True}
 
 
+# ── [agent] Agent update trigger ──────────────────────────────────────────────────────────────────
+
 @router.post("/api/hosts/{host_id}/update")
 async def update_agent(host_id: int, user=Depends(authz.perm('host.admin', host='host_id'))):
     """Update/restart the agent now; tmux sessions survive the restart."""
@@ -8160,6 +8102,8 @@ async def update_agent(host_id: int, user=Depends(authz.perm('host.admin', host=
             "the live sessions on this host (the new file is already staged).")
     return {"ok": True}
 
+
+# ── [search] Global search ────────────────────────────────────────────────────────────────────────
 
 @router.get("/api/search")
 async def search(q: str, request: Request, user=Depends(authz.perm('recording.view', list=True))):
@@ -8232,12 +8176,13 @@ _CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
                 "auth_method", "credential", "credential_policy", "via_host_id")
 
 
+# INV-01 (docs/design/INVARIANTS.md): un secret salvat aparține ȚINTEI (protocol, gazdă, port, via), nu rândului; o mutare cere parola din nou.
 def _conn_target(ctype: str, hostname, port, via) -> tuple:
     """Ţinta la care pleacă un credenţial: (protocol, gazdă, port, rută jump). `via` contează doar
     pe tipurile jump (un ssh direct pleacă din reţeaua gateway-ului, oricare ar fi `via` rămas)."""
-    proto = "telnet" if ctype in ("telnet", "telnet-jump") else "ssh"
-    jump = ctype in _JUMP_TYPES
-    return (proto, (hostname or "").strip().lower(), int(port or (23 if proto == "telnet" else 22)),
+    proto = conntypes.target_proto(ctype)
+    jump = ctype in conntypes.JUMP
+    return (proto, (hostname or "").strip().lower(), int(port or conntypes.default_port(proto)),
             int(via or 0) if jump else 0)
 
 
@@ -8257,12 +8202,14 @@ def _retargets(row, new_type: str, hostname, port, via) -> bool:
     """Ţinta s-ar muta faţă de cea pentru care a fost salvat credenţialul. Parola unui host
     `agent` vine din provisioning-ul prin SSH, deci ţinta ei e SSH pe adresa lui — NU protocolul
     cerut acum (altfel ssh → agent+adresă nouă → ssh/telnet o muta fără întrebare; review 2, H)."""
-    old_type = row["connection_type"] or "agent"
-    if old_type == "agent":
-        old_type = "ssh"
+    old_type = conntypes.of(row)
+    if old_type == conntypes.AGENT:
+        old_type = conntypes.SSH
     return (_conn_target(old_type, row["hostname"], row["ssh_port"], row["via_host_id"])
             != _conn_target(new_type, hostname, port, via))
 
+
+# ── [hosts] Update host (PATCH): retarget binding, credentials, TOFU reset ────────────────────────
 
 @router.patch("/api/hosts/{host_id}")
 async def update_host(host_id: int, host: HostPatch, request: Request,
@@ -8301,8 +8248,8 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # …iar o ţintă jump deschide TCP DIN hostul `via` (§A.11.4): orice atingere a ţintei (adresă,
     # port, tip, via — schimbată SAU doar retrimisă) cere `forward.manage` pe via-ul EFECTIV, ca la
     # creare şi la /api/hosts/test. Altfel `host.edit` pe jump ar re-ţinti pivotul oriunde.
-    eff_type = given.get("connection_type") or row["connection_type"] or "agent"
-    if eff_type in _JUMP_TYPES and any(
+    eff_type = given.get("connection_type") or conntypes.of(row)
+    if eff_type in conntypes.JUMP and any(
             f in given for f in ("hostname", "ssh_port", "connection_type", "via_host_id")):
         eff_via = given["via_host_id"] if "via_host_id" in given else row["via_host_id"]
         if eff_via:                 # fără via → refuzat mai jos (400 sshjump.needsAgent)
@@ -8337,9 +8284,9 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         # monitorizarea), simetric cu politica din `set_require_2fa`.
         await _require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password, host.stepup_totp)
 
-    old_type = row["connection_type"] or "agent"
+    old_type = conntypes.of(row)
     new_type = given.get("connection_type", old_type)
-    if new_type not in ("agent", "ssh", "ssh-jump", "telnet", "telnet-jump"):
+    if new_type not in conntypes.ALL:
         raise ApiError(400, "host.badType", "unknown connection type")
     eff = lambda f, col=None: (given[f] if f in given else row[col or f])   # noqa: E731
     hostname = (eff("hostname") or "").strip()
@@ -8348,12 +8295,12 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     _check_cred_policy(policy)
     auth_method = eff("auth_method") or "password"
 
-    if new_type in ("ssh", "ssh-jump", "telnet", "telnet-jump") and not hostname:
+    if new_type in conntypes.NETWORK and not hostname:
         raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if new_type in ("ssh", "ssh-jump") and not ssh_username:
+    if new_type in conntypes.SSH_FAMILY and not ssh_username:
         raise ApiError(400, "ssh.userRequired", "an SSH username is required")
     # la editarea unui jump, agentul `via` trebuie să rămână un host de tip agent (ca la creare)
-    if new_type in _JUMP_TYPES:
+    if new_type in conntypes.JUMP:
         via_id = eff("via_host_id")
         # Self-via: un host AGENT retipizat la jump cu `via_host_id=<propriul id>` trecea regula
         # „via e agent" (rândul lui încă zice agent), apoi `touches_conn` îi scotea propria sursă
@@ -8364,7 +8311,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
             raise ApiError(400, "sshjump.viaLoop", "a jump host cannot route through itself")
         via = (await db.fetchone("SELECT connection_type, via_host_id FROM hosts WHERE id=?", via_id)
                if via_id else None)
-        if not via or (via["connection_type"] or "agent") != "agent":
+        if not via or not conntypes.is_agent(via):
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
         cur, hops = via["via_host_id"], 0
         while cur and hops < 16:
@@ -8380,7 +8327,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
     # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
     # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.
-    if pend_given and new_type not in ("ssh", "ssh-jump"):
+    if pend_given and new_type not in conntypes.SSH_FAMILY:
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     # Parola STOCATĂ e a destinaţiei de acum. Mutarea hostului pe altă adresă / port / rută jump
     # o păstra, iar prima conectare (TOFU, pinul resetat) o trimitea noii ţinte — inclusiv unui
@@ -8413,7 +8360,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     repinned = _retargets(row, new_type, hostname, eff("ssh_port"), eff("via_host_id"))
     new_pin = None
     if pin_given:
-        if new_type not in ("ssh", "ssh-jump"):
+        if new_type not in conntypes.SSH_FAMILY:
             raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
         eff_port = (given["ssh_port"] if "ssh_port" in given else row["ssh_port"]) or 22
         new_pin = _verified_pin(user["id"], new_type, hostname, eff_port, eff("via_host_id") or 0, pin_given)
@@ -8439,7 +8386,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # `via_host_id` are sens DOAR în familia jump. Când hostul iese din ea (ssh-jump → ssh/agent)
     # îl golim explicit: altfel clientul îl considera în continuare cuibărit (`isNested`), iar un
     # fost jump devenit agent, cu `via` agăţat, era singura cale spre un ciclu de via-uri.
-    if new_type in _JUMP_TYPES:
+    if new_type in conntypes.JUMP:
         if "via_host_id" in given:
             sets.append("via_host_id=?"); vals.append(given["via_host_id"])
     elif row["via_host_id"] is not None or "via_host_id" in given:
@@ -8471,7 +8418,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # Cheie → PAROLĂ pe aceeaşi ţintă: pinul a fost pus tăcut (TOFU e păstrat doar pentru chei), deci
     # nimeni nu l-a confirmat. Îl ştergem: prima conectare cu parola cere confirmarea amprentei,
     # dacă formularul nu aduce chiar acum un pin verificat de test (review 2, pin moştenit).
-    if (not repinned and not new_pin and new_type in ("ssh", "ssh-jump") and row["known_hosts"]
+    if (not repinned and not new_pin and new_type in conntypes.SSH_FAMILY and row["known_hosts"]
             and (row["auth_method"] or "password") == "key" and auth_method == "password"):
         sets.append("known_hosts=NULL"); sets.append("hostkey_alarm=NULL")
     if repinned:
@@ -8563,6 +8510,8 @@ class Toggle2fa(BaseModel):
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
 
+# ── [hosts] Per-host flags: require 2FA, crown jewel, provision, forget credentials ───────────────
+
 @router.post("/api/hosts/{host_id}/require-2fa")
 async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(authz.perm('host.admin', host='host_id'))):
     """Activează/dezactivează cererea de 2FA la conectarea pe acest host.
@@ -8642,7 +8591,7 @@ async def provision_agent(host_id: int, request: Request, user=Depends(authz.per
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "ssh":
+    if conntypes.of(row) != conntypes.SSH:
         raise ApiError(400, "provision.sshOnly", "provisioning is only available for SSH hosts")
     # 1) conexiune SSH (creds stocate; rate-limited; pin host-key)
     await _connect_direct(row, request)
@@ -8671,7 +8620,7 @@ async def provision_agent(host_id: int, request: Request, user=Depends(authz.per
                        "the installed agent did not connect in time.\n\n" + out)
     # 4) succes: mod agent + ștergere credențiale după politică
     delete_creds = row["credential_policy"] == "ephemeral"
-    await db.execute("UPDATE hosts SET connection_type='agent' WHERE id=?", host_id)
+    await db.execute("UPDATE hosts SET connection_type=? WHERE id=?", conntypes.AGENT, host_id)
     if delete_creds:
         await db.execute(
             "UPDATE hosts SET credential_encrypted=NULL, credential_policy='stored' WHERE id=?",
@@ -8729,7 +8678,7 @@ async def forget_credentials(host_id: int, body: ForgetCredsIn,
     return {"ok": True, "connection_closed": dropped}
 
 
-# ── Snippets (comenzi salvate) ───────────────────────────────────────────
+# ── [snippets] Snippets (comenzi salvate) ───────────────────────────────────────────
 
 class SnippetIn(BaseModel):
     title: str
@@ -8882,6 +8831,8 @@ async def _refuse_if_jump_children(host_id: int) -> None:
                        "them first" % ", ".join(k["name"] for k in kids[:5]))
 
 
+# ── [hosts] Delete / uninstall host, autostart ────────────────────────────────────────────────────
+
 @router.delete("/api/hosts/{host_id}")
 async def delete_host(host_id: int, user=Depends(authz.perm("host.admin", host="host_id"))):
     await _require_host_stepup(host_id, user)   # F-05: ştergerea unui host cu 2FA e o acţiune de host
@@ -8937,7 +8888,7 @@ async def uninstall_host(host_id: int, force: bool = False,
         raise ApiError(409, "host.hasLiveSessions", "the host has live sessions; close them first")
     await _refuse_if_jump_children(host_id)     # înainte să-i cerem agentului să se dezinstaleze
 
-    ctype = row["connection_type"] or "agent"
+    ctype = conntypes.of(row)
     uninstalled = False
     warnings = []
     if ctype == "agent":
@@ -8991,7 +8942,7 @@ async def host_autostart(host_id: int, body: AutostartIn, request: Request,
     row = await db.fetchone("SELECT id, connection_type FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") != "agent":
+    if not conntypes.is_agent(row):
         raise ApiError(400, "host.autostartNotAgent",
                        "only hosts with an agent have something to start at boot")
     conn = core.sources.get(host_id)
@@ -9072,6 +9023,8 @@ def _session_json(row) -> dict:
 # closed/lost. Older closed sessions are reached per-host (GET below) or via search.
 CLOSED_SESSIONS_LIMIT = 200
 
+
+# ── [sessions] List sessions, open a session on a host ────────────────────────────────────────────
 
 @router.get("/api/sessions")
 async def list_sessions(request: Request,
@@ -9224,6 +9177,7 @@ def _window_opened_by_password(user_id: int, host_id: int) -> bool:
     return bool(rec) and _password_windows.get((user_id, host_id)) == rec[0]
 
 
+# INV-04 (docs/design/INVARIANTS.md): parola singură nu e niciodată al doilea factor.
 async def _require_host_stepup(host_id: int, user, grant: str = "", password: str = "",
                                totp: str = "") -> None:
     """H1: pe un host cu `require_2fa`, ORICE acțiune sensibilă (sesiune, `run`, `fs/*`, update,
@@ -9264,6 +9218,8 @@ async def _require_host_stepup(host_id: int, user, grant: str = "", password: st
     # acţiune dădea 403, parola era refuzată, iar DEZACTIVAREA trece prin acelaşi gard.
     await _stepup_consume_factor(host_id, user, grant, password, totp)
 
+
+# ── [stepup] Per-host step-up (2FA window) ────────────────────────────────────────────────────────
 
 @router.post("/api/hosts/{host_id}/stepup")
 async def host_stepup(host_id: int, body: SessionIn, request: Request,
@@ -9309,6 +9265,8 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     return {"ok": True, "opened": opened, "window": max(0, left)}
 
 
+# ── [ssh-keys] SSH key generated at host creation ─────────────────────────────────────────────────
+
 @router.post("/api/hosts/{host_id}/ssh-key/generate")
 async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(authz.perm('host.edit', host='host_id'))):
     """Generează o pereche de chei Ed25519 PENTRU un host SSH: stochează privata ca credenţial
@@ -9318,7 +9276,7 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(auth
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise ApiError(404, "host.missing", "no such host")
-    if (row["connection_type"] or "agent") not in ("ssh", "ssh-jump"):
+    if conntypes.of(row) not in conntypes.SSH_FAMILY:
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     k = asyncssh.generate_private_key("ssh-ed25519")
@@ -9352,7 +9310,7 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(authz.
             "known_hosts": row["known_hosts"] or ""}
 
 
-# ── Testul de conexiune din Add host + cheia generată la creare (3.5.4) ──────
+# ── [hosts-test] Testul de conexiune din Add host + cheia generată la creare (3.5.4) ──────
 # `POST /api/hosts/test` rulează dial-ul real (core.probe_ssh / probe_telnet) cu câmpurile din
 # formular, fără să salveze nimic. Poate sonda ORICE gazdă:port, adică e un scaner de porturi
 # din interiorul reţelei gazdei — de-aia: doar cookie (nu token de automatizare), plafon per
@@ -9405,7 +9363,7 @@ _tested_hostkeys: dict = {}     # (user_id, via, host, port) -> (keyline, finger
 
 
 def _test_target(user_id, ctype: str, hostname: str, port, via) -> tuple:
-    jump = ctype in _JUMP_TYPES
+    jump = ctype in conntypes.JUMP
     return (user_id, int(via or 0) if jump else 0, (hostname or "").strip().lower(), int(port or 0))
 
 
@@ -9551,14 +9509,15 @@ def _hosttest_stage(st: dict, row: dict, ssh: bool, expected_fp: str = "", offer
     return out
 
 
+# INV-01 (docs/design/INVARIANTS.md): parola stocată se folosește doar pe ACEEAȘI țintă.
 @router.post("/api/hosts/test")
 async def test_host_connection(body: HostTestIn, request: Request, user=Depends(authz.perm('hosts.create'))):
     """„Test connection" din Add host / Edit host: tcp → banner → host key → auth, cu dial-ul real,
     fără să salveze nimic. Întoarce {ok, stages, hostkey?}; textul îl pune UI-ul din coduri."""
     ctype = body.connection_type or ""
-    if ctype not in ("ssh", "ssh-jump", "telnet", "telnet-jump"):
+    if ctype not in conntypes.NETWORK:
         raise ApiError(400, "hosttest.badType", "connection tests are for ssh, ssh-jump, telnet and telnet-jump")
-    ssh = ctype in ("ssh", "ssh-jump")
+    ssh = ctype in conntypes.SSH_FAMILY
     hostname = body.hostname.strip()
     # urma în jurnal ÎNAINTE de orice refuz: o sondă blocată (metadate, plafon) contează la audit
     audit.detail(request, "connection test (%s) to %s:%s" % (ctype, hostname[:200], body.ssh_port or ""))
@@ -9577,7 +9536,7 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
     # existenţă/step-up: un host invizibil dă 404 ca unul inexistent.
     if body.host_id:
         await authz.require_on(request, body.host_id, "host.edit")
-    if ctype in _JUMP_TYPES and body.via_host_id:
+    if ctype in conntypes.JUMP and body.via_host_id:
         await authz.require_on(request, body.via_host_id, "forward.manage")
     if body.host_id:
         row = await db.fetchone("SELECT * FROM hosts WHERE id=?", body.host_id)
@@ -9588,14 +9547,14 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
     _hosttest_rate(user["id"])
     if _is_metadata_target(hostname):
         raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
-    via = body.via_host_id if ctype in _JUMP_TYPES else 0
+    via = body.via_host_id if ctype in conntypes.JUMP else 0
     if via:
         vrow = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", via)
-        if not vrow or (vrow["connection_type"] or "agent") != "agent":
+        if not vrow or not conntypes.is_agent(vrow):
             raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
         if not isinstance(core.sources.get(via), core.AgentConnection):
             raise ApiError(409, "hosttest.viaOffline", "the jump host's agent is offline — the test needs it online")
-    elif ctype in _JUMP_TYPES:
+    elif ctype in conntypes.JUMP:
         raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
 
     # credenţialul: cheia generată > ce s-a tastat > cel stocat al hostului editat (doar dacă
@@ -9703,7 +9662,7 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
     return out
 
 
-# ── Chei de deploy host→host (Toolbox → SSH keys) ────────────────────────────
+# ── [deploy-keys] Chei de deploy host→host (Toolbox → SSH keys) ────────────────────────────
 # Scop: un host de dev face `ssh` pe hosturi de prod fără agenţi AI acolo. PRIVATA se naşte
 # şi RĂMÂNE pe hostul sursă (~/.ssh/webterm_ed25519); gateway-ul ţine DOAR publica + graful
 # de deploy. Totul prin op-ul `run` + `fs_read` existente — agentul NU e atins (zero bump de
@@ -9783,7 +9742,7 @@ async def _dk_agent_host(host_id: int):
     row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
     if not row:
         raise HTTPException(404)
-    if (row["connection_type"] or "agent") != "agent":
+    if not conntypes.is_agent(row):
         raise ApiError(400, "sshkey.notAgent", "deploy keys work on agent hosts only")
     return row
 
@@ -10414,8 +10373,8 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         await authz.require_on(request, host_id, "toolbox.use")
     # 2FA step-up (server-side; bifa din client nu e de încredere) — deschide/consultă fereastra
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    ctype = row["connection_type"] or "agent"
-    if ctype in ("ssh", "ssh-jump"):
+    ctype = conntypes.of(row)
+    if ctype in conntypes.SSH_FAMILY:
         await _connect_direct(row, request, body.credential, body.passphrase)
     elif ctype == "telnet":
         await _connect_telnet(row, request, body.credential)
@@ -10555,6 +10514,8 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     return result
 
 
+# ── [sessions] Session rename / reconnect / kill / delete ─────────────────────────────────────────
+
 @router.patch("/api/sessions/{sid}")
 async def update_session(sid: str, patch: SessionPatch, request: Request,
                          user=Depends(authz.perm('session.open', host='sid'))):
@@ -10624,7 +10585,7 @@ async def delete_session(sid: str, request: Request,
     if row["state"] in ("creating", "live"):
         raise ApiError(409, "session.live", "the session is live; close it first")
     await db.execute("DELETE FROM sessions WHERE id=?", sid)
-    await _delete_replay_links(" WHERE sid=?", sid)     # înregistrarea nu mai e de partajat
+    await shares.delete_replay_links(" WHERE sid=?", sid)     # înregistrarea nu mai e de partajat
     await core.prune_split_views()                      # split-urile care o refereau (3.6.12)
     # nu ștergem transcriptul pe loc: îl arhivăm (recuperabil ~120 zile), apoi
     # janitor-ul îl curăță definitiv după retenție
@@ -10639,6 +10600,8 @@ class ShareIn(BaseModel):
     stepup_password: str = ""
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
 
+
+# ── [share] Create / revoke a live share link ─────────────────────────────────────────────────────
 
 @router.post("/api/sessions/{sid}/share")
 async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
@@ -10725,7 +10688,7 @@ async def revoke_share(sid: str, request: Request,
     return {"ok": True}
 
 
-# ── Inventarul share-urilor + rezumatul de securitate (3.5.4) ────────────────────────────
+# ── [share] Inventarul share-urilor + rezumatul de securitate (3.5.4) ────────────────────────────
 # Până acum, „e totul în regulă acum?" cerea patru locuri (Setări → Securitate, sesiunile
 # partajate, guardrail-ul, cheia de semnare), iar link-urile de share live din flotă nu le
 # lista nimic. Ambele endpoint-uri doar AGREGĂ starea existentă — nicio stocare nouă — şi
@@ -10808,12 +10771,12 @@ async def revoke_all_shares(body: RevokeAllSharesIn, request: Request,
     else:
         await _require_reauth_for_secret(user, body.current_password, "revoking all share links")
     if authz.grants_of(request).has_global("shares.manage"):
-        n = await _revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
-        n += await _revoke_replay_links()    # butonul de panică acoperă şi link-urile de replay
+        n = await shares.revoke_all_shares()       # global + deconectează invitaţii live (hub.revoke_shares)
+        n += await shares.revoke_replay_links()    # butonul de panică acoperă şi link-urile de replay
     else:
         # 3.6: fără `shares.manage`, „Revocă tot" = toate link-urile TALE (doar reduce acces)
-        n = await _revoke_all_shares(user["email"], user["id"])
-        n += await _revoke_replay_links(user["id"])
+        n = await shares.revoke_all_shares(user["email"], user["id"])
+        n += await shares.revoke_replay_links(user["id"])
     audit.detail(request, "revoked all share links (%d active)" % n)
     log.warning("all share links revoked (%d active) by %s", n, user["email"])
     email_alerts.notify_security_change("all share links were revoked (%d active)" % n,
@@ -10936,7 +10899,7 @@ async def _security_checks(user, grants=None) -> list:
     #    problemă de securitate (se actualizează la reconectare) — se numără separat.
     expected = core.agent_expected().get("version")
     agents = [h for h in hosts
-              if (h["connection_type"] or "agent") == "agent" and not h["uninstalled_at"]]
+              if conntypes.is_agent(h) and not h["uninstalled_at"]]
     online = outdated = 0
     for h in agents:
         src = core.sources.get(h["id"])
@@ -10988,6 +10951,8 @@ def _share_gate(ip: str) -> None:
                        headers={"Retry-After": str(retry)}, vars={"retry": retry})
 
 
+# ── [share] Shared-link meta (guest side) ─────────────────────────────────────────────────────────
+
 @router.get("/api/shared/{token}")
 async def shared_meta(token: str, request: Request):
     """Public: minimal session info for the read-only shared view."""
@@ -11018,6 +10983,8 @@ async def shared_meta(token: str, request: Request):
 
 TEXT_VIEW_TAIL = 2 * 1024 * 1024       # cât citim pentru vizualizarea din UI (coada)
 
+
+# ── [replay] Transcripts + replay links ───────────────────────────────────────────────────────────
 
 @router.get("/api/sessions/{sid}/transcript")
 async def get_transcript(sid: str, format: str = "out", tail: bool = False,
@@ -11122,7 +11089,7 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
         raise ApiError(400, "replay.badExpiry", "expiry must be 1 hour, 24 hours or 7 days")
     label = _LABEL_BAD.sub("", body.label or "").strip()[:replay.LABEL_MAX]
     now = time.time()
-    await _delete_replay_links(" WHERE expires <= ?", now)
+    await shares.delete_replay_links(" WHERE expires <= ?", now)
     mine = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=?", user["id"])
     here = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=? AND sid=?",
                              user["id"], sid)
@@ -11151,7 +11118,7 @@ async def list_replay_links(sid: str = "", user=Depends(security.require_user)):
     Pe un host 2FA, rândul apare doar cu fereastra de step-up deschisă (ca lista de share-uri:
     titlul sesiunii e conţinut); restul se NUMĂRĂ în `hidden`."""
     now = time.time()
-    await _delete_replay_links(" WHERE expires <= ?", now)
+    await shares.delete_replay_links(" WHERE expires <= ?", now)
     sql = ("SELECT r.*, s.title, s.host_id, h.name AS host_name, h.require_2fa"
            " FROM replay_links r LEFT JOIN sessions s ON s.id = r.sid"
            " LEFT JOIN hosts h ON h.id = s.host_id WHERE r.user_id=? AND r.expires > ?")
@@ -11161,7 +11128,7 @@ async def list_replay_links(sid: str = "", user=Depends(security.require_user)):
         args.append(sid)
     rows = await db.fetchall(sql + " ORDER BY r.created DESC", *args)
     # 3.6: un link al tău pe un host pe care nu-l mai vezi nu se arată (nici nu se numără);
-    # oricum a fost revocat la schimbarea rolului (`_revoke_unauthorized_derived`)
+    # oricum a fost revocat la schimbarea rolului (`shares.revoke_unauthorized_derived`)
     vis = await authz.visible_hosts(await authz.grants_for_user(user["id"]), "host.view")
     out, hidden = [], 0
     for r in rows:
@@ -11184,7 +11151,7 @@ async def revoke_replay_link(link_id: int, request: Request, user=Depends(authz.
         raise ApiError(404, "replay.missing", "no such replay link")
     if row["host_id"]:
         await _require_host_stepup(row["host_id"], user)   # simetric cu crearea (H1)
-    await _delete_replay_links(" WHERE id=?", link_id)
+    await shares.delete_replay_links(" WHERE id=?", link_id)
     audit.detail(request, "replay link #%d for %s revoked" % (link_id, row["sid"][:8]))
     return {"ok": True}
 
@@ -11193,7 +11160,7 @@ async def revoke_replay_link(link_id: int, request: Request, user=Depends(authz.
 async def revoke_all_replay_links(request: Request, user=Depends(security.require_user)):
     """Toate link-urile de replay ale CONTULUI. Fără re-autentificare: revocarea doar reduce
     accesul, iar link-urile altor conturi nu sunt atinse (butonul global e /api/shares/revoke-all)."""
-    n = await _revoke_replay_links(user["id"])
+    n = await shares.revoke_replay_links(user["id"])
     audit.detail(request, "all own replay links revoked (%d active)" % n)
     return {"ok": True, "revoked": n}
 
@@ -11795,6 +11762,8 @@ def _install_script_for(token: str) -> str:
         ssl_ctx="ssl._create_unverified_context()" if config.AGENT_INSECURE else "None")
 
 
+# ── [install] Installer endpoints ─────────────────────────────────────────────────────────────────
+
 @router.get("/install/{enroll_token}", response_class=PlainTextResponse)
 async def install_script(enroll_token: str, request: Request):
     enroll_token = enroll_token[:-3] if enroll_token.endswith(".sh") else enroll_token
@@ -11877,6 +11846,8 @@ async def group_install_script(group_token: str, request: Request):
     email_alerts.notify_host_enrolled(grp["name"], security.client_ip(request), host_id=host_id)
     return _install_script_for(token)
 
+
+# ── [agent] Agent-facing HTTP: uninstall marker, portable Python, ptyd.py, shell integration ──────
 
 @router.post("/agent/uninstalled")
 async def agent_uninstalled(request: Request):
@@ -12041,6 +12012,8 @@ async def shell_integration_command(user=Depends(security.require_user)):
 # Agent websocket
 # ---------------------------------------------------------------------------
 
+# ── [ws] /agent/ws — agent websocket ──────────────────────────────────────────────────────────────
+
 @router.websocket("/agent/ws")
 async def agent_ws(ws: WebSocket):
     auth = ws.headers.get("authorization", "")
@@ -12196,6 +12169,8 @@ async def _send_osc133(client, hub, span: Optional[dict]) -> None:
     except Exception:                    # noqa: BLE001 — socket închis: endpoint-ul face curăţenia
         pass
 
+
+# ── [ws] /ws/shared/{token} — share-link guest websocket ──────────────────────────────────────────
 
 @router.websocket("/ws/shared/{token}")
 async def shared_ws(ws: WebSocket, token: str):
@@ -12417,6 +12392,8 @@ async def _ws_access(user_id: int, row) -> str:
         return "replay"
     return "none"
 
+
+# ── [ws] /ws/sessions/{sid} — browser terminal websocket ──────────────────────────────────────────
 
 @router.websocket("/ws/sessions/{sid}")
 @authz.ws_perm(("session.open", "session.watch", "recording.view"), host="sid")

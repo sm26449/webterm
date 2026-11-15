@@ -52,7 +52,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           audit_log cloud_backup transcript_text shell_integration tail_altscreen
           guardrail_alerts multi_account api_token update_check install_command upgrade_script
           reauth_secrets host_edit config_env compose_env forward_stepup session_attach_stepup
-          audit_2026_07 i18n_catalog route_auth audit_reads agent_flood attach_alert account_confirm csrf_ratelimit cert_pin web_sessions webauthn agent_uninstall resync_flush agent_supersede oidc
+          audit_2026_07 i18n_catalog route_auth import_layers conntypes invariants audit_reads agent_flood attach_alert account_confirm csrf_ratelimit cert_pin web_sessions webauthn agent_uninstall resync_flush agent_supersede oidc
           backup_dest cloud_direct backup_ftps serial security_events enroll_group ssh_keygen
           split_views ssh_keys ssh_jump telnet_jump docker_sudo docker_stats host_delete diagnostics_cap agent_v54 agent_v55 agent_v56 agent_v57 agent_v58 agent_v59 deploy_script forward_proxy_headers
           api_errors hostkey_alarm handshake_events migration_failfast

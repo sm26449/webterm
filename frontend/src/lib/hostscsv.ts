@@ -6,6 +6,7 @@
    trece fiecare rând prin aceeaşi validare ca `POST /api/hosts` şi re-detectează duplicatele). */
 
 import type { Host } from './api'
+import { connTypeOf, defaultPort, isConnType, isJumpType, isNetworkType, isSshType } from './conntypes'
 
 export const CSV_COLUMNS = ['name', 'connection_type', 'hostname', 'port', 'username', 'via_host',
   'folder', 'tags', 'note', 'require_2fa', 'credential_policy', 'auth_method', 'agent_note'] as const
@@ -73,10 +74,6 @@ export type RowStatus =
   | { kind: 'exists'; code: 'hostcsv.duplicate'; vars: { name: string } }
   | { kind: 'error'; code: string; vars?: Record<string, string> }
 
-const TYPES = ['agent', 'ssh', 'ssh-jump', 'telnet', 'telnet-jump']
-const JUMP = ['ssh-jump', 'telnet-jump']
-const DIRECT = ['ssh', 'ssh-jump', 'telnet', 'telnet-jump']
-const SSHLIKE = ['ssh', 'ssh-jump']
 const POLICIES = ['stored', 'ask', 'ephemeral']
 
 type Known = { name: string; type: string; hostname: string; port: number | null; username: string }
@@ -86,7 +83,7 @@ type Known = { name: string; type: string; hostname: string; port: number | null
     fiecare rând „creat" intră în setul cunoscut, deci un nume repetat în fişier e duplicat. */
 export function previewRows(rows: CsvRow[], hosts: Host[], credentialPolicy = ''): RowStatus[] {
   const known: Known[] = hosts.filter((h) => !h.ephemeral).map((h) => ({
-    name: h.name, type: h.connection_type || 'agent', hostname: h.hostname ?? '',
+    name: h.name, type: connTypeOf(h.connection_type), hostname: h.hostname ?? '',
     port: h.ssh_port ?? null, username: h.ssh_username ?? '',
   }))
   const out: RowStatus[] = new Array(rows.length)
@@ -106,7 +103,7 @@ export function previewRows(rows: CsvRow[], hosts: Host[], credentialPolicy = ''
         port = +r.port
       }
       let viaNotAgent = false
-      if (JUMP.includes(ctype)) {
+      if (isJumpType(ctype)) {
         const via = r.via_host.trim()
         if (!via) return err('hostcsv.viaRequired')
         const cands = known.filter((k) => lc(k.name) === lc(via))
@@ -116,16 +113,16 @@ export function previewRows(rows: CsvRow[], hosts: Host[], credentialPolicy = ''
         viaNotAgent = !agents.length
       }
       // validarea comună (ordinea din `_validate_host`)
-      if (!TYPES.includes(ctype)) return err('host.badType')
+      if (!isConnType(ctype)) return err('host.badType')
       if (!r.name.trim()) return err('host.nameRequired')
       const policy = agent ? 'stored' : (credentialPolicy || lc(r.credential_policy) || 'ask')
       if (!POLICIES.includes(policy)) return err('host.badCredentialPolicy')
-      if (DIRECT.includes(ctype) && !r.hostname.trim()) return err('host.hostnameRequired')
-      if (SSHLIKE.includes(ctype) && !r.username.trim()) return err('ssh.userRequired')
-      if (SSHLIKE.includes(ctype) && !['password', 'key'].includes(lc(r.auth_method) || 'password')) return err('host.badAuthMethod')
+      if (isNetworkType(ctype) && !r.hostname.trim()) return err('host.hostnameRequired')
+      if (isSshType(ctype) && !r.username.trim()) return err('ssh.userRequired')
+      if (isSshType(ctype) && !['password', 'key'].includes(lc(r.auth_method) || 'password')) return err('host.badAuthMethod')
       if (viaNotAgent) return err('sshjump.needsAgent')
       const k: Known = { name: r.name.trim(), type: ctype, hostname: r.hostname.trim(),
-        port: agent ? null : (port ?? (ctype.startsWith('telnet') ? 23 : 22)), username: agent ? '' : r.username.trim() }
+        port: agent ? null : (port ?? defaultPort(ctype)), username: agent ? '' : r.username.trim() }
       const dup = known.some((h) => lc(h.name) === lc(k.name)) || (!agent && known.some((h) =>
         h.type !== 'agent' && lc(h.hostname) === lc(k.hostname) && h.port === k.port && lc(h.username) === lc(k.username)))
       if (dup) return { kind: 'exists', code: 'hostcsv.duplicate', vars: { name: k.name } }

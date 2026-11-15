@@ -195,11 +195,16 @@ async def main():
         r = (await c.post("/api/version/check", json={"enabled": True})).json()
         check("repornirea răspunde pe loc cu rezultatul",
               r["enabled"] is True and r["update_available"] is True, str(r))
+        check("…cu aceeaşi formă ca GET (comanda + link-ul de release notes), nu doar starea",
+              r.get("update_command", "").endswith(newer) and r.get("release_url", "").endswith("/" + newer), str(r))
 
         # comanda de update: o AFIŞĂM, n-o executăm niciodată din aplicaţie
         r = (await c.get("/api/version")).json()
         check("comanda de update e dată gata de rulat",
               r.get("update_command", "").endswith(newer), str(r.get("update_command")))
+        check("link spre release notes-urile versiunii noi",
+              r.get("release_url") == f"https://github.com/{config.UPDATE_REPO}/releases/tag/{newer}",
+              str(r.get("release_url")))
         check("comanda nu e un endpoint care execută ceva",
               not any(p.startswith("/api/version/run") for p in
                       [route.path for route in app.routes if hasattr(route, "path")]))

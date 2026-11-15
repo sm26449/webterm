@@ -1,5 +1,6 @@
 import { askSecret } from './secretPrompt'
 import { ssoStepupRedirect } from './stepup'
+import type { ConnType } from './conntypes'
 
 export interface WatermarkConfig {
   enabled: boolean
@@ -141,7 +142,7 @@ export interface Host {
   install_command?: string
   install_command_dedicated?: string
   // conectare directă
-  connection_type?: 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
+  connection_type?: ConnType
   via_host_id?: number | null
   ephemeral?: boolean
   ssh_username?: string | null

@@ -26,7 +26,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, security  # noqa: E402
+from app import api, config, db, fwddomain, security  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -185,7 +185,7 @@ async def main():
               allowed is True)
 
         # ── cap-coadă pe SUBDOMENIU: client fără jar de cookie-uri (= browserul pe slug.<dom>) ──
-        fwd_host = f"{gated_slug}.{api.forward_domain()}"
+        fwd_host = f"{gated_slug}.{fwddomain.forward_domain()}"
         async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30,
                                      follow_redirects=False) as sub:
             H = {"host": fwd_host, "cookie": f"{api.FWD_COOKIE}={ticket}"}

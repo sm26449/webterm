@@ -15,8 +15,8 @@ import { ServerIcon, KeyIcon } from './Icons'
 import HelpTip from './HelpTip'
 import { HostsCsvImport } from './HostsCsv'
 import { connSignature, failingField, stageViews, summaryText, TestResult } from '../lib/hosttest'
+import { ConnType, defaultPort, isJumpType, isSshType, isTelnetType } from '../lib/conntypes'
 
-type ConnType = 'agent' | 'ssh' | 'ssh-jump' | 'telnet' | 'telnet-jump'
 
 const field =
   'w-full rounded-md bg-ink-800 px-4 py-2.5 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-600'
@@ -53,7 +53,7 @@ export default function AddHostModal(props: {
   const [connType, setConnType] = useState<ConnType>((edit?.connection_type as ConnType) || (pj ? 'ssh-jump' : 'agent'))
   // un host „jump" (ssh-jump/telnet-jump) e definit de agentul `via` — la editare arătăm doar
   // comutatorul de PROTOCOL (SSH↔Telnet), nu selectorul generic (a-l muta pe „agent" l-ar rupe).
-  const isJump = connType === 'ssh-jump' || connType === 'telnet-jump'
+  const isJump = isJumpType(connType)
   // Sfaturile contextuale (coach tips) nu apar peste walkthrough-ul de primă rulare (fie marcat
   // gata, fie nemontat acum) şi doar la CREARE — la editare hostul e deja configurat, un hint
   // „ce e modul agent" ar fi redundant. Copia variază după tipul ales (agent vs ssh/jump).
@@ -93,8 +93,8 @@ export default function AddHostModal(props: {
   // „Test connection": rezultatul e legat de amprenta câmpurilor de conexiune din momentul
   // testului — orice editare ulterioară (host, port, user, parolă, cheie, via) îl invalidează,
   // deci „Salvează (verificat)" + pinul de host-key nu pot pleca pentru altă ţintă decât cea testată.
-  const isSshLike = connType === 'ssh' || connType === 'ssh-jump'
-  const isTelnet = connType === 'telnet' || connType === 'telnet-jump'
+  const isSshLike = isSshType(connType)
+  const isTelnet = isTelnetType(connType)
   const usePending = !!pendingKey && isSshLike && authMethod === 'key' && policy === 'stored'
   const sig = connSignature({ connType, hostname: hostname.trim(), port, username: username.trim(),
     authMethod, secret, passphrase, viaHost, policy, pending: usePending ? pendingKey?.id : '' })
@@ -248,7 +248,7 @@ export default function AddHostModal(props: {
         auth_method: authMethod,
         credential_policy: policy,
       })
-      if (connType === 'ssh-jump' || connType === 'telnet-jump') body.via_host_id = viaHost
+      if (isJump) body.via_host_id = viaHost
       // La EDITARE, un câmp gol de parolă înseamnă „las-o pe cea salvată", nu „şterge-o":
       // altfel simpla redenumire a hostului i-ar fi golit credenţialele.
       if (policy === 'ask') {
@@ -478,7 +478,7 @@ export default function AddHostModal(props: {
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {([['ssh-jump', 'SSH-jump'], ['telnet-jump', 'Telnet-jump']] as [ConnType, string][]).map(([ct, lbl]) => (
                   <button key={ct} type="button" aria-pressed={connType === ct}
-                    onClick={() => { setConnType(ct); setPort(ct === 'telnet-jump' ? 23 : 22) }}
+                    onClick={() => { setConnType(ct); setPort(defaultPort(ct)) }}
                     className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {lbl}
@@ -489,7 +489,7 @@ export default function AddHostModal(props: {
               <div className="flex gap-1 rounded-xl bg-ink-800 p-1 text-sm">
                 {([['agent', 'Agent'], ['ssh', 'SSH'], ['telnet', 'Telnet']] as [ConnType, string][]).map(([ct, label]) => (
                   <button key={ct} type="button" aria-pressed={connType === ct}
-                    onClick={() => { setConnType(ct); setPort(ct === 'telnet' ? 23 : 22) }}
+                    onClick={() => { setConnType(ct); setPort(defaultPort(ct)) }}
                     className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
                       connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                     {label}
@@ -547,7 +547,7 @@ export default function AddHostModal(props: {
 
             {connType !== 'agent' && (
               <div className="space-y-3 rounded-xl border border-ink-700 p-3">
-                {(connType === 'ssh-jump' || connType === 'telnet-jump') && (
+                {isJump && (
                   <label className="block">
                     <span className={label}>{t('addhost.jumpVia')}</span>
                     <select ref={viaRef} {...invalidFor('via')} required value={viaHost || ''} disabled={!!pj}
@@ -562,7 +562,7 @@ export default function AddHostModal(props: {
                 )}
                 <div className="flex gap-2">
                   <label className="block min-w-0 flex-1">
-                    <span className={label}>{(connType === 'ssh-jump' || connType === 'telnet-jump') ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
+                    <span className={label}>{isJump ? t('addhost.jumpTarget') : 'Hostname / IP'}</span>
                     <input ref={hostnameRef} {...invalidFor('hostname')} required
                       placeholder={t('addhost.hostnamePlaceholder')} value={hostname}
                       onChange={(e) => setHostname(e.target.value)} className={field} />
@@ -578,9 +578,9 @@ export default function AddHostModal(props: {
                     user/parolă stocate. Deci câmpul de user şi politica de credenţiale lipsesc. */}
                 {connType !== 'telnet-jump' && (
                 <label className="block">
-                  <span className={label}>{t('addhost.user')}{(connType === 'ssh' || connType === 'ssh-jump') ? '' : t('addhost.optionalSuffix')}</span>
-                  <input ref={usernameRef} {...invalidFor('username')} required={connType === 'ssh' || connType === 'ssh-jump'}
-                    placeholder={(connType === 'ssh' || connType === 'ssh-jump') ? t('addhost.userPlaceholderSsh') : t('addhost.userPlaceholderOther')}
+                  <span className={label}>{t('addhost.user')}{isSshLike ? '' : t('addhost.optionalSuffix')}</span>
+                  <input ref={usernameRef} {...invalidFor('username')} required={isSshLike}
+                    placeholder={isSshLike ? t('addhost.userPlaceholderSsh') : t('addhost.userPlaceholderOther')}
                     value={username}
                     onChange={(e) => setUsername(e.target.value)} className={field} />
                 </label>

@@ -1,4 +1,5 @@
 import { Host, Session } from './api'
+import { isAgentType, isJumpType } from './conntypes'
 
 /* Logica PURĂ a overlay-ului „host offline" din sesiune (componenta: HostOfflineOverlay).
    Separată de React ca s-o putem testa în vitest fără DOM: ce variantă se arată, de când e
@@ -10,10 +11,8 @@ import { Host, Session } from './api'
     sidebarul să nu se contrazică vreodată. */
 export function canWake(host: Host | undefined | null): boolean {
   if (!host || host.online) return false
-  return !host.connection_type || host.connection_type === 'agent'
+  return isAgentType(host.connection_type)
 }
-
-const JUMP = new Set(['ssh-jump', 'telnet-jump'])
 
 /** Variantele overlay-ului:
     - `agent`: hostul de agent al sesiunii a căzut (agentul nu mai e conectat);
@@ -46,7 +45,7 @@ export function offlineMode(i: OfflineInput): OfflineMode | null {
     // telnet-bastion prin agent (kind=telnet): agentul e viu, dar legătura spre device a căzut
     return s.kind === 'telnet' && lost ? 'connLost' : null
   }
-  if (JUMP.has(host.connection_type ?? '') && i.viaHost && !i.viaHost.online && open) return 'via'
+  if (isJumpType(host.connection_type) && i.viaHost && !i.viaHost.online && open) return 'via'
   // SSH/telnet fără agent: „offline" înseamnă o legătură pierdută de gateway (sesiunea vine
   // `lost`). Un host direct cu `online=false` şi sesiunea vie e doar „la cerere" (fără dial
   // încă, ex. după un restart de gateway) — re-dial-ul îl face chiar ataşarea WS, nu e o cădere.

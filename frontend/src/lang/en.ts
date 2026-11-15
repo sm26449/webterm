@@ -3341,6 +3341,7 @@ const en: Lang = {
     'settings.update.unreachable': "GitHub unreachable — try again later.",
     'settings.update.checkNow': "Check now",
     'settings.update.checking': "Checking…",
+    'settings.update.releaseNotes': "What's new in {version} (release notes on GitHub) ↗",
     'settings.update.howTo': "Run this on the server where WebTerm is installed (keeps your data; has a health check and automatic rollback):",
     'settings.update.copy': "Copy",
     'settings.update.copied': "Copied ✓",

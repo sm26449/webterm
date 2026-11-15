@@ -35,6 +35,7 @@ holds the user-facing guides and the internal architecture notes.
 
 Why the system is shaped the way it is. Written for someone about to change it.
 
+- [INVARIANTS](design/INVARIANTS.md) — **read first before changing hosts, credentials, step-up, shares, roles, the guardrail, the agent or forwards**: the business rules that have been got wrong, why they exist, where the code enforces them
 - [ARCHITECTURE](design/ARCHITECTURE.md) — the three parts, the trust boundaries, what roles enforce and what they cannot
 - [ROLES-AND-SSH](design/ROLES-AND-SSH.md) — the roles design (3.6.x) with the route-by-route permission matrix, and the native SSH entry proposal (3.7.x)
 - [SIGNED-UPDATES](design/SIGNED-UPDATES.md) — how agent updates are signed, and how to rotate the key without touching a host

@@ -461,7 +461,7 @@ These routes return data about more than one host. Each one filters with
 | Endpoint | Today | 3.6 |
 |---|---|---|
 | `/ws/sessions/{sid}` (`browser_ws`, api.py:9149) | `require_user_ws`; any account can attach to any session | Resolve the host from the session. `session.open` → writable owner client. Else `session.watch` → `client.writable=False` (the frontend already supports read-only guests). Else `recording.view` and the session is closed → replay only. Else close with 4404. The 60-second `_revalidate` (api.py:9307) also re-runs `effective()`. A downgrade from open to watch flips `writable` live; a loss of access closes with 4403. |
-| `/ws/shared/{token}` (`shared_ws`) | the token is the credential | Unchanged for guests. **But** a share is revoked when its creator loses `share.live` on that host (bindings change → `_revoke_all_shares(owner_id=…)` filtered by host). A writable share is downgraded when the creator loses `share.live_write`. |
+| `/ws/shared/{token}` (`shared_ws`) | the token is the credential | Unchanged for guests. **But** a share is revoked when its creator loses `share.live` on that host (bindings change → `shares.revoke_unauthorized_derived(uid)`, checked per host). A writable share is downgraded when the creator loses `share.live_write`. |
 | `/agent/ws` | host token | Not a user principal; RBAC does not apply. Agent-originated events (alerts, diagnostics, reconcile) fan out by role (§A.6.8). |
 | Forward proxy (`route_forward` + `ForwardWSMiddleware`, `/__wtfwd/auth`) | HMAC ticket `(slug, exp, uid)`, 12h TTL; 2FA hosts also check the window | `/__wtfwd/auth` issues a ticket only with `forward.use` on the forward's host. Because the ticket outlives role changes, `route_forward` and `handle_forward_ws` re-check `forward.use` for the ticket's `uid` (cached by epoch, so it is a dict lookup). A binding change also calls the existing `security.bump_forward_epoch(user_id)`. |
 
@@ -688,9 +688,9 @@ which hosts exist and are 2FA.
   - a no-binding user,
   - a token,
   
-  and assert the expected 2xx / 403 / 404. The matrix in this doc and the test data come from the
-  same table: `authz.ROUTE_PERMS` is exported, and the doc appendix is regenerated from it by a
-  script. This keeps the doc honest.
+  and assert the expected 2xx / 403 / 404. As built (3.6.0+), there is no generated table: each
+  route declares its permission with `authz.perm(...)`, Appendix A is maintained by hand, and
+  `tests/route_auth_test.py` fails when the two differ. This keeps the doc honest.
 - **`rbac_filter_test.py`:** lists, search, history, audit, apps, status counts and the alert
   fan-out, with two folders and two users.
 - **`rbac_escalation_test.py`:** each no-escalation rule (§A.6.6), the last-Owner protections,
@@ -1110,7 +1110,7 @@ current pace.
 
 | Milestone | Scope | Risk | Effort | Acceptance criteria / tests |
 |---|---|---|---|---|
-| **3.6.0: roles core** | schema + seeding; `authz.py`; `perm()` on all 198 routes + 3 WS + forward; runtime fail-closed guard; built-in roles; list filtering (§A.6.3); token ∩ creator; alert fan-out; audit `actor_id/host_id/via`; minimal Users & roles tab (bind built-in roles with scope); `/api/me/permissions` + UI gating of the main surfaces; admin CLI `promote`; docs (ARCHITECTURE, THREAT-MODEL, SECURITY-FEATURES, new ROLES.md) | **High.** It touches every route, and one mis-mapped route is a hole | **L–XL** | the tests in §A.12 green; a 3.5.16 DB upgrades with zero UI difference for a single user (Playwright snapshot of the main screens unchanged); dedicated security review passed; route matrix test generated from `ROUTE_PERMS` |
+| **3.6.0: roles core** | schema + seeding; `authz.py`; `perm()` on all 198 routes + 3 WS + forward; runtime fail-closed guard; built-in roles; list filtering (§A.6.3); token ∩ creator; alert fan-out; audit `actor_id/host_id/via`; minimal Users & roles tab (bind built-in roles with scope); `/api/me/permissions` + UI gating of the main surfaces; admin CLI `promote`; docs (ARCHITECTURE, THREAT-MODEL, SECURITY-FEATURES, new ROLES.md) | **High.** It touches every route, and one mis-mapped route is a hole | **L–XL** | the tests in §A.12 green; a 3.5.16 DB upgrades with zero UI difference for a single user (Playwright snapshot of the main screens unchanged); dedicated security review passed; route matrix checked against Appendix A by `tests/route_auth_test.py` (as built: no generated table) |
 | **3.6.1: custom roles + SSO** | role editor with ⚑ badges and presets (Auditor, Files-only); `oidc_group_roles` + UI + env bootstrap; re-sync at login and step-up; explain-access drawer | Medium (SSO edge cases) | M | `rbac_oidc_test`; editor prevents escalation; explain endpoint matches the matrix |
 | **3.6.2: polish** | time-bound bindings (expires + janitor); crown-jewel flag + warnings; deploy-key graph scope warnings; per-role guardrail rule sets (optional) | Low | S–M | expiry test; warning shown and audited |
 | **(3.6.x later)** | access requests / JIT; per-host "approve each connection" | Medium | M | not scheduled |
@@ -1192,7 +1192,7 @@ These are candidates for after 3.7, listed so they are not forgotten. None is pr
 - **Prometheus exporter** (already on the post-3.0 backlog): `/metrics` behind a token scope, with
   hosts online, sessions, agent versions, SSH connections and auth failures.
 - **API documentation.** FastAPI generates OpenAPI; publishing it, filtered to token-accessible
-  routes and annotated with the permission each needs (from `ROUTE_PERMS`), would document RBAC
+  routes and annotated with the permission each needs (from each route's `authz.perm(...)` dependency), would document RBAC
   for free.
 - **Recording storage off-box** (S3-compatible), as Warpgate does, for retention beyond the local
   volume.
@@ -1433,7 +1433,7 @@ Code: `ssomap.parse_role_map` / `reconcile_config` (called once from `main.lifes
   that second (not after the 30 s TTL), and `_arm_expiry_wake` sets one loop timer per end time
   that wakes every live socket, so terminals and forwards re-check at the end too. The
   reaper (60 s) calls `api.sweep_expired_bindings` → `authz.sweep_expired_bindings` under the
-  binding lock, then per account `bump_forward_epoch` + `_revoke_unauthorized_derived`, an audit
+  binding lock, then per account `bump_forward_epoch` + `shares.revoke_unauthorized_derived`, an audit
   row (`/janitor/binding-expired`, actor `system`) and an `access_expired` alert.
   `owner_count` now counts permanent Owners @ all only; that single change makes binding removal,
   account deletion, SSO re-sync and the local-password path refuse to remove the last permanent
@@ -1640,74 +1640,78 @@ Legend:
 - **Tok**: reachable with an automation token today (`require_scope`).
 - **⚠**: the route leaks cross-host information today for a scoped user and needs filtering.
 
-Counts: 187 routes in `api.py` (184 HTTP + 3 WebSocket), 8 in `webauthn_api.py`
-(`/api/webauthn/*`), 3 in `oidc_api.py` (`/api/oidc/*`), plus the forward proxy (an HTTP
-middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Line numbers are
-`api.py` unless stated otherwise.
+The table covers every route of every router mounted in `main.py` (`api.py`, `webauthn_api.py`
+for `/api/webauthn/*`, `oidc_api.py` for `/api/oidc/*`, `scim.py`), plus the forward proxy (an
+HTTP middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. It is edited by
+hand, one row per method; `tests/route_auth_test.py` fails when a row is missing or its Perm differs
+from the route's `authz.perm(...)`. To find a route in the code:
+`grep -n '@router\.' gateway/app/*.py | grep '<path>'`. (Rows carried line numbers until
+3.6.35; they went stale with every change and were removed.) The **Tok** and **⚠** marks
+describe the pre-3.6 state this design started from.
 
 ### A.1 Public, setup, login (unchanged)
 
 | Route | Method | Perm | Scope | Notes |
 |---|---|---|---|---|
-| `/healthz` (146) | GET | — | P | liveness |
-| `/api/state` (157) | GET | — | P | has-account flag only |
-| `/api/setup` (209) | POST | — | P | first account → **Owner @ all** |
-| `/api/login` (450) | POST | — | P | |
-| `/api/logout` (569) | POST | — | P | also closes the user's SSH connections (3.7) |
-| `/api/shared/{token}` (8092) | GET | — | P | token = credential; revoked if the creator loses `share.live` |
-| `/api/replay/meta` (8347) | GET | — | P | `X-Replay-Token` |
-| `/api/replay/cast` (8361) | GET | — | P | idem |
-| `/api/replay/text` (8378) | GET | — | P | idem |
-| `/install/{enroll_token}` (8632) | GET | — | P | |
-| `/install/group/{group_token}` (8666) | GET | — | P | auto-created host lands in the group's folder → in scope for that folder's bindings |
-| `/agent/uninstalled` (8715) | POST | — | P | host token |
-| `/agent/ptyd.py` (8749) | GET | — | P | |
+| `/healthz` | GET | — | P | liveness |
+| `/api/state` | GET | — | P | has-account flag only |
+| `/api/setup` | POST | — | P | first account → **Owner @ all** |
+| `/api/login` | POST | — | P | |
+| `/api/logout` | POST | — | P | also closes the user's SSH connections (3.7) |
+| `/api/shared/{token}` | GET | — | P | token = credential; revoked if the creator loses `share.live` |
+| `/api/replay/meta` | GET | — | P | `X-Replay-Token` |
+| `/api/replay/cast` | GET | — | P | idem |
+| `/api/replay/text` | GET | — | P | idem |
+| `/install/{enroll_token}` | GET | — | P | |
+| `/install/group/{group_token}` | GET | — | P | auto-created host lands in the group's folder → in scope for that folder's bindings |
+| `/agent/uninstalled` | POST | — | P | host token |
+| `/agent/ptyd.py` | GET | — | P | |
 | `/agent/python/{target}` (3.6.9) | GET | — | P | host token (portable Python; pinned + SHA-256-verified tarballs only) |
-| `/agent/shell-integration.sh` (8798) | GET | — | P | |
-| `/__wtfwd/auth` (5325) | GET | — (handler checks `forward.use`) | P + H(slug→host) | PUBLIC route (the session cookie is validated in the handler); 3.6.0 checks `forward.use` on the forward's host before issuing the ticket: invisible host → the same 404 as a missing forward |
-| `/api/webauthn/login/options` (wa:205) | POST | — | P | |
-| `/api/webauthn/login/verify` (wa:215) | POST | — | P | |
-| `/api/oidc/status` (oi:40) | GET | — | P | |
-| `/api/oidc/login` (oi:46) | GET | — | P | `intent=stepup&host_id` → step-up callback must require `host.view` on that host |
-| `/api/oidc/callback` (oi:64) | GET | — | P | provisioning + **group → binding re-sync** (§A.7) |
+| `/agent/shell-integration.sh` | GET | — | P | |
+| `/__wtfwd/auth` | GET | — (handler checks `forward.use`) | P + H(slug→host) | PUBLIC route (the session cookie is validated in the handler); 3.6.0 checks `forward.use` on the forward's host before issuing the ticket: invisible host → the same 404 as a missing forward |
+| `/api/webauthn/login/options` | POST | — | P | |
+| `/api/webauthn/login/verify` | POST | — | P | |
+| `/api/oidc/status` | GET | — | P | |
+| `/api/oidc/login` | GET | — | P | `intent=stepup&host_id` → step-up callback must require `host.view` on that host |
+| `/api/oidc/callback` | GET | — | P | provisioning + **group → binding re-sync** (§A.7) |
 
 ### A.2 Account and self-service (S)
 
 | Route | Method | Perm | Scope | Notes |
 |---|---|---|---|---|
-| `/api/account` (631) | POST | — | S | reauth |
-| `/api/totp/status` (723) | GET | — | S | |
-| `/api/totp/setup` (1101) | POST | — | S | |
-| `/api/totp/activate` (1123) | POST | — | S | |
-| `/api/totp/disable` (1155) | POST | — | S | |
-| `/api/totp/recovery-codes` (1176) | POST | — | S | |
-| `/api/account/sessions` (935) | GET | — | S | |
-| `/api/account/sessions/{rid}` (948) | DELETE | — | S | |
-| `/api/account/sessions/revoke-others` (968) | POST | — | S | also SSH connections (3.7) |
-| `/api/alerts` (1561) | GET | — | S | rows are per user; the fan-out decides |
-| `/api/alerts/unread` (1568) | GET | — | S | |
-| `/api/alerts/read` (1574) | POST | — | S | |
-| `/api/alerts` (1582) | DELETE | — | S | |
-| `/api/alerts/prefs` (1589) | GET | — | S | |
-| `/api/alerts/prefs` (1594) | POST | — | S | |
-| `/api/push/status` (2964) | GET | — | S | own push state + server VAPID public key |
-| `/api/push/subscribe` (2981) | POST | — | S | own device subscription |
-| `/api/push/unsubscribe` (3003) | POST | — | S | own device subscription |
-| `/api/push/prefs` (3013) | POST | — | S | own push preferences |
-| `/api/push/test` (3021) | POST | — | S | test push to own devices |
-| `/api/version` (2057) | GET | — | S | |
-| `/api/changelog` (3611) | GET | — | S | |
-| `/api/split-views` (4476) | GET | — | S | panes without access show "no access" |
-| `/api/split-views` (4497) | POST | — | S | pane sids must be visible (`session.watch`) |
-| `/api/split-views/{sv_id}` (4512) | PATCH | — | S | idem |
-| `/api/split-views/{sv_id}` (4538) | DELETE | — | S | |
-| `/api/shell-integration/command` (8809) | GET | — | S | |
-| `/api/webauthn/register/options` (wa:81) | POST | — | S | |
-| `/api/webauthn/register/verify` (wa:176) | POST | — | S | second gate |
-| `/api/webauthn/stepup/options` (wa:268) | POST | `host.view` | H(body) | host_id 0 = account scope (S) |
-| `/api/webauthn/stepup/verify` (wa:284) | POST | `host.view` | H(body) | idem; also resolves pending SSH approvals (3.7) |
-| `/api/webauthn/credentials` (wa:321) | GET | — | S | |
-| `/api/webauthn/credentials/{cred_id}` (wa:334) | DELETE | — | S | |
+| `/api/account` | POST | — | S | reauth |
+| `/api/totp/status` | GET | — | S | |
+| `/api/totp/setup` | POST | — | S | |
+| `/api/totp/activate` | POST | — | S | |
+| `/api/totp/disable` | POST | — | S | |
+| `/api/totp/recovery-codes` | POST | — | S | |
+| `/api/account/sessions` | GET | — | S | |
+| `/api/account/sessions/{rid}` | DELETE | — | S | |
+| `/api/account/sessions/revoke-others` | POST | — | S | also SSH connections (3.7) |
+| `/api/alerts` | GET | — | S | rows are per user; the fan-out decides |
+| `/api/alerts/unread` | GET | — | S | |
+| `/api/alerts/read` | POST | — | S | |
+| `/api/alerts` | DELETE | — | S | |
+| `/api/alerts/prefs` | GET | — | S | |
+| `/api/alerts/prefs` | POST | — | S | |
+| `/api/push/status` | GET | — | S | own push state + server VAPID public key |
+| `/api/push/subscribe` | POST | — | S | own device subscription |
+| `/api/push/unsubscribe` | POST | — | S | own device subscription |
+| `/api/push/prefs` | POST | — | S | own push preferences |
+| `/api/push/test` | POST | — | S | test push to own devices |
+| `/api/version` | GET | — | S | |
+| `/api/changelog` | GET | — | S | |
+| `/api/split-views` | GET | — | S | panes without access show "no access" |
+| `/api/split-views` | POST | — | S | pane sids must be visible (`session.watch`) |
+| `/api/split-views/{sv_id}` | PATCH | — | S | idem |
+| `/api/split-views/{sv_id}` | DELETE | — | S | |
+| `/api/shell-integration/command` | GET | — | S | |
+| `/api/webauthn/register/options` | POST | — | S | |
+| `/api/webauthn/register/verify` | POST | — | S | second gate |
+| `/api/webauthn/stepup/options` | POST | `host.view` | H(body) | host_id 0 = account scope (S) |
+| `/api/webauthn/stepup/verify` | POST | `host.view` | H(body) | idem; also resolves pending SSH approvals (3.7) |
+| `/api/webauthn/credentials` | GET | — | S | |
+| `/api/webauthn/credentials/{cred_id}` | DELETE | — | S | |
 | `/api/me/permissions` | GET | — | S | §A.9 (3.6.0) |
 | *new* `/api/account/ssh-keys` (3.7) | GET/POST/DELETE | — | S | second gate on POST/DELETE |
 
@@ -1715,9 +1719,9 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 
 | Route | Method | Perm | Scope | Notes |
 |---|---|---|---|---|
-| `/api/users` (768) | GET | `users.manage` | G / S | without the perm → `[self]` ⚠ |
-| `/api/users` (779) | POST | `users.manage` | G | body gains role + scope; no-escalation |
-| `/api/users/{uid}/delete` (809) | POST | `users.manage` | G | Owners only by Owners; tokens are already deleted, add bindings + SSH keys |
+| `/api/users` | GET | `users.manage` | G / S | without the perm → `[self]` ⚠ |
+| `/api/users` | POST | `users.manage` | G | body gains role + scope; no-escalation |
+| `/api/users/{uid}/delete` | POST | `users.manage` | G | Owners only by Owners; tokens are already deleted, add bindings + SSH keys |
 | `/api/users/{uid}/bindings` | GET | `users.manage` | G | 3.6.0 |
 | `/api/users/{uid}/bindings` | POST | `users.manage` | G | §A.6.6; reauth + second gate (3.6.0) |
 | `/api/users/{uid}/bindings/{bid}/delete` | POST | `users.manage` | G | POST with a body (reauth), like account deletion — a DELETE with a body is badly supported by clients (3.6.0) |
@@ -1735,191 +1739,191 @@ middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. Li
 | `/api/settings/scim/revoke` | POST | `users.manage` | G | **Owner only** (handler): revoke the SCIM token; reauth + second gate (3.6.11) |
 | `/api/settings/scim/enabled` | POST | `users.manage` | G | **Owner only** (handler): turn SCIM on (reauth + second gate) / off (no reauth: it only reduces access) (3.6.11) |
 | `/api/users/{uid}/enable` | POST | `users.manage` | G | **Owner only** (handler): re-enable an account SCIM disabled; reauth + second gate (3.6.11) |
-| `/api/tokens` (987) | GET | `tokens.create` | S / G | own; all with `tokens.manage` ⚠ |
-| `/api/tokens` (993) | POST | `tokens.create` | G | role ⊆ creator |
-| `/api/tokens/{tid}/revoke` (1026) | POST | `tokens.create` | S / G | own, or any with `tokens.manage` |
-| `/api/enroll-groups` (1036) | GET | `hosts.create` | G | ⚠ |
-| `/api/enroll-groups` (1058) | POST | `hosts.create` | G | the folder decides future access |
-| `/api/enroll-groups/{gid}/revoke` (1090) | POST | `hosts.create` | G | |
+| `/api/tokens` | GET | `tokens.create` | S / G | own; all with `tokens.manage` ⚠ |
+| `/api/tokens` | POST | `tokens.create` | G | role ⊆ creator |
+| `/api/tokens/{tid}/revoke` | POST | `tokens.create` | S / G | own, or any with `tokens.manage` |
+| `/api/enroll-groups` | GET | `hosts.create` | G | ⚠ |
+| `/api/enroll-groups` | POST | `hosts.create` | G | the folder decides future access |
+| `/api/enroll-groups/{gid}/revoke` | POST | `hosts.create` | G | |
 
 ### A.4 Instance settings, backups, signing (G)
 
 | Route | Method | Perm | Scope | Notes |
 |---|---|---|---|---|
-| `/api/settings/command-guard` (1367) | GET | `settings.manage` | G | (Operators may need a read for UI hints: return rules count only) |
-| `/api/settings/command-guard` (1372) | POST | `settings.manage` | G | |
-| `/api/settings/watermark` (1402) | GET | — | S | everyone needs it to render the watermark |
-| `/api/settings/watermark` (1407) | POST | `settings.manage` | G | |
-| `/api/settings/smtp` (1421) | GET | `settings.manage` | G | |
-| `/api/settings/smtp` (1433) | POST | `settings.manage` | G | |
-| `/api/settings/webhook/test` (1490) | POST | `settings.manage` | G | |
-| `/api/settings/smtp/test` (1502) | POST | `settings.manage` | G | |
-| `/api/settings/alerts` (1523) | GET | `settings.manage` | G | |
-| `/api/settings/alerts` (1529) | POST | `settings.manage` | G | |
-| `/api/settings/forward` (3200) | GET | `settings.manage` | G | |
-| `/api/settings/forward` (3205) | POST | `settings.manage` | G | |
+| `/api/settings/command-guard` | GET | `settings.manage` | G | (Operators may need a read for UI hints: return rules count only) |
+| `/api/settings/command-guard` | POST | `settings.manage` | G | |
+| `/api/settings/watermark` | GET | — | S | everyone needs it to render the watermark |
+| `/api/settings/watermark` | POST | `settings.manage` | G | |
+| `/api/settings/smtp` | GET | `settings.manage` | G | |
+| `/api/settings/smtp` | POST | `settings.manage` | G | |
+| `/api/settings/webhook/test` | POST | `settings.manage` | G | |
+| `/api/settings/smtp/test` | POST | `settings.manage` | G | |
+| `/api/settings/alerts` | GET | `settings.manage` | G | |
+| `/api/settings/alerts` | POST | `settings.manage` | G | |
+| `/api/settings/forward` | GET | `settings.manage` | G | |
+| `/api/settings/forward` | POST | `settings.manage` | G | |
 | `/api/certs` (3.6.7) | GET | `settings.manage` | G | | read-only TLS status; `can_renew` = `certs.renew` |
 | `/api/certs/check` (3.6.7) | POST | `settings.manage` | G | | rate-limited instance-wide (30 s) |
 | `/api/certs/renew-host` (3.6.7) | PUT | `certs.renew` | G | | the picked host must be an agent host where the Owner has `session.open` |
-| `/api/settings/deploy-key-policy` (7088) | GET | `settings.manage` | G | |
-| `/api/settings/deploy-key-policy` (7093) | POST | `settings.manage` | G | |
-| `/api/version/check` (2064) | POST | `settings.manage` | G | |
-| `/api/version/refresh` (2073) | POST | `settings.manage` | G | |
-| `/api/backup/status` (3329) | GET | `backups.manage` | G | |
-| `/api/backup/download` (3345) | POST | `backups.manage` | G | reauth |
-| `/api/backup/stored/{name}/download` (3359) | POST | `backups.manage` | G | |
-| `/api/backup/restore` (3374) | POST | `backups.manage` | G | |
-| `/api/backup/schedule` (3408) | POST | `backups.manage` | G | |
-| `/api/backup/stored/{name}` (3417) | DELETE | `backups.manage` | G | |
-| `/api/backup/seen` (3429) | POST | `backups.manage` | G | |
+| `/api/settings/deploy-key-policy` | GET | `settings.manage` | G | |
+| `/api/settings/deploy-key-policy` | POST | `settings.manage` | G | |
+| `/api/version/check` | POST | `settings.manage` | G | |
+| `/api/version/refresh` | POST | `settings.manage` | G | |
+| `/api/backup/status` | GET | `backups.manage` | G | |
+| `/api/backup/download` | POST | `backups.manage` | G | reauth |
+| `/api/backup/stored/{name}/download` | POST | `backups.manage` | G | |
+| `/api/backup/restore` | POST | `backups.manage` | G | |
+| `/api/backup/schedule` | POST | `backups.manage` | G | |
+| `/api/backup/stored/{name}` | DELETE | `backups.manage` | G | |
+| `/api/backup/seen` | POST | `backups.manage` | G | |
 | `/api/backup/stored/{name}/verify` (3.6.8) | POST | `backups.manage` | G | | unpack + integrity check, nothing restored; records `restore_verified_at` |
 | `/api/backup/verify` (3.6.8) | POST | `backups.manage` | G | | an uploaded .wtbk, decrypted + checked in memory, nothing staged |
 | `/api/health` (3.6.8) | GET | `security.view` | G | | System health (cookie only); host names only for hosts with `host.view`; commands only with `settings.manage`; `can_terminal` = `certs.renew` |
 | `/api/health/check` (3.6.8) | POST | `settings.manage` | G | | "Re-check now", rate-limited instance-wide (30 s) |
 | `/api/health/{check_id}/mute` (3.6.8) | POST | `settings.manage` | G | | 7 d / 30 d / until it changes / off; audited |
-| `/api/backup/cloud` (3477) | GET | `backups.manage` | G | |
-| `/api/backup/cloud/config` (3482) | POST | `backups.manage` | G | |
-| `/api/backup/cloud/probe` (3496) | POST | `backups.manage` | G | |
-| `/api/backup/cloud/direct` (3508) | POST | `backups.manage` | G | |
-| `/api/backup/cloud/authorize` (3528) | GET | `backups.manage` | G | |
-| `/api/backup/cloud/callback` (3536) | GET | `backups.manage` | G | |
-| `/api/backup/cloud/upload` (3561) | POST | `backups.manage` | G | |
-| `/api/backup/cloud/disconnect` (3570) | POST | `backups.manage` | G | |
-| `/api/signing/status` (3606) | GET | `signing.manage` | G | (a status bit for the UI badge could be S) |
-| `/api/signing/generate` (3624) | POST | `signing.manage` | G | |
-| `/api/signing/import` (3639) | POST | `signing.manage` | G | |
-| `/api/signing/unlock` (3657) | POST | `signing.manage` | G | |
-| `/api/signing/lock` (3673) | POST | `signing.manage` | G | |
-| `/api/signing/backup` (3682) | POST | `signing.manage` | G | |
-| `/api/security/summary` (8060) | GET | `security.view` | G / S | without it → own-account checks only ⚠ |
-| `/api/audit` (4880) | GET | `audit.view` | L | without it → own rows; with it → visible hosts + NULL-host rows ⚠ |
-| `/api/history` (4742) | DELETE | `history.clear` | G | global wipe |
+| `/api/backup/cloud` | GET | `backups.manage` | G | |
+| `/api/backup/cloud/config` | POST | `backups.manage` | G | |
+| `/api/backup/cloud/probe` | POST | `backups.manage` | G | |
+| `/api/backup/cloud/direct` | POST | `backups.manage` | G | |
+| `/api/backup/cloud/authorize` | GET | `backups.manage` | G | |
+| `/api/backup/cloud/callback` | GET | `backups.manage` | G | |
+| `/api/backup/cloud/upload` | POST | `backups.manage` | G | |
+| `/api/backup/cloud/disconnect` | POST | `backups.manage` | G | |
+| `/api/signing/status` | GET | `signing.manage` | G | (a status bit for the UI badge could be S) |
+| `/api/signing/generate` | POST | `signing.manage` | G | |
+| `/api/signing/import` | POST | `signing.manage` | G | |
+| `/api/signing/unlock` | POST | `signing.manage` | G | |
+| `/api/signing/lock` | POST | `signing.manage` | G | |
+| `/api/signing/backup` | POST | `signing.manage` | G | |
+| `/api/security/summary` | GET | `security.view` | G / S | without it → own-account checks only ⚠ |
+| `/api/audit` | GET | `audit.view` | L | without it → own rows; with it → visible hosts + NULL-host rows ⚠ |
+| `/api/history` | DELETE | `history.clear` | G | global wipe |
 
 ### A.5 Fleet-wide lists and search (L)
 
 | Route | Method | Perm | Scope | Tok | Notes |
 |---|---|---|---|---|---|
-| `/api/status` (2020) | GET | `host.view` (any) | L | read | ⚠ counts over visible hosts; storage/health with `security.view` |
-| `/api/hosts` (2083) | GET | `host.view` | L | read | ⚠ |
-| `/api/hosts/export.csv` (2219) | GET | `hosts.export` | G∩L | | ⚠ |
-| `/api/sessions` (6383) | GET | `session.watch` ∪ `recording.view` | L | read | ⚠ |
-| `/api/search` (5700) | GET | `recording.view` | L | | ⚠ already filters 2FA; filter in SQL before reading transcripts |
-| `/api/history` (4683) | POST | `session.open` | H(body) | | write only for hosts where you have a shell; 2FA rule unchanged |
-| `/api/history` (4707) | GET | `recording.view` | L | | ⚠ |
-| `/api/apps` (4863) | GET | `forward.use` | L | | ⚠ |
-| `/api/shares` (7892) | GET | — / `shares.manage` | S / G | | own; all with the perm |
-| `/api/shares/revoke-all` (7905) | POST | — / `shares.manage` | S / G | | own; global with the perm |
-| `/api/replay-links` (8244) | GET | — / `shares.manage` | S / G | | |
-| `/api/replay-links/revoke-all` (8283) | POST | — / `shares.manage` | S / G | | |
-| `/api/snippets` (6136) | GET | — | S | | shared library |
-| `/api/snippets` (6142) | POST | — | S | | `created_by_id` |
-| `/api/snippets/{sid}` (6160) | PATCH | — / `snippets.manage` | S / G | | own, or any with the perm |
-| `/api/snippets/{sid}` (6175) | DELETE | — / `snippets.manage` | S / G | | idem |
+| `/api/status` | GET | `host.view` (any) | L | read | ⚠ counts over visible hosts; storage/health with `security.view` |
+| `/api/hosts` | GET | `host.view` | L | read | ⚠ |
+| `/api/hosts/export.csv` | GET | `hosts.export` | G∩L | | ⚠ |
+| `/api/sessions` | GET | `session.watch` ∪ `recording.view` | L | read | ⚠ |
+| `/api/search` | GET | `recording.view` | L | | ⚠ already filters 2FA; filter in SQL before reading transcripts |
+| `/api/history` | POST | `session.open` | H(body) | | write only for hosts where you have a shell; 2FA rule unchanged |
+| `/api/history` | GET | `recording.view` | L | | ⚠ |
+| `/api/apps` | GET | `forward.use` | L | | ⚠ |
+| `/api/shares` | GET | — / `shares.manage` | S / G | | own; all with the perm |
+| `/api/shares/revoke-all` | POST | — / `shares.manage` | S / G | | own; global with the perm |
+| `/api/replay-links` | GET | — / `shares.manage` | S / G | | |
+| `/api/replay-links/revoke-all` | POST | — / `shares.manage` | S / G | | |
+| `/api/snippets` | GET | — | S | | shared library |
+| `/api/snippets` | POST | — | S | | `created_by_id` |
+| `/api/snippets/{sid}` | PATCH | — / `snippets.manage` | S / G | | own, or any with the perm |
+| `/api/snippets/{sid}` | DELETE | — / `snippets.manage` | S / G | | idem |
 
 ### A.6 Host lifecycle and administration
 
 | Route | Method | Perm | Scope | 2FA | Notes |
 |---|---|---|---|---|---|
-| `/api/hosts` (2166) | POST | `hosts.create` | G | | folder chosen must be within the creator's scope (trivial for `all`) |
-| `/api/hosts/import` (2353) | POST | `hosts.create` | G | | |
-| `/api/hosts/test` (6809) | POST | `hosts.create` | G (+ `forward.manage` on `via_host_id`) | su | dials arbitrary targets; SSRF-shaped |
-| `/api/hosts/ssh-key/pending` (6723) | POST | `hosts.create` | G | | |
-| `/api/hosts/{host_id}` (5759) | PATCH | `host.edit` (+ `hosts.create` G if folder/tags change) | H(host_id) | su | bumps authz_epoch on folder/tag change |
-| `/api/hosts/{host_id}` (6194) | DELETE | `host.admin` | H(host_id) | su | |
-| `/api/hosts/{host_id}/enroll` (2405) | POST | `host.admin` | H(host_id) | su | |
-| `/api/hosts/{host_id}/require-2fa` (5948) | POST | `host.admin` | H(host_id) | su | turning 2FA off is a downgrade → security alert |
+| `/api/hosts` | POST | `hosts.create` | G | | folder chosen must be within the creator's scope (trivial for `all`) |
+| `/api/hosts/import` | POST | `hosts.create` | G | | |
+| `/api/hosts/test` | POST | `hosts.create` | G (+ `forward.manage` on `via_host_id`) | su | dials arbitrary targets; SSRF-shaped |
+| `/api/hosts/ssh-key/pending` | POST | `hosts.create` | G | | |
+| `/api/hosts/{host_id}` | PATCH | `host.edit` (+ `hosts.create` G if folder/tags change) | H(host_id) | su | bumps authz_epoch on folder/tag change |
+| `/api/hosts/{host_id}` | DELETE | `host.admin` | H(host_id) | su | |
+| `/api/hosts/{host_id}/enroll` | POST | `host.admin` | H(host_id) | su | |
+| `/api/hosts/{host_id}/require-2fa` | POST | `host.admin` | H(host_id) | su | turning 2FA off is a downgrade → security alert |
 | `/api/hosts/{host_id}/crown-jewel` | POST | `host.admin` | H(host_id) | | Owner @ all only (handler); clearing the mark = reauth + second gate; audited + alerted (3.6.10, §A.11.2) |
-| `/api/hosts/{host_id}/provision` (5969) | POST | `host.admin` | H(host_id) | su | ⚑ |
-| `/api/hosts/{host_id}/forget-credentials` (6047) | POST | `host.admin` | H(host_id) | su | |
-| `/api/hosts/{host_id}/update` (5681) | POST | `host.admin` | H(host_id) | su | agent update |
-| `/api/hosts/{host_id}/uninstall` (6232) | POST | `host.admin` | H(host_id) | su | |
-| `/api/hosts/{host_id}/autostart` (6291) | POST | `host.admin` | H(host_id) | su | |
-| `/api/hosts/{host_id}/wake` (4589) | POST | `host.wake` | H(host_id) | su | |
-| `/api/hosts/{host_id}/stepup` (6537) | POST | `host.view` | H(host_id) | (is the step-up) | |
-| `/api/hosts/{host_id}/hostkey` (4914) | GET | `host.diagnostics` | H(host_id) | | |
-| `/api/hosts/{host_id}/hostkey/accept` (4931) | POST | `host.edit` | H(host_id) | su | |
-| `/api/hosts/{host_id}/ssh-key/generate` (6570) | POST | `host.edit` | H(host_id) | su | credential for an SSH-type host |
-| `/api/hosts/{host_id}/ssh-key/public` (6592) | POST | `host.edit` | H(host_id) | su | |
-| `/api/hosts/{host_id}/events` (4965) | GET | `host.diagnostics` | H(host_id) | su | |
-| `/api/hosts/{host_id}/agent-log` (5001) | GET | `host.diagnostics` | H(host_id) | su | audited read |
-| `/api/hosts/{host_id}/diagnostics/refresh` (5020) | POST | `host.diagnostics` | H(host_id) | su | |
-| `/api/hosts/{host_id}/diag-probe` (4241) | GET | `host.diagnostics` | H(host_id) | su | |
-| `/api/hosts/{host_id}/ports` (4186) | GET | `host.diagnostics` | H(host_id) | su | listening ports = internal map |
+| `/api/hosts/{host_id}/provision` | POST | `host.admin` | H(host_id) | su | ⚑ |
+| `/api/hosts/{host_id}/forget-credentials` | POST | `host.admin` | H(host_id) | su | |
+| `/api/hosts/{host_id}/update` | POST | `host.admin` | H(host_id) | su | agent update |
+| `/api/hosts/{host_id}/uninstall` | POST | `host.admin` | H(host_id) | su | |
+| `/api/hosts/{host_id}/autostart` | POST | `host.admin` | H(host_id) | su | |
+| `/api/hosts/{host_id}/wake` | POST | `host.wake` | H(host_id) | su | |
+| `/api/hosts/{host_id}/stepup` | POST | `host.view` | H(host_id) | (is the step-up) | |
+| `/api/hosts/{host_id}/hostkey` | GET | `host.diagnostics` | H(host_id) | | |
+| `/api/hosts/{host_id}/hostkey/accept` | POST | `host.edit` | H(host_id) | su | |
+| `/api/hosts/{host_id}/ssh-key/generate` | POST | `host.edit` | H(host_id) | su | credential for an SSH-type host |
+| `/api/hosts/{host_id}/ssh-key/public` | POST | `host.edit` | H(host_id) | su | |
+| `/api/hosts/{host_id}/events` | GET | `host.diagnostics` | H(host_id) | su | |
+| `/api/hosts/{host_id}/agent-log` | GET | `host.diagnostics` | H(host_id) | su | audited read |
+| `/api/hosts/{host_id}/diagnostics/refresh` | POST | `host.diagnostics` | H(host_id) | su | |
+| `/api/hosts/{host_id}/diag-probe` | GET | `host.diagnostics` | H(host_id) | su | |
+| `/api/hosts/{host_id}/ports` | GET | `host.diagnostics` | H(host_id) | su | listening ports = internal map |
 
 ### A.7 Sessions, terminal, shares, recordings
 
 | Route | Method | Perm | Scope | 2FA | Tok | Notes |
 |---|---|---|---|---|---|---|
-| `/api/hosts/{host_id}/sessions` (6404) | GET | `session.watch` ∪ `recording.view` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/sessions` (7559) | POST | `session.open` | H(host_id) | su | | a body `cmd` (docker exec / upgrade / toolbox) is still `session.open`; Toolbox launches also need `toolbox.use` |
+| `/api/hosts/{host_id}/sessions` | GET | `session.watch` ∪ `recording.view` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/sessions` | POST | `session.open` | H(host_id) | su | | a body `cmd` (docker exec / upgrade / toolbox) is still `session.open`; Toolbox launches also need `toolbox.use` |
 | `/api/hosts/{host_id}/cert-renew` (3.6.7) | POST | `certs.renew` | G + `session.open` on host_id | ff | | Owner-only; the picked host only, an allow-listed name; the command is typed, not run |
 | `/api/hosts/{host_id}/health-terminal` (3.6.8) | POST | `certs.renew` | G + `session.open` on host_id | ff | | Owner-only; the picked host only; the client names a check + command index, the server re-renders the command from its allow-list (healthcmd.py); typed, not run; private session `health-fix` |
-| `/api/sessions/{sid}` (7707) | PATCH | `session.open` (own) / `session.manage` | H(sid) | | | rename/note |
-| `/api/sessions/{sid}/reconnect` (7723) | POST | `session.open` | H(sid) | su | | |
-| `/api/sessions/{sid}/kill` (7743) | POST | `session.open` (own) / `session.manage` | H(sid) | su | | |
-| `/api/sessions/{sid}` (7757) | DELETE | `session.open` (own) / `session.manage` | H(sid) | su | | |
-| `/api/sessions/{sid}/share` (7784) | POST | `share.live` (+ `share.live_write` if writable) | H(sid) | su | | |
-| `/api/sessions/{sid}/share` (7813) | GET | `session.watch` | H(sid) | | | |
-| `/api/sessions/{sid}/share` (7839) | DELETE | `share.live` | H(sid) | su | | |
-| `/api/sessions/{sid}/transcript` (8120) | GET | `recording.view` | H(sid) | ssu | | audited read |
-| `/api/sessions/{sid}/preview` (8145) | GET | `recording.view` | H(sid) | ssu | | |
-| `/api/sessions/{sid}/replay-links` (8198) | POST | `share.replay` | H(sid) | su | | |
-| `/api/replay-links/{link_id}` (8268) | DELETE | `share.replay` (own) / `shares.manage` | H(link) | su | | |
-| `/ws/sessions/{sid}` (9149) | WS | `session.open` → rw; `session.watch` → ro; `recording.view` → closed replay | H(sid) | window (passive) + lock | | 60-second revalidation re-runs authz (§A.6.4) |
-| `/ws/shared/{token}` (8990) | WS | — | P | hub lock applies | | revoked when the creator loses `share.live` |
-| `/agent/ws` (8852) | WS | — | P (host token) | | | not a user principal |
+| `/api/sessions/{sid}` | PATCH | `session.open` (own) / `session.manage` | H(sid) | | | rename/note |
+| `/api/sessions/{sid}/reconnect` | POST | `session.open` | H(sid) | su | | |
+| `/api/sessions/{sid}/kill` | POST | `session.open` (own) / `session.manage` | H(sid) | su | | |
+| `/api/sessions/{sid}` | DELETE | `session.open` (own) / `session.manage` | H(sid) | su | | |
+| `/api/sessions/{sid}/share` | POST | `share.live` (+ `share.live_write` if writable) | H(sid) | su | | |
+| `/api/sessions/{sid}/share` | GET | `session.watch` | H(sid) | | | |
+| `/api/sessions/{sid}/share` | DELETE | `share.live` | H(sid) | su | | |
+| `/api/sessions/{sid}/transcript` | GET | `recording.view` | H(sid) | ssu | | audited read |
+| `/api/sessions/{sid}/preview` | GET | `recording.view` | H(sid) | ssu | | |
+| `/api/sessions/{sid}/replay-links` | POST | `share.replay` | H(sid) | su | | |
+| `/api/replay-links/{link_id}` | DELETE | `share.replay` (own) / `shares.manage` | H(link) | su | | |
+| `/ws/sessions/{sid}` | WS | `session.open` → rw; `session.watch` → ro; `recording.view` → closed replay | H(sid) | window (passive) + lock | | 60-second revalidation re-runs authz (§A.6.4) |
+| `/ws/shared/{token}` | WS | — | P | hub lock applies | | revoked when the creator loses `share.live` |
+| `/agent/ws` | WS | — | P (host token) | | | not a user principal |
 
 ### A.8 Files and transfers
 
 | Route | Method | Perm | Scope | 2FA | Notes |
 |---|---|---|---|---|---|
-| `/api/hosts/{host_id}/fs` (2427) | GET | `files.read` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/cwd` (2438) | GET | `files.read` | H(host_id) | su | (session cwd) |
-| `/api/hosts/{host_id}/fs/download` (2483) | GET | `files.read` | H(host_id) | su | audited |
-| `/api/hosts/{host_id}/fs/archive` (2559) | GET | `files.read` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/preview` (2864) | GET | `files.read` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/upload` (2637) | POST | `files.write` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/upload/status` (2671) | GET | `files.write` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/upload/commit` (2688) | POST | `files.write` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/upload` (2709) | DELETE | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs` | GET | `files.read` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/cwd` | GET | `files.read` | H(host_id) | su | (session cwd) |
+| `/api/hosts/{host_id}/fs/download` | GET | `files.read` | H(host_id) | su | audited |
+| `/api/hosts/{host_id}/fs/archive` | GET | `files.read` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/preview` | GET | `files.read` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/upload` | POST | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/upload/status` | GET | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/upload/commit` | POST | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/upload` | DELETE | `files.write` | H(host_id) | su | |
 | `/api/hosts/{host_id}/fs/root-move` (3.6.9) | POST | `files.write` | H(host_id) | su | plans "upload and move as root": names staging files in the agent's inbox; only the planner may upload into them while the plan lives; the gateway hashes the bytes on the way |
 | `/api/hosts/{host_id}/fs/root-move/{plan_id}/command` (3.6.9) | POST | `files.write` | H(host_id) | su | planner only; returns the command the CLIENT types (never runs) into the person's own terminal — reads the staged file as the agent's user, installs only on a SHA-256 match; typing = the session's normal input gate |
-| `/api/hosts/{host_id}/fs/mkdir` (5641) | POST | `files.write` | H(host_id) | su | |
-| `/api/hosts/{host_id}/fs/rename` (5653) | POST | `files.write` | H(host_id) | su | (rename over an existing file = delete → also `files.delete` when `overwrite`) |
-| `/api/hosts/{host_id}/fs/delete` (5667) | POST | `files.delete` | H(host_id) | su | |
-| `/api/fs/copy` (2752) | POST | `files.read` (src) + `files.write` (dst) | H(body: src, dst) | su (both) | job stores `user_id` |
-| `/api/fs/copy/{job_id}` (2807) | GET | — (job owner / Owner) | S | | ⚠ today any account sees any job |
-| `/api/fs/copy/{job_id}` (2816) | DELETE | — (job owner / Owner) | S | | |
-| `/api/fs/copy/{job_id}/retry` (2828) | POST | — (job owner; re-checks `files.read` + `files.write`) | S + H(job) | su | |
+| `/api/hosts/{host_id}/fs/mkdir` | POST | `files.write` | H(host_id) | su | |
+| `/api/hosts/{host_id}/fs/rename` | POST | `files.write` | H(host_id) | su | (rename over an existing file = delete → also `files.delete` when `overwrite`) |
+| `/api/hosts/{host_id}/fs/delete` | POST | `files.delete` | H(host_id) | su | |
+| `/api/fs/copy` | POST | `files.read` (src) + `files.write` (dst) | H(body: src, dst) | su (both) | job stores `user_id` |
+| `/api/fs/copy/{job_id}` | GET | — (job owner / Owner) | S | | ⚠ today any account sees any job |
+| `/api/fs/copy/{job_id}` | DELETE | — (job owner / Owner) | S | | |
+| `/api/fs/copy/{job_id}/retry` | POST | — (job owner; re-checks `files.read` + `files.write`) | S + H(job) | su | |
 
 ### A.9 Run, Docker, services, Toolbox, serial
 
 | Route | Method | Perm | Scope | 2FA | Tok | Notes |
 |---|---|---|---|---|---|---|
-| `/api/hosts/{host_id}/run` (3712) | POST | `run` | H(host_id) | su | run | the fleet console = N calls; each host is checked |
-| `/api/hosts/{host_id}/git` (3765) | POST | `run` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/docker` (3865) | GET | `docker.view` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/docker/stats` (4025) | GET | `docker.view` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/docker/action` (4052) | POST | `docker.act` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/services` (4125) | GET | `services.view` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/services/action` (4166) | POST | `services.act` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/connections` (4369) | GET | `toolbox.use` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/connections` (4380) | POST | `toolbox.manage` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/connections/{conn_id}` (4398) | PATCH | `toolbox.manage` | H(host_id) | su | | check that conn belongs to host_id |
-| `/api/hosts/{host_id}/connections/{conn_id}` (4420) | DELETE | `toolbox.manage` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/serial/discover` (5174) | POST | `serial.use` | H(host_id) | su | | |
-| `/api/hosts/{host_id}/serial/open` (5189) | POST | `serial.use` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/run` | POST | `run` | H(host_id) | su | run | the fleet console = N calls; each host is checked |
+| `/api/hosts/{host_id}/git` | POST | `run` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/docker` | GET | `docker.view` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/docker/stats` | GET | `docker.view` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/docker/action` | POST | `docker.act` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/services` | GET | `services.view` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/services/action` | POST | `services.act` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/connections` | GET | `toolbox.use` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/connections` | POST | `toolbox.manage` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/connections/{conn_id}` | PATCH | `toolbox.manage` | H(host_id) | su | | check that conn belongs to host_id |
+| `/api/hosts/{host_id}/connections/{conn_id}` | DELETE | `toolbox.manage` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/serial/discover` | POST | `serial.use` | H(host_id) | su | | |
+| `/api/hosts/{host_id}/serial/open` | POST | `serial.use` | H(host_id) | su | | |
 
 ### A.10 Forwards
 
 | Route | Method | Perm | Scope | 2FA | Notes |
 |---|---|---|---|---|---|
-| `/api/hosts/{host_id}/forwards` (4851) | GET | `forward.use` | H(host_id) | su | targets shown only with `forward.manage` |
-| `/api/hosts/{host_id}/forwards` (5037) | POST | `forward.manage` | H(host_id) | su | |
-| `/api/forwards/{fid}` (5075) | PATCH | `forward.manage` | H(fid) | su | |
-| `/api/forwards/{fid}` (5101) | DELETE | `forward.manage` | H(fid) | su | |
-| `/api/forwards/{fid}/probe` (3087) | GET | `forward.use` | H(fid) | su | |
-| `/api/forwards/{fid}/telnet` (5129) | POST | `forward.manage` + `session.open` | H(fid) | su | opens a session through the forward |
+| `/api/hosts/{host_id}/forwards` | GET | `forward.use` | H(host_id) | su | targets shown only with `forward.manage` |
+| `/api/hosts/{host_id}/forwards` | POST | `forward.manage` | H(host_id) | su | |
+| `/api/forwards/{fid}` | PATCH | `forward.manage` | H(fid) | su | |
+| `/api/forwards/{fid}` | DELETE | `forward.manage` | H(fid) | su | |
+| `/api/forwards/{fid}/probe` | GET | `forward.use` | H(fid) | su | |
+| `/api/forwards/{fid}/telnet` | POST | `forward.manage` + `session.open` | H(fid) | su | opens a session through the forward |
 | `<slug>.<forward-domain>/*` (`route_forward`, main.py `forward_router`) | any | `forward.use` for the ticket's `uid` | H(slug) | window (2FA hosts) | re-checked per request (epoch cache) |
 | `<slug>.<forward-domain>` WS (`ForwardWSMiddleware` → `handle_forward_ws`, 5433) | WS | `forward.use` | H(slug) | window | re-checked in its revalidate loop |
 
@@ -1930,16 +1934,16 @@ All of these use `deploykey.manage`. Deploy, deploy-batch and rotate need the pe
 
 | Route | Method | Perm | Scope | 2FA | Notes |
 |---|---|---|---|---|---|
-| `/api/hosts/{host_id}/deploy-key` (7013) | GET | `deploykey.manage` | H(host_id) | su | |
-| `/api/hosts/{host_id}/deploy-key/generate` (7218) | POST | `deploykey.manage` | H(host_id) | su | |
-| `/api/hosts/{host_id}/deploy-key/deploy` (7273) | POST | `deploykey.manage` | H(host_id) + H(body target) | ff | |
-| `/api/hosts/{host_id}/deploy-key/deploy-batch` (7300) | POST | `deploykey.manage` | H(host_id) + each target | ff | |
-| `/api/hosts/{host_id}/deploy-key/revoke` (7322) | POST | `deploykey.manage` | H(host_id) + target | su | |
-| `/api/hosts/{host_id}/deploy-key/verify` (7351) | POST | `deploykey.manage` | H(host_id) + target | su | |
-| `/api/hosts/{host_id}/deploy-key` (7378) | DELETE | `deploykey.manage` | H(host_id) | su | |
-| `/api/hosts/{host_id}/deploy-key/test` (7417) | POST | `deploykey.manage` | H(host_id) + target | su | |
-| `/api/hosts/{host_id}/deploy-key/ssh-config` (7438) | POST | `deploykey.manage` | H(host_id) + target | su | |
-| `/api/hosts/{host_id}/deploy-key/rotate` (7470) | POST | `deploykey.manage` | H(host_id) + all targets | ff | |
+| `/api/hosts/{host_id}/deploy-key` | GET | `deploykey.manage` | H(host_id) | su | |
+| `/api/hosts/{host_id}/deploy-key/generate` | POST | `deploykey.manage` | H(host_id) | su | |
+| `/api/hosts/{host_id}/deploy-key/deploy` | POST | `deploykey.manage` | H(host_id) + H(body target) | ff | |
+| `/api/hosts/{host_id}/deploy-key/deploy-batch` | POST | `deploykey.manage` | H(host_id) + each target | ff | |
+| `/api/hosts/{host_id}/deploy-key/revoke` | POST | `deploykey.manage` | H(host_id) + target | su | |
+| `/api/hosts/{host_id}/deploy-key/verify` | POST | `deploykey.manage` | H(host_id) + target | su | |
+| `/api/hosts/{host_id}/deploy-key` | DELETE | `deploykey.manage` | H(host_id) | su | |
+| `/api/hosts/{host_id}/deploy-key/test` | POST | `deploykey.manage` | H(host_id) + target | su | |
+| `/api/hosts/{host_id}/deploy-key/ssh-config` | POST | `deploykey.manage` | H(host_id) + target | su | |
+| `/api/hosts/{host_id}/deploy-key/rotate` | POST | `deploykey.manage` | H(host_id) + all targets | ff | |
 
 ### A.11b SCIM provisioning (3.6.11)
 

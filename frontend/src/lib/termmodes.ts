@@ -1,4 +1,5 @@
 import type { IModes } from '@xterm/xterm'
+import { isAgentType, isTelnetType } from './conntypes'
 
 // Starea DECSET/SM a terminalului, ca secvențe care o refac după un reset().
 // La resume, reset()-ul șterge modurile pe care tmux le crede încă active:
@@ -28,6 +29,7 @@ export function modeRestoreSeq(m: IModes): string {
   return s
 }
 
+// INV-08 (docs/design/INVARIANTS.md): bracketed paste anunțat de tmux nu e de încredere (doar pty / telnet).
 /** Fluxul acestui terminal trece (sau poate trece) printr-un client tmux: agent cu backend tmux, sau
     SSH / SSH prin bastion (comanda sesiunii e `tmux new -A … || exec $SHELL -l`). Fără host cunoscut: da (fail-closed).
     tmux trimite clientului `ESC[?2004h` O DATĂ, la attach, şi nu-i transmite comutările panoului
@@ -39,9 +41,8 @@ export function pasteModeUntrusted(host?: { backend?: string | null; connection_
   // host necunoscut) → nu. Limită cunoscută: un tmux pornit DE MÂNĂ într-o sesiune pty/telnet face
   // modul la fel de lipicios şi nu se vede de aici.
   if (!host) return true
-  const ct = host.connection_type || 'agent'
-  if (ct === 'agent') return host.backend !== 'pty'
-  return !(ct === 'telnet' || ct === 'telnet-jump')
+  if (isAgentType(host.connection_type)) return host.backend !== 'pty'
+  return !isTelnetType(host.connection_type)
 }
 
 /** bracketed paste pe care ne putem baza (guardrail: TAB într-un paste = text): modul cerut ŞI un

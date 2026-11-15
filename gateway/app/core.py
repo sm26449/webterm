@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import authz, config, db, email_alerts, osc133, push, security, signing, telnet
+from . import authz, config, conntypes, db, email_alerts, osc133, push, security, signing, telnet
 
 log = logging.getLogger("webterm")
 
@@ -51,6 +51,8 @@ AGENT_PROTO_BIN_FSWRITE = 55          # prima versiune de agent care vorbeşte F
 GAP_MARKER = b"\r\n\x1b[7m[webterm: some output was lost here]\x1b[0m\r\n"
 
 sources: Dict[int, "SessionSource"] = {}
+
+# ── [registry] Per-host dial lock, source registry, agent event log ───────────────────────────────
 
 # Lock per-host pentru dial-ul direct SSH/telnet: `dial_*` fac check-then-act cu un `await`
 # la mijloc (conectarea) → două cereri simultane către un host fără sursă ar deschide DOUĂ
@@ -166,7 +168,7 @@ async def hosts_awaiting_first_agent() -> list:
     dintre acestea — acolo are sens să apară „încercare refuzată de la IP-ul X"."""
     try:
         return await db.fetchall(
-            "SELECT id, name FROM hosts WHERE (connection_type IS NULL OR connection_type='agent')"
+            "SELECT id, name FROM hosts WHERE " + conntypes.SQL_IS_AGENT +
             " AND agent_version IS NULL AND uninstalled_at IS NULL ORDER BY created DESC LIMIT 5")
     except Exception:                     # noqa: BLE001
         return []
@@ -180,6 +182,8 @@ async def prune_agent_events() -> None:
     except Exception:                     # noqa: BLE001
         pass
 
+
+# ── [transcripts] Session ids, transcripts, archive, capture jobs, storage stats ──────────────────
 
 def new_sid() -> str:
     return uuid.uuid4().hex
@@ -579,6 +583,8 @@ HISTORY_SEAM_PANE = (b"\x1b[0m\x1b[2m\xe2\x94\x80\xe2\x94\x80 webterm: history o
                      b"\xe2\x94\x80\xe2\x94\x80\x1b[0m")
 
 
+# ── [history] tmux pane history + replay on attach ────────────────────────────────────────────────
+
 class PaneHistory(bytes):
     """Captura de istoric (bytes) + câte pane-uri vizibile avea fereastra (1 = un singur pane sau
     pane zoom-at). Subclasă de bytes ca apelanţii existenţi (`if raw:`, build_history_block) să
@@ -783,6 +789,8 @@ KEEPALIVE_SECS = 25.0        # idle keepalive: a session with no output would ot
                              # Ping every KEEPALIVE_SECS while idle keeps the path warm,
                              # feeds the client watchdog, and runs dead-client detection.
 
+
+# ── [browser] BrowserClient (one browser websocket) ───────────────────────────────────────────────
 
 class BrowserClient:
     def __init__(self, ws, hub: "SessionHub"):
@@ -1094,6 +1102,8 @@ class BrowserClient:
 # ---------------------------------------------------------------------------
 # SessionHub
 # ---------------------------------------------------------------------------
+
+# ── [hub] SessionHub (one session, fan-out to browsers/guests, lock/unlock) ───────────────────────
 
 class SessionHub:
     def __init__(self, row):
@@ -1705,6 +1715,7 @@ class SessionHub:
         else:
             log.info("session %s: locked (%s)", self.sid, reason)
 
+    # INV-05 (docs/design/INVARIANTS.md): pe un host cu 2FA, invitații unui link văd doar cât e un operator verificat atașat.
     def has_operator(self) -> bool:
         """Un operator VERIFICAT e ataşat: un client-owner al unui cont, care poate scrie şi NU e
         blocat, pe un hub deblocat. Pe un host 2FA un client-owner porneşte blocat fără fereastră de
@@ -1907,6 +1918,8 @@ class SessionHub:
         self._redraw_task = asyncio.create_task(_go())
 
 
+# ── [sources] Hub factory, SessionSource base, source errors ──────────────────────────────────────
+
 def get_or_create_hub(row) -> SessionHub:
     hub = hubs.get(row["id"])
     if hub is None:
@@ -1985,6 +1998,8 @@ class SessionSource:
     async def disconnect(self) -> None:
         """Închide transportul sursei (la înlocuire / oprire)."""
 
+
+# ── [forward] ForwardStream / TLS forward over the agent tunnel ───────────────────────────────────
 
 class ForwardError(Exception):
     pass
@@ -2156,6 +2171,8 @@ async def wrap_tls_forward(fs: "ForwardStream",
     await t.handshake()
     return t
 
+
+# ── [agent] AgentConnection (one connected agent) ─────────────────────────────────────────────────
 
 class AgentConnection(SessionSource):
     def __init__(self, ws, host_id: int):
@@ -2614,6 +2631,8 @@ _agent_cache = {"source": None, "version": None, "mtime": None}
 AGENT_VERSION_RE = re.compile(r"^AGENT_VERSION\s*=\s*(\d+)\s*(#.*)?$", re.M)
 
 
+# ── [agent-update] Agent version expectations + auto-update ───────────────────────────────────────
+
 def agent_source_version(source) -> Optional[int]:
     """Versiunea declarată într-o sursă de agent, sau None dacă linia nu are forma strictă."""
     m = AGENT_VERSION_RE.search(source if isinstance(source, str) else "")
@@ -2714,6 +2733,7 @@ def _refusal_hint(code: str) -> str:
     return _REFUSAL_HINTS.get(code, "see ~/.webterm/ptyd.log on the host")
 
 
+# INV-09 (docs/design/INVARIANTS.md): agentul are versiune proprie, semnată; orice edit în ptyd.py = bump + re-semnare + flota.
 async def maybe_upgrade_agent(conn: AgentConnection) -> None:
     expected = agent_expected()
     if conn.agent_version is None:
@@ -2847,7 +2867,7 @@ def _clip(v, limit: int = 255):
     return v[:limit] if isinstance(v, str) else None
 
 
-# ── Agents on a Python older than 3.6 (3.6.9) ──────────────────────────────────────────────
+# ── [agent-python] Agents on a Python older than 3.6 (3.6.9) ──────────────────────────────────────────────
 # ptyd.py is "Python 3.6+" but has no runtime check, and it does NOT report its Python version
 # (hello/diagnostics carry the OS, not the interpreter — a v59 item). On 3.5 (Ubuntu 16.04,
 # Debian 9) it connects and runs terminals, but `with os.scandir(...)` raises AttributeError
@@ -2900,6 +2920,8 @@ DIAG_STR_MAX = 4096           # plafon pe un singur şir din snapshot (un câmp 
 DIAG_MAX_DEPTH = 8            # imbricare: un JSON adânc artificial e tot un vector de DoS la parsare
 _DIAG_TRUNC = "…[truncated]"
 
+
+# ── [diagnostics] Agent diagnostics: updates, clock, supervision summaries ────────────────────────
 
 def bound_diagnostics(v, depth: int = 0):
     """Taie şirurile peste DIAG_STR_MAX (cu marcaj vizibil) şi imbricarea peste DIAG_MAX_DEPTH,
@@ -2971,6 +2993,8 @@ def supervision_summary(diag) -> Optional[dict]:
         out["watchdog"] = s["watchdog"]
     return out
 
+
+# ── [reconcile] Reconcile agent sessions on (re)connect ───────────────────────────────────────────
 
 async def reconcile(conn: AgentConnection, msg: dict) -> None:
     conn.epoch = msg.get("epoch")
@@ -3183,7 +3207,7 @@ async def reconcile_telnet_on_start() -> None:
     # doar în RAM-ul gateway-ului. telnet-jump e prins oricum de kind='telnet', dar îl listăm
     # explicit pentru claritate; ssh-jump LIPSEA — sesiunile lui rămâneau fantomă 'live' la restart.
     q = ("state IN ('live','creating') AND (kind='telnet' OR host_id IN"
-         " (SELECT id FROM hosts WHERE connection_type IN ('ssh','telnet','ssh-jump','telnet-jump')))")
+         " (SELECT id FROM hosts WHERE " + conntypes.SQL_NETWORK + "))")
     ghosts = await db.fetchall("SELECT id FROM sessions WHERE " + q)
     if not ghosts:
         return
@@ -3193,6 +3217,8 @@ async def reconcile_telnet_on_start() -> None:
     log.info("startup: %d ephemeral sessions (telnet/SSH/direct telnet) 'live' → 'lost'"
              " (they do not survive a restart)", len(ghosts))
 
+
+# ── [sweeps] Periodic sweeps: offline hosts, stale sessions, purge host, idle locks ───────────────
 
 async def _reap_ghost(sid: str, reason: str) -> None:
     """Marchează o sesiune fantomă 'lost' — prin hub dacă are clienți conectați
@@ -3249,7 +3275,7 @@ async def sweep_hosts_offline() -> None:
     try:
         rows = await db.fetchall(
             "SELECT id, name, last_heartbeat, uninstalled_at, alerts_muted, offline_notified "
-            "FROM hosts WHERE connection_type='agent'")
+            "FROM hosts WHERE " + conntypes.SQL_IS_AGENT)
     except Exception:                       # noqa: BLE001 — observabilitatea nu rupe reaper-ul
         return
     for row in rows:
@@ -3314,7 +3340,7 @@ async def sweep_stale_sessions() -> None:
         # fără sursă vie: doar hosturile de AGENT au heartbeat semnificativ; le reapăm
         # când e stale. Hosturile SSH/telnet DIRECTE n-au heartbeat și se re-dial-uiesc
         # la reconectarea browserului (api.py) — NU le reapăm pe absența sursei.
-        if (row["connection_type"] or "agent") == "agent":
+        if conntypes.is_agent(row):
             hb = row["last_heartbeat"] or 0
             if now - hb > SESSION_STALE_AFTER:
                 await _reap_ghost(sid, "host-offline")
@@ -3351,7 +3377,6 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
 
     Nu deconectează sursa hostului (apelanţii o fac, cu nuanţele lor — uninstall aşteaptă
     confirmarea agentului) şi presupune că nu mai există sesiuni vii (apelanţii refuză cu 409)."""
-    from . import security          # lazy: security nu importă core, dar păstrăm ordinea de import
     if _depth > _PURGE_MAX_DEPTH:
         raise RuntimeError("jump nesting too deep while purging host %s" % host_id)
     # Copiii jump: cei EFEMERI merg cu părintele (nu-i poate folosi nimeni fără el);
@@ -3426,7 +3451,6 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
                      str(host_id))
     await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)
     await db.execute("DELETE FROM hosts WHERE id=?", host_id)
-    from . import authz
     authz.bump_epoch()
 
     # starea din RAM cheiată pe host_id — ar fi moştenită de hostul următor cu acelaşi id
@@ -3525,6 +3549,7 @@ async def sweep_idle_locks() -> None:
             await hub.lock()
 
 
+# INV-04 (docs/design/INVARIANTS.md): terminalul nu e re-verificat la 5 min (intenționat), dar se blochează la plafonul de 60 min.
 async def sweep_stepup_caps() -> None:
     """Plafonul ABSOLUT de step-up pe terminalele 2FA (3.5.13). Un terminal ţinut în uz nu se
     bloca niciodată: idle-lock-ul măsoară doar inactivitatea, iar fereastra de step-up (plafonată
@@ -3545,6 +3570,8 @@ async def sweep_stepup_caps() -> None:
         if hub.authorized_at is None or now - hub.authorized_at >= security.STEPUP_WINDOW_MAX:
             await hub.lock("stepup_max")
 
+
+# ── [agent] register_agent ────────────────────────────────────────────────────────────────────────
 
 async def register_agent(ws, host_id: int, pinned: bool = False) -> AgentConnection:
     old = sources.get(host_id)
@@ -3599,6 +3626,8 @@ CURSOR_MOVE_RE = re.compile(rb"\x1b\[[0-9;]*[HfABEFd]")
 CURSOR_FWD_RE = re.compile(rb"\x1b\[([0-9]*)C")
 SEARCH_READ_CAP = 4 * 1024 * 1024      # max bytes read per transcript
 
+
+# ── [search] Transcript text + search ─────────────────────────────────────────────────────────────
 
 def transcript_text(sid: str, tail_bytes: int = 0) -> str:
     """Transcriptul ca TEXT citibil: fără secvenţe de control, cu CR şi backspace aplicate.
@@ -3696,6 +3725,8 @@ def search_transcripts(rows, query: str):
     return results
 
 
+# ── [sessions] Create / kill session ──────────────────────────────────────────────────────────────
+
 async def create_session(host_id: int, title: str, rows: int = 24, cols: int = 80,
                          tz: Optional[str] = None, cmd: Optional[str] = None,
                          pw: Optional[str] = None, created_by_id: Optional[int] = None,
@@ -3771,6 +3802,8 @@ MAX_SERIAL_SESSIONS = 16
 # TelnetShim.them_will_echo — dar textul e suficient și mai robust între device-uri.
 _PW_PROMPT = re.compile(rb"(?i)(?:password|passcode|passphrase)\s*:?\s*$")
 
+
+# ── [telnet] Telnet + serial sources via an agent forward ─────────────────────────────────────────
 
 class ForwardTelnetSource(SessionSource):
     """O sesiune telnet către un device din LAN-ul host-ului, tunelată prin agent.
@@ -4215,6 +4248,8 @@ SSH_CONNECT_TIMEOUT = 15
 SSH_FWD_IDLE = 300         # conexiune SSH ridicată DOAR pentru forward: teardown după atâtea secunde fără forward/sesiune
 
 
+# ── [ssh] Host key pinning, TOFU, first contact (HostKeyUnverified) ───────────────────────────────
+
 class HostKeyMismatch(Exception):
     """Amprenta host key-ului diferă de cea pinată — posibil MITM. Poartă AMBELE amprente
     (SHA256:…), ca UI-ul să poată arăta „era X, acum e Y" — un toast fără amprente nu permite
@@ -4275,6 +4310,7 @@ def _hostkey_kwargs(host_row) -> tuple:
     return kwargs, holder
 
 
+# INV-03 (docs/design/INVARIANTS.md): o parolă nu pleacă spre o cheie de host neconfirmată (TOFU doar cu autentificare prin cheie).
 def _needs_first_contact(host_row, credential: Optional[dict]) -> bool:
     """Fără pin şi cu PAROLĂ: prima conectare cere confirmarea amprentei. Cu cheie, TOFU rămâne:
     privata nu pleacă la server (semnătura e legată de sesiune) — decizie a userului, 2026-11-15.
@@ -4314,7 +4350,7 @@ class _CaptureHostKeyClient(asyncssh.SSHClient):
         return False
 
 
-async def _peek_host_key(conn_kwargs: dict):
+async def peek_host_key(conn_kwargs: dict):
     """Cheia publică a serverului, fără să autentifice nimic (lista de încredere goală + refuz)."""
     holder = {"key": None}
 
@@ -4395,6 +4431,8 @@ async def _hostkey_mismatch(host_row, holder, err) -> "HostKeyMismatch":
         pass
     return HostKeyMismatch(str(err), old_fp, new_fp)
 
+
+# ── [ssh] SshSource, dial_ssh, ssh-jump bridge ────────────────────────────────────────────────────
 
 class SshForwardStream:
     """Un forward printr-un canal direct-tcpip asyncssh. Aceeași interfață
@@ -4608,7 +4646,7 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         stored = host_row["known_hosts"]
         if _needs_first_contact(host_row, credential):
             _pending_first_contact(host_row)
-            key = await _peek_host_key(dict(host=host, port=port,
+            key = await peek_host_key(dict(host=host, port=port,
                                             username=host_row["ssh_username"]))
             raise await _hostkey_first_contact(host_row, key)
         kwargs = dict(host=host, port=port)
@@ -4763,7 +4801,7 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
             _pending_first_contact(host_row)
             fs, ssh_sock, bridge_sock, pump = await _open_jump_bridge(host_row)
             try:
-                key = await _peek_host_key(dict(sock=ssh_sock, username=host_row["ssh_username"]))
+                key = await peek_host_key(dict(sock=ssh_sock, username=host_row["ssh_username"]))
             finally:
                 await _close_jump_bridge(fs, ssh_sock, bridge_sock, pump)
             raise await _hostkey_first_contact(host_row, key)
@@ -4797,6 +4835,8 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
 # Direct Telnet source (legacy/plaintext — gateway dials out to host:23)
 # ---------------------------------------------------------------------------
 
+
+# ── [telnet] Direct TelnetSource ──────────────────────────────────────────────────────────────────
 
 class TelnetSource(SessionSource):
     """O conexiune telnet per host, o singură sesiune. Fără PTY/tmux (telnet e
@@ -4925,6 +4965,8 @@ PROBE_BANNER_WAIT = 5.0      # cât aşteptăm greeting-ul SSH după TCP (în bu
 PROBE_TELNET_WAIT = 3.0      # cât aşteptăm un banner / prompt de login de la un device telnet
 _TELNET_PROMPT_RE = re.compile(rb"(login|username|user name|password)\s*:", re.I)
 
+
+# ── [probe] Connection test probes (probe_ssh / probe_telnet) ─────────────────────────────────────
 
 class ProbeFailed(Exception):
     """Etapa `stage` a picat. `kind` = clasa internă (timeout/refused/unreachable/dns/not_ssh/
@@ -5204,7 +5246,7 @@ async def probe_telnet(host_row, addrs: Optional[list] = None) -> dict:
                 pass
 
 
-# ── Chei SSH generate la CREAREA hostului (în aşteptare) ─────────────────────
+# ── [ssh-keys] Chei SSH generate la CREAREA hostului (în aşteptare) ─────────────────────
 # „Generează o cheie pentru acest host" din formularul Add host: privata se naşte pe gateway şi
 # stă criptată în seif (acelaşi Fernet ca restul credenţialelor, acelaşi format de blob) într-un
 # rând `pending_ssh_keys` legat de userul care a generat-o, până când (a) o leagă un create /
@@ -5225,6 +5267,8 @@ async def purge_pending_ssh_keys() -> None:
 FS_CHUNK = 1024 * 1024   # bloc pe hopul gateway→agent: 1 MiB (mai puţine round-trip-uri la upload;
 #                          base64-ul rămâne, dar mesajul rezultat ~1.33 MiB e mult sub WS_MSG_MAX)
 
+
+# ── [files] File ops over the agent (list, read, archive, write) ──────────────────────────────────
 
 def _agent_or_raise(host_id: int) -> "AgentConnection":
     conn = sources.get(host_id)
@@ -5253,7 +5297,7 @@ async def fs_crc32(host_id: int, path: str, seed: bool = False) -> int:
     return int(resp.get("crc32", 0)) & 0xffffffff
 
 
-# ── CRC-32 incremental pe hopul gateway→agent (protocol agent v55) ────────────
+# ── [files] CRC-32 incremental pe hopul gateway→agent (protocol agent v55) ────────────
 # Agentul (v55) acumulează CRC-ul temp-ului `.wtpart` pe măsură ce lipeşte fiecare FRAME_FSWRITE şi
 # întoarce CRC-ul curent în reply. Memorăm ultimul CRC per upload AICI, ca la commit să-l comparăm cu
 # CRC-ul clientului FĂRĂ a re-citi tot fişierul (fs_crc32 pe un temp de 17 GB = minute de stall, exact
@@ -5457,7 +5501,7 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
         raise
 
 
-# ── Upload resumabil pe chunk-uri ────────────────────────────────────────────
+# ── [upload] Upload resumabil pe chunk-uri ────────────────────────────────────────────
 # Spre deosebire de fs_write_stream (o singură cerere = tot fişierul), aici clientul taie fişierul
 # în felii şi le trimite pe rând cu un `upload_id` STABIL. Temp-ul `.wtpart.<id>` persistă între
 # cereri, deci o cădere de reţea — sau un restart de gateway — NU reia de la zero: clientul întreabă
@@ -5481,7 +5525,7 @@ def _upload_key(host_id: int, path: str, upload_id: str) -> tuple:
 
 
 
-# ── Fereastră de reordonare pentru upload PIPELINED (transfers phase 2) ───────
+# ── [upload] Fereastră de reordonare pentru upload PIPELINED (transfers phase 2) ───────
 # Clientul poate trimite până la WINDOW_K felii CONCURENT peste HTTP, ca să ascundă RTT-ul pe
 # legături cu latenţă mare: corpurile urcă în paralel browser→gateway. DAR agentul scrie STRICT
 # la offset == dimensiunea curentă a temp-ului (fs_write respinge orice altceva cu offset_conflict),
@@ -5655,7 +5699,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str, user=None) -
     return out
 
 
-# ── SHA-256 of staged "move as root" uploads (3.6.9 review M1, rootmove.py) ───────────────
+# ── [upload] SHA-256 of staged "move as root" uploads (3.6.9 review M1, rootmove.py) ───────────────
 # The `sudo` command that installs a staged inbox file checks it against the SHA-256 of the bytes
 # that passed through THIS gateway — not of what is on the host when the command runs (the inbox
 # belongs to the agent's user, who can swap it). The hash is built in `_drain_window`, where the
@@ -5915,6 +5959,8 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str, user=None) ->
             pass
     _upload_locks.pop(key, None)          # abia după eliberare (vezi _upload_forget)
 
+
+# ── [files] delete / rename / mkdir / cwd, file errors ────────────────────────────────────────────
 
 async def fs_delete(host_id: int, path: str, recursive: bool = False) -> None:
     resp = await _agent_or_raise(host_id).request(

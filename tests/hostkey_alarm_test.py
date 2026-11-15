@@ -384,7 +384,7 @@ async def main():
     cert = ca.generate_host_certificate(hk_c, "certhost", principals=["127.0.0.1"])
     srv_c = await asyncssh.create_server(_Server, "127.0.0.1", 0, server_host_keys=[(hk_c, cert)])
     cport = srv_c.sockets[0].getsockname()[1]
-    got = await core._peek_host_key(dict(host="127.0.0.1", port=cport, username="tester"))
+    got = await core.peek_host_key(dict(host="127.0.0.1", port=cport, username="tester"))
     check("M3: host cu certificat → cheia simplă a hostului e citită (nu None)",
           got is not None and got.get_fingerprint() == hk_c.get_fingerprint(), repr(got))
     probe_row = {"id": 0, "name": "c", "connection_type": "ssh", "hostname": "127.0.0.1", "ssh_port": cport,

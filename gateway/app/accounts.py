@@ -30,7 +30,7 @@ import logging
 import time
 from typing import Optional
 
-from . import audit, authz, db, email_alerts, security
+from . import audit, authz, db, email_alerts, security, shares
 
 log = logging.getLogger("webterm")
 
@@ -155,9 +155,8 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
         "SELECT COUNT(*) AS c FROM api_tokens WHERE created_by_id=?", uid))["c"]
     await db.execute("DELETE FROM api_tokens WHERE created_by_id=?", uid)
     ngrp = await revoke_enroll_groups(uid, email)
-    from . import api                       # late: api imports this module
-    nshare = await api._revoke_all_shares(email, uid)
-    nlinks = await api._revoke_replay_links(uid)
+    nshare = await shares.revoke_all_shares(email, uid)
+    nlinks = await shares.revoke_replay_links(uid)
     what = ("account %s disabled by the identity provider (%s): sessions ended, %d automation "
             "token(s), %d group enrollment token(s), %d share(s) and %d replay link(s) revoked"
             % (email, reason, ntok, ngrp, nshare, nlinks))

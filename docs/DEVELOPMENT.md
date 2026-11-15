@@ -19,7 +19,7 @@ cd frontend && npm run dev
 No Node on the machine? The Playwright image used by the gates has it:
 
 ```sh
-cd frontend && docker run --rm -v "$PWD":/work -w /work mcr.microsoft.com/playwright:v1.63.0-noble \
+docker run --rm -v "$PWD/frontend":/work -w /work mcr.microsoft.com/playwright:v1.63.0-noble \
   bash -c 'npx tsc --noEmit && npm run lint && npx vitest run'
 ```
 
@@ -79,10 +79,17 @@ agent/
 gateway/app/
   main.py                  FastAPI app, security headers, static files, periodic reapers
   api.py                   every REST route + the agent / browser / shared websockets + the
-                           installer. 12k lines: navigate by its "# ── Section ──" banners
+                           installer. 13k lines in sections `# ── [tag] Title ──`: list them with
+                           `grep -n '^# ── ' gateway/app/api.py`; one feature in api.py + core.py:
+                           `grep -n '^# ── \[ssh\]' gateway/app/{api,core}.py`. Only main.py
+                           imports it (tests/import_layers_test.py)
   core.py                  runtime: SessionHub, AgentConnection, liveness reconciliation, the
                            per-connection sources (SSH, SSH-jump, telnet, serial), forwards,
-                           file transfer
+                           file transfer; same `[tag]` sections
+  conntypes.py             connection types (agent · ssh · ssh-jump · telnet · telnet-jump) and their
+                           groupings, in Python and SQL: the only place that lists them
+                           (tests/conntypes_test.py; frontend mirror in lib/conntypes.ts)
+  shares.py · fwddomain.py revoke live shares / replay links · the forward domain
   db.py · config.py        SQLite (aiosqlite, no ORM) + migrations · env configuration, version
   errors.py · audit.py     API errors with stable codes · audit log of every changing request
   -- identity and access --
@@ -189,15 +196,32 @@ administer your servers with. The CI chain, in order:
 11. **Jump-host UI** (`scripts/e2e-jump.mjs`) — nesting, the form, the host hub.
 
 Frontend `eslint` and `vitest` run in the `unit-tests` job with the Python suite. Two CI checks
-have no local equivalent in `ci-local.sh`: the **counts in the docs** (`unit-tests`: the number of
-`check(` calls in `e2e-session.mjs` must match the README, the number of suites in `run-tests.sh`
-must match CONTRIBUTING.md — a mismatch fails the job, and then no image is built) and
-**`AGENT_VERSION` bumped when `agent/ptyd.py` changed** (`build`, compared with the previous push).
+have no local equivalent in `ci-local.sh`: the **counts in the docs** (`unit-tests` job; a
+mismatch fails it, and then no image is built). Compute them exactly as CI does:
+
+```sh
+grep -c '^\s*check(' scripts/e2e-session.mjs   # → "`e2e-session.mjs`, N checks" in README.md
+# (only lines that START with check( count; a plain grep -c 'check(' gives a bigger number)
+N=$(awk '/^CI_TESTS="/{f=1} f{print} f&&/"[[:space:]]*$/{exit}' scripts/run-tests.sh \
+    | sed 's/CI_TESTS=//' | tr -d '"' | wc -w); echo $((N + 1))
+                                                  # → "`unit-tests` job — N suites" in CONTRIBUTING.md (+1 = CI_LAST)
+```
+
+The other one is **`AGENT_VERSION` bumped when `agent/ptyd.py` changed** (`build`, compared with
+the previous push).
 
 Run the same chain locally with `scripts/ci-local.sh` (steps: `unit sig lint build smoke e2e a11y
 fs fwd mobile sso backup features jump`, or `all` — about half an hour). `build` produces the image
 the browser steps run against, so repeat it after a code change; `a11y` and `mobile` log in with
 the account that `e2e` creates, so run them together with it (`ci-local.sh build e2e mobile`).
+Only one gate with containers runs at a time per clone (a lock in the shared git dir); a second
+one, or a run that finds `wtci-*` containers left by an interrupted run, exits 2 without touching
+anything. Clean up leftovers with `WTCI_CLEAN_STALE=1`. Ports 8000–8006 must be free.
+`IMG=webterm-verify:<name>` gives a run its own image tag (default `webterm-verify:local`), so a
+`build` from one worktree does not replace the image that another checkout's later steps reuse;
+the containers and ports stay shared, which is why the lock exists.
+`MOBILE_DEVICES=iphone-13` limits `scripts/mobile-audit.mjs` to one device when you run it
+directly; `ci-local.sh` does not pass it on.
 
 Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` (which `upgrade.sh` calls after its backup and host-file sync) keeps the
 previous image and does an **automatic rollback** if the new container doesn't

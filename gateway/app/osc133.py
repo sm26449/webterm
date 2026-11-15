@@ -108,6 +108,7 @@ def _exit_from(tail: bytes) -> Optional[int]:
         return None
 
 
+# INV-08 (docs/design/INVARIANTS.md): euristicile garde-ului doar ADAUGĂ citiri; a scurta/ignora input = bypass.
 class Osc133Scanner:
     """`integrated` = s-a văzut un B (sfârşit de prompt), ca `CommandTracker.integrated`.
     `last` = felul ultimului marcaj 133 ('A'|'B'|'C'|'D') sau None (necunoscut: niciun marcaj de la

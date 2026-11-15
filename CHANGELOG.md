@@ -9,6 +9,62 @@ back.
 
 ## [Unreleased]
 
+## [3.6.35] — 2026-11-16 · agent (59)
+
+An internal maintenance release: no new features and no behaviour change intended. It removes
+structural traps in the gateway's code: the places where changes most often went wrong, and
+where the retarget bypasses fixed in 3.6.34 came from. Gateway only: the agent is unchanged, so
+the fleet does not update.
+
+### Fixed
+- **The FTPS backup's CA certificate survives saving the Settings form again.** The form says
+  "leave empty to keep the stored one", but every save overwrote the CA with the empty field.
+  A backup to a self-signed FTPS server then started failing the next night. An empty field now
+  keeps the CA for the same destination. A different server clears it, like the stored password:
+  that certificate belonged to the old server.
+
+### Changed
+- **"Update available" now links to what the new version brings.** The Status panel and
+  Settings → Preferences already showed the upgrade command, but the in-app changelog belongs to
+  the version you are running. A link now opens the new version's release notes on GitHub.
+- **Connection types are defined in one place.** "SSH or SSH-jump", "the jump types", "anything
+  except an agent" and "a host with no type is an agent" were spelled out by hand about 70 times
+  in the gateway and again in the frontend. The 3.6.34 review found two ways to move a stored
+  password to another server, and both sat in that matrix: one branch forgot one type. The rules
+  now live in `gateway/app/conntypes.py`, with a frontend mirror in `lib/conntypes.ts`. A test
+  rejects any new hand-written list of types, including in SQL, and checks that the two lists
+  match. A database row missing the type column now raises an error instead of being treated as
+  an agent host. Four queries that compared `connection_type='agent'` now use the same "no
+  type = agent" rule as the rest of the code. Since the column defaults to `agent`, that only
+  matters for hand-edited data.
+- **No gateway module imports the routes module any more.** Account deletion, SSO role sync and
+  the system-health checks reached back into `api.py` from inside functions, to get around an
+  import cycle. That made the cycle invisible and let a change in `api.py` break them, but only
+  when that code path ran. Revoking shares and replay links now lives in `shares.py`, and the
+  forward domain in `fwddomain.py`. A test keeps it that way and lists the few remaining
+  function-level imports, each with its reason.
+- **`api.py` and `core.py` are divided into tagged sections** (`# ── [ssh] …`, `[share]`,
+  `[hosts]`…), so one search finds a feature in both files. Comments only.
+
+### Documentation
+- **New: `docs/design/INVARIANTS.md`, the business rules that have been got wrong.** Eleven rules,
+  each with the mistaken belief behind a past bug, the reason for the rule, the code that enforces
+  it and its test. Examples: a saved password belongs to a destination, not to a host entry; a
+  password never goes to an unconfirmed host key; a share never outlives the person who made it;
+  the guardrail may only add readings. The enforcing code carries matching `INV-NN` comments, and
+  a test keeps the page, the comments, the named functions and the cited tests in step.
+- **Contributor docs match how the gates actually behave.** CONTRIBUTING said the full local
+  gate takes ~10 minutes; it takes about 35. It also suggested running a subset without `build`,
+  which silently tests the previous image. Both are fixed, along with the gate lock, the cleanup
+  of left-over containers, and running the frontend checks without Node on the host.
+- **The doc-count check is spelled out.** CI counts only lines that *start* with `check(` in
+  `e2e-session.mjs`, so a plain count gave a different number from the README. DEVELOPMENT.md now
+  gives CI's exact commands.
+- **The role design's route matrix (Appendix A) no longer carries line numbers.** 190 of the 192
+  rows pointed to the wrong place in `api.py`. The doc also claimed the matrix was generated from
+  an `authz.ROUTE_PERMS` table. That table never existed: the matrix is kept by hand, and
+  `route_auth_test` keeps it in step with the code.
+
 ## [3.6.34] — 2026-11-15 · agent (59)
 
 External security reviews of 3.6.33 found ways around several of WebTerm's own rules: a share

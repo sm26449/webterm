@@ -22,6 +22,7 @@ type UpdateInfo = {
   current: string; enabled: boolean; latest?: string
   update_available?: boolean; configurable?: boolean; error?: string
   update_command?: string
+  release_url?: string
 }
 
 export default function PreferencesTab() {
@@ -389,6 +390,12 @@ export default function PreferencesTab() {
             <UpdateCommand command={upd.update_command}
               status={{ error: upd.error, checking: updBusy,
                         onRetry: () => { setUpdBusy(true); api<UpdateInfo>('/api/version/refresh', { method: 'POST' }).then(setUpd).catch((e) => setUpd((u) => (u ? { ...u, error: errText(e, t) || t('common.loadFailed') } : u))).finally(() => setUpdBusy(false)) } }} />
+            {upd.release_url && (
+              <a href={upd.release_url} target="_blank" rel="noopener noreferrer"
+                className="wt-link mt-2 inline-block text-xs hover:underline">
+                {t('settings.update.releaseNotes', { version: upd.latest ?? '' })}
+              </a>
+            )}
           </div>
         )}
       </section>

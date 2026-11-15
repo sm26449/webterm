@@ -40,9 +40,20 @@ The browser gates (smoke boot, session E2E, accessibility, FS API, port forwardi
 mobile audit) need Docker and Playwright rather than the venv:
 
 ```sh
-scripts/ci-local.sh            # all of them, ~10 min
-scripts/ci-local.sh e2e a11y   # or a subset, in CI order
+scripts/ci-local.sh                  # all of them (= `all`), about 35 min
+scripts/ci-local.sh build e2e a11y   # or a subset, in CI order
 ```
+
+- The browser steps reuse the existing `webterm-verify:local` image when `build` is left out,
+  so after any frontend or gateway change, include `build` or you test the old code.
+- `a11y` and `mobile` log in with the account that `e2e` creates. On a fresh container without
+  `e2e` in the same run, they stop with exit 2 before testing anything, so run them together:
+  `ci-local.sh build e2e mobile`.
+- One gate with containers runs at a time per clone. A second one exits 2, and so does a run
+  that finds `wtci-*` containers left over from an interrupted run: clean them with
+  `WTCI_CLEAN_STALE=1`. Ports 8000–8006 must be free.
+- `MOBILE_DEVICES=iphone-13 node scripts/mobile-audit.mjs` limits the mobile audit to one
+  device, but `ci-local.sh` does not pass that variable on.
 
 The accessibility gate (`tests/ui_review.mjs`, step `a11y`) runs axe-core with the
 `wcag2a/2aa/21a/21aa/22aa` + `best-practice` tags over ~136 scans (every surface in both
@@ -77,7 +88,8 @@ happened on 2026-08-05; the helper also refuses to run when it detects a live ag
 refuses accounts with live processes and fails *silently* — one such account survived 21
 days with 13 shells.
 
-Frontend: `cd frontend && npm run build` (also runs `tsc --noEmit`).
+Frontend: `cd frontend && npm run build` (also runs `tsc --noEmit`). No Node on the machine? Run
+the frontend checks in the Playwright image, as shown in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 **Environment gotcha for tests that call `ptyd.Agent(...)`:** on a machine with `tmux` + `/etc/machine-id`
 (as on the CI runner), `Agent.__init__` writes `~/.webterm/tmux.conf`; the test must isolate `HOME`
@@ -88,7 +100,7 @@ and call `os.makedirs(ptyd.WEBTERM_DIR, exist_ok=True)` after import. See `tests
 The `.github/workflows/docker-publish.yml` workflow **blocks image publishing** if:
 
 1. **The agent signature** does not match `agent/ptyd.py` (see below).
-2. **The Python unit tests** (`unit-tests` job — 131 suites; `scripts/run-tests.sh` is the
+2. **The Python unit tests** (`unit-tests` job — 134 suites; `scripts/run-tests.sh` is the
    single source of truth for the list, and guards it in both directions) fail.
 3. **Smoke boot** (headless Chromium) — the UI fails to start.
 4. **Session E2E** (REAL agent) / **FS API** / **port forwarding** / **mobile audit** fail, or one
@@ -147,6 +159,9 @@ account `demo@example.com`). One command regenerates all of them:
 (cd frontend && npm ci)          # once: the `playwright` npm package the capture script imports
 scripts/screenshots/run.sh       # → docs/screenshots/*.png, dark + light, then pngquant
 ```
+
+Without Node on the host, do the `npm ci` step in the Playwright image:
+`docker run --rm -v "$PWD/frontend":/work -w /work mcr.microsoft.com/playwright:v1.63.0-noble npm ci`.
 
 It needs docker plus two local images: the WebTerm image of the current version
 (`ghcr.io/sm26449/webterm:v<GATEWAY_VERSION>`, override with `WEBTERM_IMAGE=…`) and

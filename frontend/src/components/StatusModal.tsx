@@ -62,6 +62,7 @@ interface VersionInfo {
   latest?: string
   update_available?: boolean
   update_command?: string
+  release_url?: string
   error?: string
 }
 
@@ -195,6 +196,12 @@ export default function StatusModal(props: { onClose: () => void }) {
                 <div className="py-2">
                   <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
                   <UpdateCommand command={ver.update_command} />
+                  {ver.release_url && (
+                    <a href={ver.release_url} target="_blank" rel="noopener noreferrer"
+                      className="wt-link mt-2 inline-block text-xs hover:underline">
+                      {t('settings.update.releaseNotes', { version: ver.latest ?? '' })}
+                    </a>
+                  )}
                 </div>
               )}
             </div>

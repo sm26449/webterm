@@ -57,7 +57,7 @@ FORWARD_TOKEN_TTL = 12 * 3600
 _forward_epoch: str = secrets.token_hex(8)
 
 # …dar epoch-ul singur e GLOBAL, iar de la conturile multiple asta însemna că logout-ul lui A
-# rupea tunelurile lui B. Share-urile au primit deja tratamentul ăsta (`_revoke_all_shares`
+# rupea tunelurile lui B. Share-urile au primit deja tratamentul ăsta (`shares.revoke_all_shares`
 # ia un `owner_email`); token-urile de forward au rămas în urmă, în ACELAŞI handler de logout.
 # Semnalat de un audit extern, ca „DoS colateral pe tuneluri".
 #
@@ -832,6 +832,7 @@ def consume_stepup_grant(grant: str, user_id: int, host_id: int) -> bool:
 # acțiunile sensibile ulterioare pe host (run, fs, sesiune, update) o consultă în loc să ceară
 # re-verificare per-click (altfel file-browser-ul ar cere passkey la fiecare navigare). Ca `sudo`.
 _stepup_windows: dict = {}     # (user_id, host_id) -> (opened_at, expiry)
+# INV-04 (docs/design/INVARIANTS.md): fereastră per (user, host): 5 min inactivitate, plafon absolut 60 min.
 STEPUP_WINDOW = 300            # 5 min inactivitate → se închide (idle timeout, sliding)
 STEPUP_WINDOW_MAX = 3600       # plafon ABSOLUT de la primul step-up: peste atât, re-verificare oricât de activ ai fi
 

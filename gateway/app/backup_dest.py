@@ -202,9 +202,9 @@ async def probe_hostkey(host: str, port: int, user: str,
     if not ssh_key and not password:
         raise DestError("lipseşte cheia SSH sau parola")
     if password and not ssh_key and not (trust_hostkey or "").strip():
-        from .core import _peek_host_key        # import local: backup_dest nu trage core la import
+        from .core import peek_host_key        # import local: backup_dest nu trage core la import
         try:
-            key = await asyncio.wait_for(_peek_host_key(dict(host=host, port=port, username=user)),
+            key = await asyncio.wait_for(peek_host_key(dict(host=host, port=port, username=user)),
                                          timeout=CONNECT_TIMEOUT)
         except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
             raise DestError("serverul SFTP nu răspunde: %s" % e)

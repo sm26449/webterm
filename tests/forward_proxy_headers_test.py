@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 from starlette.requests import Request  # noqa: E402
 
-from app import api  # noqa: E402
+from app import api, fwddomain  # noqa: E402
 
 ok = 0
 total = 0
@@ -150,20 +150,20 @@ async def main():
     check("port: PUBLIC_URL invalid → fără sufix (nu aruncă)", api._fwd_port_suffix("http://x:notaport") == "")
     base = api._fwd_base("graf")
     check("URL-ul forward-ului include portul PUBLIC_URL (http://localhost:8000)",
-          base == "http://graf.%s:8000" % api.forward_domain(), base)
+          base == "http://graf.%s:8000" % fwddomain.forward_domain(), base)
     # Origin-ul de pe subdomeniu CU port trece la fel ca fără (rutarea/verificarea ignoră portul)
-    fhost = "graf.%s:8000" % api.forward_domain()
+    fhost = "graf.%s:8000" % fwddomain.forward_domain()
     check("Origin cu portul public → acceptat, rescris la ţintă",
           api._fwd_origin_for_target(base, fhost, "http", "127.0.0.1", 3000) == "http://127.0.0.1:3000")
     try:
-        api._fwd_origin_for_target("http://evil.%s:8000" % api.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        api._fwd_origin_for_target("http://evil.%s:8000" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
         check("Origin străin (alt subdomeniu) → tot refuzat", False)
     except api.ApiError:
         check("Origin străin (alt subdomeniu) → tot refuzat", True)
     # raport 2026-11, punct 8: originea se compară ÎNTREAGĂ — acelaşi subdomeniu pe ALT port e altă
     # origine (alt serviciu pe aceeaşi gazdă), nu pagina forward-ului
     try:
-        api._fwd_origin_for_target("http://graf.%s:9999" % api.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        api._fwd_origin_for_target("http://graf.%s:9999" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
         check("Origin pe acelaşi subdomeniu, ALT port → refuzat", False)
     except api.ApiError:
         check("Origin pe acelaşi subdomeniu, ALT port → refuzat", True)

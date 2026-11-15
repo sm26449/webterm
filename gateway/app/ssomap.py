@@ -41,7 +41,7 @@ import time
 import unicodedata
 from typing import Optional
 
-from . import audit, authz, db, email_alerts, security
+from . import audit, authz, config, db, email_alerts, security, shares
 
 log = logging.getLogger("webterm")
 
@@ -181,8 +181,7 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
         if not defer_bump:
             authz.bump_epoch()
         security.bump_forward_epoch(uid)
-        from . import api                  # late: api imports this module's callers
-        await api._revoke_unauthorized_derived(uid)
+        await shares.revoke_unauthorized_derived(uid)
 
     def lab(t):
         return _label(names.get(t[0], ("", "?"))[1], t[1], t[2])
@@ -195,6 +194,7 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
     return out
 
 
+# INV-07 (docs/design/INVARIANTS.md): un cont cu parolă locală nu primește NICIODATĂ roluri din grupurile SSO.
 async def has_local_password(uid: int) -> bool:
     """True unless the account was provisioned by SSO or its owner removed the local password.
     Unknown / NULL = True (fail-closed: pre-3.6.2 accounts count as having one)."""
@@ -527,7 +527,6 @@ async def reconcile_config(raw: Optional[str] = None) -> dict:
     WEBTERM_OIDC_ROLE_MAP. Nu ridică excepţii spre apelant (pornirea nu are voie să cadă din
     cauza unui .env greşit): o eroare neaşteptată e jurnalizată şi NU acordă nimic (scrierile
     în DB sunt doar ADĂUGĂRI de mapări valide deja verificate şi ŞTERGERI)."""
-    from . import config
     raw = config.OIDC_ROLE_MAP if raw is None else raw
     out = {"added": [], "removed": [], "kept_ui": [], "errors": [], "warnings": [],
            "owner_refused": [], "pruned": 0}

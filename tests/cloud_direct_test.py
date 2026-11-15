@@ -177,6 +177,18 @@ async def main():
             except cloudbackup.CloudError as e:
                 check("destinaţie mutată + pinul vechi (fără Probe pe noul server) → refuzată",
                       "not seen" in str(e), str(e))
+            # CA-ul FTPS: gol pe aceeaşi destinaţie = păstrat (cum promite UI-ul); mutată = golit
+            pem = "-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----"
+            await cloudbackup.save_config_direct("ftps", "ftp.example", 21, "u", ".", "", "pw-ftp",
+                                                 "", pem, "passphrase-buna", 5, False)
+            await cloudbackup.save_config_direct("ftps", "FTP.example", 0, "u", "./alt", "", "",
+                                                 "", "", "passphrase-buna", 9, False)
+            check("CA-ul FTPS rămâne la o re-salvare cu câmpul gol (aceeaşi destinaţie)",
+                  (await cloudbackup.get_config())["ca"] == pem)
+            await cloudbackup.save_config_direct("ftps", "ftp2.example", 21, "u", ".", "", "pw-2",
+                                                 "", "", "passphrase-buna", 9, False)
+            check("…dar NU urmează o destinaţie mutată (CA-ul era al serverului vechi)",
+                  not (await cloudbackup.get_config())["ca"])
             check("port 0 = implicitul protocolului (aceeaşi destinaţie, nu „mutată\")",
                   cloudbackup._dport("sftp", 0) == 22 and cloudbackup._dport("ftps", 0) == 21)
         finally:

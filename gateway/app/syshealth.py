@@ -40,7 +40,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
-from . import alert_history, config, db, healthcmd, hoststatus
+# INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
+from . import alert_history, config, conntypes, db, fwddomain, healthcmd, hoststatus
 
 log = logging.getLogger("webterm")
 
@@ -549,7 +550,7 @@ async def c_channel() -> Optional[Result]:
 async def _agent_rows():
     return await db.fetchall(
         "SELECT id, agent_version, supervision_summary, update_blocked FROM hosts"
-        " WHERE COALESCE(connection_type,'agent')='agent' AND COALESCE(ephemeral,0)=0"
+        " WHERE " + conntypes.SQL_IS_AGENT + " AND COALESCE(ephemeral,0)=0"
         " AND uninstalled_at IS NULL ORDER BY id")
 
 
@@ -671,7 +672,7 @@ async def c_signing() -> Optional[Result]:
         return Result("critical", "signing_unsigned", rec="signing_key", action="settings:signing")
     if signing.key_exists() and not signing.is_loaded():
         row = await db.fetchone(
-            "SELECT COUNT(*) AS c FROM hosts WHERE connection_type='agent'"
+            "SELECT COUNT(*) AS c FROM hosts WHERE " + conntypes.SQL_IS_AGENT +
             " AND agent_version IS NOT NULL AND agent_version < ?", exp.get("version") or 0)
         behind = int(row["c"]) if row else 0
         if behind:
@@ -748,8 +749,7 @@ def _kick_probe(now: Optional[float] = None) -> bool:
 
 
 async def c_forwards_http() -> Optional[Result]:
-    from . import api
-    if config.PUBLIC_URL.startswith("http://") and api.forward_domain():
+    if config.PUBLIC_URL.startswith("http://") and fwddomain.forward_domain():
         if await db.fetchone("SELECT 1 FROM port_forwards LIMIT 1"):
             return Result("critical", "insecure_forwards", rec="use_https")
     return None
@@ -938,7 +938,7 @@ _CERT_SEV = {"ok": "ok", "expiring": "warning", "expiring_soon": "critical", "ex
 
 def _cert_check(role: str):
     async def fn() -> Optional[Result]:
-        from . import api, certmon
+        from . import certmon
         items = [i for i in certmon.status()["items"] if i.get("role") == role]
         if not items:
             return None
@@ -950,7 +950,7 @@ def _cert_check(role: str):
         p = {"name": it.get("name") or "?", "days": int(max(0, it.get("days_left") or 0))}
         cmds = []
         dom = it.get("renew_domain")
-        if state != "ok" and dom in certmon.renew_domains(api.forward_domain()):
+        if state != "ok" and dom in certmon.renew_domains(fwddomain.forward_domain()):
             cmds = [{"t": "cert_renew", "p": {"domain": dom}}]
         return Result(_CERT_SEV.get(state, "warning"), key, p,
                       rec="" if state == "ok" else "renew_cert", commands=cmds,
@@ -1006,13 +1006,12 @@ async def c_clock() -> Optional[Result]:
 
 
 async def c_forward_dns() -> Optional[Result]:
-    from . import api
     if not await db.fetchone("SELECT 1 FROM port_forwards WHERE enabled=1 LIMIT 1"):
         return None
-    domain = api.forward_domain()
+    domain = fwddomain.forward_domain()
     if not domain:
         return None
-    if not api._valid_domain(domain):
+    if not fwddomain.valid_domain(domain):
         return None
     # DNS only (the same `wtcheck.<domain>` name the on-demand probe in Settings resolves) — no
     # outbound TCP/TLS from a background task to a name a settings.manage holder can edit

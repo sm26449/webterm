@@ -3401,6 +3401,7 @@ const ro: Lang = {
     'settings.update.unreachable': "GitHub inaccesibil — reîncearcă mai târziu.",
     'settings.update.checkNow': "Verifică acum",
     'settings.update.checking': "Se verifică…",
+    'settings.update.releaseNotes': "Ce aduce {version} (release notes pe GitHub) ↗",
     'settings.update.howTo': "Rulează pe serverul unde e instalat WebTerm (păstrează datele; are health-check și rollback automat):",
     'settings.update.copy': "Copiază",
     'settings.update.copied': "Copiat ✓",

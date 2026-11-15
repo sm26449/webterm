@@ -32,7 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
-from app import (alert_history, api, audit, config, core, db, email_alerts, healthcmd,  # noqa: E402
+from app import (alert_history, api, audit, config, core, db, email_alerts, fwddomain, healthcmd,  # noqa: E402
                  hoststatus, main as app_main, oidc, security, syshealth, updatecheck)
 
 ok = 0
@@ -532,8 +532,8 @@ async def test_checks(owner_uid):
     r = await run_check("forward.dns")
     check("no forwards → forward DNS not applicable", r is None, r)
     await U.add_forward(h2, "grafana")
-    saved_fwd = api._fwd_domain_cache
-    api._fwd_domain_cache = "apps.example.com"
+    saved_fwd = fwddomain._fwd_domain_cache
+    fwddomain._fwd_domain_cache = "apps.example.com"
     orig_ghbn, asked = socket.gethostbyname, []
 
     def fake_ghbn(name):
@@ -549,7 +549,7 @@ async def test_checks(owner_uid):
         check("forward DNS answers → ok", r["severity"] == "ok", r)
     finally:
         socket.gethostbyname = orig_ghbn
-        api._fwd_domain_cache = saved_fwd
+        fwddomain._fwd_domain_cache = saved_fwd
         await db.execute("DELETE FROM port_forwards")
     core._note_agent_clock(h2, float("nan"))
     core._note_agent_clock(h2, "soon")

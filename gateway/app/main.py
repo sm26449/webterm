@@ -14,8 +14,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, certmon, config, core, db, email_alerts, health,
-               oidc_api, scim, security, signing, ssomap, syshealth, webauthn_api)
+from . import (api, audit, authz, backup, certmon, config, conntypes, core, db, email_alerts,
+               fwddomain, health, oidc_api, scim, security, signing, ssomap, syshealth, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -32,7 +32,7 @@ async def _warn_if_insecure_forwards() -> None:
     înseamnă că o pagină de echipament poate INJECTA o sesiune în originea aplicaţiei —
     fixare de sesiune. Nu refuzăm pornirea (o instalare de laborator pe IP e legitimă), dar
     o spunem tare: tăcerea aici e cea care lasă pe cineva să creadă că e în regulă."""
-    if config.PUBLIC_URL.startswith("http://") and api.forward_domain():
+    if config.PUBLIC_URL.startswith("http://") and fwddomain.forward_domain():
         log.error(
             "INSECURE: WEBTERM_PUBLIC_URL is http:// while port-forwarding is configured. "
             "Without https the session cookie loses its __Host- prefix, so a forwarded page "
@@ -66,7 +66,7 @@ async def _warn_if_signing_locked() -> None:
     if not expected:
         return
     row = await db.fetchone(
-        "SELECT COUNT(*) AS c FROM hosts WHERE connection_type='agent'"
+        "SELECT COUNT(*) AS c FROM hosts WHERE " + conntypes.SQL_IS_AGENT +
         " AND agent_version IS NOT NULL AND agent_version < ?", expected)
     if row and row["c"]:
         email_alerts.notify_signing_locked(row["c"])
@@ -276,7 +276,7 @@ async def lifespan(app: FastAPI):
         log.warning("the fleet signing key is ENCRYPTED and locked — agent auto-update "
                     "is paused until you unlock it in Settings → Infrastructure & tokens")
     await api.init_setup_token()
-    await api.load_forward_domain()            # domeniul de forward configurabil din Settings
+    await fwddomain.load_forward_domain()            # domeniul de forward configurabil din Settings
     await api.seed_default_snippets()          # snippet-uri de transfer gata făcute (o singură dată)
     await core.reconcile_telnet_on_start()     # sesiunile telnet nu supraviețuiesc restartului → lost
     # 3.6.5: mapările SSO din WEBTERM_OIDC_ROLE_MAP (source='config') = exact ce scrie în .env,
@@ -295,7 +295,7 @@ async def lifespan(app: FastAPI):
     lagmon = asyncio.create_task(health.loop_lag_monitor())   # sănătatea gateway-ului
     backupt = asyncio.create_task(_scheduled_backup())        # backup-uri programate (off/daily/weekly)
     # 3.6.7: the TLS certificate Traefik serves (read-only handshake; alerts before expiry)
-    certt = asyncio.create_task(certmon.loop(api.forward_domain))
+    certt = asyncio.create_task(certmon.loop(fwddomain.forward_domain))
     # 3.6.8: System health (every check, alerting on transitions) + the optional dead-man switch
     healtht = asyncio.create_task(syshealth.loop())
     heartbeatt = asyncio.create_task(syshealth.heartbeat_loop())
@@ -432,7 +432,7 @@ async def csrf_guard(request: Request, call_next):
     deci nu trec pe aici — iar cine trimite şi cookie, şi Bearer, primeşte refuz corect."""
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         host = (request.headers.get("host") or "").split(":")[0].lower()
-        fdom = api.forward_domain()
+        fdom = fwddomain.forward_domain()
         forwarded = bool(host and fdom and host != fdom and host.endswith("." + fdom))
         # Subdomeniile de forward nu sunt API-ul nostru: cererile lor merg la echipament.
         if not forwarded and request.url.path.startswith(("/api/", "/__wtfwd/")):
@@ -481,7 +481,7 @@ async def security_headers(request: Request, call_next):
     # folosește inline scripts + eval). Izolarea rămâne prin subdomeniu + cookie
     # __Host-; echipamentul își aduce propriile headere de securitate.
     host = (request.headers.get("host") or "").split(":")[0].lower()
-    fdom = api.forward_domain()
+    fdom = fwddomain.forward_domain()
     if host and host != fdom and host.endswith("." + fdom):
         # F-08: CSP-ul nostru rupe UI-uri de echipamente, dar ASTEA trei nu rup nimic —
         # niciun UI de router nu are nevoie să fie încadrat de alt site sau să scurgă
@@ -535,7 +535,7 @@ class ForwardWSMiddleware:
         if scope["type"] == "websocket":
             hdrs = dict(scope.get("headers", []))
             host = hdrs.get(b"host", b"").decode("latin1").split(":")[0].lower()
-            main = api.forward_domain()
+            main = fwddomain.forward_domain()
             if host and host != main and host.endswith("." + main):
                 await api.handle_forward_ws(scope, receive, send)
                 return

@@ -910,6 +910,7 @@ def has_auth_dep(route) -> bool:
 _declared_ok: dict[int, bool] = {}
 
 
+# INV-06 (docs/design/INVARIANTS.md): rută nedeclarată = 500, nu deschisă; rolurile limitează ce atinge WebTerm, nu shell-ul.
 async def declared(request: HTTPConnection):
     """Router-level guard (fail-closed at runtime): a route that declares no permission and is
     neither PUBLIC nor SELF answers 500 `authz.undeclared` — unusable, never open."""
@@ -1075,6 +1076,7 @@ async def role_id(key: str) -> Optional[int]:
     return r["id"] if r else None
 
 
+# INV-07 (docs/design/INVARIANTS.md): nicio acțiune nu scoate ultimul Owner / ultimul break-glass.
 async def owner_count(exclude_binding: Optional[int] = None,
                       exclude_user: Optional[int] = None,
                       with_local_password: bool = False) -> int:

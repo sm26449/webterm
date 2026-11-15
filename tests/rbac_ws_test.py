@@ -15,7 +15,7 @@ import asyncio
 import json
 
 import rbac_util as U
-from app import api, core, db, security
+from app import api, core, db, fwddomain, security
 
 check = U.Checker()
 
@@ -197,7 +197,7 @@ async def main():
     del fid
     ticket = security.make_forward_token("svc", op_id)
     check("bilet + forward.use pe host → acces", await api._forward_authz_ok("svc", ticket))
-    host = "svc." + api.forward_domain()
+    host = "svc." + fwddomain.forward_domain()
     async with U.client(cookies={api.FWD_COOKIE: ticket}) as fc:
         r = await fc.get("http://%s/" % host, headers={"host": host, "origin": "http://" + host})
         check("cerere pe subdomeniu cu bilet valid: trece de autorizare (host offline → 409)",
