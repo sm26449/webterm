@@ -243,9 +243,9 @@ async def test_no_sign_in(op):
     check("parola greşită → 401 obişnuit (fără oracol)", r.status_code == 401 and U.code(r) == "auth.badCredentials")
     await c.aclose()
     check("…nicio sesiune creată", await n_sessions(lid) == 0)
-    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume
+    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume_anon
     webauthn_api.verify_authentication_response = lambda **kw: _Verified()
-    webauthn_api._consume = lambda cred: b"challenge"
+    webauthn_api._consume_anon = lambda cred: b"challenge"
     try:
         await db.execute("INSERT INTO webauthn_credentials(user_id, credential_id, public_key,"
                          " sign_count, name, created) VALUES(?,?,?,0,'k',?)", lid, b"cred-dis", b"pk",
@@ -255,7 +255,7 @@ async def test_no_sign_in(op):
               and U.code(r) == "auth.accountDisabled"
               and security.COOKIE_NAME not in r.headers.get("set-cookie", ""), "%s %s" % (r.status_code, r.text[:120]))
     finally:
-        webauthn_api.verify_authentication_response, webauthn_api._consume = orig_v, orig_c
+        webauthn_api.verify_authentication_response, webauthn_api._consume_anon = orig_v, orig_c
     r = await sso_login("sub-op", "op@x.co")
     check("SSO → redirect sso_error=disabled, fără cookie",
           r.headers.get("location", "").endswith("sso_error=disabled")

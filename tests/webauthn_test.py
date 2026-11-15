@@ -49,45 +49,114 @@ async def main():
 
     # ── challenge: emis o dată, consumat o dată ─────────────────────────────
     import base64
+    A, B = 1001, 1002                  # două conturi
+    W = webauthn_api
+
+    def b64(c):
+        return base64.urlsafe_b64encode(c).rstrip(b"=").decode()
+
+    def refused(fn, *args):
+        try:
+            fn(*args)
+            return False
+        except Exception:
+            return True
+
     ch = os.urandom(32)
-    b64 = base64.urlsafe_b64encode(ch).rstrip(b"=").decode()
-    webauthn_api._remember(ch)
-    got = webauthn_api._consume(_cred(b64))
+    W._remember(ch, A)
+    got = W._consume(_cred(b64(ch)), A)
     check("un challenge emis se consumă", got == ch, got)
-
-    try:
-        webauthn_api._consume(_cred(b64))
-        check("acelaşi challenge A DOUA oară → refuzat", False, "a trecut")
-    except Exception as e:
-        check("acelaşi challenge A DOUA oară → refuzat", "40" in str(type(e)) or True, type(e).__name__)
-
-    other = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    try:
-        webauthn_api._consume(_cred(other))
-        check("un challenge pe care NU l-am emis → refuzat", False, "a trecut")
-    except Exception:
-        check("un challenge pe care NU l-am emis → refuzat", True)
+    check("acelaşi challenge A DOUA oară → refuzat", refused(W._consume, _cred(b64(ch)), A))
+    check("un challenge pe care NU l-am emis → refuzat",
+          refused(W._consume, _cred(b64(os.urandom(32))), A))
 
     # expirare
     ch2 = os.urandom(32)
-    b2 = base64.urlsafe_b64encode(ch2).rstrip(b"=").decode()
-    webauthn_api._remember(ch2)
-    key = b2
-    webauthn_api._challenges[key] = time.time() - 1      # îl îmbătrânim
-    try:
-        webauthn_api._consume(_cred(b2))
-        check("challenge expirat → refuzat", False, "a trecut")
-    except Exception:
-        check("challenge expirat → refuzat", True)
+    W._remember(ch2, A)
+    W._challenges[b64(ch2)] = (time.time() - 1, A)      # îl îmbătrânim
+    check("challenge expirat → refuzat", refused(W._consume, _cred(b64(ch2)), A))
 
-    # plafon: o rafală de /options nu poate umple memoria
-    before = len(webauthn_api._challenges)
-    for _ in range(webauthn_api.CHALLENGE_MAX + 50):
-        webauthn_api._remember(os.urandom(32))
-    check("stocul de challenge-uri e plafonat",
-          len(webauthn_api._challenges) <= webauthn_api.CHALLENGE_MAX,
-          "%d > %d (înainte %d)" % (len(webauthn_api._challenges),
-                                    webauthn_api.CHALLENGE_MAX, before))
+    # ── legat de cont: challenge-ul lui A nu e bun pentru B, şi B nu i-l poate arde ──
+    ch3 = os.urandom(32)
+    W._remember(ch3, A)
+    check("challenge-ul contului A, prezentat de B → refuzat",
+          refused(W._consume, _cred(b64(ch3)), B))
+    check("…şi încercarea lui B NU l-a scos din coadă", b64(ch3) in W._challenges)
+    check("A îl consumă în continuare", W._consume(_cred(b64(ch3)), A) == ch3)
+
+    # cozile nu se amestecă: login nu primeşte un challenge de step-up, step-up nu primeşte unul de login
+    ch4 = os.urandom(32)
+    W._remember(ch4, A)
+    check("login cu un challenge din coada autentificată → refuzat",
+          refused(W._consume_anon, _cred(b64(ch4))))
+    ch5 = os.urandom(32)
+    W._remember_anon(ch5)
+    check("step-up cu un challenge de login → refuzat", refused(W._consume, _cred(b64(ch5)), A))
+    check("login îşi consumă propriul challenge", W._consume_anon(_cred(b64(ch5))) == ch5)
+
+    # ── DoS între conturi (audit 2026-11): B face flood pe /stepup/options ──────
+    W._challenges.clear()
+    victim = os.urandom(32)
+    W._remember(victim, A)
+    for _ in range(W.CHALLENGE_MAX * 2):
+        W._remember(os.urandom(32), B)
+    check("flood-ul lui B nu evacuează challenge-ul lui A", b64(victim) in W._challenges)
+    check("B e ţinut la plafonul per cont",
+          sum(1 for _, u in W._challenges.values() if u == B) <= W.CHALLENGE_PER_USER_MAX)
+
+    # multe conturi ostile, fiecare la plafon: tot nu ating challenge-ul unic al victimei. Limita
+    # e exactă: CHALLENGE_MAX conturi active (victima inclusă) încap câte unul; peste atât, cineva
+    # tot trebuie să piardă un loc — memoria rămâne plafonată, iar asta cere sute de conturi.
+    W._challenges.clear()
+    W._remember(victim, A)
+    for uid in range(5000, 5000 + W.CHALLENGE_MAX - 1):
+        for _ in range(W.CHALLENGE_PER_USER_MAX):
+            W._remember(os.urandom(32), uid)
+    check("stocul autentificat e plafonat global", len(W._challenges) <= W.CHALLENGE_MAX,
+          len(W._challenges))
+    check("conturi ostile multe: challenge-ul unic al victimei rămâne", b64(victim) in W._challenges)
+    check("victima îl consumă după flood", W._consume(_cred(b64(victim)), A) == victim)
+
+    # victima cu DOUĂ challenge-uri (două taburi): conturile ostile cu tot atâtea, venite după ea,
+    # nu-i scot nici pe cel vechi — la egalitate cedează ultimul venit, nu primul din coadă
+    W._challenges.clear()
+    old, new = os.urandom(32), os.urandom(32)
+    W._remember(old, A)
+    W._remember(new, A)
+    for uid in range(7000, 7000 + (W.CHALLENGE_MAX - 2) // 2):
+        W._remember(os.urandom(32), uid)
+        W._remember(os.urandom(32), uid)
+    for uid in range(8000, 8010):                       # conturi proaspete, câte unul
+        W._remember(os.urandom(32), uid)
+    check("victimă cu 2 challenge-uri: nici cel vechi nu e evacuat", b64(old) in W._challenges)
+    check("…nici cel nou", b64(new) in W._challenges)
+
+    # JSON adânc imbricat (endpoint neautentificat /login/verify): 400, nu 500 (RecursionError)
+    deep = base64.urlsafe_b64encode(b"[" * 200000).rstrip(b"=").decode()
+    try:
+        W._consume_anon({"response": {"clientDataJSON": deep}})
+        check("clientDataJSON adânc imbricat → refuzat", False, "a trecut")
+    except Exception as e:
+        check("clientDataJSON adânc imbricat → 400 (ApiError), nu RecursionError",
+              type(e).__name__ == "ApiError", type(e).__name__)
+
+    # propriul flood al unui cont îi evacuează doar challenge-urile vechi, pe cel nou îl păstrează
+    W._challenges.clear()
+    for _ in range(W.CHALLENGE_PER_USER_MAX + 3):
+        W._remember(os.urandom(32), A)
+    last = os.urandom(32)
+    W._remember(last, A)
+    check("cel mai nou challenge al contului supravieţuieşte propriului plafon",
+          W._consume(_cred(b64(last)), A) == last)
+
+    # plafon: o rafală de /login/options nu poate umple memoria
+    for _ in range(W.CHALLENGE_MAX + 50):
+        W._remember_anon(os.urandom(32))
+    check("stocul anonim e plafonat", len(W._challenges_anon) <= W.CHALLENGE_MAX,
+          len(W._challenges_anon))
+    check("clientDataJSON cu challenge ne-text → 400, nu 500",
+          refused(W._consume, {"response": {"clientDataJSON": base64.urlsafe_b64encode(
+              b'{"challenge": 5}').rstrip(b"=").decode()}}, A))
 
     # ── parametrii ceruţi bibliotecii: stricţi peste tot ────────────────────
     # Sunt verificaţi pe SURSĂ: dacă cineva scoate `require_user_verification` sau lasă

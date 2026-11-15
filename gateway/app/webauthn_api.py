@@ -22,8 +22,8 @@ from .errors import ApiError
 
 router = APIRouter(prefix="/api/webauthn", dependencies=[Depends(authz.declared)])
 
-# issued challenges (single-user tool: a small in-memory set is plenty)
-_challenges = {}          # b64url(challenge) -> expiry epoch
+# challenge-uri emise pentru cereri AUTENTIFICATE (înrolare, step-up), legate de contul care le-a cerut
+_challenges = {}          # b64url(challenge) -> (expiry epoch, user_id)
 CHALLENGE_TTL = 300
 
 
@@ -32,6 +32,12 @@ def _rp_id() -> str:
 
 
 CHALLENGE_MAX = 256          # bound memory: login/options is unauthenticated
+# Plafon PER CONT pe coada autentificată. Plafonul global singur se evacua FIFO între conturi: un
+# cont ostil care cerea `/stepup/options` în buclă (îi ajunge `host.view`) scotea challenge-ul pe
+# care alt utilizator tocmai îl primise → acela nu mai trecea de 2FA pe hosturile care îl cer
+# (DoS între utilizatori, găsit la auditul din 2026-11). Acum un cont îşi poate evacua doar
+# PROPRIILE challenge-uri; 8 acoperă câteva taburi/popout-uri care cer step-up în acelaşi timp.
+CHALLENGE_PER_USER_MAX = 8
 
 # Cozi SEPARATE pentru cererile anonime şi cele autentificate. Plafonul era comun, iar evacuarea
 # FIFO: 256 de apeluri pe `/login/options` (endpoint neautentificat, câteva zeci de ms) scoteau
@@ -40,32 +46,87 @@ CHALLENGE_MAX = 256          # bound memory: login/options is unauthenticated
 # marcate „cere 2FA" deveneau inaccesibile, cu mesajul „challenge necunoscut sau expirat;
 # reîncearcă", care trimite omul într-o buclă. Plafonul apăra memoria şi deschidea o negare de
 # serviciu; separarea păstrează prima proprietate fără a doua.
-_challenges_anon: dict = {}
+_challenges_anon: dict = {}   # b64url(challenge) -> expiry epoch
 
 
-def _remember(challenge: bytes, anon: bool = False) -> None:
-    store = _challenges_anon if anon else _challenges
+def _b64(challenge: bytes) -> str:
+    return base64.urlsafe_b64encode(challenge).rstrip(b"=").decode()
+
+
+def _remember_anon(challenge: bytes) -> None:
     now = time.time()
-    for key in [k for k, v in store.items() if v < now]:
-        del store[key]
+    for key in [k for k, v in _challenges_anon.items() if v < now]:
+        del _challenges_anon[key]
     # hard cap: drop the oldest if an attacker floods login/options
-    while len(store) >= CHALLENGE_MAX:
-        store.pop(next(iter(store)))
-    store[base64.urlsafe_b64encode(challenge).rstrip(b"=").decode()] = now + CHALLENGE_TTL
+    while len(_challenges_anon) >= CHALLENGE_MAX:
+        _challenges_anon.pop(next(iter(_challenges_anon)))
+    _challenges_anon[_b64(challenge)] = now + CHALLENGE_TTL
 
 
-def _consume(credential: dict) -> bytes:
-    """Validate the challenge inside the client response is one we issued."""
+def _remember(challenge: bytes, user_id: int) -> None:
+    """Challenge pentru o cerere autentificată, legat de `user_id`. Evacuarea nu atinge NICIODATĂ
+    challenge-urile altui cont cât timp contul curent are de unde ceda: întâi plafonul per cont
+    (cel mai vechi al lui), iar la plafonul global cel mai vechi al contului care ţine CELE MAI
+    MULTE — un grup de conturi ostile nu poate scoate challenge-ul unic al victimei (cât timp
+    sunt sub CHALLENGE_MAX conturi active; peste atât memoria rămâne plafonată, iar ceva cedează)."""
+    now = time.time()
+    for key in [k for k, (exp, _) in _challenges.items() if exp < now]:
+        del _challenges[key]
+    mine = [k for k, (_, uid) in _challenges.items() if uid == user_id]
+    while len(mine) >= CHALLENGE_PER_USER_MAX:
+        del _challenges[mine.pop(0)]          # dict-ul păstrează ordinea inserării: primul = cel mai vechi
+    while len(_challenges) >= CHALLENGE_MAX:
+        counts: dict = {}
+        first: dict = {}                      # uid -> poziţia celui mai vechi challenge al lui
+        for i, (_, uid) in enumerate(_challenges.values()):
+            counts[uid] = counts.get(uid, 0) + 1
+            first.setdefault(uid, i)
+        top = max(counts.values())
+        # La egalitate cedează CEL CARE CERE; altfel, dintre cei cu cele mai multe, cel care a
+        # venit ULTIMUL. Alegerea „primul din coadă" lovea tocmai cel mai vechi deţinător — de
+        # regulă victima: cu 2 challenge-uri (două taburi) ajungeau ~127 de conturi ostile.
+        if counts.get(user_id, 0) >= top:
+            hog = user_id
+        else:
+            hog = max((u for u, n in counts.items() if n == top), key=first.get)
+        del _challenges[next(k for k, (_, uid) in _challenges.items() if uid == hog)]
+    _challenges[_b64(challenge)] = (now + CHALLENGE_TTL, user_id)
+
+
+def _client_challenge(credential: dict) -> str:
     try:
         client_data = json.loads(base64url_to_bytes(credential["response"]["clientDataJSON"]))
         challenge_b64 = client_data["challenge"]
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError, RecursionError):   # JSON adânc imbricat → 400, nu 500
         raise ApiError(400, "passkey.malformed", "malformed credential")
-    expiry = _challenges.pop(challenge_b64, None)
-    if expiry is None:
-        expiry = _challenges_anon.pop(challenge_b64, None)
+    if not isinstance(challenge_b64, str):
+        raise ApiError(400, "passkey.malformed", "malformed credential")
+    return challenge_b64
+
+
+def _expired() -> ApiError:
+    return ApiError(400, "passkey.challengeExpired", "unknown or expired challenge; try again")
+
+
+def _consume_anon(credential: dict) -> bytes:
+    """Login: doar challenge-uri emise de `/login/options` (coada anonimă)."""
+    challenge_b64 = _client_challenge(credential)
+    expiry = _challenges_anon.pop(challenge_b64, None)
     if not expiry or expiry < time.time():
-        raise ApiError(400, "passkey.challengeExpired", "unknown or expired challenge; try again")
+        raise _expired()
+    return base64url_to_bytes(challenge_b64)
+
+
+def _consume(credential: dict, user_id: int) -> bytes:
+    """Înrolare / step-up: doar un challenge emis ACESTUI cont. Unul al altui cont e refuzat ca
+    necunoscut şi NU e scos din coadă — o cerere străină nu are niciun efect asupra victimei."""
+    challenge_b64 = _client_challenge(credential)
+    entry = _challenges.get(challenge_b64)
+    if entry is None or entry[1] != user_id:
+        raise _expired()
+    del _challenges[challenge_b64]
+    if entry[0] < time.time():
+        raise _expired()
     return base64url_to_bytes(challenge_b64)
 
 
@@ -92,7 +153,7 @@ async def register_options(user=Depends(security.require_user)):
             resident_key=ResidentKeyRequirement.REQUIRED,
             user_verification=UserVerificationRequirement.REQUIRED),
     )
-    _remember(options.challenge)
+    _remember(options.challenge, user["id"])
     return Response(options_to_json(options), media_type="application/json")
 
 
@@ -180,7 +241,7 @@ async def register_verify(body: CredentialBody, request: Request,
     if not await _verify_reauth(user, body.password):
         raise ApiError(401, "passkey.passwordRequired", "re-enter your account password to add a passkey")
     await second_gate(user, request, body, "enrol a passkey on your WebTerm account")
-    expected = _consume(body.credential)
+    expected = _consume(body.credential, user["id"])
     try:
         result = verify_registration_response(
             credential=body.credential,
@@ -207,7 +268,7 @@ async def login_options():
         rp_id=_rp_id(),
         user_verification=UserVerificationRequirement.REQUIRED,
     )
-    _remember(options.challenge, anon=True)   # endpoint neautentificat
+    _remember_anon(options.challenge)   # endpoint neautentificat
     return Response(options_to_json(options), media_type="application/json")
 
 
@@ -219,7 +280,7 @@ async def login_verify(body: CredentialBody, request: Request, response: Respons
         raise ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
                        headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
-    expected = _consume(body.credential)
+    expected = _consume_anon(body.credential)
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
     row = await db.fetchone(
         "SELECT * FROM webauthn_credentials WHERE credential_id=?", cred_id)
@@ -291,7 +352,7 @@ async def stepup_options(body: StepupOptions, user=Depends(authz.perm('host.view
         allow_credentials=[PublicKeyCredentialDescriptor(id=r["credential_id"])
                            for r in creds] or None,
     )
-    _remember(options.challenge)
+    _remember(options.challenge, user["id"])
     return Response(options_to_json(options), media_type="application/json")
 
 
@@ -304,7 +365,7 @@ async def stepup_verify(body: StepupVerify, request: Request,
         raise ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
                        headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
-    expected = _consume(body.credential)
+    expected = _consume(body.credential, user["id"])
     cred_id = base64url_to_bytes(body.credential.get("rawId", ""))
     # legat de utilizatorul curent: un passkey al altcuiva nu deblochează nimic
     row = await db.fetchone(

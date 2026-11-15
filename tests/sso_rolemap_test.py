@@ -391,9 +391,9 @@ async def passkey_login(cred_id: bytes):
 
 async def test_sso_only():
     print("── WEBTERM_OIDC_SSO_ONLY: passkey ca prim factor")
-    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume
+    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume_anon
     webauthn_api.verify_authentication_response = lambda **kw: _Verified()
-    webauthn_api._consume = lambda cred: b"challenge"
+    webauthn_api._consume_anon = lambda cred: b"challenge"
     try:
         await sso_login("sub-sso1", "sso1@x.co", [])          # provizionat de SSO: SSO-only
         sid = await uid_of("sso1@x.co")
@@ -425,7 +425,7 @@ async def test_sso_only():
         check("SSO_ONLY=1: login-ul prin SSO merge", bool(tok))
     finally:
         config.OIDC_SSO_ONLY = False
-        webauthn_api.verify_authentication_response, webauthn_api._consume = orig_v, orig_c
+        webauthn_api.verify_authentication_response, webauthn_api._consume_anon = orig_v, orig_c
 
 
 async def test_session_max():

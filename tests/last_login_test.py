@@ -98,9 +98,9 @@ async def main():
     await db.execute("INSERT INTO webauthn_credentials(user_id, credential_id, public_key,"
                      " sign_count, name, created) VALUES(?,?,?,0,'k',?)", uid, b"cred-pk", b"pk",
                      time.time())
-    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume
+    orig_v, orig_c = webauthn_api.verify_authentication_response, webauthn_api._consume_anon
     webauthn_api.verify_authentication_response = lambda **kw: _Verified()
-    webauthn_api._consume = lambda cred: b"challenge"
+    webauthn_api._consume_anon = lambda cred: b"challenge"
     try:
         raw = base64.urlsafe_b64encode(b"cred-pk").rstrip(b"=").decode()
         c = U.client()
@@ -110,7 +110,7 @@ async def main():
         check("login cu passkey → passkey", r.status_code == 200 and s[1] == "passkey",
               "%s %s" % (r.text[:120], s))
     finally:
-        webauthn_api.verify_authentication_response, webauthn_api._consume = orig_v, orig_c
+        webauthn_api.verify_authentication_response, webauthn_api._consume_anon = orig_v, orig_c
 
     # ── SSO (callback OIDC real) ────────────────────────────────────────────────────────
     idp("sub-ll-1", "sso@x.co")
