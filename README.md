@@ -294,4 +294,26 @@ and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).
 [MIT](LICENSE) · history in the [CHANGELOG](CHANGELOG.md).
 
 <a id="acknowledgments"></a>
-Built with development assistance from Claude (Anthropic).
+
+## How WebTerm is built
+
+WebTerm is designed, owned and maintained by [sm26449](https://github.com/sm26449). A large share
+of the code, the tests and the documentation is written together with **Claude Code**
+(Anthropic's Claude) as a development partner. Credit where it is due, both ways: the direction,
+the priorities and the responsibility are the maintainer's; much of the typing, testing and
+checking is Claude's.
+
+How we work:
+
+- **The maintainer decides.** What to build, what to leave out and when to release are his
+  calls. Claude proposes, asks when a choice is his to make, and does the work.
+- **Claims are checked against the code.** Audits and reviews are verified in the source before
+  anything changes: some findings turn out to be stale, others worse than reported.
+- **Security changes get an independent review** by a separate agent that reads the code, not the
+  conclusion. A fix ships with a test that fails without it.
+- **Nothing reaches users without the gates**: the hermetic suite, browser E2E against a real
+  agent, the mobile and accessibility audits, and CI before an image is published. Agent updates
+  are signed with the maintainer's own offline key, and production is only ever deployed by hand.
+
+Why: keeping a security-sensitive tool for a server fleet in good shape takes more tests, reviews
+and documentation than one person can write. The AI brings the volume; the human keeps the say.
