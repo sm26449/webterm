@@ -57,7 +57,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     hostkey: '', ca: '', passphrase: '', keep: 14, include_transcripts: false,
     current_password: '',
   })
-  const [probeInfo, setProbeInfo] = useState<{ fingerprint: string; type: string; hostkey: string } | null>(null)
+  const [probeInfo, setProbeInfo] = useState<{ fingerprint: string; type: string; hostkey: string; auth_tested?: boolean } | null>(null)
   const isDirect = cloudForm.provider === 'sftp' || cloudForm.provider === 'ftps'
 
   // U04: o stare necunoscută nu e „neconfigurat" — formularele nu se trimit peste valori implicite
@@ -85,21 +85,25 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     }).catch((e) => setCloudState({ status: 'error', error: errText(e, t) }))
   }
 
-  // SFTP TOFU: testează conexiunea şi întoarce amprenta host-key-ului de confirmat vizual.
-  async function probeHost() {
+  // SFTP: amprenta host-key-ului de confirmat vizual. Pinul aparţine destinaţiei: orice schimbare de
+  // tip / host / port îl goleşte (mai jos), ca „pinned" să nu mintă pentru o maşină nouă (lot 3).
+  // `trustKey` (lot 3): a doua trecere cu parolă — amprenta a fost văzută şi acceptată; abia acum
+  // serverul trimite parola, şi doar unui server care prezintă exact acea cheie
+  async function probeHost(trustKey?: string) {
     setCloudErr(''); setCloudMsg(''); setCloudBusy(true)
     try {
-      const info = await api<{ fingerprint: string; type: string; hostkey: string }>(
+      const info = await api<{ fingerprint: string; type: string; hostkey: string; auth_tested?: boolean }>(
         '/api/backup/cloud/probe',
         { method: 'POST', body: JSON.stringify({
           host: directForm.host, port: directForm.port, user: directForm.user,
           ssh_key: directForm.auth === 'key' ? directForm.ssh_key : '',
           password: directForm.auth === 'password' ? directForm.password : '',
           current_password: directForm.current_password,
+          trust_hostkey: trustKey ?? '',
         }) })
       setProbeInfo(info)
       setDirectForm((f) => ({ ...f, hostkey: info.hostkey }))
-      setCloudMsg(t('settings.direct.probeOk'))
+      setCloudMsg(t(info.auth_tested === false ? 'settings.direct.probeKeyOnly' : 'settings.direct.probeOk'))
     } catch (e) {
       setCloudErr(errText(e, t) || String(e))
     }
@@ -518,7 +522,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           ))}
           {[{ id: 'sftp', label: 'SFTP' }, { id: 'ftps', label: 'FTPS' }].map((p) => (
             <button key={p.id} type="button"
-              onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => ({ ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21 })) }}
+              onClick={() => { setCloudForm((f) => ({ ...f, provider: p.id })); setDirectForm((f) => (f.kind === p.id ? f : { ...f, kind: p.id, port: p.id === 'sftp' ? 22 : 21, hostkey: '' })); setProbeInfo(null) }}
               className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
                 cloudForm.provider === p.id ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-300 hover:bg-ink-700'}`}
             >{p.label}</button>
@@ -631,11 +635,11 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           </p>
           <div className="flex gap-2">
             <input value={directForm.host} spellCheck={false} autoComplete="off"
-              onChange={(e) => setDirectForm((f) => ({ ...f, host: e.target.value }))}
+              onChange={(e) => { setDirectForm((f) => ({ ...f, host: e.target.value, hostkey: '' })); setProbeInfo(null) }}
               placeholder={t('settings.direct.host')} aria-label={t('settings.direct.host')}
               className={field + ' flex-1'} />
             <input type="number" min={1} max={65535} value={directForm.port}
-              onChange={(e) => setDirectForm((f) => ({ ...f, port: Number(e.target.value) }))}
+              onChange={(e) => { setDirectForm((f) => ({ ...f, port: Number(e.target.value), hostkey: '' })); setProbeInfo(null) }}
               placeholder={t('settings.direct.port')} aria-label={t('settings.direct.port')}
               className={field + ' w-24'} />
           </div>
@@ -674,7 +678,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           {directForm.kind === 'sftp' && (
             <div className="rounded-md bg-ink-800/60 p-3 ring-1 ring-ink-700">
               <div className="flex flex-wrap items-center gap-2">
-                <button type="button" onClick={probeHost} disabled={cloudBusy || !directForm.host || !directForm.user}
+                <button type="button" onClick={() => probeHost()} disabled={cloudBusy || !directForm.host || !directForm.user}
                   className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
                   {t('settings.direct.probe')}
                 </button>
@@ -687,6 +691,12 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
                   {t('settings.direct.confirmFingerprint')}
                   <span className="mt-1 block font-mono text-slate-200">{probeInfo.fingerprint}</span>
                 </p>
+              )}
+              {probeInfo?.auth_tested === false && (
+                <button type="button" onClick={() => probeHost(probeInfo.hostkey)} disabled={cloudBusy}
+                  className="mt-2 rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-200 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-40">
+                  {t('settings.direct.trustAndTest')}
+                </button>
               )}
             </div>
           )}

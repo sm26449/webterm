@@ -77,6 +77,9 @@ A saved connection is a credentialed hole into the host, so on a host marked
 - **Creating, editing or deleting** a connection also requires step-up — otherwise
   a stolen session cookie could re-target a stored connection at an attacker's
   server and harvest the password at the next launch.
+- **Re-targeting** a connection with a stored password (another server, port or
+  engine) asks for the password again, on every host (since 3.6.34). Leaving the
+  password empty keeps it only while the connection still points where it did.
 
 On hosts without 2FA these actions behave as normal authenticated requests.
 

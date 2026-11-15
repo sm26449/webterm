@@ -492,6 +492,12 @@ def _cloud_api_error(e: Exception) -> ApiError:
     low = msg.lower()
     if "passphrase" in low:
         code = "backup.passphraseTooShort"
+    elif "destination changed" in low:
+        code = "cloud.retargetNeedsSecret"
+    elif "was not seen for this server" in low:
+        code = "cloud.hostKeyNotProbed"
+    elif "alt" in low and "cheie de host" in low:
+        code = "cloud.hostKeyMismatch"
     elif "host key" in low:
         code = "cloud.hostKeyRequired"
     elif "host and user" in low:
@@ -5588,6 +5594,7 @@ class ProbeIn(BaseModel):
     user: str
     ssh_key: str = ""
     password: str = ""
+    trust_hostkey: str = ""        # lot 3: cheia confirmată vizual — abia cu ea pleacă parola
     current_password: str = ""
 
 
@@ -5617,7 +5624,8 @@ async def cloud_probe(body: ProbeIn, request: Request, user=Depends(authz.perm('
     if not await _verify_reauth_password(user, body.current_password):
         raise ApiError(401, "auth.wrongPassword", "wrong password")
     try:
-        return await cloudbackup.probe(body.host, body.port, body.user, body.ssh_key, body.password)
+        return await cloudbackup.probe(body.host, body.port, body.user, body.ssh_key, body.password,
+                                       body.trust_hostkey)
     except cloudbackup.CloudError as e:
         raise _cloud_api_error(e)
 
@@ -6527,10 +6535,20 @@ async def create_connection(host_id: int, body: ConnectionIn, user=Depends(authz
 @router.patch("/api/hosts/{host_id}/connections/{conn_id}")
 async def update_connection(host_id: int, conn_id: int, body: ConnectionIn,
                             user=Depends(authz.perm('toolbox.manage', host='host_id'))):
-    if not await db.fetchone("SELECT id FROM connections WHERE id=? AND host_id=?", conn_id, host_id):
+    cur = await db.fetchone("SELECT * FROM connections WHERE id=? AND host_id=?", conn_id, host_id)
+    if not cur:
         raise ApiError(404, "connection.missing", "no such connection")
     await _require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1 (audit v53)
     _validate_connection(body)
+    # Lot 3 (raport de securitate 2026-11): parola stocată e a serverului de baze de date pentru care
+    # a fost salvată. Gol = „păstrează" o trimitea, la următoarea lansare, oricărui `target_host`
+    # pus între timp — inclusiv unui server al celui care a editat conexiunea.
+    moved = ((cur["engine"] or "", (cur["target_host"] or "").strip().lower(), int(cur["target_port"] or 0))
+             != (body.engine, body.target_host.strip().lower(), int(body.target_port or 0)))
+    if (moved and body.cred_policy == "stored" and cur["credential_encrypted"]
+            and not body.credential):
+        raise ApiError(400, "connection.retargetNeedsPassword",
+                       "the connection now points to another server — enter its password again")
     await db.execute(
         "UPDATE connections SET label=?, engine=?, target_host=?, target_port=?, username=?,"
         " dbname=?, cred_policy=? WHERE id=? AND host_id=?",

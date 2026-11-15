@@ -270,6 +270,13 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    re-check); it cannot vouch for accounts the IdP itself issues. Separate trust
    levels by running **separate instances**, each gated by its own group, and keep
    the **break-glass** local admin's password/passkey safe for when the IdP is down.
+9. **A host's identity is its enrolled agent.** Stored secrets that run *on* a host (saved
+   database connections in the Toolbox, `stored` policy) are handed to whichever agent is
+   enrolled for that host at launch. Re-enrolling the host (a new install link: `host.admin`
+   plus step-up on 2FA hosts, audited) on another machine therefore gives that machine those
+   secrets at the next launch. What *is* defended (since 3.6.34): moving a saved connection, a
+   backup destination or an SSH/telnet host to another server, port or protocol asks for its
+   password again, so editing a target cannot redirect a password the editor never saw.
 
 ## Outbound connections the gateway makes on its own
 

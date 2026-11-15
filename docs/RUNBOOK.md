@@ -408,7 +408,12 @@ shell:
   passphrase is stored encrypted so scheduled uploads can run unattended).
 - **Your own SFTP or FTPS server.** For SFTP the server's **host key is pinned on first
   use (TOFU)**: *Probe* shows the `SHA256:` fingerprint and **Save stays disabled until you
-  confirm it**; if the host key later changes, the upload is **refused** (anti-MITM). For
+  confirm it**; if the host key later changes, the upload is **refused** (anti-MITM). With a
+  **password**, *Probe* only reads the host key and sends nothing (since 3.6.34); *Trust this key
+  and test the password* then tries the password against that exact key only. Only a key the
+  gateway itself saw at *Probe* can be saved. Pointing the destination at another server, port or
+  protocol asks for its password or SSH key again: a stored secret only goes to the server it was
+  saved for. For
   FTPS the server certificate is verified against the system CAs, or against a CA/cert PEM
   you paste for self-signed servers. Either way the archive leaves **already encrypted** —
   the destination only ever sees ciphertext.

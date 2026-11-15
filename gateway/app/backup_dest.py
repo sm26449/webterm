@@ -189,22 +189,49 @@ async def sftp_delete(cfg: dict, name: str) -> None:
 
 
 async def probe_hostkey(host: str, port: int, user: str,
-                        ssh_key: str = "", password: str = "") -> dict:
-    """TOFU: se conectează O DATĂ acceptând orice cheie de host (known_hosts=None), autentifică cu
-    credenţialele date (deci validează şi auth-ul), şi întoarce cheia + amprenta serverului ca
-    userul s-o confirme. Cheia confirmată se pinuieşte apoi în config; conexiunile reale o impun."""
-    kw = dict(host=host, port=int(port or 22), username=user, known_hosts=None)
+                        ssh_key: str = "", password: str = "", trust_hostkey: str = "") -> dict:
+    """Cheia de host a serverului SFTP, ca omul s-o confirme vizual înainte să fie pinuită.
+
+    Cu PAROLĂ, parola pleacă abia după confirmare (raport de securitate 2026-11, lot 3): fără
+    `trust_hostkey` citim doar cheia (fără nicio autentificare) şi întoarcem `auth_tested: False`;
+    cu `trust_hostkey`, conexiunea pinuieşte EXACT acea cheie (refuzată înainte de auth dacă
+    serverul oferă alta) şi abia apoi testează parola. Înainte: TOFU + parola în aceeaşi
+    conexiune, deci un adversar pe drum la acel moment o primea.
+    Cu CHEIE SSH rămâne TOFU într-un pas: privata nu pleacă la server (semnătura e legată de sesiune)."""
+    port = int(port or 22)
+    if not ssh_key and not password:
+        raise DestError("lipseşte cheia SSH sau parola")
+    if password and not ssh_key and not (trust_hostkey or "").strip():
+        from .core import _peek_host_key        # import local: backup_dest nu trage core la import
+        try:
+            key = await asyncio.wait_for(_peek_host_key(dict(host=host, port=port, username=user)),
+                                         timeout=CONNECT_TIMEOUT)
+        except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
+            raise DestError("serverul SFTP nu răspunde: %s" % e)
+        if key is None:
+            raise DestError("serverul nu a prezentat o cheie de host SSH")
+        line = key.export_public_key().decode().strip()
+        return {"hostkey": " ".join(line.split()[:2]), "fingerprint": key.get_fingerprint(),
+                "type": line.split()[0], "auth_tested": False}
+    kw = dict(host=host, port=port, username=user, known_hosts=None)
+    trusted = (trust_hostkey or "").strip()
+    if trusted:
+        try:
+            asyncssh.import_public_key(trusted)
+        except (asyncssh.KeyImportError, ValueError):
+            raise DestError("cheia de host acceptată nu e o cheie publică SSH")
+        kw["known_hosts"] = _known_hosts(host, port, trusted)
     if ssh_key:
         try:
             kw["client_keys"] = [asyncssh.import_private_key(ssh_key)]
         except (asyncssh.KeyImportError, ValueError) as e:
             raise DestError("cheia SSH nu a putut fi citită: %s" % e)
-    elif password:
-        kw["password"] = password
     else:
-        raise DestError("lipseşte cheia SSH sau parola")
+        kw["password"] = password
     try:
         conn = await asyncio.wait_for(asyncssh.connect(**kw), timeout=CONNECT_TIMEOUT)
+    except asyncssh.HostKeyNotVerifiable:
+        raise DestError("serverul a oferit ALTĂ cheie de host decât cea acceptată — parola nu a fost trimisă")
     except (asyncssh.PermissionDenied, asyncssh.Error) as e:
         raise DestError("conexiune/autentificare SFTP eşuată: %s" % e)
     except (OSError, asyncio.TimeoutError) as e:
@@ -214,7 +241,7 @@ async def probe_hostkey(host: str, port: int, user: str,
         line = key.export_public_key().decode().strip()          # "ssh-ed25519 AAAA..."
         fp = key.get_fingerprint()                               # "SHA256:..."
         return {"hostkey": " ".join(line.split()[:2]), "fingerprint": fp,
-                "type": line.split()[0]}
+                "type": line.split()[0], "auth_tested": True}
     finally:
         await _close(conn)
 

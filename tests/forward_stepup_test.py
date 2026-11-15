@@ -338,6 +338,33 @@ async def main():
         r = await c.request("DELETE", f"/api/hosts/{plain}/connections/{plain_cid}")
         check("conexiune pe host fără 2FA: ştergerea merge ca înainte", r.status_code == 200, r.text)
 
+        # ── lot 3 (raport 2026-11): parola stocată nu se mută odată cu serverul DB ──────
+        r = await c.post(f"/api/hosts/{plain}/connections", json=dict(CONN, label="pg-mut"))
+        mid = r.json()["id"]
+
+        async def secret(cid):
+            return (await db.fetchone("SELECT credential_encrypted FROM connections WHERE id=?", cid))["credential_encrypted"]
+        before = await secret(mid)
+        for label, change in (("alt target_host", {"target_host": "evil.example"}),
+                              ("alt port", {"target_port": 6543}),
+                              ("alt motor", {"engine": "mysql", "target_port": 5432})):
+            r = await c.patch(f"/api/hosts/{plain}/connections/{mid}",
+                              json=dict(CONN, label="pg-mut", credential="", **change))
+            check("conexiune DB mutată (%s) fără parolă nouă → 400 connection.retargetNeedsPassword" % label,
+                  r.status_code == 400 and r.headers.get("x-webterm-error") == "connection.retargetNeedsPassword",
+                  "%s %s" % (r.status_code, r.text[:120]))
+        row = await db.fetchone("SELECT target_host FROM connections WHERE id=?", mid)
+        check("…nimic schimbat (ţinta şi secretul neatinse)",
+              row["target_host"] == "10.0.0.5" and await secret(mid) == before)
+        r = await c.patch(f"/api/hosts/{plain}/connections/{mid}",
+                          json=dict(CONN, label="pg-redenumit", credential=""))
+        check("aceeaşi ţintă (doar redenumire), parola goală → 200, parola păstrată",
+              r.status_code == 200 and await secret(mid) == before, r.text[:120])
+        r = await c.patch(f"/api/hosts/{plain}/connections/{mid}",
+                          json=dict(CONN, label="pg-mut", target_host="db2.internal", credential="alta"))
+        check("mutată CU parolă nouă → 200, secret nou", r.status_code == 200 and await secret(mid) != before,
+              r.text[:120])
+
         # ── 7. ştergerea hostului duce şi conexiunile (fără orfani cu secrete) ────
         # PRAGMA foreign_keys nu e setat → CASCADE inactiv; ştergem explicit. Cu id-urile
         # reutilizate, altfel un host nou ar moşteni parola stocată a celui vechi. audit v53.

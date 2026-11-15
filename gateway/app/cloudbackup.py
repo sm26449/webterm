@@ -360,6 +360,19 @@ async def status() -> dict:
     }
 
 
+def _dport(kind: str, port) -> int:
+    """Portul efectiv al unei destinaţii directe: 0/gol = implicitul protocolului (ca la conectare)."""
+    p = int(port or 0)
+    return p or (21 if kind == "ftps" else 22)
+
+
+async def _wipe_direct() -> None:
+    """Credenţialele + ancora de încredere ale destinaţiei directe. Rămase după trecerea pe OAuth,
+    reveneau la o destinaţie directă nouă fără să fie cerute din nou (review lot 3, H)."""
+    for k in (K_HOST, K_PORT, K_USER, K_PATH, K_SSH_KEY, K_PASSWORD, K_HOSTKEY, K_CA):
+        await _set(k, "")
+
+
 async def save_config(provider: str, client_id: str, client_secret: str,
                       passphrase: str, keep: int, include_transcripts: bool) -> None:
     if provider not in PROVIDERS:
@@ -367,6 +380,8 @@ async def save_config(provider: str, client_id: str, client_secret: str,
     if len(passphrase) < 8:
         raise CloudError("the encryption passphrase must be at least 8 characters")
     prev = await get_config()
+    if _is_direct(prev["provider"]):
+        await _wipe_direct()               # OAuth nu le foloseşte: nu le ţinem pentru mai târziu
     # schimbarea providerului/clientului invalidează autorizarea existentă
     if prev["provider"] != provider or prev["client_id"] != client_id:
         await _set(K_REFRESH, "")
@@ -392,10 +407,32 @@ async def save_config_direct(kind: str, host: str, port: int, user: str, path: s
         raise CloudError("the encryption passphrase must be at least 8 characters")
     if not host.strip() or not user.strip():
         raise CloudError("host and user are required")
-    if kind == "sftp" and not hostkey.strip():
+    # Lot 3 (raport de securitate 2026-11): secretul şi pinul aparţin destinaţiei pentru care au
+    # fost salvate. Gol = „păstrează" era corect pe ACEEAŞI destinaţie; mutată pe alt server, parola
+    # (sau cheia) veche pleca la noul server la primul backup, iar pinul vechi rămânea al altei maşini.
+    # Ţinta veche se citeşte din câmpurile STOCATE, oricare ar fi providerul de acum: un ocol prin
+    # OAuth (gdrive) şi înapoi lăsa K_HOST/K_PASSWORD pe loc, dar „providerul vechi" nu mai era
+    # direct, deci mutarea nu se vedea (review lot 3, H). Provider ne-direct = ţintă necunoscută.
+    old_kind = (await _get(K_PROVIDER)) or ""
+    old = (old_kind, ((await _get(K_HOST)) or "").strip().lower(),
+           _dport(old_kind, (await _get(K_PORT)) or 0))
+    new = (kind, host.strip().lower(), _dport(kind, port))
+    moved = not _is_direct(old_kind) or old != new
+    if moved and not (password or ssh_key) and ((await _get(K_PASSWORD)) or (await _get(K_SSH_KEY))):
+        raise CloudError("the destination changed — enter its password or SSH key again")
+    if kind == "sftp":
         prev = await _get(K_HOSTKEY)
-        if not prev:
+        hk = " ".join(hostkey.split()[:2])
+        if not hk and (not prev or moved):
             raise CloudError("confirm the server host key first (probe)")
+        # şi la o destinaţie MUTATĂ: pinul vechi e al altei maşini — se pinuieşte doar ce a văzut
+        # Probe pe noul server (review lot 3, M)
+        if hk and (moved or hk != " ".join((prev or "").split()[:2])):
+            # o cheie NOUĂ se pinuieşte doar dacă gateway-ul chiar a văzut-o la Probe pe acest
+            # server, recent — nu una adusă de client (un MITM ar fi pinuit cheia lui)
+            seen = _PROBED.get((host.strip().lower(), _dport("sftp", port)))
+            if not seen or seen[0] != hk or time.time() - seen[1] > PROBE_TTL:
+                raise CloudError("confirm the server host key with Probe — that key was not seen for this server")
     await _set(K_PROVIDER, kind)
     await _set(K_HOST, host.strip())
     await _set(K_PORT, int(port) if port else 0)
@@ -403,10 +440,12 @@ async def save_config_direct(kind: str, host: str, port: int, user: str, path: s
     await _set(K_PATH, path.strip())
     if ssh_key:                            # gol = păstrează secretul existent
         await _set(K_SSH_KEY, security.encrypt_secret(ssh_key))
+        await _set(K_PASSWORD, "")         # metodele sunt exclusive: nu ţinem şi parola veche
     if password:
         await _set(K_PASSWORD, security.encrypt_secret(password))
-    if hostkey.strip():
-        await _set(K_HOSTKEY, hostkey.strip())
+        await _set(K_SSH_KEY, "")
+    if kind == "sftp" and hostkey.strip():
+        await _set(K_HOSTKEY, " ".join(hostkey.split()[:2]))
     await _set(K_CA, ca.strip())
     await _set(K_PASSPHRASE, security.encrypt_secret(passphrase))
     await _set(K_KEEP, max(1, min(365, int(keep))))
@@ -415,12 +454,24 @@ async def save_config_direct(kind: str, host: str, port: int, user: str, path: s
     await _set(K_REFRESH, "")
 
 
-async def probe(host: str, port: int, user: str, ssh_key: str = "", password: str = "") -> dict:
-    """TOFU pentru SFTP: testează conexiunea + întoarce host-key-ul + amprenta de confirmat."""
+# cheile de host VĂZUTE de gateway la Probe: (host, port) → (cheie, moment). Salvarea pinuieşte doar
+# una de aici (lot 3): clientul nu poate aduce o cheie proprie. În memorie, ca la /api/hosts/test.
+_PROBED: dict = {}
+PROBE_TTL = 600
+
+
+async def probe(host: str, port: int, user: str, ssh_key: str = "", password: str = "",
+                trust_hostkey: str = "") -> dict:
+    """SFTP: cheia de host de confirmat (cu parolă, fără autentificare până la `trust_hostkey`)."""
     try:
-        return await backup_dest.probe_hostkey(host, int(port or 22), user, ssh_key, password)
+        res = await backup_dest.probe_hostkey(host.strip(), _dport("sftp", port), user, ssh_key,
+                                              password, trust_hostkey)
     except backup_dest.DestError as e:
         raise CloudError(str(e))
+    if len(_PROBED) > 64:
+        _PROBED.clear()
+    _PROBED[(host.strip().lower(), _dport("sftp", port))] = (res["hostkey"], time.time())
+    return res
 
 
 async def disconnect() -> None:
@@ -428,8 +479,8 @@ async def disconnect() -> None:
     Direct (sftp/ftps): nu există „token” de uitat — şterge toată destinaţia, inclusiv credenţialele
     (cheie SSH / parolă) şi ancora de încredere (host-key / CA), şi resetează providerul."""
     if _is_direct(await _get(K_PROVIDER)):
-        for k in (K_PROVIDER, K_HOST, K_PORT, K_USER, K_PATH, K_SSH_KEY, K_PASSWORD, K_HOSTKEY, K_CA):
-            await _set(k, "")
+        await _set(K_PROVIDER, "")
+    await _wipe_direct()                   # mereu: şi resturile unei destinaţii directe de dinainte
     await _set(K_REFRESH, "")
     await _set(K_ACCOUNT, "")
     await _set(K_FOLDER, "")
