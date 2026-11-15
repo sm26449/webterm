@@ -4619,6 +4619,15 @@ async def _open_target(conn, thost: str, tport: int, scheme: str):
     return fs
 
 
+def _host_header_port(host_header: str, scheme: str):
+    """Portul din antetul Host (ce vede browserul), altfel cel implicit al schemei — ca să
+    comparăm ORIGINEA ÎNTREAGĂ (schemă, gazdă, port), nu doar gazda (raport 2026-11, punct 8)."""
+    _h, sep, port = (host_header or "").rpartition(":")
+    if sep and port.isdigit() and "]" not in port:
+        return int(port)
+    return _DEFAULT_PORTS.get(scheme)
+
+
 def _fwd_origin_for_target(origin: str, fwd_host: str, scheme: str, thost: str, tport: int):
     """Antetul `Origin` trimis ţintei unui forward. Aplicaţiile cu protecţie CSRF proprie
     (Grafana: `POST /api/ds/query`, Grafana Live; la fel Gitea, Home Assistant…) compară
@@ -4634,7 +4643,8 @@ def _fwd_origin_for_target(origin: str, fwd_host: str, scheme: str, thost: str, 
         return None
     o = _origin_tuple(origin)
     pub = _origin_tuple(config.PUBLIC_URL)
-    if o is None or pub is None or o[0] != pub[0] or o[1] != fwd_host.split(":")[0].lower():
+    if (o is None or pub is None or o[0] != pub[0] or o[1] != fwd_host.split(":")[0].lower()
+            or o[2] != _host_header_port(fwd_host, pub[0])):
         raise ApiError(403, "forward.badOrigin", "cross-origin request refused by the forward")
     return "%s://%s:%d" % ("https" if scheme == "https" else "http", thost, tport)
 
@@ -7868,6 +7878,7 @@ async def handle_forward_ws(scope, receive, send):
     o = _origin_tuple(origin or "")
     pub = _origin_tuple(config.PUBLIC_URL)
     if (not origin or o is None or pub is None or o[1] != host or o[0] != pub[0]
+            or o[2] != _host_header_port(headers.get("host", ""), pub[0])
             or not slug or "." in slug
             or not security.verify_forward_token(cookies.get(FWD_COOKIE), slug)):
         await send({"type": "websocket.close", "code": 1008})

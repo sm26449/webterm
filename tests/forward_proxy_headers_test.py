@@ -160,6 +160,16 @@ async def main():
         check("Origin străin (alt subdomeniu) → tot refuzat", False)
     except api.ApiError:
         check("Origin străin (alt subdomeniu) → tot refuzat", True)
+    # raport 2026-11, punct 8: originea se compară ÎNTREAGĂ — acelaşi subdomeniu pe ALT port e altă
+    # origine (alt serviciu pe aceeaşi gazdă), nu pagina forward-ului
+    try:
+        api._fwd_origin_for_target("http://graf.%s:9999" % api.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        check("Origin pe acelaşi subdomeniu, ALT port → refuzat", False)
+    except api.ApiError:
+        check("Origin pe acelaşi subdomeniu, ALT port → refuzat", True)
+    check("port implicit: Host fără port ↔ Origin fără port (https:443) → acceptat",
+          api._host_header_port("graf.example.com", "https") == 443
+          and api._host_header_port("graf.example.com:8443", "https") == 8443)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

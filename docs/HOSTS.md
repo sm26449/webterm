@@ -242,6 +242,12 @@ a fresh factor. The lock covers every client attached to the terminal, **share-l
 included** — a writable guest no longer stays usable just because the owner keeps the
 terminal busy.
 
+**What this does *not* do: re-check the 5-minute step-up window while you type.** The window
+decides whether you may *attach* or *unlock*; once a terminal is open, what keeps it open is
+activity (the idle lock) and the absolute one-hour cap above, not the window. A terminal you
+are actively using therefore stays usable for up to an hour after the factor, by design: being
+locked out every five minutes mid-command would push people to turn 2FA off.
+
 **Share-link guests need a verified operator at the terminal** (since 3.6.34). A guest cannot
 present a factor, so on a 2FA host they see and type only while a signed-in user who can type
 and is unlocked is attached. When the last one leaves (or loses write access), guests are locked

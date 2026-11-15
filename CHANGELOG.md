@@ -10,6 +10,7 @@ back.
 ## [Unreleased]
 
 ### Security
+- **Port forwards compare the whole page origin, port included.** The check on a forwarded app's requests and WebSockets compared only the scheme and host name of the `Origin`, so a page served from the same forward subdomain on a different port passed as the forward itself. It now has to match exactly, port included. Only relevant where something else answers on another port of that name. Found by the same external review.
 - **The first connection to an SSH host with a password now asks you to confirm its host key before the password is sent**, as OpenSSH does. Before, WebTerm trusted whatever key the server offered on first contact and signed in over that same connection, so someone in the network path at that moment (the "trust on first use" window) received the password. Now:
   - "Test connection" in Add host stops at the host key and shows its fingerprint. "Trust this key and test sign-in" sends the password only to that exact key; a different key is refused before sign-in.
   - Opening a session on a password host that has no pinned key yet (saved without a successful test) shows a "Verify the host key" dialog. Nothing is sent until you trust it; WebTerm then pins the key and warns you if it ever changes.
