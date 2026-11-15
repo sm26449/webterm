@@ -1035,6 +1035,10 @@ class BrowserClient:
                 await asyncio.wait_for(asyncio.shield(self._pong_fut), PONG_HARD_TIMEOUT)
             except asyncio.TimeoutError:
                 self.hub.clients.discard(self)      # stop fanning output to it
+                # dacă era operatorul verificat, invitaţii prin share nu-l aşteaptă pe `finally`-ul
+                # handler-ului (care depinde de închiderea transportului): blocaţi acum
+                if self.is_owner:
+                    asyncio.ensure_future(self.hub.sync_guests())
                 try:
                     await self.ws.close(code=4408)
                 except Exception:
@@ -1586,9 +1590,12 @@ class SessionHub:
             return
         self.attached = False
         await self._checkpoint(force=True)
+        # linkul de share LIVE moare odată cu sesiunea (raport de securitate 2026-11, lot 1): nu mai
+        # e nimic de privit live, iar înregistrarea are linkurile ei de replay, cu verificările lor.
+        # Fără asta, linkul rămânea listat ca „activ" (şi numărat în rezumatul de securitate).
         await db.execute(
             "UPDATE sessions SET state='closed', closed_at=?, exit_status=?,"
-            " close_reason='exited' WHERE id=?",
+            " close_reason='exited', share_token=NULL, share_expires=NULL WHERE id=?",
             time.time(), status, self.sid)
         await self.broadcast_json({"type": "exit", "status": status, "signal": sig})
         source = self._source()
@@ -1697,6 +1704,44 @@ class SessionHub:
             log.info("session %s: locked (2FA idle-lock, %ds with no input)", self.sid, self.lock_idle)
         else:
             log.info("session %s: locked (%s)", self.sid, reason)
+
+    def has_operator(self) -> bool:
+        """Un operator VERIFICAT e ataşat: un client-owner al unui cont, care poate scrie şi NU e
+        blocat, pe un hub deblocat. Pe un host 2FA un client-owner porneşte blocat fără fereastră de
+        step-up şi se deblochează doar cu factorul contului lui, deci „deblocat" = autorizat.
+        Înainte, prezenţa se citea doar din `is_owner`: un cont fără step-up, ataşat şi blocat
+        individual (alt cont lucra deja), sau un watcher read-only, ţinea uşa deschisă invitaţilor
+        după ce operatorul real pleca (raport de securitate 2026-11, lot 1)."""
+        if self.locked:
+            return False
+        return any(c.is_owner and c.user_id is not None and getattr(c, "writable", True)
+                   and not c.locked for c in self.clients)
+
+    async def sync_guests(self) -> None:
+        """Pe un host 2FA (`stepup_cap`), invitaţii prin share văd terminalul DOAR cât e ataşat un
+        operator verificat (`has_operator`). Apelat la fiecare schimbare a prezenţei: operatorul
+        pleacă / devine read-only → invitaţii se blochează pe loc (înainte rămâneau până la
+        idle-lock, adică până la 5 min, sau până la plafonul de 60 min cu idle-lock oprit);
+        operatorul revine / se deblochează → invitaţii blocaţi se deblochează, cu resync din
+        transcript, ca la `unlock`. Nu atinge clienţii-owner şi nu blochează hub-ul."""
+        if not self.stepup_cap or self.closed:
+            return
+        present = self.has_operator()
+        changed = []
+        for c in list(self.clients):
+            if c.is_owner:
+                continue
+            if not present and not c.locked:
+                c.lock()
+                changed.append((c, {"type": "locked", "reason": "owner"}))
+            elif present and c.locked:
+                c.unlock()
+                changed.append((c, {"type": "unlocked"}))
+        for c, msg in changed:
+            try:
+                await c.send_text(json.dumps(msg))
+            except Exception:            # noqa: BLE001 — un invitat mort nu opreşte restul
+                pass
 
     def note_authorized(self, ts: Optional[float]) -> None:
         """Un factor prezentat la `ts` autorizează terminalul (doar avansează, nu dă înapoi)."""

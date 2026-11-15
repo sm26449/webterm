@@ -24,6 +24,8 @@ export default function SharedView(props: { token: string }) {
   const [wsLimited, setWsLimited] = useState(false)   // WS închis 4429: limită per IP (3.5.15)
   const [conn, setConn] = useState<'connecting' | 'open' | 'closed' | 'locked' | 'revoked'>('connecting')
   const [lockMax, setLockMax] = useState(false)
+  // `owner`: pe un host 2FA, niciun operator verificat nu e la terminal (a plecat / e read-only)
+  const [lockOwner, setLockOwner] = useState(false)
   const [termBg] = useState(() => readTheme().background || '#0b0e14')
   const [watermark, setWatermark] = useState<WatermarkConfig | null>(null)
   const [writable, setWritable] = useState(false)
@@ -112,6 +114,7 @@ export default function SharedView(props: { token: string }) {
         else if (msg.type === 'locked') {
           // `stepup_max` (3.5.13): plafonul de 60 min de la factorul owner-ului pe un host 2FA
           setLockMax(msg.reason === 'stepup_max')
+          setLockOwner(msg.reason === 'owner')
           setConn('locked')
         }
         else if (msg.type === 'unlocked') setConn('open')   // urmează resync + tail din transcript
@@ -223,7 +226,7 @@ export default function SharedView(props: { token: string }) {
               <div className="max-w-sm space-y-1">
                 <div className="text-base font-semibold text-slate-100">{t('share.lockedTitle')}</div>
                 <div className="text-compact text-slate-400">
-                  {lockMax ? t('share.lockedBodyMax') : t('share.lockedBody')}
+                  {lockMax ? t('share.lockedBodyMax') : lockOwner ? t('share.lockedBodyOwner') : t('share.lockedBody')}
                 </div>
               </div>
             </div>

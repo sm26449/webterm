@@ -73,12 +73,12 @@ async def main():
     await api.init_setup_token()
 
     # o sesiune închisă cu un share valid (token în clar aici, hash în DB — ca în producţie)
-    hid = 1          # sesiune închisă: hostul nu e atins (fără hub, fără agent)
+    hid = 1          # sesiune live (un link live pe una încheiată e refuzat — share_presence_test)
     good = security.new_token()
     sid = "a" * 32
     await db.execute(
         "INSERT INTO sessions(id,host_id,title,state,created,rows,cols,share_token,share_expires)"
-        " VALUES(?,?,?,?,?,?,?,?,?)", sid, hid, "demo", "closed", time.time(), 24, 80,
+        " VALUES(?,?,?,?,?,?,?,?,?)", sid, hid, "demo", "live", time.time(), 24, 80,
         security.sha256_hex(good), time.time() + 3600)
 
     def client(ip):

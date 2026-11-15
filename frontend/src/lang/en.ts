@@ -324,6 +324,7 @@ const en: Lang = {
     'err.session.missing': "That session no longer exists.",
     'err.session.notTelnet': "That session no longer exists, or it is not a telnet session.",
     'err.session.hostOfflineKill': "The host is offline — the session cannot be closed right now.",
+    'err.session.notLive': "The session is no longer running, so it cannot be shared live. To show what happened, share its recording instead.",
     'err.session.live': "The session is live — close it first.",
     'err.session.containerAgentOnly': "Container shells are only available on agent hosts.",
     'err.session.upgradeAgentOnly': "OS upgrade is only available on agent hosts.",
@@ -1736,6 +1737,7 @@ const en: Lang = {
     'host.require2faNoFactor': "2FA is now required on {name}, but your account has no passkey and no authenticator code (TOTP). You will not be able to open this host until you set one up.",
     'session.lockedTitleMax': "Session locked: confirm 2FA again",
     'session.lockedDescMax': "Locked: re-confirm 2FA every 60 min on this host. The terminal keeps running — unlock it to resume access.",
+    'share.lockedBodyOwner': "This host requires 2FA, so you can watch only while the owner is at the terminal. Viewing resumes automatically when they are back.",
     'share.lockedBodyMax': "The owner must re-confirm 2FA on this host (every 60 min). Viewing resumes automatically after unlock.",
     'history.clearPassword': "Your account password (clearing the whole command history):",
     // ── 3.5.12: linkuri de replay pentru înregistrările sesiunilor închise ──

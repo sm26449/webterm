@@ -322,6 +322,7 @@ const ro: Lang = {
     'err.session.missing': "Sesiunea aceea nu mai există.",
     'err.session.notTelnet': "Sesiunea aceea nu mai există, sau nu e o sesiune telnet.",
     'err.session.hostOfflineKill': "Hostul e offline — sesiunea nu poate fi închisă acum.",
+    'err.session.notLive': "Sesiunea nu mai rulează, deci nu poate fi partajată live. Ca să arăți ce s-a întâmplat, partajează înregistrarea ei.",
     'err.session.live': "Sesiunea e activă — închide-o mai întâi.",
     'err.session.containerAgentOnly': "Shell-urile în container sunt disponibile doar pe hosturile cu agent.",
     'err.session.upgradeAgentOnly': "Actualizarea OS e disponibilă doar pe hosturile cu agent.",
@@ -1761,6 +1762,7 @@ const ro: Lang = {
     'host.require2faNoFactor': "{name} cere acum 2FA, dar contul tău nu are nici passkey, nici cod de autentificare (TOTP). Nu vei putea deschide acest host până nu configurezi unul.",
     'session.lockedTitleMax': "Sesiune blocată: confirmă din nou 2FA",
     'session.lockedDescMax': "Blocată: pe acest host 2FA se reconfirmă la fiecare 60 de minute. Terminalul rulează în continuare — deblochează-l ca să reiei accesul.",
+    'share.lockedBodyOwner': "Hostul cere 2FA, deci poți urmări doar cât timp proprietarul e la terminal. Vizualizarea revine automat când se întoarce.",
     'share.lockedBodyMax': "Proprietarul trebuie să reconfirme 2FA pe acest host (la fiecare 60 de minute). Vizualizarea se reia automat după deblocare.",
     'history.clearPassword': "Parola contului tău (ștergi tot istoricul comenzilor):",
     // ── 3.5.12: linkuri de replay pentru înregistrările sesiunilor închise ──

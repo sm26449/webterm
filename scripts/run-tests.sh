@@ -59,7 +59,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           pentest_forward_token pentest_xff_lockout pentest_oidc_alg
           upload_window fs_copy fs_copy_folders download_resume
           sec_stepup_hardening sec_login_proxy sec_sso_account sec_closed_scrollback sec_setup_token security_summary
-          sec_stepup_cap sec_stepup_factor
+          sec_stepup_cap sec_stepup_factor share_presence
           snippet_targets host_test_connection hosts_csv alert_history replay_links share_ratelimit
           changelog_section rbac_matrix rbac_filter rbac_escalation rbac_ws rbac_migration rbac_secreview
           rbac_roles rbac_oidc sso_rolemap authentik_provision certmon cert_renew_script

@@ -89,7 +89,9 @@ a reason):
 - **Live share links** (`#/shared/<token>`, `/api/shared/…`, `/ws/shared/…`) — 256-bit token,
   stored hashed, expiry ≤ 24 h, revocable; die on logout and password change; refused while
   the 2FA idle-lock holds, and locked with the owner's terminal when its 60-minute step-up cap
-  is reached.
+  is reached. On a 2FA host a guest is served only while a verified operator (signed in, can
+  type, unlocked) is attached, and is locked the moment the last one leaves (3.6.34). A live
+  link serves only a running session and dies when it ends.
 - **Replay links** (`#/replay/<token>`, `GET /api/replay/{meta,cast,text}`, 3.5.12) — read-only
   access to the recording of **one closed session**. 256-bit token, stored as sha256, shown
   once; carried in the URL **fragment** (never sent to the server on page load, never in a

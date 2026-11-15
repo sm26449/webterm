@@ -10492,9 +10492,13 @@ async def create_share(sid: str, request: Request, body: ShareIn = ShareIn(),
     """Link public, temporizat, către o sesiune. `writable` lasă vizitatorul să și
     TASTEZE (lărgește suprafața de încredere — opt-in per share); altfel doar vizualizare."""
     audit.detail(request, "writable" if body.writable else "read-only")
-    row = await db.fetchone("SELECT id, host_id, origin FROM sessions WHERE id=?", sid)
+    row = await db.fetchone("SELECT id, host_id, origin, state FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
+    # un link LIVE către o sesiune încheiată publica înregistrarea fără `recording.view` /
+    # `share.replay` (raport de securitate 2026-11, lot 1) — pentru asta există linkurile de replay
+    if row["state"] not in ("creating", "live"):
+        raise ApiError(409, "session.notLive", "only a running session can be shared live")
     # 3.6.7 (review F4): a certificate-renewal terminal (sudo on the gateway host) is never shared
     if _origin(row) in ROOT_TERMINAL_ORIGINS:
         raise ApiError(403, "certs.renewSessionPrivate",
@@ -10842,6 +10846,9 @@ async def shared_meta(token: str, request: Request):
             security.sha256_hex(token), time.time())
     if not row:
         replay.SHARE_LIMIT.record_miss(ip)
+        raise ApiError(404, "link.invalid", "invalid or expired link")
+    if row["state"] not in ("creating", "live"):
+        # ca /ws/shared: un link live nu mai arată nimic dintr-o sesiune încheiată (nici titlul)
         raise ApiError(404, "link.invalid", "invalid or expired link")
     # watermark pe link-ul partajat = trasabilitatea celei mai riscante suprafețe
     # (sesiune vizibilă unui terț). Rezolvăm ${email}/${host} SERVER-SIDE, ca să nu
@@ -12059,11 +12066,18 @@ async def shared_ws(ws: WebSocket, token: str):
         replay.SHARE_LIMIT.record_miss(ip)
         await ws.close(code=4404)
         return
+    # Linkul de share e o vedere LIVE. Pe o sesiune încheiată nu exista hub, deci poarta de
+    # prezenţă/2FA de mai jos era sărită şi invitatul primea coada transcriptului — adică o
+    # înregistrare publicată prin `share.live`, fără `recording.view`/`share.replay` şi fără
+    # verificările lor (raport de securitate 2026-11, lot 1). Înregistrările au fluxul lor de replay.
+    # O sesiune `lost` care revine `live` (reconciliere după restart) redevine accesibilă.
+    if row["state"] not in ("creating", "live"):
+        await ws.close(code=4404)
+        return
     await ws.accept()
     writable = bool(row["share_writable"])
-    live = row["state"] in ("creating", "live")
-    hub = core.get_or_create_hub(row) if live else None
-    client = core.BrowserClient(ws, hub) if hub else None
+    hub = core.get_or_create_hub(row)
+    client = core.BrowserClient(ws, hub)
     if client:
         client.id = "g_" + security.new_token()[:10]
         client.is_owner = False
@@ -12097,8 +12111,8 @@ async def shared_ws(ws: WebSocket, token: str):
             share_2fa = True
             hub.lock_idle = config.IDLE_LOCK_SECS
             hub.stepup_cap = True        # plafonul absolut de step-up blochează şi invitaţii
-            owner_present = any(getattr(c, "is_owner", False) for c in hub.clients)
-            start_locked = hub.locked or not owner_present
+            # operator VERIFICAT (deblocat, poate scrie), nu orice client-owner — vezi has_operator
+            start_locked = not hub.has_operator()
     # Aceeaşi politică de replay ca owner-ul (istoric tmux inclus), sub ACEEAŞI condiţie: fără
     # owner prezent pe un host 2FA, invitatul nu primeşte nimic din scrollback.
     sb, sb_rows = core.parse_replay_params(getattr(ws, "query_params", None) or {})
@@ -12109,14 +12123,23 @@ async def shared_ws(ws: WebSocket, token: str):
     replay_sent = False
     if not start_locked:
         replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows, span=osc_span)
-        if hub and (hub.locked or (share_2fa and not any(
-                getattr(c, "is_owner", False) for c in hub.clients))):
+        if hub and (hub.locked or (share_2fa and not hub.has_operator())):
             start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
         else:
             await ws.send_bytes(replay_bytes)
             replay_sent = True
     if hub:
+        # Blocat ÎNAINTE de a intra în hub: între `clients.add` şi sfârşitul ataşării sunt mai multe
+        # await-uri (ensure_attached = drum la agent, audit, roster) în care `push` livra output-ul
+        # live unui invitat încă nemarcat blocat (review lot 1, F1).
+        if start_locked:
+            client.lock()
         hub.clients.add(client)
+        # re-verificat SINCRON cu adăugarea: operatorul poate pleca în timpul `send_bytes` de mai
+        # sus, iar `sync_guests` din plecarea lui nu-l vedea încă pe acest invitat
+        if share_2fa and not start_locked and not hub.has_operator():
+            start_locked = True
+            client.lock()
         await _send_osc133(client, hub, osc_span if replay_sent else None)
         client.sender_task = asyncio.create_task(client.sender())
         conn = core.sources.get(row["host_id"])
@@ -12142,8 +12165,11 @@ async def shared_ws(ws: WebSocket, token: str):
         if start_locked:
             # invitatul NU poate debloca (n-are passkey) — doar aşteaptă re-auth-ul owner-ului.
             # Nu forţăm hub.lock() dintr-un invitat; sweep-ul de idle blochează hub-ul la nivel global.
-            client.lock()
             await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason or "owner"}))
+        if share_2fa:
+            # starea de ACUM, nu cea de la începutul ataşării: un operator sosit între timp îl
+            # deblochează, unul plecat îl blochează
+            await hub.sync_guests()
 
     # revalidare periodică: linkul de share poate fi REVOCAT sau poate EXPIRA cât invitatul e
     # conectat. Fără asta, socketul deschis (validat doar la handshake) continuă broadcast-ul.
@@ -12363,6 +12389,11 @@ async def browser_ws(ws: WebSocket, sid: str):
         await ws.send_text(json.dumps({"type": "locked"}))
 
     if hub:
+        # Fără step-up: blocat ÎNAINTE de a intra în hub. Altfel, până la decizia de mai jos (după
+        # roster/announce/audit), clientul primea output live şi conta drept operator verificat
+        # (`has_operator`) — un invitat ataşat în fereastra asta trecea de poarta lui (review lot 1, F2).
+        if start_locked:
+            client.lock()
         hub.clients.add(client)
         await _send_osc133(client, hub, osc_span if replay_sent else None)
         client.sender_task = asyncio.create_task(client.sender())
@@ -12402,6 +12433,8 @@ async def browser_ws(ws: WebSocket, sid: str):
                 # lucrează (DoS), iar output-ul nu-i ajunge până nu-şi prezintă propriul factor
                 client.lock()
                 await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason}))
+        # un operator verificat tocmai a sosit → invitaţii blocaţi în lipsa lui se deblochează
+        await hub.sync_guests()
         conn = core.sources.get(row["host_id"])
         # sesiune SSH live fără sursă = gateway repornit; re-dial cu creds stocate
         # și re-atașează tmux-ul remote (persistență peste restart)
@@ -12451,6 +12484,9 @@ async def browser_ws(ws: WebSocket, sid: str):
                 return
             if access == "rw" and now_access != "rw" and client is not None:
                 client.writable = False
+                if hub is not None:
+                    # ÎNAINTE de orice await: un watcher nu mai ţine invitaţii înăuntru
+                    await hub.sync_guests()
                 try:
                     await client.send_text(json.dumps({"type": "readonly"}))
                 except Exception:                    # noqa: BLE001
@@ -12533,6 +12569,7 @@ async def browser_ws(ws: WebSocket, sid: str):
                             # fereastră): factorul lui îi deblochează propria vedere
                             client.unlock()
                             await client.send_text(json.dumps({"type": "unlocked"}))
+                        await hub.sync_guests()
                 elif ctl.get("type") == "kick":
                     # DOAR owner-ul (client autentificat) scoate un INVITAT (nu owner).
                     # Închide WS-ul țintei → bucla ei se termină + roster rebroadcast.
@@ -12604,4 +12641,7 @@ async def browser_ws(ws: WebSocket, sid: str):
             hub.clients.discard(client)
             if client.sender_task:
                 client.sender_task.cancel()
+            # ultimul operator verificat a plecat → invitaţii prin share se blochează ACUM, nu la
+            # idle-lock (raport de securitate 2026-11, lot 1)
+            await hub.sync_guests()
             await hub.broadcast_roster()

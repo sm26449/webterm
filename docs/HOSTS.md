@@ -234,6 +234,12 @@ a fresh factor. The lock covers every client attached to the terminal, **share-l
 included** — a writable guest no longer stays usable just because the owner keeps the
 terminal busy.
 
+**Share-link guests need a verified operator at the terminal** (since 3.6.34). A guest cannot
+present a factor, so on a 2FA host they see and type only while a signed-in user who can type
+and is unlocked is attached. When the last one leaves (or loses write access), guests are locked
+at once and unlock by themselves when an operator returns. A live link only works while its
+session runs; to show an ended session, share its recording (replay link).
+
 **Automation tokens are refused outright** on these hosts (*"the host requires 2FA — not
 reachable with an automation token"*): a token cannot present a passkey, so a 2FA host stays
 reachable only by a person in a browser.
