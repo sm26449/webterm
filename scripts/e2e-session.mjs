@@ -2359,6 +2359,9 @@ try {
   await openAddSsh(`e2e-ssh-tested-${RUN}`, 2222)
   await addHostDlg.getByLabel('SSH password').fill('parola-e2e-ssh-123456')
   await addHostDlg.locator('[data-testid="hosttest-run"]').click()
+  // 3.6.34: primul contact cu parolă se opreşte la host key — parola pleacă abia după „Trust"
+  const trustBtn = addHostDlg.locator('[data-testid="hosttest-trust"]')
+  if (await visible(trustBtn, 15000)) await trustBtn.click()
   const okStages = addHostDlg.locator('[data-testid="hosttest-stages"] li[data-state="ok"]')
   await visible(testResult.locator('text=Connection verified'), 15000)
   check('hosttest: SSH real → 4 etape ✓ (TCP, SSH, host key cu amprenta, authentication)',

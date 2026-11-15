@@ -134,7 +134,7 @@ WSOUT=$(docker exec "$CT" python3 -c "
 import asyncio, websockets, sys
 async def main():
     async with websockets.connect('ws://wsecho.$D:8000/live',
-            additional_headers={'Cookie':'wt_fwd=$WTK','Origin':'http://wsecho.$D'}) as ws:
+            additional_headers={'Cookie':'wt_fwd=$WTK','Origin':'http://wsecho.$D:8000'}) as ws:
         await ws.send('hello-ws')
         print(await asyncio.wait_for(ws.recv(), timeout=10))
 asyncio.run(main())
@@ -218,6 +218,11 @@ SFJSON=$(sess -X POST "$B/api/hosts/$SSHID/forwards" -H 'Content-Type: applicati
   -d '{"label":"sshsvc","target_host":"127.0.0.1","target_port":9999,"scheme":"http","enabled":true}')
 SFSLUG=$(echo "$SFJSON" | grep -oE '"slug":"[^"]+"' | sed 's/"slug":"//;s/"//')
 SFID=$(echo "$SFJSON" | grep -oE '"id":[0-9]+' | head -1 | grep -oE '[0-9]+')
+# 3.6.34: primul contact cu PAROLĂ nu autentifică până nu e confirmată amprenta — primul dial
+# lasă o alarmă de prim contact; o confirmăm cu amprenta afişată, ca un om în dialogul din UI
+sess "$B/api/forwards/$SFID/probe" >/dev/null
+SFP=$(sess "$B/api/hosts/$SSHID/hostkey" | grep -oE '"fingerprint":"[^"]+"' | sed 's/"fingerprint":"//;s/"//')
+sess -X POST "$B/api/hosts/$SSHID/hostkey/accept" -H 'Content-Type: application/json' -d "{\"fingerprint\":\"$SFP\"}" >/dev/null
 # probă: fără sesiune deschisă, auto-dial SSH → open_connection → 9999
 sess "$B/api/forwards/$SFID/probe" | grep -q '"reachable":true' && ok "SSH host: probe via auto-dial (no session)" || no "ssh-probe" "$(sess "$B/api/forwards/$SFID/probe")"
 # acces prin subdomeniu → proxy prin canalul SSH

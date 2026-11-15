@@ -155,6 +155,18 @@ IP for 10 minutes for **every** token, valid ones included, so the lock is not a
 metadata endpoint answers `429 share.rateLimited` with `Retry-After`; the WebSocket closes with
 code `4429` before looking the token up, and the guest page says to wait and reload.
 
+**Share links on 2FA hosts follow a verified operator** (3.6.34). A guest cannot present a
+factor, so on a host that requires 2FA they are served only while a signed-in user who can type
+and is unlocked is at the terminal; when the last one leaves, guests are locked at once. A live
+link only serves a running session and is cleared when it ends; recordings are shared with
+replay links.
+
+**Stored secrets stay with their target** (3.6.34). A saved SSH/telnet password, a backup
+destination's password or key and a Toolbox database password are only sent to the server they
+were saved for: moving the target (address, port, protocol, jump route, engine) asks for the
+secret again. The first connection to an SSH host with a password stops at its host key until a
+person confirms the fingerprint, as OpenSSH does; the same applies to SFTP backup destinations.
+
 <a id="signed-agent-updates"></a>
 **Signed agent updates (Ed25519).** Agents only accept `ptyd.py` signed with the
 key whose public half is pinned inside them (`UPDATE_PUBKEY`, TOFU at install); CI
