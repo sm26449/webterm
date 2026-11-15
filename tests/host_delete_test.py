@@ -256,7 +256,8 @@ async def main():
                                              "hostname": "h", "ssh_username": "u", "via_host_id": a,
                                              "credential": "p"})
         jx = r.json()["id"]
-        r = await c.patch(f"/api/hosts/{jx}", json={"connection_type": "ssh"})
+        # ssh-jump → ssh direct = alt drum spre ţintă: cere parola din nou (raport 2026-11, lot 2)
+        r = await c.patch(f"/api/hosts/{jx}", json={"connection_type": "ssh", "credential": "p2"})
         check("PATCH ssh-jump → ssh → 200", r.status_code == 200, r.text)
         h = (await hosts_by_id())[jx]
         check("via_host_id golit la ieşirea din familia jump", h["via_host_id"] is None, str(h["via_host_id"]))

@@ -139,7 +139,7 @@ function PaneMoveMenu(props: { label: string; items: { key: string; label: strin
 }
 
 /** Alarma de host-key: ce ştim despre schimbare (vezi `startFailed` + evenimentul `wt-hostkey-changed`). */
-type HostKeyAlarm = { hostId: number; name: string; old_fp?: string; new_fp?: string; changed_at?: number | string }
+type HostKeyAlarm = { hostId: number; name: string; old_fp?: string; new_fp?: string; changed_at?: number | string; first?: boolean }
 
 /** Un rând de amprentă (monospace, trunchiat cu title complet) + buton de copiere. */
 function FingerprintRow(props: { label: string; value?: string; copyLabel: string }) {
@@ -786,22 +786,25 @@ function MainApp() {
   useEffect(() => {
     for (const h of hosts) {
       const a = h.hostkey_alarm
-      if (!a?.new_fp) continue
+      // primul contact NU vine din poll: dialogul „verifică amprenta" apare doar celui care tocmai a
+      // încercat să se conecteze (startFailed) — nu oricui vede hostul, nici după un dial de fundal
+      // (un prompt nesolicitat te învaţă să apeşi „Trust" fără să te uiţi; review lot 2)
+      if (!a?.new_fp || a.first) continue
       const key = `${h.id}:${a.changed_at ?? ''}:${a.new_fp}`
       if (seenHostKeyRef.current.has(key)) continue
       seenHostKeyRef.current.add(key)
       window.dispatchEvent(new CustomEvent('wt-hostkey-changed', {
-        detail: { host_id: h.id, host_name: h.name, old_fp: a.old_fp, new_fp: a.new_fp, changed_at: a.changed_at },
+        detail: { host_id: h.id, host_name: h.name, old_fp: a.old_fp, new_fp: a.new_fp, changed_at: a.changed_at, first: a.first },
       }))
     }
   }, [hosts])
   const [hostKeyBusy, setHostKeyBusy] = useState(false)
   useEffect(() => {
     const onEv = (e: Event) => {
-      const d = (e as CustomEvent<{ host_id: number; host_name?: string; old_fp?: string; new_fp?: string; changed_at?: number | string }>).detail
+      const d = (e as CustomEvent<{ host_id: number; host_name?: string; old_fp?: string; new_fp?: string; changed_at?: number | string; first?: boolean }>).detail
       if (!d) return
       const name = hosts.find((h) => h.id === d.host_id)?.name ?? d.host_name ?? `#${d.host_id}`
-      if (d.new_fp) setHostKeyAlarm({ hostId: d.host_id, name, old_fp: d.old_fp, new_fp: d.new_fp, changed_at: d.changed_at })
+      if (d.new_fp) setHostKeyAlarm({ hostId: d.host_id, name, old_fp: d.old_fp, new_fp: d.new_fp, changed_at: d.changed_at, first: d.first })
       else notifyError(t('app.cannotStartSession'), t('hostkey.title', { name }))
     }
     window.addEventListener('wt-hostkey-changed', onEv)
@@ -1722,12 +1725,14 @@ function MainApp() {
   // dacă ruta nu există încă (gateway vechi) sau nu are amprenta nouă, rămâne toast-ul vechi.
   async function startFailed(host: Host, e: unknown) {
     const hostKey = e instanceof ApiError && e.status === 409
-      && (e.code === 'ssh.hostKeyChanged' || /host key fingerprint changed/i.test(e.message))
+      && (e.code === 'ssh.hostKeyChanged' || e.code === 'ssh.hostKeyUnverified'
+        || /host key fingerprint changed/i.test(e.message))
     if (hostKey) {
-      const info = await api<{ fingerprint?: string; previous?: string; changed_at?: number | string }>(
+      const info = await api<{ fingerprint?: string; previous?: string; changed_at?: number | string; first?: boolean }>(
         `/api/hosts/${host.id}/hostkey`).catch(() => null)
       if (info?.fingerprint) {
-        setHostKeyAlarm({ hostId: host.id, name: host.name, old_fp: info.previous, new_fp: info.fingerprint, changed_at: info.changed_at })
+        setHostKeyAlarm({ hostId: host.id, name: host.name, old_fp: info.previous, new_fp: info.fingerprint,
+          changed_at: info.changed_at, first: info.first })
         return
       }
     }
@@ -1744,7 +1749,7 @@ function MainApp() {
         method: 'POST', body: JSON.stringify({ fingerprint: a.new_fp }),
       }))
       setHostKeyAlarm(null)
-      notify(t('hostkey.accepted', { name: a.name }), t('hostkey.acceptedBody'), 'info')
+      notify(t(a.first ? 'hostkey.firstAccepted' : 'hostkey.accepted', { name: a.name }), t('hostkey.acceptedBody'), 'info')
       refresh()
     } catch (e) {
       notifyError(t('hostkey.acceptFailed'), errText(e, t) || t('app.error'))
@@ -2340,12 +2345,14 @@ function MainApp() {
           onClick={(e) => { if (e.target === e.currentTarget) setHostKeyAlarm(null) }}>
           <TrapDialog alert onClose={() => setHostKeyAlarm(null)} labelledBy="wt-hostkey-title" describedBy="wt-hostkey-desc"
             className="glass w-full max-w-lg rounded-2xl p-6">
-            <h2 id="wt-hostkey-title" className="wt-danger flex items-center gap-2 text-lg font-semibold leading-tight">
-              <ShieldIcon /> {t('hostkey.title', { name: hostKeyAlarm.name })}
+            {/* primul contact (lot 2): aceeaşi poartă, alt sens — nu „s-a schimbat", ci „verifică
+                înainte să trimitem parola"; o singură amprentă, acceptarea nu e butonul de pericol */}
+            <h2 id="wt-hostkey-title" className={`${hostKeyAlarm.first ? 'wt-warn' : 'wt-danger'} flex items-center gap-2 text-lg font-semibold leading-tight`}>
+              <ShieldIcon /> {t(hostKeyAlarm.first ? 'hostkey.firstTitle' : 'hostkey.title', { name: hostKeyAlarm.name })}
             </h2>
-            <p id="wt-hostkey-desc" className="mt-2 text-sm leading-relaxed text-slate-300">{t('hostkey.intro')}</p>
+            <p id="wt-hostkey-desc" className="mt-2 text-sm leading-relaxed text-slate-300">{t(hostKeyAlarm.first ? 'hostkey.firstIntro' : 'hostkey.intro')}</p>
             <dl className="mt-3 space-y-2 text-xs">
-              <FingerprintRow label={t('hostkey.pinned')} value={hostKeyAlarm.old_fp} copyLabel={t('hostkey.copy')} />
+              {!hostKeyAlarm.first && <FingerprintRow label={t('hostkey.pinned')} value={hostKeyAlarm.old_fp} copyLabel={t('hostkey.copy')} />}
               <FingerprintRow label={t('hostkey.received')} value={hostKeyAlarm.new_fp} copyLabel={t('hostkey.copy')} />
             </dl>
             {hostKeyAlarm.changed_at != null && (
@@ -2353,15 +2360,16 @@ function MainApp() {
                 {t('hostkey.changedAt', { when: typeof hostKeyAlarm.changed_at === 'number' ? fmtTs(hostKeyAlarm.changed_at) : String(hostKeyAlarm.changed_at) })}
               </p>
             )}
-            <p className="mt-3 text-sm leading-relaxed text-slate-300">{t('hostkey.meaning')}</p>
+            <p className="mt-3 text-sm leading-relaxed text-slate-300">{t(hostKeyAlarm.first ? 'hostkey.firstMeaning' : 'hostkey.meaning')}</p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <button onClick={() => setHostKeyAlarm(null)}
                 className="rounded-md px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800">
-                {t('hostkey.keepBlocking')}
+                {t(hostKeyAlarm.first ? 'hostkey.firstCancel' : 'hostkey.keepBlocking')}
               </button>
               <button onClick={acceptHostKey} disabled={hostKeyBusy}
-                className="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50">
-                {t('hostkey.accept')}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 ${
+                  hostKeyAlarm.first ? 'bg-sky-600 hover:bg-sky-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
+                {t(hostKeyAlarm.first ? 'hostkey.firstAccept' : 'hostkey.accept')}
               </button>
             </div>
           </TrapDialog>

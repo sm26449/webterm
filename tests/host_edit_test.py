@@ -113,7 +113,11 @@ async def main():
 
         # ── 4. pinul de host-key aparţine MAŞINII, nu hostului din WebTerm ───
         await db.execute("UPDATE hosts SET known_hosts=? WHERE id=?", "ssh-rsa PIN-VECHI", hid)
+        # parola stocată e a ţintei vechi: mutarea fără parolă nouă e refuzată (raport 2026-11, lot 2)
         r = await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.10"})
+        check("mutarea fără parolă nouă → 400 host.retargetNeedsPassword (parola nu pleacă la noua ţintă)",
+              r.status_code == 400 and r.headers.get("X-WebTerm-Error") == "host.retargetNeedsPassword", r.text)
+        r = await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.10", "credential": "parolanoua"})
         check("mutarea pe altă maşină raportează resetarea pinului",
               r.json().get("host_key_reset") is True, r.text)
         row = await db.fetchone("SELECT known_hosts FROM hosts WHERE id=?", hid)
@@ -193,7 +197,7 @@ async def main():
                   r.json().get("disconnected") is False, r.text)
             check("…şi hub-urile rămân ataşate (fără bounce inutil)", stub.attached is True)
             # o SCHIMBARE reală de conexiune tot detaşează, ca noua sursă să re-ataşeze
-            await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.77"})
+            await c.patch(f"/api/hosts/{hid}", json={"hostname": "10.0.0.77", "credential": "parola77"})
             check("schimbare reală de conexiune DETAŞEAZĂ hub-urile (re-attach la reconectare)",
                   stub.attached is False)
         finally:

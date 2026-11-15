@@ -518,7 +518,9 @@ def _hostkey_alarm(row):
     except ValueError:
         return None
     return {"old_fp": a.get("old_fp") or "", "new_fp": a.get("new_fp") or "",
-            "changed_at": a.get("changed_at")}
+            "changed_at": a.get("changed_at"),
+            # primul contact (lot 2): nu e o schimbare, e o amprentă de confirmat înainte de parolă
+            "first": bool(a.get("first"))}
 
 
 LOGIN_MAX_BODY = 4096   # 4 KiB: un corp de login legitim are ~200 B; peste atât e abuz pre-auth
@@ -3189,6 +3191,10 @@ async def _connect_direct(row, request, body_credential="", body_passphrase=""):
     # amprentele la vedere, până când omul le verifică out-of-band şi apasă „accept" (sau
     # resetează pinul mutând hostul). (audit UX §6.e1/§6.e2)
     alarm = _hostkey_alarm(row)
+    if alarm and alarm["first"]:
+        raise ApiError(409, "ssh.hostKeyUnverified",
+                       "first connection: confirm the host key fingerprint %s before signing in"
+                       % (alarm["new_fp"] or "?"), vars={"new_fp": alarm["new_fp"]})
     if alarm:
         raise ApiError(409, "ssh.hostKeyChanged",
                        "the host key fingerprint changed (%s → %s) — possible MITM; connection "
@@ -3218,6 +3224,14 @@ def _ssh_dial_error(e: BaseException, row) -> ApiError:
         return ApiError(502, "sshjump.unreachable",
                         "the agent could not reach %s:%s — %s"
                         % (row["hostname"], row["ssh_port"] or 22, e))
+    if isinstance(e, core.HostKeyUnverified) and not e.new_fp:
+        # serverul n-a prezentat o cheie pe care s-o putem arăta: nimic de confirmat, nimic trimis
+        return ApiError(502, "ssh.hostKeyUnreadable",
+                        "the server did not present a host key WebTerm can show — nothing was sent")
+    if isinstance(e, core.HostKeyUnverified):
+        return ApiError(409, "ssh.hostKeyUnverified",
+                        "first connection: confirm the host key fingerprint %s before signing in"
+                        % (e.new_fp or "?"), vars={"new_fp": e.new_fp})
     if isinstance(e, core.HostKeyMismatch):
         return ApiError(409, "ssh.hostKeyChanged",
                         "the host key fingerprint changed (%s → %s) — possible MITM; connection refused"
@@ -7251,6 +7265,9 @@ async def audit_list(request: Request, limit: int = 200, before: float = 0.0, q:
 
 
 class HostKeyAcceptIn(BaseModel):
+    # amprenta pe care omul a VĂZUT-o în dialog: accept-ul pinează doar dacă e chiar cea a alarmei
+    # de acum (un dialog vechi nu pinează o cheie pe care nimeni n-a văzut-o — review lot 2, M5)
+    fingerprint: str = ""
     stepup_grant: str = ""
     stepup_password: str = ""
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
@@ -7268,7 +7285,8 @@ async def host_hostkey(host_id: int, user=Depends(authz.perm('host.diagnostics',
     pinned_fp = core.hostkey_fingerprint(row["known_hosts"] or "")
     if alarm:
         return {"fingerprint": alarm["new_fp"], "previous": alarm["old_fp"] or pinned_fp,
-                "changed_at": alarm["changed_at"], "pinned": bool(row["known_hosts"]), "alarm": True}
+                "changed_at": alarm["changed_at"], "pinned": bool(row["known_hosts"]), "alarm": True,
+                "first": alarm["first"]}
     return {"fingerprint": pinned_fp, "previous": None, "changed_at": None,
             "pinned": bool(row["known_hosts"]), "alarm": False}
 
@@ -7290,13 +7308,29 @@ async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Requ
         alarm = None
     if not alarm:
         raise ApiError(409, "ssh.noHostKeyAlarm", "no host-key change is pending for this host")
+    if (body.fingerprint or "").strip() != (alarm.get("new_fp") or ""):
+        raise ApiError(409, "ssh.hostKeyStale",
+                       "the host key changed since you looked at it — review the new fingerprint")
+    if alarm.get("first") and row["known_hosts"]:
+        # între timp hostul a primit un pin (test verificat): alarma de prim contact nu-l înlocuieşte
+        await db.execute("UPDATE hosts SET hostkey_alarm=NULL WHERE id=?", host_id)
+        raise ApiError(409, "ssh.noHostKeyAlarm", "this host already has a pinned key")
     new_key = alarm.get("new_key") or ""
     old_fp, new_fp = alarm.get("old_fp") or "?", alarm.get("new_fp") or "?"
-    if new_key:
-        await db.execute("UPDATE hosts SET known_hosts=?, hostkey_alarm=NULL WHERE id=?", new_key, host_id)
-    else:
-        # cheia oferită n-a putut fi capturată (asyncssh vechi?) → resetăm pinul: TOFU la următorul dial
-        await db.execute("UPDATE hosts SET known_hosts=NULL, hostkey_alarm=NULL WHERE id=?", host_id)
+    # Condiţionat de alarma CITITĂ: între citire şi aici e step-up-ul (await-uri), iar un PATCH
+    # concurent (pin verificat de test, mutare) nu trebuie suprascris cu cheia unei alarme vechi
+    # (review 2). Fără cheie capturată (asyncssh vechi?) → pinul se resetează: confirmare la dial.
+    await db.execute("UPDATE hosts SET known_hosts=?, hostkey_alarm=NULL WHERE id=? AND hostkey_alarm=?",
+                     new_key or None, host_id, row["hostkey_alarm"])
+    after = await db.fetchone("SELECT known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
+    if not after or after["hostkey_alarm"] is not None or (after["known_hosts"] or None) != (new_key or None):
+        raise ApiError(409, "ssh.hostKeyStale", "the host changed while you were confirming — review it again")
+    if alarm.get("first") and new_key:
+        # primul contact confirmat: pin iniţial, nu o re-pinare — auditat, fără alertă de flotă
+        audit.detail(request, "host-key first contact confirmed: %s" % new_fp)
+        await core.record_agent_event(host_id, "hostkey_accepted", reason="hostkey_first_confirmed",
+                                      detail="%s by %s" % (new_fp, user["email"]))
+        return {"ok": True, "fingerprint": new_fp, "pinned": True}
     audit.detail(request, "host-key accepted: %s → %s" % (old_fp, new_fp))
     await core.record_agent_event(host_id, "hostkey_accepted", reason="hostkey_accepted",
                                   detail="%s → %s by %s" % (old_fp, new_fp, user["email"]))
@@ -8169,6 +8203,38 @@ _CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
                 "auth_method", "credential", "credential_policy", "via_host_id")
 
 
+def _conn_target(ctype: str, hostname, port, via) -> tuple:
+    """Ţinta la care pleacă un credenţial: (protocol, gazdă, port, rută jump). `via` contează doar
+    pe tipurile jump (un ssh direct pleacă din reţeaua gateway-ului, oricare ar fi `via` rămas)."""
+    proto = "telnet" if ctype in ("telnet", "telnet-jump") else "ssh"
+    jump = ctype in _JUMP_TYPES
+    return (proto, (hostname or "").strip().lower(), int(port or (23 if proto == "telnet" else 22)),
+            int(via or 0) if jump else 0)
+
+
+def _has_stored_password(row) -> bool:
+    """Rândul ţine o PAROLĂ în seif (ssh sau telnet), oricare ar fi tipul/politica/metoda de acum.
+    Blob ilizibil → True (fail-closed: nu ştim ce e, tratăm ca secret)."""
+    if not row["credential_encrypted"]:
+        return False
+    try:
+        cred = _decode_credential(row["credential_encrypted"])
+    except Exception:                       # noqa: BLE001
+        return True
+    return isinstance(cred, dict) and bool(cred.get("password"))
+
+
+def _retargets(row, new_type: str, hostname, port, via) -> bool:
+    """Ţinta s-ar muta faţă de cea pentru care a fost salvat credenţialul. Parola unui host
+    `agent` vine din provisioning-ul prin SSH, deci ţinta ei e SSH pe adresa lui — NU protocolul
+    cerut acum (altfel ssh → agent+adresă nouă → ssh/telnet o muta fără întrebare; review 2, H)."""
+    old_type = row["connection_type"] or "agent"
+    if old_type == "agent":
+        old_type = "ssh"
+    return (_conn_target(old_type, row["hostname"], row["ssh_port"], row["via_host_id"])
+            != _conn_target(new_type, hostname, port, via))
+
+
 @router.patch("/api/hosts/{host_id}")
 async def update_host(host_id: int, host: HostPatch, request: Request,
                       user=Depends(authz.perm('host.edit', host='host_id'))):
@@ -8287,6 +8353,23 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.
     if pend_given and new_type not in ("ssh", "ssh-jump"):
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
+    # Parola STOCATĂ e a destinaţiei de acum. Mutarea hostului pe altă adresă / port / rută jump
+    # o păstra, iar prima conectare (TOFU, pinul resetat) o trimitea noii ţinte — inclusiv unui
+    # server SSH al celui care a făcut mutarea (raport de securitate 2026-11, lot 2). Acum ţinta
+    # nouă cere parola din nou. Doar parola: o cheie privată nu pleacă niciodată la server
+    # (semnătura e legată de sesiune), deci schimbarea IP-ului unui host cu cheie rămâne liberă.
+    # Regula se ia din parola STOCATĂ, nu din câmpurile cererii: tipul, politica („ask") sau metoda
+    # („key") schimbate odată cu adresa, apoi readuse într-un al doilea PATCH, ocoleau o verificare
+    # legată de ele — iar telnet o trimitea chiar în clar (review lot 2, C1). Agent = nu o foloseşte.
+    pw_moves = (not given.get("credential") and not pend_given and _has_stored_password(row)
+                and _retargets(row, new_type, hostname, eff("ssh_port"), eff("via_host_id")))
+    # Pe `agent` parola nu se foloseşte: o ţintă mutată nu cere parola, dar o ŞTERGE din seif — ca
+    # să nu reînvie la întoarcerea pe ssh/telnet spre noua adresă (review 2, H)
+    drop_secret = pw_moves and new_type == "agent"
+    if pw_moves and new_type != "agent":
+        raise ApiError(400, "host.retargetNeedsPassword",
+                       "the host now points somewhere else — enter the password again; the stored "
+                       "one is only sent to the address it was saved for")
     if (new_type == "ssh" and policy == "stored" and not pend_given
             and not given.get("credential") and not row["credential_encrypted"]):
         raise ApiError(400, "host.noStoredCredentials",
@@ -8296,8 +8379,9 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
     # Pinul de host-key aparține MAȘINII vechi: dacă am mutat hostul în altă parte, pinul
     # respinge noua mașină la fiecare încercare, iar mesajul arată ca un MITM. Îl resetăm
     # explicit (TOFU repinează la prima conectare) și O SPUNEM în răspuns.
-    repinned = (("hostname" in given and hostname != (row["hostname"] or ""))
-                or ("ssh_port" in given and given["ssh_port"] != row["ssh_port"]))
+    # Ţinta = protocol + gazdă (fără diferenţe de majuscule) + port + rută jump: şi un ssh-jump
+    # devenit ssh direct (alt drum, altă reţea) e altă ţintă (review lot 2, H2)
+    repinned = _retargets(row, new_type, hostname, eff("ssh_port"), eff("via_host_id"))
     new_pin = None
     if pin_given:
         if new_type not in ("ssh", "ssh-jump"):
@@ -8351,12 +8435,25 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
             credential=given["credential"], passphrase=given.get("passphrase") or "",
             credential_policy=policy))
         sets.append("credential_encrypted=?"); vals.append(blob)
+    elif drop_secret or (policy == "ask" and row["credential_encrypted"] and not pend_given):
+        # „cere de fiecare dată" = nimic stocat. Lăsat în seif, secretul revenea la viaţă la
+        # întoarcerea pe „stored" — pe o ţintă mutată între timp (review lot 2, C1)
+        sets.append("credential_encrypted=NULL")
+    # Cheie → PAROLĂ pe aceeaşi ţintă: pinul a fost pus tăcut (TOFU e păstrat doar pentru chei), deci
+    # nimeni nu l-a confirmat. Îl ştergem: prima conectare cu parola cere confirmarea amprentei,
+    # dacă formularul nu aduce chiar acum un pin verificat de test (review 2, pin moştenit).
+    if (not repinned and not new_pin and new_type in ("ssh", "ssh-jump") and row["known_hosts"]
+            and (row["auth_method"] or "password") == "key" and auth_method == "password"):
+        sets.append("known_hosts=NULL"); sets.append("hostkey_alarm=NULL")
     if repinned:
         # ţintă nouă: pinul vechi pleacă; dacă testul a văzut-o, pinăm direct cheia ei
         sets.append("known_hosts=?"); vals.append(new_pin)
         sets.append("hostkey_alarm=NULL")      # pin nou = alarma veche nu mai are obiect
     elif new_pin and not row["known_hosts"]:
         sets.append("known_hosts=?"); vals.append(new_pin)
+        # pinul verificat de test înlocuieşte o alarmă de prim contact rămasă (posibil cu cheia
+        # unui MITM văzută la un dial anterior) — altfel „Trust" ar fi suprascris pinul bun (M4)
+        sets.append("hostkey_alarm=NULL")
     if not sets and not pend_given:
         return {"ok": True, "changed": False}
     async with authz._lock:
@@ -9372,6 +9469,9 @@ class HostTestIn(BaseModel):
     via_host_id: int = 0                 # familia jump: agentul prin care tunelăm
     host_id: int = 0                     # editare: hostul existent (credenţialul stocat + pinul lui)
     pending_key_id: str = ""             # cheia generată în formular, încă nelegată
+    # lot 2: cheia publică pe care omul a văzut-o (amprenta) şi o acceptă — abia atunci testul
+    # trimite PAROLA; fără ea, la primul contact testul se opreşte la host key
+    trust_hostkey: str = ""
     stepup_grant: str = ""
     stepup_password: str = ""
     stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
@@ -9481,7 +9581,10 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
             cred = ({"key": body.credential, "passphrase": body.passphrase or None} if auth == "key"
                     else {"password": body.credential})
         elif (row is not None and row["credential_encrypted"] and row["credential_policy"] != "ask"
-              and (row["auth_method"] or "password") == auth):
+              and (row["auth_method"] or "password") == auth
+              and (auth == "key" or not _retargets(row, ctype, hostname, port, via))):
+            # parola stocată doar spre ţinta pentru care a fost salvată (lot 2): pe o adresă nouă
+            # testul sare peste auth, ca la politica „ask" — nu trimite parola unui server nou
             cred = _decode_credential(row["credential_encrypted"])
         if cred is not None and auth == "key":
             try:
@@ -9501,6 +9604,20 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
             and int(row["ssh_port"] or 22) == int(port)
             and (row["via_host_id"] or 0) == (via or 0)):
         expected = row["known_hosts"]
+    # Primul contact cu PAROLĂ (fără pin): parola pleacă abia după ce omul a văzut amprenta şi a
+    # acceptat-o (`trust_hostkey`), ca la OpenSSH. Probe-ul refuză ÎNAINTE de auth o cheie oferită
+    # diferită de cea acceptată. Fără acceptare: doar până la host key (raport 2026-11, lot 2).
+    needs_trust = False
+    if ssh and not expected and cred is not None and auth == "password":
+        trusted = (body.trust_hostkey or "").strip()
+        if trusted:
+            try:
+                asyncssh.import_public_key(trusted)
+            except Exception:                           # noqa: BLE001
+                raise ApiError(400, "hosttest.badTrustKey", "that is not an SSH public key")
+            expected = trusted
+        else:
+            cred, needs_trust = None, True
 
     # rezolvare + poartă de metadate pe ADRESELE rezultate (un nume care rezolvă la 169.254.169.254
     # nu trece). Jump: rezolvă agentul, în reţeaua lui — verificăm best-effort şi local.
@@ -9534,7 +9651,15 @@ async def test_host_connection(body: HostTestIn, request: Request, user=Depends(
               for st in res["stages"]]
     ok = bool(stages) and all(s["ok"] or s.get("warn") or s.get("skipped") for s in stages)
     hostkey_ok = any(s["id"] == "hostkey" and s["ok"] for s in stages)
+    if needs_trust and hostkey_ok:
+        # nu „reuşit": sign-in-ul aşteaptă confirmarea amprentei (UI: „Trust and test sign-in")
+        for st in stages:
+            if st["id"] == "auth":
+                st.update(ok=False, skipped=True, code="hosttest.confirmHostkey")
+        ok = False
     out = {"ok": ok, "stages": stages}
+    if needs_trust and hostkey_ok:
+        out["needs_trust"] = True
     if hk:
         out["hostkey"] = {"type": hk["type"], "fingerprint_sha256": hk["fingerprint_sha256"]}
         if hostkey_ok:

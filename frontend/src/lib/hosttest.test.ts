@@ -11,6 +11,7 @@ const CAT: Record<string, string> = {
   'err.ssh.authFailed': 'The target rejected the credentials', 'err.hosttest.refused': 'Connection refused',
   'err.hosttest.failed': 'The test failed', 'err.hosttest.hostKeyMismatch': 'differs {old_fp} → {new_fp}',
   'err.hosttest.telnetSilent': 'No banner yet', 'err.hosttest.authSkipped': 'not tested',
+  'hosttest.confirmKey': 'Server key {fp}: check it', 'err.hosttest.confirmHostkey': 'not sent yet',
 }
 const t = (k: string, v?: Record<string, string | number>) =>
   (CAT[k] ?? k).replace(/\{(\w+)\}/g, (_m, n) => String(v?.[n] ?? `{${n}}`))
@@ -77,5 +78,22 @@ describe('connSignature', () => {
   it('stabilă la ordinea cheilor, diferită la orice valoare schimbată', () => {
     expect(connSignature({ a: 1, b: 'x' })).toBe(connSignature({ b: 'x', a: 1 }))
     expect(connSignature({ a: 1, b: 'x' })).not.toBe(connSignature({ a: 1, b: 'y' }))
+  })
+})
+
+describe('primul contact cu parolă (needs_trust)', () => {
+  const r: TestResult = {
+    ok: false, needs_trust: true,
+    hostkey: { type: 'ssh-ed25519', fingerprint_sha256: 'SHA256:abc', key: 'ssh-ed25519 AAAA' },
+    stages: [...okSsh.stages.slice(0, 3), { id: 'auth', ok: false, skipped: true, code: 'hosttest.confirmHostkey' }],
+  }
+  it('rezumatul cere verificarea amprentei, nu raportează un eşec', () => {
+    expect(summaryText(r, t, false)).toBe('Server key SHA256:abc: check it')
+  })
+  it('etapa auth e „sărită", cu motivul, şi nu mută focusul pe parolă', () => {
+    const auth = stageViews(r, t, false).find((v) => v.id === 'auth')
+    expect(auth?.state).toBe('skip')
+    expect(auth?.text).toBe('not sent yet')
+    expect(failingField(r)).toBeNull()
   })
 })

@@ -51,6 +51,7 @@ export interface HostKeyAlarm {
   old_fp: string
   new_fp: string
   changed_at: number | null
+  first?: boolean     // primul contact: amprentă de confirmat înainte de parolă (nu o schimbare)
 }
 
 export interface HostMetrics {
@@ -106,7 +107,7 @@ export interface HostSupervision {
 
 export interface Host {
   /** alarmă de host-key schimbat nerezolvată (SSH direct/jump); null când totul e în regulă */
-  hostkey_alarm?: { old_fp?: string; new_fp?: string; changed_at?: number } | null
+  hostkey_alarm?: { old_fp?: string; new_fp?: string; changed_at?: number; first?: boolean } | null
   id: number
   name: string
   note: string

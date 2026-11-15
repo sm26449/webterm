@@ -43,10 +43,14 @@ What the code enforces:
   wake routes all go through the agent connection and answer *"host offline"* (or a specific
   *agent hosts only* error) otherwise. Port forwarding is the exception: it also works on SSH
   hosts.
-- **SSH host keys** are pinned on first connect. If the key later changes, the host carries a
-  *host key changed* alarm and every connection is refused without dialling until you review
-  the new fingerprint and accept it. Changing the hostname or port of a host resets the pin
-  (the response says so), because the old pin belongs to the old machine.
+- **SSH host keys** are pinned on first connect. On a host that signs in with a **password**,
+  that first connection stops at the host key and asks you to **verify the fingerprint** before
+  the password is sent (since 3.6.34, as OpenSSH does); hosts saved after a successful test are
+  already pinned and never ask. If the key later changes, the host carries a *host key changed*
+  alarm and every connection is refused without dialling until you review the new fingerprint
+  and accept it. Changing the hostname, port or jump route of a host resets the pin (the
+  response says so), because the old pin belongs to the old machine, and on a password host it
+  **asks for the password again**: a stored password is only sent to the target it was saved for.
 - You can change the type of an existing host at any time (**Edit host**). The edit form says
   why you would: if the agent stops responding, switch the host to SSH to get in and fix it;
   history and sessions stay on the same host. Changing a connection field (type, hostname,
@@ -64,7 +68,7 @@ shell. The result is shown per stage, so you see *where* it broke:
 |---|---|---|
 | **TCP** | The gateway (or, for a jump type, the agent) can open the port | Refused (wrong port, service down), unreachable / timed out (firewall, wrong address), name not found |
 | **SSH** / **Telnet** | Something answers: the SSH greeting, or for telnet any banner or login prompt within 3 seconds | Not an SSH server on that port; no greeting at all. A silent telnet device is only a *warning*: some wait for the first Enter |
-| **host key** | The server's host key; its SHA256 fingerprint is shown | On an existing host whose pinned key differs: the test stops here and the password is **not** sent |
+| **host key** | The server's host key; its SHA256 fingerprint is shown | On an existing host whose pinned key differs: the test stops here and the password is **not** sent. On first contact with a password, the test also stops here until you choose **Trust this key and test sign-in** |
 | **authentication** | The user and password or key are accepted | The same message you would get when connecting |
 
 What you need to know:
@@ -78,7 +82,11 @@ What you need to know:
   through the host-key alarm, where you compare fingerprints and accept explicitly.
 - Changing any connection field after a test (hostname, port, user, password, key, via host)
   clears the result; test again before saving as verified.
-- In Edit host, leaving the password empty tests with the stored credential. On a host with
+- With a password and no pinned key yet, the first run stops after the host key and shows its
+  fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server,
+  then **Trust this key and test sign-in**: the password goes only to that exact key.
+- In Edit host, leaving the password empty tests with the stored credential, as long as the
+  address, port and jump route are unchanged; on a new target the stored password is not tried. On a host with
   **Require 2FA** that needs a step-up first, exactly like connecting.
 - With the **Ask every time** policy there is nothing to log in with, so the test stops after
   the host key and says authentication was not tested.

@@ -229,9 +229,32 @@ async def main():
         check("ascultător tăcut → banner picat cu ssh.noBanner (acelaşi cod ca la conectare)",
               st and st.get("code") == "ssh.noBanner", r.text[:200])
 
-        # ── SSH real: parolă greşită ──
+        # ── primul contact cu PAROLĂ (raport 2026-11, lot 2): fără amprentă acceptată, parola NU pleacă ──
         STATS["pw_tries"] = 0
-        r = await test(credential=BAD)
+        r = await test()
+        j = r.json()
+        st = _stage(j, "auth")
+        check("primul contact fără trust_hostkey → needs_trust, ok=false",
+              j.get("needs_trust") is True and j.get("ok") is False, str(j)[:300])
+        check("…auth sărit cu hosttest.confirmHostkey",
+              st and st.get("skipped") and st.get("code") == "hosttest.confirmHostkey", str(st))
+        check("…cheia + amprenta serverului întoarse, ca omul să le compare",
+              j.get("hostkey", {}).get("fingerprint_sha256") == server_fp
+              and (j["hostkey"].get("key") or "").split()[:2] == server_pub.split()[:2], str(j.get("hostkey")))
+        check("…şi serverul NU a primit nicio parolă", STATS["pw_tries"] == 0, str(STATS))
+        other_pub = asyncssh.generate_private_key("ssh-ed25519").export_public_key().decode().strip()
+        r = await test(trust_hostkey=other_pub)
+        j = r.json()
+        check("trust_hostkey ≠ cheia oferită → hostkey picat (hosttest.hostKeyMismatch)",
+              (_stage(j, "hostkey") or {}).get("code") == "hosttest.hostKeyMismatch", str(j)[:300])
+        check("…fără nicio parolă trimisă", STATS["pw_tries"] == 0, str(STATS))
+        r = await test(trust_hostkey="nu-e-o-cheie")
+        check("trust_hostkey invalid → 400 hosttest.badTrustKey",
+              r.status_code == 400 and r.headers.get("x-webterm-error") == "hosttest.badTrustKey", r.text[:150])
+
+        # ── SSH real: parolă greşită (amprenta acceptată) ──
+        STATS["pw_tries"] = 0
+        r = await test(credential=BAD, trust_hostkey=server_pub)
         j = r.json()
         check("parolă greşită → ok=false", j.get("ok") is False, r.text[:200])
         check("parolă greşită → tcp/banner/hostkey ok",
@@ -244,8 +267,8 @@ async def main():
               j.get("hostkey", {}).get("fingerprint_sha256") == server_fp
               and j["hostkey"].get("type") == "ssh-ed25519", str(j.get("hostkey")))
 
-        # ── SSH real: parolă bună ──
-        r = await test()
+        # ── SSH real: parolă bună (amprenta acceptată) ──
+        r = await test(trust_hostkey=server_pub)
         j = r.json()
         check("parolă bună → ok=true, 4 etape ok",
               j.get("ok") is True and [s["id"] for s in j["stages"]] == ["tcp", "banner", "hostkey", "auth"]
@@ -395,6 +418,12 @@ async def main():
         r = await test(host_id=pid_host, credential="")
         check("edit: testul foloseşte credenţialul STOCAT când nu se tastează altul",
               r.json().get("ok") is True and (_stage(r.json(), "auth") or {}).get("ok") is True, r.text[:300])
+        # lot 2: parola STOCATĂ nu pleacă spre o ţintă nouă (alt hostname) — auth sărit, nicio încercare
+        STATS["pw_tries"] = 0
+        r = await test(host_id=pid_host, credential="", hostname="localhost")
+        st = _stage(r.json(), "auth") or {}
+        check("edit pe altă adresă: parola stocată NU e folosită (auth sărit, niciun pw trimis)",
+              st.get("skipped") is True and STATS["pw_tries"] == 0, "%s %s" % (st, STATS))
 
         # ── step-up: hostul editat cere 2FA → testul cere step-up ca la conectare ──
         r = await c.post("/api/hosts", json=dict(base, name="h2fa", require_2fa=True))
@@ -497,7 +526,8 @@ async def main():
         check("jump cu via care NU e agent → 400 sshjump.needsAgent",
               r.headers.get("x-webterm-error") == "sshjump.needsAgent", r.text[:150])
         core.sources[aid] = FakeAgent(aid, ("127.0.0.1", sport))
-        r = await test(connection_type="ssh-jump", via_host_id=aid, hostname="10.9.9.9")
+        r = await test(connection_type="ssh-jump", via_host_id=aid, hostname="10.9.9.9",
+                       trust_hostkey=server_pub)
         j = r.json()
         check("jump prin agent (tunel real) → ok, 4 etape", j.get("ok") is True and len(j["stages"]) == 4, str(j)[:300])
         check("jump: nicio sursă înregistrată, niciun forward rămas",

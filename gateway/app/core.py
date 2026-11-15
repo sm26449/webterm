@@ -4226,6 +4226,13 @@ class HostKeyMismatch(Exception):
         self.new_fp = new_fp
 
 
+class HostKeyUnverified(HostKeyMismatch):
+    """PRIMUL contact cu un host SSH cu parolă, fără pin: amprenta trebuie confirmată de om
+    ÎNAINTE ca parola să plece (raport de securitate 2026-11, lot 2). TOFU-ul vechi pina ce vedea
+    şi autentifica în aceeaşi conexiune, deci un adversar pe drum la primul contact primea parola.
+    Subclasă a HostKeyMismatch: fiecare `except` existent o prinde şi refuză (fail-closed)."""
+
+
 def hostkey_fingerprint(keyline: str) -> str:
     """`SHA256:…` pentru o linie de cheie publică OpenSSH; "" dacă nu se poate decoda."""
     try:
@@ -4266,6 +4273,94 @@ def _hostkey_kwargs(host_row) -> tuple:
     else:
         kwargs["known_hosts"] = None            # TOFU: prima conectare pinează
     return kwargs, holder
+
+
+def _needs_first_contact(host_row, credential: Optional[dict]) -> bool:
+    """Fără pin şi cu PAROLĂ: prima conectare cere confirmarea amprentei. Cu cheie, TOFU rămâne:
+    privata nu pleacă la server (semnătura e legată de sesiune) — decizie a userului, 2026-11-15.
+    Şi o parolă GOALĂ contează: TOFU-ul ei ar lăsa un pin neconfirmat pe care o parolă reală,
+    adăugată mai târziu pe aceeaşi ţintă, l-ar moşteni (review lot 2)."""
+    return (not host_row["known_hosts"] and host_row["auth_method"] != "key"
+            and isinstance(credential, dict))
+
+
+def _pending_first_contact(host_row) -> None:
+    """Alarmă de prim contact deja pe rând → refuz FĂRĂ un nou dial: un forward reîncercat sau un
+    re-dial nu deschide câte o conexiune şi nu scrie câte un eveniment la fiecare încercare."""
+    raw = host_row["hostkey_alarm"] if "hostkey_alarm" in host_row.keys() else None
+    if not raw:
+        return
+    try:
+        a = json.loads(raw)
+    except ValueError:
+        return
+    if a.get("first"):
+        raise HostKeyUnverified("first contact: confirm the host key fingerprint", "",
+                                a.get("new_fp") or "")
+
+
+# Doar algoritmi de cheie SIMPLĂ (fără certificate OpenSSH) când lista de încredere e goală: altfel
+# asyncssh negociază întâi certificatul, cere `validate_host_ca_key`, iar cheia hostului nu ajunge
+# niciodată la noi — un host cu certificat nu mai putea fi pinat deloc (review lot 2, M3).
+_PLAIN_HOSTKEY_ALGS = [a.decode() for a in asyncssh.public_key.get_public_key_algs()]
+
+
+class _CaptureHostKeyClient(asyncssh.SSHClient):
+    """Doar citeşte cheia oferită şi o REFUZĂ: asyncssh opreşte conexiunea înainte de orice auth."""
+    _holder: dict = None
+
+    def validate_host_public_key(self, host, addr, port, key):
+        self._holder["key"] = key
+        return False
+
+
+async def _peek_host_key(conn_kwargs: dict):
+    """Cheia publică a serverului, fără să autentifice nimic (lista de încredere goală + refuz)."""
+    holder = {"key": None}
+
+    def _factory():
+        c = _CaptureHostKeyClient()
+        c._holder = holder
+        return c
+    kw = dict(conn_kwargs)
+    kw.update(_ssh_auth_kwargs({"ssh_username": conn_kwargs.get("username") or "",
+                                "auth_method": "password"}, None))
+    kw.update(known_hosts=lambda _h, _a, _p: ([], [], []), client_factory=_factory,
+              server_host_key_algs=_PLAIN_HOSTKEY_ALGS)
+    try:
+        conn = await asyncssh.connect(**kw)
+        conn.close()                         # n-ar trebui să ajungă aici (cheia e refuzată)
+    except asyncssh.HostKeyNotVerifiable:
+        pass
+    return holder["key"]
+
+
+async def _hostkey_first_contact(host_row, key) -> "HostKeyUnverified":
+    """Pune pe host o alarmă de PRIM CONTACT (`first`), cu amprenta oferită: UI-ul o arată ca
+    „verifică amprenta", nu ca „cheie schimbată"; acceptarea (POST …/hostkey/accept) o pinează.
+    Conectarea e refuzată până atunci. Nu e o alertă de securitate: nimic nu s-a schimbat."""
+    new_fp, new_key = "", ""
+    if key is not None:
+        try:
+            new_fp = key.get_fingerprint()
+            new_key = key.export_public_key().decode().strip()
+        except Exception:   # noqa: BLE001
+            pass
+    if not new_key:
+        return HostKeyUnverified("could not read the server's host key", "", "")
+    alarm = {"first": True, "old_fp": "", "new_fp": new_fp, "new_key": new_key,
+             "changed_at": time.time()}
+    # o alarmă deja pendinte rămâne cea de confirmat (alt dial — ex. un forward — nu o rescrie şi
+    # nu redeschide dialogul); o cheie diferită la conectarea de după accept = alarma de mismatch
+    # …şi doar dacă rândul arată încă ţinta pe care am citit-o (un PATCH concurent l-a putut muta)
+    await db.execute("UPDATE hosts SET hostkey_alarm=? WHERE id=? AND known_hosts IS NULL"
+                     " AND hostkey_alarm IS NULL AND hostname IS ? AND ssh_port IS ?",
+                     json.dumps(alarm), host_row["id"], host_row["hostname"], host_row["ssh_port"])
+    await record_agent_event(host_row["id"], "hostkey_first_seen", reason="hostkey_first_seen",
+                             detail=new_fp)
+    log.info("host %s(%s): first SSH contact, host key %s awaits confirmation before sign-in",
+             host_row["name"], host_row["id"], new_fp)
+    return HostKeyUnverified("first contact: confirm the host key fingerprint", "", new_fp)
 
 
 async def _hostkey_mismatch(host_row, holder, err) -> "HostKeyMismatch":
@@ -4511,6 +4606,11 @@ async def dial_ssh(host_row, credential: dict) -> SshSource:
         host = host_row["hostname"]
         port = host_row["ssh_port"] or 22
         stored = host_row["known_hosts"]
+        if _needs_first_contact(host_row, credential):
+            _pending_first_contact(host_row)
+            key = await _peek_host_key(dict(host=host, port=port,
+                                            username=host_row["ssh_username"]))
+            raise await _hostkey_first_contact(host_row, key)
         kwargs = dict(host=host, port=port)
         kwargs.update(_ssh_auth_kwargs(host_row, credential))
         pin_kwargs, holder = _hostkey_kwargs(host_row)
@@ -4659,6 +4759,14 @@ async def dial_ssh_jump(host_row, credential: dict) -> SshJumpSource:
         stored = host_row["known_hosts"]
         # kwargs ÎNAINTE de tunel: o cheie privată ilizibilă nu mai deschide (şi lasă) un forward
         auth_kwargs = _ssh_auth_kwargs(host_row, credential)
+        if _needs_first_contact(host_row, credential):
+            _pending_first_contact(host_row)
+            fs, ssh_sock, bridge_sock, pump = await _open_jump_bridge(host_row)
+            try:
+                key = await _peek_host_key(dict(sock=ssh_sock, username=host_row["ssh_username"]))
+            finally:
+                await _close_jump_bridge(fs, ssh_sock, bridge_sock, pump)
+            raise await _hostkey_first_contact(host_row, key)
         fs, ssh_sock, bridge_sock, pump = await _open_jump_bridge(host_row)
         kwargs = dict(sock=ssh_sock)
         kwargs.update(auth_kwargs)
@@ -4974,7 +5082,8 @@ async def probe_ssh(host_row, credential: Optional[dict], addrs: Optional[list] 
             c = _ProbeHostKeyClient()
             c._holder = holder
             return c
-        kwargs = dict(sock=sock, known_hosts=lambda _h, _a, _p: ([], [], []), client_factory=_factory)
+        kwargs = dict(sock=sock, known_hosts=lambda _h, _a, _p: ([], [], []), client_factory=_factory,
+                      server_host_key_algs=_PLAIN_HOSTKEY_ALGS)
         if not jump:
             kwargs["host"] = host_row["hostname"]
         kwargs.update(auth_kwargs)

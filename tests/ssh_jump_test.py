@@ -138,13 +138,25 @@ async def main():
     check("mismatch → alarma notify_host_key_changed s-a declanşat", fired["n"] >= 1)
     check("sursa NU a fost înregistrată la mismatch", core.sources.get(TGT_BAD) is None)
 
-    # ── TOFU: fără cheie pinată → prima conectare pinează cheia serverului ──
+    # ── prim contact cu parolă (raport 2026-11, lot 2): fără pin, prin tunel, NU se autentifică —
+    #    cheia e citită, amprenta cerută la confirmare, nicio sursă înregistrată ──
+    first = None
     try:
-        src = await core.dial_ssh_jump(row(TGT_TOFU, None), {"password": ""})
-        check("TOFU: prima conectare reuşeşte şi pinează", isinstance(src, core.SshJumpSource))
+        await core.dial_ssh_jump(row(TGT_TOFU, None), {"password": "secret"})
+    except core.HostKeyUnverified as e:
+        first = e
+    except Exception as e:       # noqa: BLE001
+        check("prim contact: tip eroare", False, repr(e))
+    check("prim contact prin jump → HostKeyUnverified cu amprenta serverului",
+          first is not None and first.new_fp == hostkey.get_fingerprint(), repr(first))
+    check("…nicio sursă înregistrată", core.sources.get(TGT_TOFU) is None)
+    # după confirmare (pinul = cheia văzută) conexiunea trece
+    try:
+        src = await core.dial_ssh_jump(row(TGT_TOFU, server_pub), {"password": "secret"})
+        check("după confirmare: conexiunea prin tunel reuşeşte", isinstance(src, core.SshJumpSource))
         await src.disconnect()
     except Exception as e:       # noqa: BLE001
-        check("TOFU path", False, repr(e))
+        check("după confirmare", False, repr(e))
 
     email_alerts.notify_host_key_changed = orig
     server.close()

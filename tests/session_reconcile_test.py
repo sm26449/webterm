@@ -11,6 +11,8 @@ import sys
 import tempfile
 import time
 
+import asyncssh
+
 os.environ["WEBTERM_DATA_DIR"] = tempfile.mkdtemp()
 os.environ.setdefault("WEBTERM_PUBLIC_URL", "http://127.0.0.1:8000")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
@@ -209,7 +211,9 @@ async def main():
         await mk_host(9, None, conn_type="ssh")
         core.sources.pop(9, None)
         core._dial_locks.pop(9, None)
-        hrow = {"id": 9, "hostname": "h", "ssh_port": 22, "known_hosts": None,
+        # pinat: testul e despre lock-ul de dial, nu despre primul contact (care nu autentifică)
+        pinned = asyncssh.generate_private_key("ssh-ed25519").export_public_key().decode().strip()
+        hrow = {"id": 9, "hostname": "h", "ssh_port": 22, "known_hosts": pinned,
                 "ssh_username": "u", "auth_method": "password"}
         res = await asyncio.gather(core.dial_ssh(hrow, {"password": "x"}),
                                    core.dial_ssh(hrow, {"password": "x"}))

@@ -144,7 +144,7 @@ export default function AddHostModal(props: {
     if (code === 'hosttest.badPort') return 'port'
     if (code === 'ssh.userRequired') return 'username'
     if (/^(sshjump\.(needsAgent|viaLoop)|hosttest\.viaOffline)$/.test(code)) return 'via'
-    if (/^(host\.(noStoredCredentials|credentialsRequired)|hosttest\.badKey|sshkey\.pendingMissing)$/.test(code)) return 'secret'
+    if (/^(host\.(noStoredCredentials|credentialsRequired|retargetNeedsPassword)|hosttest\.badKey|sshkey\.pendingMissing)$/.test(code)) return 'secret'
     return 'name'
   }
   function fail(msg: string, err?: unknown) {
@@ -288,7 +288,9 @@ export default function AddHostModal(props: {
 
   // „Test connection": tcp → banner → host key → auth, prin dial-ul real al gateway-ului, fără
   // să salveze nimic. Serverul are plafonul lui de 10 s; aici: termen de rezervă + „Anulează".
-  async function runTest() {
+  // `trustKey`: a doua trecere a testului la primul contact cu parolă — omul a văzut amprenta şi o
+  // acceptă; abia acum serverul trimite parola (şi refuză înainte de auth o cheie diferită)
+  async function runTest(trustKey?: string) {
     if (testing) return
     setError(''); setTestState(null); setTesting(true)
     // butonul de test devine `disabled` cât rulează → focusul s-ar pierde pe <body>; îl ducem pe
@@ -309,6 +311,7 @@ export default function AddHostModal(props: {
       auth_method: usePending ? 'key' : authMethod, via_host_id: isJump ? viaHost : 0,
     }
     if (edit) body.host_id = edit.id
+    if (trustKey) body.trust_hostkey = trustKey
     if (isSshLike && policy === 'stored') {
       if (usePending) body.pending_key_id = pendingKey?.id
       else if (secret) Object.assign(body, { credential: secret, passphrase })
@@ -770,7 +773,7 @@ export default function AddHostModal(props: {
                   <p className="wt-danger">{testErr}</p>
                 ) : testRes ? (
                   <>
-                    <p className={`text-sm font-medium ${testRes.ok ? 'wt-good' : 'wt-danger'}`}>
+                    <p className={`text-sm font-medium ${testRes.ok ? 'wt-good' : testRes.needs_trust ? 'wt-warn' : 'wt-danger'}`}>
                       {summaryText(testRes, t, isTelnet)}
                     </p>
                     <ul className="mt-2 space-y-1" data-testid="hosttest-stages">
@@ -788,6 +791,15 @@ export default function AddHostModal(props: {
                     {verified && isSshLike && testRes.hostkey?.key && (
                       <p className="mt-2 text-2xs text-slate-500">{t('hosttest.willPin')}</p>
                     )}
+                    {testRes.needs_trust && testRes.hostkey?.key && (
+                      <div className="mt-2 space-y-2">
+                        <p className="text-2xs text-slate-400">{t('hosttest.trustHint')}</p>
+                        <Button type="button" variant="secondary" data-testid="hosttest-trust"
+                          onClick={() => runTest(testRes.hostkey?.key)} disabled={testing || busy}>
+                          {t('hosttest.trustAndTest')}
+                        </Button>
+                      </div>
+                    )}
                   </>
                 ) : null}
               </div>
@@ -801,7 +813,7 @@ export default function AddHostModal(props: {
                       {t('hosttest.cancel')}
                     </Button>
                   ) : null}
-                  <button ref={testBtnRef} type="button" onClick={runTest} data-testid="hosttest-run"
+                  <button ref={testBtnRef} type="button" onClick={() => runTest()} data-testid="hosttest-run"
                     disabled={testing || busy || !hostname.trim() || (isSshLike && !username.trim()) || (isJump && !viaHost)}
                     aria-describedby="addhost-test-result"
                     className="rounded-md px-3 py-2 text-sm font-medium text-slate-200 ring-1 ring-ink-600 hover:bg-ink-800 disabled:opacity-50">

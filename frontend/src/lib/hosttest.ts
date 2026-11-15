@@ -20,6 +20,8 @@ export type TestResult = {
   ok: boolean
   stages: TestStage[]
   hostkey?: { type: string; fingerprint_sha256: string; key?: string }
+  /** Primul contact cu parolă: amprenta trebuie acceptată ÎNAINTE ca testul să trimită parola. */
+  needs_trust?: boolean
 }
 
 export type StageView = {
@@ -65,6 +67,7 @@ export function codeText(code: string | undefined, vars: Record<string, string |
 
 /** Rezumatul anunţat (aria-live) după test: reuşit / avertisment / etapa care a picat. */
 export function summaryText(r: TestResult, t: T, telnet: boolean): string {
+  if (r.needs_trust) return t('hosttest.confirmKey', { fp: r.hostkey?.fingerprint_sha256 ?? '' })
   const failed = r.stages.find((s) => !s.ok && !s.warn && !s.skipped)
   if (failed) {
     const v = stageViews({ ...r, stages: [failed] }, t, telnet)[0]
