@@ -9,6 +9,12 @@ back.
 
 ## [Unreleased]
 
+### Contributors
+- **`npm run dev` serves the patched DOMPurify too.** 3.6.36 redirected Monaco's bundled
+  DOMPurify 3.4.15 to 3.4.17 in the production build only. The dev server pre-bundles Monaco with
+  esbuild, which skips Vite's build plugins, so local development still ran the vulnerable copy.
+  The same redirect now runs there as well. The shipped image was not affected.
+
 ## [3.6.36] — 2026-11-16 · agent (59)
 
 A security patch for the image and the frontend's dependencies, plus the first structural move

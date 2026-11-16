@@ -1,4 +1,6 @@
 import react from '@vitejs/plugin-react'
+import { dirname } from 'node:path'
+import type { Plugin as EsbuildPlugin } from 'esbuild'
 import { defineConfig, type Plugin } from 'vite'
 
 // monaco-editor 0.57 NU foloseşte pachetul npm `dompurify`: are propria copie, DOMPurify 3.4.15
@@ -8,6 +10,10 @@ import { defineConfig, type Plugin } from 'vite'
 // spre pachetul `dompurify` pinuit în overrides. Fail closed: dacă monaco mută fişierul şi
 // redirecţionarea nu se mai aplică, build-ul PICĂ, nu livrează tăcut copia veche. Când o versiune
 // monaco aduce DOMPurify >= 3.4.17, scoateţi plugin-ul şi intrarea din overrides împreună.
+// Aceleaşi două teste în ambele plugin-uri (rollup pentru build, esbuild pentru dev).
+const MONACO_IMPORTER = /[\\/]monaco-editor[\\/]/
+const VENDORED_DOMPURIFY = /(^|\/)dompurify\/dompurify\.js$/
+
 function monacoPatchedDompurify(): Plugin {
   let hits = 0
   let building = false
@@ -16,8 +22,8 @@ function monacoPatchedDompurify(): Plugin {
     enforce: 'pre',
     configResolved(cfg) { building = cfg.command === 'build' },
     async resolveId(source, importer, options) {
-      if (!importer || !/[\\/]monaco-editor[\\/]/.test(importer)) return null
-      if (!/(^|\/)dompurify\/dompurify\.js$/.test(source)) return null
+      if (!importer || !MONACO_IMPORTER.test(importer)) return null
+      if (!VENDORED_DOMPURIFY.test(source)) return null
       const r = await this.resolve('dompurify', importer, { ...options, skipSelf: true })
       if (!r) this.error('pachetul dompurify lipseşte: monaco ar rula copia sa vulnerabilă')
       hits++
@@ -32,8 +38,28 @@ function monacoPatchedDompurify(): Plugin {
   }
 }
 
+// `vite dev` pre-împachetează monaco cu esbuild (optimizeDeps), pas în care plugin-urile rollup
+// de mai sus NU rulează: fără asta, serverul de dezvoltare servea tot copia 3.4.15. Aici nu
+// oprim nimic dacă redirecţionarea nu se aplică (ar bloca dev-ul); garda e cea din build.
+function monacoPatchedDompurifyDev(): EsbuildPlugin {
+  return {
+    name: 'webterm-monaco-dompurify-dev',
+    setup(build) {
+      build.onResolve({ filter: VENDORED_DOMPURIFY }, async (args) => {
+        if (!MONACO_IMPORTER.test(args.importer)) return undefined
+        const r = await build.resolve('dompurify', { resolveDir: dirname(args.importer), kind: args.kind })
+        if (r.errors.length) return { errors: r.errors }
+        return { path: r.path }
+      })
+    },
+  }
+}
+
 export default defineConfig({
   plugins: [monacoPatchedDompurify(), react()],
+  optimizeDeps: {
+    esbuildOptions: { plugins: [monacoPatchedDompurifyDev()] },
+  },
   build: {
     rollupOptions: {
       output: {
