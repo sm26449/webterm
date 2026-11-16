@@ -26,7 +26,7 @@ os.environ["WEBTERM_IDLE_LOCK_SECS"] = "300"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, stepup, config, core, db, security, webauthn_api  # noqa: E402
 from app import totp as totp_mod  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
@@ -160,7 +160,7 @@ async def main():
         # fail-closed transformă orice sesiune 2FA într-o uşă zidită.
         security._stepup_windows.clear()
         try:
-            await api._require_host_stepup(hid, me, "", "")
+            await stepup.require_host_stepup(hid, me, "", "")
             opened_without_secret = True
         except Exception:
             opened_without_secret = False
@@ -170,14 +170,14 @@ async def main():
         config.PUBLIC_URL = "http://10.0.0.5:8000"       # instalare pe IP gol
         try:
             check("fără WebAuthn, calea de deblocare există (rp_id nu e domeniu)",
-                  api._webauthn_available() is False)
+                  webauthn_api.available() is False)
             # 3.5.13 (decizie de politică): parola SINGURĂ nu mai deschide un host 2FA — un cont
             # fără passkey şi fără TOTP primea pe hostul „cu 2FA" exact factorul de la login.
             # Refuz cu un cod stabil (UI-ul trimite la Setări → 2FA), ORICE parolă ar veni.
             security._stepup_windows.clear()
             code = ""
             try:
-                await api._require_host_stepup(hid, me, "", PW)
+                await stepup.require_host_stepup(hid, me, "", PW)
             except Exception as e:                        # noqa: BLE001
                 code = getattr(e, "code", "")
             check("fără WebAuthn şi fără TOTP: parola CORECTĂ e refuzată (stepup.needsFactor)",
@@ -189,7 +189,7 @@ async def main():
             me_totp = await db.fetchone("SELECT * FROM users WHERE id=?", uid)
             security._stepup_windows.clear()
             try:
-                await api._require_host_stepup(hid, me_totp, "", "", totp_mod.generate(secret))
+                await stepup.require_host_stepup(hid, me_totp, "", "", totp_mod.generate(secret))
                 unlocked = security.stepup_window_ok(uid, hid)
             except Exception as e:                        # noqa: BLE001
                 unlocked = False
@@ -197,7 +197,7 @@ async def main():
             check("fără WebAuthn, codul TOTP deblochează", unlocked is True)
             security._stepup_windows.clear()
             try:
-                await api._require_host_stepup(hid, me_totp, "", "", "000000")
+                await stepup.require_host_stepup(hid, me_totp, "", "", "000000")
                 bad_ok = True
             except Exception:
                 bad_ok = False

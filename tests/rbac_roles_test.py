@@ -19,7 +19,7 @@ import json
 
 import rbac_util as U
 import rbac_ws_test as W
-from app import api, authz, core, db
+from app import api, stepup, authz, core, db
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -297,20 +297,20 @@ async def main():
     check("Admin şterge un cont cu un rol custom pe care îl stăpâneşte", r.status_code == 200, r.text[:120])
 
     # ── 10. cursa: re-verificare SUB lock (re-auth-ul e punctul de suspendare) ─────────────
-    orig = api._reauth_for_access_change
+    orig = stepup.reauth_for_access_change
 
     async def demote_then(user, request, body, what):
         await orig(user, request, body, what)
         if user["id"] == adm_id:
             await U.unbind_all(adm_id)
             await U.bind(adm_id, "viewer", "all", "")
-    api._reauth_for_access_change = demote_then
+    stepup.reauth_for_access_change = demote_then
     try:
         r = await adm.post("/api/roles", json=rp(["host.view"], "RaceRole"))
         check("cursă: Admin retrogradat între verificare şi scriere → creare refuzată",
               r.status_code == 403 and await custom_id("RaceRole") is None, r.text[:120])
     finally:
-        api._reauth_for_access_change = orig
+        stepup.reauth_for_access_change = orig
     await U.unbind_all(adm_id)
     await U.bind(adm_id, "admin", "all", "")
 
@@ -318,7 +318,7 @@ async def main():
         await orig(user, request, body, what)
         await db.execute("UPDATE roles SET perms=? WHERE id=?",
                          json.dumps(["host.view", "backups.manage"]), m5)
-    api._reauth_for_access_change = widen_then
+    stepup.reauth_for_access_change = widen_then
     try:
         tgt = await U.add_user("tgt@x.co")
         r = await adm.post("/api/users/%d/bindings" % tgt,
@@ -328,7 +328,7 @@ async def main():
               and not await db.fetchone("SELECT 1 FROM role_bindings WHERE user_id=?", tgt),
               r.text[:120])
     finally:
-        api._reauth_for_access_change = orig
+        stepup.reauth_for_access_change = orig
 
     # ── PF-01/SC-14: GET /api/users citeşte legăturile TUTUROR conturilor într-o interogare
     # batch (`b.user_id IN (…)`), nu una per cont. Dovada: numărul de SELECT-uri pe role_bindings

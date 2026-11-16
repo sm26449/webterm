@@ -42,3 +42,9 @@ class ApiError(HTTPException):
         super().__init__(status_code=status_code, detail=detail, headers=hdrs)
         self.code = code
         self.vars = dict(vars or {})
+
+
+def rate_limited(retry: int) -> ApiError:
+    """429 uniform pentru lockout-ul per IP (login/setup/reauth/conectare directă)."""
+    return ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
+                    headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})

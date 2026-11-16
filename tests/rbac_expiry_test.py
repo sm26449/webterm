@@ -24,7 +24,7 @@ import asyncio
 import time
 
 import rbac_util as U
-from app import admin, api, authz, db
+from app import admin, api, stepup, authz, db
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -168,18 +168,18 @@ async def main():
         r = await db.fetchone("SELECT expires FROM role_bindings WHERE id=?", b)
         return r["expires"] if r else "gone"
 
-    orig_reauth, orig_recheck = api._reauth_for_access_change, api._recheck_granter
+    orig_reauth, orig_recheck = stepup.reauth_for_access_change, api._recheck_granter
 
     async def reauth_then_shorten(*a, **k):
         await orig_reauth(*a, **k)
         await db.execute("UPDATE role_bindings SET expires=? WHERE id=?", meanwhile, race)
-    api._reauth_for_access_change = reauth_then_shorten
+    stepup.reauth_for_access_change = reauth_then_shorten
     try:
         # cererea: 2 h → 1 h („mai scurt", reguli de scoatere); între timp a devenit 10 min, deci
         # aceeaşi cerere ar fi devenit o EXTINDERE — decisă pe rândul vechi, ar fi ocolit acordarea
         r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, race), json=xb(time.time() + 3600))
     finally:
-        api._reauth_for_access_change = orig_reauth
+        stepup.reauth_for_access_change = orig_reauth
     check("sfârşitul schimbat în timpul re-auth-ului → 409 authz.bindingChanged",
           r.status_code == 409 and U.code(r) == "authz.bindingChanged", "%s %s" % (r.status_code, r.text[:120]))
     check("…rândul păstrează valoarea de între timp", abs((await exp_of(race)) - meanwhile) < 1)
@@ -200,11 +200,11 @@ async def main():
     async def reauth_then_delete(*a, **k):
         await orig_reauth(*a, **k)
         await db.execute("DELETE FROM role_bindings WHERE id=?", race)
-    api._reauth_for_access_change = reauth_then_delete
+    stepup.reauth_for_access_change = reauth_then_delete
     try:
         r = await owner.post("/api/users/%d/bindings/%d/expiry" % (ana_id, race), json=xb(None))
     finally:
-        api._reauth_for_access_change = orig_reauth
+        stepup.reauth_for_access_change = orig_reauth
     check("…scoasă în timpul re-auth-ului → 404, nimic re-creat",
           r.status_code == 404 and await exp_of(race) == "gone", "%s %s" % (r.status_code, r.text[:120]))
     authz.bump_epoch()

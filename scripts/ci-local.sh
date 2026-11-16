@@ -50,10 +50,12 @@ PIPAUDIT="${PIPAUDIT:-$(dirname "$PY")/pip-audit}"
 [ -x "$PIPAUDIT" ] || PIPAUDIT=pip-audit
 # paşi: unit sig lint build smoke e2e a11y fs fwd mobile sso backup features jump — sau `all`
 
-pass=0; fail=0; skipped=""
+pass=0; fail=0; skipped=""; failed=""
 say()  { printf '\n\033[1;36m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; pass=$((pass+1)); }
-no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1)); }
+no()   { printf '\033[31m  ✗ %s\033[0m\n' "$*"; fail=$((fail+1))
+         # în CI-SUMMARY: fără " şi ; în nume, ca linia să rămână parsabilă (failed="a; b")
+         local m="$*"; m=${m//\"/\'}; m=${m//;/,}; failed="${failed:+$failed; }$m"; }
 
 cleanup() {
   docker rm -f $C1 $C2 $C3 $C4 $C5 $C6 $C7 $SF $FT >/dev/null 2>&1 || true
@@ -192,6 +194,9 @@ PINS=$(cd "$REPO" && grep -rhn 'ghcr\.io/[^ }"]*/webterm:[^ }"]*' \
          .env.prod.example docker-compose.yml docker-compose.prod.yml install.sh | grep -cv ":v$V" || true)
 [ "$PINS" = 0 ] && ok "pin de imagine ↔ GATEWAY_VERSION (v$V)" || no "$PINS pin(uri) de imagine != v$V"
 "$PY" "$REPO/scripts/check-reqs-lock.py" >/dev/null && ok "requirements.txt ↔ .lock" || no "requirements drift"
+# numerele din docs (suite, verificări e2e): până acum doar CI le verifica, deci un număr uitat
+# ieşea abia pe tag. Acelaşi script ca jobul `unit-tests`.
+DC=$("$REPO/scripts/check-doc-counts.sh" 2>&1) && ok "numere în docs ↔ realitate" || no "numere în docs: $(echo "$DC" | grep -v '^doc counts:' | tr '\n' ' ')"
 (cd "$REPO" && $RUFF check --select F gateway/app agent/ptyd.py >/dev/null 2>&1) \
   && ok "ruff --select F" || no "ruff --select F"
 # gitleaks EXACT ca în CI: `--no-git` pe WORKING-TREE, nu pe istoric. Diferenţa nu e cosmetică —
@@ -510,4 +515,7 @@ fi
 fi
 
 printf '\n\033[1m%d trecute, %d eșuate\033[0m\n' "$pass" "$fail"
+# Linie STABILĂ, fără culori, mereu ultima: agenţii scriau ~250 de grep-uri diferite peste log
+# (`✓|✗`, `trecute, eșuate`…) ca să afle ce a picat. `tail -1 log` ajunge.
+printf 'CI-SUMMARY steps="%s" pass=%d fail=%d failed="%s"\n' "$ONLY" "$pass" "$fail" "$failed"
 exit $((fail > 0 ? 1 : 0))

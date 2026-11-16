@@ -46,7 +46,7 @@ three identical CH340s with no serial, which is which" case.
 - Gateway: `ForwardSerialSource` (like `ForwardTelnetSource`, but without the IAC shim). It keeps
   the guards for an **untrusted** device: `OscFilter` (F5 — filters OSC 133/52 coming from
   the device) plus password redaction in the transcript (F3). `resize` is a no-op (serial has no winsize).
-- The `/api/hosts/{id}/serial/open` endpoint requires **host step-up** (`_require_host_stepup`) and
+- The `/api/hosts/{id}/serial/open` endpoint requires **host step-up** (`stepup.require_host_stepup`) and
   validates the device (`/dev/` prefix, no NUL), parity, and flow.
 - Separate cap: `MAX_SERIALS = 16` (agent) / `MAX_SERIAL_SESSIONS = 16` (gateway).
 - The session config is saved in the `sessions.serial_config` column (JSON) for restoration.

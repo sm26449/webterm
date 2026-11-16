@@ -17,7 +17,7 @@ import asyncio
 import time
 
 import rbac_util as U
-from app import api, authz, db
+from app import api, stepup, authz, db
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -109,13 +109,13 @@ async def main():
     # ── legături noi ─────────────────────────────────────────────────────────────────────
     target = await U.add_user("t1@x.co")
     n_before = len(await db.fetchall("SELECT id FROM role_bindings WHERE user_id=?", target))
-    orig = api._reauth_for_access_change
+    orig = stepup.reauth_for_access_change
     calls = []
 
     async def spy(*a, **k):
         calls.append(1)
         return await orig(*a, **k)
-    api._reauth_for_access_change = spy
+    stepup.reauth_for_access_change = spy
     try:
         r = await owner.post("/api/users/%d/bindings" % target, json=bb("operator", "folder", "infra"))
         check("Operator @ folder cu host crown-jewel → 409 authz.crownJewel",
@@ -124,7 +124,7 @@ async def main():
               r.headers.get("x-webterm-error-vars", ""))
         check("…ÎNAINTE de re-auth / al doilea factor", calls == [])
     finally:
-        api._reauth_for_access_change = orig
+        stepup.reauth_for_access_change = orig
     check("…nimic scris", len(await db.fetchall("SELECT id FROM role_bindings WHERE user_id=?",
                                                target)) == n_before)
     r = await owner.post("/api/users/%d/bindings" % target,

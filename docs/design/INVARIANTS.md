@@ -98,15 +98,15 @@ whoever answers first receives it.
 - A password alone is never a second factor.
 - An SSO step-up needs a fresh `auth_time` from the identity provider.
 - Granting durable access (deploy keys and similar) needs a fresh factor even on hosts without
-  `require_2fa` (`_require_fresh_factor`).
+  `require_2fa` (`stepup.require_fresh_factor`).
 
 **The misconceptions.**
 - "A terminal must be re-verified every 5 minutes." An external report claimed this. The cap is
   60 minutes on purpose.
 - "A password re-entry counts as step-up." It was refused in 3.5.13.
 
-**Enforced in**: `security.py` (grant and window mechanics); `api.py` `_require_host_stepup`,
-`_require_fresh_factor`; `core.py` `sweep_stepup_caps`; `oidc.py` `_check_stepup_auth_time`.
+**Enforced in**: `security.py` (grant and window mechanics); `stepup.py` `require_host_stepup`,
+`require_fresh_factor`, `consume_factor`; `core.py` `sweep_stepup_caps`; `oidc.py` `_check_stepup_auth_time`.
 **Tests**: `stepup`, `sec_stepup_factor`, `forward_stepup`.
 
 <a id="inv-05"></a>

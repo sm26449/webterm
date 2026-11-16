@@ -25,7 +25,7 @@ import json
 import time
 
 import rbac_util as U
-from app import api, core, db, security, webauthn_api
+from app import api, stepup, core, db, security, webauthn_api
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -126,13 +126,13 @@ async def ws_tests(owner, prod):
     hub.attached = True
     hub._source = lambda s=src: s
     fresh = {"ok": False}
-    orig_fresh = api._require_fresh_factor
+    orig_fresh = stepup.require_fresh_factor
 
     async def fake_fresh(host_id, user, grant="", password="", totp="", **kw):
         if not fresh["ok"]:
             raise api.ApiError(403, "stepup.passkey", "factor required")
         security.open_stepup_window(user["id"], host_id)
-    api._require_fresh_factor = fake_fresh
+    stepup.require_fresh_factor = fake_fresh
     try:
         # ── M1: watcher read-only nu deblochează hub-ul ──
         security.open_stepup_window(op_id, prod)
@@ -186,7 +186,7 @@ async def ws_tests(owner, prod):
         await finish(ws_vw, t_vw)
         await finish(ws_op, t_op)
     finally:
-        api._require_fresh_factor = orig_fresh
+        stepup.require_fresh_factor = orig_fresh
         await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", prod)
     for c in (op, op2, vw):
         await c.aclose()

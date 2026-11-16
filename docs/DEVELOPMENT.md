@@ -195,19 +195,13 @@ administer your servers with. The CI chain, in order:
 10. **Feature UI** (`scripts/e2e-features.mjs`) — group enrollment tokens and host tags.
 11. **Jump-host UI** (`scripts/e2e-jump.mjs`) — nesting, the form, the host hub.
 
-Frontend `eslint` and `vitest` run in the `unit-tests` job with the Python suite. Two CI checks
-have no local equivalent in `ci-local.sh`: the **counts in the docs** (`unit-tests` job; a
-mismatch fails it, and then no image is built). Compute them exactly as CI does:
+Frontend `eslint` and `vitest` run in the `unit-tests` job with the Python suite. The **counts in
+the docs** ("`e2e-session.mjs`, N checks" in README.md, "`unit-tests` job — N suites" in
+CONTRIBUTING.md) are checked by `scripts/check-doc-counts.sh`, which both the `unit-tests` job and
+`ci-local.sh unit` run; on a mismatch it prints the right number. Only lines that START with
+`check(` count, and the suite number is the words in `CI_TESTS` + 1 (`CI_LAST`).
 
-```sh
-grep -c '^\s*check(' scripts/e2e-session.mjs   # → "`e2e-session.mjs`, N checks" in README.md
-# (only lines that START with check( count; a plain grep -c 'check(' gives a bigger number)
-N=$(awk '/^CI_TESTS="/{f=1} f{print} f&&/"[[:space:]]*$/{exit}' scripts/run-tests.sh \
-    | sed 's/CI_TESTS=//' | tr -d '"' | wc -w); echo $((N + 1))
-                                                  # → "`unit-tests` job — N suites" in CONTRIBUTING.md (+1 = CI_LAST)
-```
-
-The other one is **`AGENT_VERSION` bumped when `agent/ptyd.py` changed** (`build`, compared with
+One CI check has no local equivalent in `ci-local.sh`: **`AGENT_VERSION` bumped when `agent/ptyd.py` changed** (`build`, compared with
 the previous push).
 
 Run the same chain locally with `scripts/ci-local.sh` (steps: `unit sig lint build smoke e2e a11y
@@ -222,6 +216,11 @@ anything. Clean up leftovers with `WTCI_CLEAN_STALE=1`. Ports 8000–8006 must b
 the containers and ports stay shared, which is why the lock exists.
 `MOBILE_DEVICES=iphone-13` limits `scripts/mobile-audit.mjs` to one device when you run it
 directly; `ci-local.sh` does not pass it on.
+The last line of a run is always plain text, for scripts and agents:
+`CI-SUMMARY steps="…" pass=N fail=M failed="…"` (`ci-local.sh`) and
+`RUN-TESTS-SUMMARY suite=… ran=N failed=K: …` (`run-tests.sh`). After a push,
+`scripts/wait-ci.sh [ref]` waits for the GitHub Actions runs of that commit (public API, no `gh`)
+and exits 0 green, 1 if a run failed, 2 on timeout; `MIN_RUNS=4` after a tag push.
 
 Only if all pass does the image publish to ghcr. On deploy, `deploy.sh` (which `upgrade.sh` calls after its backup and host-file sync) keeps the
 previous image and does an **automatic rollback** if the new container doesn't

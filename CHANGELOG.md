@@ -9,6 +9,36 @@ back.
 
 ## [Unreleased]
 
+## [3.6.36] — 2026-11-16 · agent (59)
+
+A security patch for the image and the frontend's dependencies, plus the first structural move
+from the maintenance backlog. Gateway and image only: the agent is unchanged (59), so the fleet
+does not update.
+
+### Security
+- **The file editor's HTML sanitiser is patched.** `monaco-editor` 0.57 bundles its own copy of
+  DOMPurify 3.4.15, which has five XSS advisories (GHSA-p98j-92pf-mc4p and related; fixed in
+  3.4.17). An npm `overrides` entry alone would only have changed what scanners read, because
+  Monaco never imports the npm package. So the build now redirects Monaco's import to DOMPurify
+  3.4.17, and fails if that redirect ever stops applying. The weekly security scan caught it on
+  `main`.
+- **The image's Debian packages carry their security fixes.** The pinned `python:3.12-slim`
+  digest froze OS packages with fixed HIGH/CRITICAL CVEs (perl, util-linux, OpenSSL, SQLite,
+  PCRE2, zlib, apt). The digest moves to the 2026-11-05 image, and every CI build now runs a fresh
+  `apt-get upgrade`, because Debian ships fixes (zlib here) before the next official Python image.
+
+### Changed
+- **Step-up and re-authentication live in one module** (`gateway/app/stepup.py`), moved out of the
+  12k-line `api.py` with no change in behaviour. The rules that decide when a second factor is
+  needed were spread across five files, and that is where earlier bypasses came from.
+
+### Contributors
+- Gates end with one plain line (`CI-SUMMARY …`, `RUN-TESTS-SUMMARY …`), so the result of a run
+  is `tail -1` instead of a hunt through coloured output.
+- The counts in the docs are checked by `scripts/check-doc-counts.sh`, run by both CI and
+  `ci-local.sh unit`. A wrong count used to show up only in CI, after the push.
+- `scripts/wait-ci.sh [ref]` waits for the GitHub Actions runs of a commit and reports which failed.
+
 ## [3.6.35] — 2026-11-16 · agent (59)
 
 An internal maintenance release: no new features and no behaviour change intended. It removes

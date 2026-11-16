@@ -394,7 +394,7 @@ How it composes with what exists today:
   `perm("host.view", any_host=True, tokens=True)` and `perm("run", host="host_id", tokens=True)`.
   Routes that do not pass `tokens=True` reject Bearer tokens, which keeps today's allowlist
   semantics.
-- The handler keeps its existing `_require_host_stepup(...)` / `_require_fresh_factor(...)` call
+- The handler keeps its existing `stepup.require_host_stepup(...)` / `stepup.require_fresh_factor(...)` call
   **after** the dependency. Order: authn → authz → step-up → action. Step-up therefore never
   runs for a principal who lacks the permission. That also prevents an oracle: today, a 403
   `stepup.*` tells you the host exists and is 2FA.
@@ -495,13 +495,13 @@ These rules are enforced server-side in the binding and role endpoints:
 4. The last Owner cannot be removed, demoted or deleted. This extends today's "cannot delete the
    last account".
 5. A custom role that holds a permission you lack cannot be edited by you.
-6. Binding changes are credential-class changes. They need `_verify_reauth_password` plus
+6. Binding changes are credential-class changes. They need `stepup.verify_reauth_password` plus
    `webauthn_api.second_gate`, as `create_user` does today. They are audited and fire
    `notify_security_change` to holders of `security.view`.
 
 #### A.6.7 Step-up interplay
 
-Nothing changes in `_require_host_stepup`, `_require_fresh_factor` or the window semantics
+Nothing changes in `stepup.require_host_stepup`, `stepup.require_fresh_factor` or the window semantics
 (5-minute sliding window, 60-minute absolute cap). The one rule is that `perm()` runs first.
 
 `POST /api/hosts/{id}/stepup` needs `host.view`. Otherwise the step-up ceremony itself would leak
@@ -886,7 +886,7 @@ Host web01.wt
   - `ssh-ed25519`, `ecdsa-sha2-nistp256/384`, `rsa-sha2-*` with ≥ 3072 bits;
   - `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` (FIDO security keys).
 - Adding or removing a key is a credential change:
-  - `_verify_reauth_password` + `second_gate`, as for passkeys;
+  - `stepup.verify_reauth_password` + `second_gate`, as for passkeys;
   - SSO users use an SSO step-up;
   - alert `ssh_key_added`;
   - audit entry.
@@ -911,7 +911,7 @@ web01 requires 2FA.
 Waiting…
 ```
 
-- **TOTP.** The digits typed go to the existing ladder (`_stepup_consume_factor`). That reuses
+- **TOTP.** The digits typed go to the existing ladder (`stepup.consume_factor`). That reuses
   the TOTP anti-replay (`verify_second_factor`) and the dedicated lockout key
   `stepup-totp:<uid>`.
 - **Web approval** (Warpgate-style).
@@ -1634,8 +1634,8 @@ Legend:
   - `G`: global (needs a binding at scope `all`);
   - `S`: self-service (authenticated, own data);
   - `P`: public (unchanged; its credential is in the request).
-- **2FA**: the route also runs `_require_host_stepup` (`su`), `_require_fresh_factor` (`ff`), or
-  the session-host step-up (`ssu`, `_require_session_host_stepup`). Unchanged by 3.6; it runs
+- **2FA**: the route also runs `stepup.require_host_stepup` (`su`), `stepup.require_fresh_factor` (`ff`), or
+  the session-host step-up (`ssu`, `stepup.require_session_host_stepup`). Unchanged by 3.6; it runs
   after authz.
 - **Tok**: reachable with an automation token today (`require_scope`).
 - **⚠**: the route leaks cross-host information today for a scoped user and needs filtering.

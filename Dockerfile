@@ -10,11 +10,22 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- runtime ----
-FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 WORKDIR /srv/webterm
 
-# gosu pentru coborârea privilegiilor din entrypoint; user neprivilegiat dedicat
-RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+# gosu pentru coborârea privilegiilor din entrypoint; user neprivilegiat dedicat.
+# `apt-get upgrade`: digest-ul de bază îngheaţă pachetele Debian de la data imaginii oficiale,
+# iar fixurile de securitate Debian ajung înaintea unei noi imagini python (Trivy, nov. 2026:
+# zlib1g avea fix în deb13u1, imaginea din 5 nov. încă nu). Digest-ul rămâne pinuit pentru
+# reproductibilitate; upgrade-ul ia doar actualizări din aceeaşi versiune Debian.
+# APT_REFRESH: cache-ul de layere din CI (type=gha) ar refolosi la nesfârşit rezultatul PRIMULUI
+# upgrade (cheia = textul instrucţiunii + layerul părinte), adică fixurile Debian publicate după
+# acel build n-ar mai intra. CI dă aici `github.run_id`: un upgrade proaspăt la fiecare rulare, iar
+# imaginea testată de smoke şi cea publicată din aceeaşi rulare împart layerul. Local rămâne
+# `local`, deci cache-ul merge ca înainte.
+ARG APT_REFRESH=local
+RUN echo "apt refresh: $APT_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /srv/webterm --shell /usr/sbin/nologin webterm
 

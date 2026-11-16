@@ -82,7 +82,7 @@ ROOT_TESTS="ssh provision"
 : "${WEBTERM_PUBLIC_URL:=http://127.0.0.1:8000}"
 export WEBTERM_DATA_DIR WEBTERM_PUBLIC_URL
 
-fail=0
+fail=0; ran=0; failed_suites=""
 
 # Un test care nu există trebuie să OPREASCĂ rularea, nu să fie descoperit peste luni.
 # `integration_m1` a stat pe listă cu fişierul numit `integration_m1.py` (fără `_test`), deci
@@ -146,7 +146,8 @@ run_group() {
             "$PY" "tests/${t}_test.py"
             rc=$?
         fi
-        [ "$rc" = 0 ] || fail=1
+        ran=$((ran+1))
+        [ "$rc" = 0 ] || { fail=1; failed_suites="$failed_suites $t"; }
     done
 }
 
@@ -166,5 +167,7 @@ case "$SUITE" in
 esac
 echo "Not run (need a gateway running on :8000): $STACK_TESTS"
 echo "Not run (need sudo + sshd + ephemeral users): $ROOT_TESTS"
+# linie stabilă, mereu ultima (vezi CI-SUMMARY în ci-local.sh): `tail -1` spune ce a picat
+echo "RUN-TESTS-SUMMARY suite=$SUITE ran=$ran failed=$(echo $failed_suites | wc -w):$failed_suites"
 
 exit $fail

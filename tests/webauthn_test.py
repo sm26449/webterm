@@ -194,7 +194,7 @@ async def main():
     host = _up(config.PUBLIC_URL).hostname or ""
     is_ip = all(part.isdigit() for part in host.split(".")) and host.count(".") == 3
     if is_ip:
-        check("pe IP, WebAuthn e raportat ca indisponibil", _api._webauthn_available() is False)
+        check("pe IP, WebAuthn e raportat ca indisponibil", webauthn_api.available() is False)
 
     # ── schimbarea setului de passkey-uri cere al doilea factor ─────────────
     src_gate = inspect.getsource(webauthn_api.second_gate)

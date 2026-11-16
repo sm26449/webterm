@@ -14,7 +14,7 @@ os.environ.setdefault("WEBTERM_SETUP_TOKEN", "test-setup")
 os.environ.setdefault("WEBTERM_PUBLIC_URL", "http://localhost:8000")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app import api, core  # noqa: E402
+from app import api, stepup, core  # noqa: E402
 
 ok = 0
 total = 0
@@ -66,8 +66,8 @@ async def main():
 
     async def _no_stepup(*a, **k):
         return None
-    orig = api._require_host_stepup
-    api._require_host_stepup = _no_stepup
+    orig = stepup.require_host_stepup
+    stepup.require_host_stepup = _no_stepup
     raised = None
     try:
         await api.docker_list(3, "containers", user={"id": 1, "email": "a@b.co"})
@@ -76,7 +76,7 @@ async def main():
     except Exception as e:  # noqa: BLE001
         raised = type(e).__name__
     finally:
-        api._require_host_stepup = orig
+        stepup.require_host_stepup = orig
     check("denied + sudo pică → ApiError docker.denied", raised == "docker.denied", str(raised))
 
     # 4) _docker_denied recunoaşte ambele forme

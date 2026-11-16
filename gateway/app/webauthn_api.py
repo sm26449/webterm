@@ -1,6 +1,7 @@
 """Passkey (WebAuthn) registration and login."""
 
 import base64
+import ipaddress
 import json
 import time
 from urllib.parse import urlparse
@@ -29,6 +30,18 @@ CHALLENGE_TTL = 300
 
 def _rp_id() -> str:
     return urlparse(config.PUBLIC_URL).hostname or "localhost"
+
+
+def available() -> bool:
+    """WebAuthn rp_id must be a domain; IP addresses don't qualify."""
+    host = urlparse(config.PUBLIC_URL).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        return "." in host
 
 
 CHALLENGE_MAX = 256          # bound memory: login/options is unauthenticated
@@ -159,7 +172,7 @@ async def register_options(user=Depends(security.require_user)):
 
 async def _verify_reauth(user, password: str) -> bool:
     """Re-autentificare cu parola în sesiune, PLAFONATĂ ca /api/login (cheie pe cont) — la fel ca
-    `_verify_reauth_password` din api.py. FĂRĂ plafonare, un cookie furat ar avea un oracle de
+    `stepup.verify_reauth_password`. FĂRĂ plafonare, un cookie furat ar avea un oracle de
     ghicire a parolei ne-throttled pe endpoint-urile de credențiale (enroll/delete passkey)."""
     key = "reauth:%d" % user["id"]
     allowed, retry = security.login_allowed(key)

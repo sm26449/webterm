@@ -25,7 +25,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, security  # noqa: E402
+from app import api, stepup, config, db, security  # noqa: E402
 from app import totp as totp_mod  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
@@ -132,16 +132,16 @@ async def main():
         r = await c.get(f"/api/hosts/{gated}/sessions?stepup_password={PW}")
         check("o acţiune de host cu parola în query → tot needsFactor",
               r.status_code == 403 and _code(r) == "stepup.needsFactor", r.text[:160])
-        check("_require_fresh_factor pe ţintă 2FA (unlock/deploy) → needsFactor",
-              await _raises_code(api._require_fresh_factor(gated, await me(), "", PW))
+        check("stepup.require_fresh_factor pe ţintă 2FA (unlock/deploy) → needsFactor",
+              await _raises_code(stepup.require_fresh_factor(gated, await me(), "", PW))
               == "stepup.needsFactor")
         # re-auth tip `sudo` pe o ţintă FĂRĂ 2FA rămâne pe parolă (deploy-key spre un host simplu)
         security._stepup_windows.clear()
-        check("_require_fresh_factor pe ţintă FĂRĂ 2FA: parola corectă trece",
-              await _raises_code(api._require_fresh_factor(plain, await me(), "", PW)) is None)
+        check("stepup.require_fresh_factor pe ţintă FĂRĂ 2FA: parola corectă trece",
+              await _raises_code(stepup.require_fresh_factor(plain, await me(), "", PW)) is None)
         security._stepup_windows.clear()
-        check("_require_fresh_factor pe ţintă FĂRĂ 2FA: fără parolă → stepup.password",
-              await _raises_code(api._require_fresh_factor(plain, await me(), "", "")) == "stepup.password")
+        check("stepup.require_fresh_factor pe ţintă FĂRĂ 2FA: fără parolă → stepup.password",
+              await _raises_code(stepup.require_fresh_factor(plain, await me(), "", "")) == "stepup.password")
         r = await c.post(f"/api/hosts/{plain}/stepup", json={"stepup_password": PW})
         check("/stepup pe host FĂRĂ 2FA cu parola → 200 (neschimbat)", r.status_code == 200, r.text[:160])
 
@@ -159,9 +159,9 @@ async def main():
         config.OIDC_ENABLED = True
         try:
             check("SSO: step-up → host.needs2faSso (nu needsFactor)",
-                  await _raises_code(api._require_host_stepup(gated, await me(), "", PW))
+                  await _raises_code(stepup.require_host_stepup(gated, await me(), "", PW))
                   == "host.needs2faSso")
-            check("SSO: stepup_method=sso", await api._stepup_method(await me()) == "sso")
+            check("SSO: stepup_method=sso", await stepup.method(await me()) == "sso")
         finally:
             config.OIDC_ENABLED = old_oidc
             await db.execute("UPDATE users SET sso_subject=NULL WHERE id=?", uid)
