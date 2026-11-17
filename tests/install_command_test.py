@@ -94,6 +94,15 @@ async def main():
     finally:
         config.AGENT_INSECURE = False
 
+    # ── token de grup: ACELAŞI one-liner (acelaşi constructor), doar calea /install/group/ ──
+    # Era o copie separată în api.py; fallback-ul pe wget fusese reparat într-una singură o vreme.
+    grp = hostmodel.install_command("GTOK", "s3cret", group=True)
+    check("grup: calea /install/group/<token>.sh", "/install/group/GTOK.sh" in grp and "/install/GTOK.sh" not in grp, grp)
+    check("grup: identic cu cel per-host în afară de cale",
+          grp == with_pw.replace("/install/TOK123.sh", "/install/group/GTOK.sh"), grp)
+    urls = [w for w in grp.split() if "/install/" in w]
+    check("grup: parola tot ca header, în niciun URL (curl şi wget)", len(urls) == 2 and not any("s3cret" in u for u in urls), grp)
+
     # ── API: ambele variante ajung la UI, pe crearea de host şi pe re-enroll ──
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:

@@ -98,9 +98,8 @@ def tag_list(s: str, limit: Optional[int] = MAX_TAGS) -> list:
     fiecare. `limit=None` NU taie — ţintele de snippet vor să ştie câte au venit, ca să refuze
     peste plafon în loc să piardă în tăcere etichetele de la coadă."""
     seen, out = set(), []
-    for tag in (s or "").replace(",", " ").split():
-        tag = tag.strip().lower()[:32]
-        if tag and tag not in seen:
+    for tag in authz.tag_tokens(s):    # acelaşi tokenizer ca potrivirea scope-urilor (authz)
+        if tag not in seen:
             seen.add(tag)
             out.append(tag)
         if limit is not None and len(out) >= limit:
@@ -322,11 +321,15 @@ def host_online(row) -> bool:
 AGENT_USER = "webterm"          # userul dedicat propus în varianta cu privilegii minime
 
 
-def install_command(enroll_token: str, password: str = "") -> str:
+def install_command(enroll_token: str, password: str = "", group: bool = False) -> str:
+    """The install one-liner for one host (`/install/<token>.sh`) or, with `group=True`, for a
+    group enrolment token (`/install/group/<token>.sh`: run it on N machines, the gateway
+    creates one host per run). One builder for both, so a fix (the wget fallback below was
+    one) cannot land in only one of them."""
     # self-signed gateway: the one-liner itself must skip cert verification
     flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
     wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
-    url = "%s/install/%s.sh" % (config.PUBLIC_URL, enroll_token)
+    url = "%s/install/%s%s.sh" % (config.PUBLIC_URL, "group/" if group else "", enroll_token)
     # Parola temporară călătoreşte ca HEADER, nu în URL: un proxy/access-log înregistrează
     # metoda+URL-ul, nu anteturile, deci un URL scurs acolo NU conţine parola. Ambele mijloace
     # de aducere (curl/wget) o trimit. Parola conţine doar caractere din alfabetul nostru

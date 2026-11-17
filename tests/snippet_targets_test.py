@@ -24,7 +24,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, security, hostmodel  # noqa: E402
+from app import api, authz, config, db, security, hostmodel  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -86,6 +86,23 @@ async def main():
               s["targets"] == {"tags": ["prod", "web", "a", "b", "x" * 32]}, repr(s["targets"]))
         check("aceeaşi normalizare ca la host (_norm_tags)",
               ",".join(s["targets"]["tags"]) == hostmodel.norm_tags("Prod web PROD a,b " + "x" * 40))
+        # Ce se SALVEAZĂ pe host (tag_list) şi ce POTRIVEŞTE un scope `tag:` (authz.tag_set) trec
+        # prin acelaşi tokenizer (authz.tag_tokens). Ieşirile lui sunt FIXATE aici: o schimbare a
+        # regulii (alt separator, fără plafonul de 32) mută şi scope-urile, deci trebuie să pice.
+        pinned = [
+            (None, []), ("", []), (" ,, ", []),
+            ("A,,b  c\tD,a", ["a", "b", "c", "d", "a"]),
+            ("x\u00a0y\u2003z\nw", ["x", "y", "z", "w"]),          # NBSP, em-space, newline separă
+            ("ŞEF,şef ÎN", ["şef", "şef", "în"]),
+            ("p" * 40, ["p" * 32]),
+            ("a;b", ["a;b"]),                                          # `;` NU separă
+        ]
+        for raw, want in pinned:
+            got = list(authz.tag_tokens(raw))
+            check("tag_tokens(%r) fixat" % (raw if raw is None else raw[:16]), got == want, "%r != %r" % (got, want))
+        check("tag_set = mulţimea tokenilor", authz.tag_set("A,,b  c\tD,a") == frozenset({"a", "b", "c", "d"}))
+        check("tag_list: dedup în ordine + plafon", hostmodel.tag_list("A,,b  c\tD,a") == ["a", "b", "c", "d"]
+              and len(hostmodel.tag_list(",".join("t%d" % i for i in range(40)))) == hostmodel.MAX_TAGS)
 
         # ── 4. targets {"tags": []} → stocat ca null ──
         r = await c.post("/api/snippets", json={"title": "gol", "body": "true", "targets": {"tags": []}})

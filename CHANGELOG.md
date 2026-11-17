@@ -36,6 +36,13 @@ back.
   The tests that read source code (error codes in both languages, audited reads, alert
   messages, route permissions) now cover the new files too, so the split cannot quietly take
   routes out of their reach.
+- **One rule for reading host tags, one builder for the install command.** Role scopes match
+  hosts by tag (`tag:prod`) with one parser, while hosts were saved with a second copy of the
+  same rule; if the two ever drifted, a host could stop matching the scope that names it. Both
+  now use `authz.tag_tokens`. Likewise the group enrolment one-liner was a copy of the per-host
+  one (the curl → wget fallback was once fixed in only one of them); both now come from
+  `hostmodel.install_command`. Same output as before, checked against the old code on 20,000
+  random inputs.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

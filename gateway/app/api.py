@@ -2249,7 +2249,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
                                         security.client_ip(request), user["email"], fleet=True,
                                         what_key="enroll_token_created", what_params={"name": name})
     # valoarea în clar se întoarce O SINGURĂ DATĂ; în DB stă doar hash-ul
-    return {"token": raw, "install_command": _group_install_command(raw, pw),
+    return {"token": raw, "install_command": hostmodel.install_command(raw, pw, group=True),
             "groups": await list_enroll_groups(user)}
 
 
@@ -2893,21 +2893,6 @@ async def push_test(user=Depends(security.require_user)):
 # ---------------------------------------------------------------------------
 # Hosts
 # ---------------------------------------------------------------------------
-
-
-# ── [install] Agent install one-liners (step-up helpers: stepup.py) ────────────────────────────────
-
-
-def _group_install_command(group_token: str, password: str = "") -> str:
-    """Acelaşi one-liner ca `hostmodel.install_command`, dar spre `/install/group/<token>`: îl rulezi pe
-    N maşini, iar gateway-ul auto-creează câte un host (cu token propriu) la fiecare rulare."""
-    flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
-    wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
-    url = "%s/install/group/%s.sh" % (config.PUBLIC_URL, group_token)
-    ch = ' -H "X-Enroll-Pass: %s"' % password if password else ""
-    wh = ' --header="X-Enroll-Pass: %s"' % password if password else ""
-    return ("(command -v curl >/dev/null && curl %s%s %s || wget %s%s-qO- %s) | sh"
-            % (flags, ch, url, wflags, wh, url))
 
 
 # ── [status] /api/status, version + update check ──────────────────────────────────────────────────

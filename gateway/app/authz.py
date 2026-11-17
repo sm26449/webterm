@@ -225,9 +225,19 @@ async def poll_external_epoch() -> None:
 
 
 # ── grants ───────────────────────────────────────────────────────────────────────────────────
+def tag_tokens(s):
+    """THE tag tokeniser: comma/space separated, lowercase, max 32 chars each, in order (may
+    repeat). Scope matching (`tag_set`, `tag:<x>` bindings) and what gets stored on a host
+    (`hostmodel.tag_list`) both go through here: two copies of this rule could drift, and a
+    host saved with one spelling would then stop matching the scope that names it."""
+    for t in (s or "").replace(",", " ").split():
+        t = t.strip().lower()[:32]
+        if t:
+            yield t
+
+
 def tag_set(s) -> frozenset:
-    """Same tokenisation as hostmodel.tag_list (comma/space separated, lowercase, 32 chars)."""
-    return frozenset(t.strip().lower()[:32] for t in (s or "").replace(",", " ").split() if t.strip())
+    return frozenset(tag_tokens(s))
 
 
 @dataclass(frozen=True)
