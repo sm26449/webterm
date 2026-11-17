@@ -25,7 +25,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, config, core, db, security, hostmodel  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -80,7 +80,7 @@ async def main():
         check("rezumatul de update-uri e extras LA SCRIERE",
               json.loads(row["updates_summary"]) == {"count": 3, "security": 1, "manager": "apt"},
               row["updates_summary"])
-        check("_host_updates citeşte rezumatul", api._host_updates(row) == {"count": 3, "security": 1, "manager": "apt"})
+        check("_host_updates citeşte rezumatul", hostmodel.host_updates(row) == {"count": 3, "security": 1, "manager": "apt"})
 
         # 2) un singur şir uriaş → tăiat, snapshot-ul se stochează
         huge = {"system": {"os": "A" * 300_000}, "updates": {"count": 5, "security": 0, "manager": "apt"}}
@@ -91,7 +91,7 @@ async def main():
               stored["system"]["os"].endswith(core._DIAG_TRUNC)
               and len(stored["system"]["os"]) == core.DIAG_STR_MAX + len(core._DIAG_TRUNC))
         check("snapshot-ul tăiat rămâne sub plafon şi se stochează",
-              len(row["diagnostics"]) < core.DIAG_MAX_BYTES and api._host_updates(row)["count"] == 5)
+              len(row["diagnostics"]) < core.DIAG_MAX_BYTES and hostmodel.host_updates(row)["count"] == 5)
         check("cache-ul live e cel tăiat", agent.diagnostics is stored or agent.diagnostics["system"]["os"] == stored["system"]["os"])
 
         # 3) peste plafon chiar şi după tăiere (multe chei de 4 KB) → refuzat, ultimul bun rămâne
@@ -99,7 +99,7 @@ async def main():
         flood["updates"] = {"count": 99, "security": 99, "manager": "evil"}
         await agent._store_diagnostics(flood)
         row = await _row(hid)
-        check("snapshot peste plafon → REFUZAT (DB neschimbat)", api._host_updates(row)["count"] == 5
+        check("snapshot peste plafon → REFUZAT (DB neschimbat)", hostmodel.host_updates(row)["count"] == 5
               and "k1" not in row["diagnostics"])
         check("cache-ul live NU e înlocuit", "k1" not in (agent.diagnostics or {}))
         evs = await _events(hid)
@@ -128,17 +128,17 @@ async def main():
         check("imbricarea peste DIAG_MAX_DEPTH e tăiată (marcaj la adâncimea plafonului)",
               node == core._DIAG_TRUNC and levels == core.DIAG_MAX_DEPTH, "levels=%d node=%r" % (levels, node))
         check("rezumat fără `security` numeric → None, manager păstrat",
-              api._host_updates(row) == {"count": 1, "security": None, "manager": "dnf"})
+              hostmodel.host_updates(row) == {"count": 1, "security": None, "manager": "dnf"})
 
         # 6) snapshot fără updates → rezumat '' (nu NULL: NULL = rând vechi, fallback)
         await agent._store_diagnostics({"system": {"os": "x"}})
         row = await _row(hid)
         check("fără `updates` → updates_summary='' şi badge None",
-              row["updates_summary"] == "" and api._host_updates(row) is None, repr(row["updates_summary"]))
+              row["updates_summary"] == "" and hostmodel.host_updates(row) is None, repr(row["updates_summary"]))
         await agent._store_diagnostics({"updates": {"count": True}})
-        check("count bool nu e număr → None", api._host_updates(await _row(hid)) is None)
+        check("count bool nu e număr → None", hostmodel.host_updates(await _row(hid)) is None)
         await agent._store_diagnostics(["nu", "e", "dict"])
-        check("snapshot non-dict ignorat", api._host_updates(await _row(hid)) is None)
+        check("snapshot non-dict ignorat", hostmodel.host_updates(await _row(hid)) is None)
 
         # 7) GET /api/hosts întoarce rezumatul (calea fierbinte)
         await agent._store_diagnostics(good)
@@ -150,16 +150,16 @@ async def main():
         # 8) rând de dinaintea coloanei (NULL): fallback pe blob, dar doar sub plafon
         legacy = json.dumps({"updates": {"count": 7, "security": 2, "manager": "apt"}})
         await db.execute("UPDATE hosts SET updates_summary=NULL, diagnostics=? WHERE id=?", legacy, hid)
-        check("rând vechi (NULL) → fallback pe blob", api._host_updates(await _row(hid))["count"] == 7)
+        check("rând vechi (NULL) → fallback pe blob", hostmodel.host_updates(await _row(hid))["count"] == 7)
         big_legacy = json.dumps({"pad": "C" * (core.DIAG_MAX_BYTES + 10),
                                  "updates": {"count": 8, "security": 0, "manager": "apt"}})
         await db.execute("UPDATE hosts SET updates_summary=NULL, diagnostics=? WHERE id=?", big_legacy, hid)
-        check("blob vechi peste plafon NU se parsează la fiecare poll", api._host_updates(await _row(hid)) is None)
+        check("blob vechi peste plafon NU se parsează la fiecare poll", hostmodel.host_updates(await _row(hid)) is None)
         hosts = (await c.get("/api/hosts")).json()
         check("listarea rămâne 200 cu blob vechi peste plafon",
               next(h for h in hosts if h["id"] == hid)["updates"] is None)
         await db.execute("UPDATE hosts SET updates_summary='x{' WHERE id=?", hid)
-        check("rezumat corupt → None, nu 500", api._host_updates(await _row(hid)) is None)
+        check("rezumat corupt → None, nu 500", hostmodel.host_updates(await _row(hid)) is None)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

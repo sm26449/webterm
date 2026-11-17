@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import asyncssh  # noqa: E402
 import httpx  # noqa: E402
-from app import api, config, core, db, email_alerts, security  # noqa: E402
+from app import api, config, core, db, email_alerts, security, hosts_api  # noqa: E402
 from app.main import app  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
@@ -309,7 +309,7 @@ async def main():
               core._needs_first_contact({"known_hosts": None, "auth_method": "password"}, {"password": ""}))
 
         # ── M4: un pin verificat de test înlocuieşte alarma de prim contact; „Trust" vechi nu-l suprascrie ──
-        api._hosttest_hits.clear()
+        hosts_api._hosttest_hits.clear()
         r = await c.post("/api/hosts/test", json={
             "connection_type": "ssh", "hostname": "127.0.0.1", "ssh_port": port, "ssh_username": "tester",
             "auth_method": "password", "credential": "secret", "trust_hostkey": server_pub})

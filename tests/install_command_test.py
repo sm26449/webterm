@@ -18,7 +18,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, security  # noqa: E402
+from app import api, config, db, security, hostmodel  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -44,8 +44,8 @@ async def main():
     await db.connect()
     await api.init_setup_token()
 
-    plain = api._install_command("TOK123")
-    ded = api._install_command_dedicated("TOK123")
+    plain = hostmodel.install_command("TOK123")
+    ded = hostmodel.install_command_dedicated("TOK123")
 
     check("varianta simplă e un one-liner care se termină în | sh", plain.endswith("| sh"))
     # comanda trebuie să meargă şi pe imagini minimale fără curl: scriptul adus are deja
@@ -57,7 +57,7 @@ async def main():
     check("fără -k pe gateway cu CA publică", " -fsS " in plain and "-fsSk" not in plain)
 
     # ── parola de înrolare călătoreşte ca HEADER, nu în URL (un URL scurs în log nu o conţine) ──
-    with_pw = api._install_command("TOK123", "s3cret")
+    with_pw = hostmodel.install_command("TOK123", "s3cret")
     check("parola merge ca header pe curl", '-H "X-Enroll-Pass: s3cret"' in with_pw, with_pw)
     check("parola merge ca header şi pe wget", '--header="X-Enroll-Pass: s3cret"' in with_pw, with_pw)
     check("parola NU apare în URL (doar în header)",
@@ -66,11 +66,11 @@ async def main():
     check("fără parolă → niciun header (comportament clasic)", "X-Enroll-Pass" not in plain)
 
     # ── varianta cu user dedicat ──
-    check("creează userul dedicat", f"useradd -m -s /bin/bash {api.AGENT_USER}" in ded)
+    check("creează userul dedicat", f"useradd -m -s /bin/bash {hostmodel.AGENT_USER}" in ded)
     check("useradd tolerează userul existent (comanda se poate relua)", "|| true" in ded)
     check("activează linger — altfel serviciul moare la logout",
-          f"loginctl enable-linger {api.AGENT_USER}" in ded)
-    check("rulează instalarea CA userul dedicat", f"sudo -iu {api.AGENT_USER}" in ded)
+          f"loginctl enable-linger {hostmodel.AGENT_USER}" in ded)
+    check("rulează instalarea CA userul dedicat", f"sudo -iu {hostmodel.AGENT_USER}" in ded)
     check("linger vine ÎNAINTE de instalare",
           ded.index("enable-linger") < ded.index("sudo -iu"), ded)
     check("instalarea propriu-zisă e aceeaşi comandă", plain in ded)
@@ -90,7 +90,7 @@ async def main():
     config.AGENT_INSECURE = True
     try:
         check("insecure → -k în ambele variante",
-              "-fsSk" in api._install_command("T") and "-fsSk" in api._install_command_dedicated("T"))
+              "-fsSk" in hostmodel.install_command("T") and "-fsSk" in hostmodel.install_command_dedicated("T"))
     finally:
         config.AGENT_INSECURE = False
 

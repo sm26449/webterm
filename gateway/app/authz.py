@@ -226,7 +226,7 @@ async def poll_external_epoch() -> None:
 
 # ── grants ───────────────────────────────────────────────────────────────────────────────────
 def tag_set(s) -> frozenset:
-    """Same tokenisation as api._tag_list (comma/space separated, lowercase, 32 chars)."""
+    """Same tokenisation as hostmodel.tag_list (comma/space separated, lowercase, 32 chars)."""
     return frozenset(t.strip().lower()[:32] for t in (s or "").replace(",", " ").split() if t.strip())
 
 
@@ -1719,3 +1719,7 @@ async def explain(target_uid: int, host_id: int, ref: HostRef, crown: bool = Fal
         host["crown_jewel"] = bool(h and h["cj"])
     return {"host": host, "bindings": bindings, "effective": effective,
             "shell": bool(set(effective) & SHELL_PERMS), "notes": notes}
+
+
+def scope_label(kind: str, value: str) -> str:
+    return "all hosts" if kind == "all" else "%s %s" % (kind, value)

@@ -24,7 +24,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, security  # noqa: E402
+from app import api, config, db, security, hostmodel  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -85,7 +85,7 @@ async def main():
         check("tag-uri normalizate (lowercase, dedup, virgulă separă, max 32 car.)",
               s["targets"] == {"tags": ["prod", "web", "a", "b", "x" * 32]}, repr(s["targets"]))
         check("aceeaşi normalizare ca la host (_norm_tags)",
-              ",".join(s["targets"]["tags"]) == api._norm_tags("Prod web PROD a,b " + "x" * 40))
+              ",".join(s["targets"]["tags"]) == hostmodel.norm_tags("Prod web PROD a,b " + "x" * 40))
 
         # ── 4. targets {"tags": []} → stocat ca null ──
         r = await c.post("/api/snippets", json={"title": "gol", "body": "true", "targets": {"tags": []}})

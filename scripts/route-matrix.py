@@ -15,11 +15,11 @@ import tempfile
 os.environ.setdefault("WEBTERM_DATA_DIR", tempfile.mkdtemp())
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway"))
 
-from app import api, authz, oidc_api, scim, webauthn_api  # noqa: E402
+from app import api, authz, hosts_api, oidc_api, scim, webauthn_api  # noqa: E402
 
 
 def main() -> int:
-    rp = authz.route_perms([api.router, webauthn_api.router, oidc_api.router, scim.router])
+    rp = authz.route_perms([api.router, hosts_api.router, webauthn_api.router, oidc_api.router, scim.router])
     if "--counts" in sys.argv:
         kinds = {}
         for kind, spec in rp.values():

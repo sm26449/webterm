@@ -44,8 +44,8 @@ read it. The first fix still missed two paths: an `agent` row moved to `ssh`, an
 hop wipes the direct credentials) and the "Test connection" button, which uses a stored password
 only on the same target.
 
-**Enforced in**: `api.py` `[hosts]`: `_conn_target`, `_retargets`, `_has_stored_password`,
-`update_host`; `[hosts-test]` `test_host_connection`; `[toolbox-db]` `update_connection`;
+**Enforced in**: `hosts_api.py` `[hosts]`: `_conn_target`, `_retargets`, `_has_stored_password`,
+`update_host`; `[hosts-test]` `test_host_connection`; `api.py` `[toolbox-db]` `update_connection`;
 `cloudbackup.py` `save_config_direct`, `_wipe_direct`.
 **Tests**: `host_edit`, `host_test_connection`, `cloud_direct`, `hostkey_alarm`.
 
@@ -81,7 +81,7 @@ including SQL, and checks that backend and frontend lists match).
 whoever answers first receives it.
 
 **Enforced in**: `core.py` `[ssh]`: `_needs_first_contact`, `_hostkey_first_contact`,
-`peek_host_key`; `api.py` `[ssh]` host-key accept; `cloudbackup.py` `_PROBED`.
+`peek_host_key`; `hosts_api.py` `[ssh]` `host_hostkey_accept`; `cloudbackup.py` `_PROBED`.
 **Tests**: `hostkey_alarm`, `host_test_connection`, `cloud_direct`, `ssh_jump`.
 
 <a id="inv-04"></a>

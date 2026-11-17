@@ -28,6 +28,14 @@ back.
   (`authz.bindings_lock`, `tag_set`, `load_bindings`, `row_role`, `forget_cached`;
   `core.agent_or_raise`, `clip`, `upload_tmp`; `security.stepup_window_record`), so it is clear
   what a module offers and what may change under it. No change in behaviour.
+- **The host routes have their own module** (`gateway/app/hosts_api.py`, ~1,300 lines out of the
+  12,500-line `api.py`): list, create, edit, delete and uninstall a host, its 2FA / crown-jewel /
+  autostart flags, the host-key alarm and the Add-host connection test. What the rest of the API
+  shares about hosts (stored credentials, dialling, validate + insert) moved one layer down to
+  `hostmodel.py`. Same routes, same permissions, same matching order (checked path by path).
+  The tests that read source code (error codes in both languages, audited reads, alert
+  messages, route permissions) now cover the new files too, so the split cannot quietly take
+  routes out of their reach.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

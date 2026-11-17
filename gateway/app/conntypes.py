@@ -59,5 +59,5 @@ def default_port(ctype: str) -> int:
 
 def target_proto(ctype: str) -> str:
     """Protocolul cu care gateway-ul ar vorbi cu ţinta. Un host `agent` e tratat ca SSH: la o
-    mutare agent → ssh/telnet, adresa veche se compară ca ţintă SSH (vezi api._conn_target)."""
+    mutare agent → ssh/telnet, adresa veche se compară ca ţintă SSH (vezi hosts_api._conn_target)."""
     return TELNET if ctype in TELNET_FAMILY else SSH

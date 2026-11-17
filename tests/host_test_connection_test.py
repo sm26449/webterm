@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import asyncssh  # noqa: E402
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, config, core, db, security, hostmodel, hosts_api  # noqa: E402
 from app.main import app  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
@@ -203,7 +203,7 @@ async def main():
             return b
 
         async def test(**kw):
-            api._hosttest_hits.clear()          # plafonul se testează separat
+            hosts_api._hosttest_hits.clear()          # plafonul se testează separat
             return await c.post("/api/hosts/test", json=ssh_body(**kw))
 
         n_hosts = (await db.fetchone("SELECT COUNT(*) n FROM hosts"))["n"]
@@ -323,17 +323,17 @@ async def main():
         check("nume nerezolvabil → tcp picat cu hosttest.dns", st and st.get("code") == "hosttest.dns", r.text[:200])
 
         # ── plafonul per user ──
-        api._hosttest_hits.clear()
+        hosts_api._hosttest_hits.clear()
         closed = _closed_port()
         codes = []
-        for _ in range(api.HOSTTEST_RATE + 1):
+        for _ in range(hosts_api.HOSTTEST_RATE + 1):
             r = await c.post("/api/hosts/test", json=ssh_body(ssh_port=closed))
             codes.append(r.status_code)
-        check("primele %d teste trec, al %d-lea → 429" % (api.HOSTTEST_RATE, api.HOSTTEST_RATE + 1),
-              codes[:-1] == [200] * api.HOSTTEST_RATE and codes[-1] == 429, str(codes))
+        check("primele %d teste trec, al %d-lea → 429" % (hosts_api.HOSTTEST_RATE, hosts_api.HOSTTEST_RATE + 1),
+              codes[:-1] == [200] * hosts_api.HOSTTEST_RATE and codes[-1] == 429, str(codes))
         check("429 cu cod hosttest.rateLimited + Retry-After",
               r.headers.get("x-webterm-error") == "hosttest.rateLimited" and r.headers.get("retry-after"))
-        api._hosttest_hits.clear()
+        hosts_api._hosttest_hits.clear()
 
         # ── tokenurile de automatizare: refuzate (doar cookie) ──
         r = await c.post("/api/tokens", json={"name": "auto", "scopes": ["read", "run"], "days": 1,
@@ -377,20 +377,20 @@ async def main():
         r = await c.post("/api/hosts", json=dict(base, name="pin-fp", pin_hostkey=server_fp))
         check("pin_hostkey ca amprentă SHA256 → acceptat", r.status_code == 200, r.text[:150])
         # cache expirat
-        for k in list(api._tested_hostkeys):
-            kl, fp, _ts = api._tested_hostkeys[k]
-            api._tested_hostkeys[k] = (kl, fp, time.monotonic() - api.HOSTKEY_TEST_TTL - 5)
+        for k in list(hostmodel.tested_hostkeys):
+            kl, fp, _ts = hostmodel.tested_hostkeys[k]
+            hostmodel.tested_hostkeys[k] = (kl, fp, time.monotonic() - hostmodel.HOSTKEY_TEST_TTL - 5)
         r = await c.post("/api/hosts", json=dict(base, name="pin-stale", pin_hostkey=good_key))
         check("cache-ul testului expirat → pin refuzat", r.status_code == 400, r.text[:150])
         # alt user nu foloseşte testul altuia: cheia cache-ului conţine user_id
         await test()
         check("cache-ul e per user (cheia include user_id)",
-              all(k[0] == uid for k in api._tested_hostkeys))
+              all(k[0] == uid for k in hostmodel.tested_hostkeys))
 
         # editare: hostul pinat cu altă cheie → testul refuză ÎNAINTE de auth
         await db.execute("UPDATE hosts SET known_hosts=? WHERE id=?", other, pid_host)
         STATS["pw_tries"] = 0
-        api._tested_hostkeys.clear()
+        hostmodel.tested_hostkeys.clear()
         r = await test(host_id=pid_host)
         j = r.json()
         st = _stage(j, "hostkey")
@@ -400,7 +400,7 @@ async def main():
         check("pin diferit → parola NU a fost trimisă ţintei", STATS["pw_tries"] == 0 and _stage(j, "auth") is None,
               str(STATS))
         check("pin diferit → cheia nu intră în cache-ul de pin (deci nici în răspuns ca `key`)",
-              not api._tested_hostkeys and "key" not in j.get("hostkey", {}), str(api._tested_hostkeys))
+              not hostmodel.tested_hostkeys and "key" not in j.get("hostkey", {}), str(hostmodel.tested_hostkeys))
         # un test FĂRĂ host_id vede cheia nouă — dar PATCH-ul nu poate repina pe aceeaşi ţintă
         await test()
         r = await c.patch("/api/hosts/%d" % pid_host, json={"pin_hostkey": good_key})
@@ -455,7 +455,7 @@ async def main():
         check("create cu pending_key_id → 200", r.status_code == 200, r.text[:200])
         kid = r.json()["id"]
         hrow = await db.fetchone("SELECT * FROM hosts WHERE id=?", kid)
-        cred = api._decode_credential(hrow["credential_encrypted"])
+        cred = hostmodel.decode_credential(hrow["credential_encrypted"])
         derived = asyncssh.import_private_key(cred["key"]).export_public_key().decode().split()[:2]
         check("hostul are cheia legată: auth key, politica stored, aceeaşi publică",
               hrow["auth_method"] == "key" and hrow["credential_policy"] == "stored"
@@ -507,12 +507,12 @@ async def main():
         r = await c.post("/api/hosts/%d/ssh-key/generate" % kid, json={})
         hrow = await db.fetchone("SELECT * FROM hosts WHERE id=?", kid)
         check("generate (edit) → credenţial citibil de _resolve_credential",
-              r.status_code == 200 and "key" in api._resolve_credential(hrow))
+              r.status_code == 200 and "key" in hostmodel._resolve_credential(hrow))
         await db.execute("UPDATE hosts SET credential_encrypted=? WHERE id=?",
                          security.encrypt_secret(asyncssh.generate_private_key("ssh-ed25519")
                                                  .export_private_key().decode()), kid)
         hrow = await db.fetchone("SELECT * FROM hosts WHERE id=?", kid)
-        check("rând vechi cu PEM gol (dinainte de 3.5.4) → tot citibil", "key" in api._resolve_credential(hrow))
+        check("rând vechi cu PEM gol (dinainte de 3.5.4) → tot citibil", "key" in hostmodel._resolve_credential(hrow))
         r = await c.post("/api/hosts/%d/ssh-key/public" % kid, json={})
         check("show public key merge pe rândul vechi", r.status_code == 200, r.text[:150])
 

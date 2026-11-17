@@ -299,7 +299,7 @@ async def main():
             r = await c.post("/api/settings/webhook/test")
             check("test webhook fără URL → 400 cu cod", r.status_code == 400
                   and r.headers.get("x-webterm-error") == "settings.webhookSendFailed", r.text[:80])
-            await api._set_setting("alert_webhook", "https://hooks.example/x")
+            await db.set_setting("alert_webhook", "https://hooks.example/x")
             r = await c.post("/api/settings/webhook/test")
             check("test webhook cu URL → 200 şi POST pe URL", r.status_code == 200
                   and posted == ["https://hooks.example/x"], f"{r.status_code} {posted}")

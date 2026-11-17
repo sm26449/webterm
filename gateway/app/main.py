@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
 from . import (api, audit, authz, backup, certmon, config, conntypes, core, db, email_alerts,
-               fwddomain, health, oidc_api, scim, security, signing, ssomap, syshealth, webauthn_api)
+               fwddomain, health, hosts_api, oidc_api, scim, security, signing, ssomap, syshealth,
+               webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -559,6 +560,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)
+app.include_router(hosts_api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 app.include_router(scim.router)

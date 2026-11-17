@@ -27,7 +27,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, audit, config, db, security  # noqa: E402
+from app import api, audit, config, db, hosts_api, security  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -67,11 +67,17 @@ def _concrete(path: str) -> str:
     return "".join(out)
 
 
+# Fişierele cu rute HTTP ale API-ului: api.py + rutele mutate în module proprii (hosts_api.py).
+ROUTE_FILES = ("api.py", "hosts_api.py")
+
+
 def static_gate():
-    src = pathlib.Path(__file__).resolve().parent.parent / "gateway" / "app" / "api.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "gateway" / "app"
+    nodes = []
+    for fn in ROUTE_FILES:
+        nodes += list(ast.walk(ast.parse((app_dir / fn).read_text(encoding="utf-8"))))
     readers = []
-    for node in ast.walk(tree):
+    for node in nodes:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         paths = []
@@ -99,7 +105,7 @@ def static_gate():
 
     # Invers: o intrare în `_AUDITED_PATHS` care nu mai corespunde niciunei rute e o listă
     # care se lărgeşte tăcut, exact ca `PUBLIC` din route_auth_test.
-    all_paths = {r.path for r in api.router.routes if getattr(r, "path", None)}
+    all_paths = {r.path for rt in (api.router, hosts_api.router) for r in rt.routes if getattr(r, "path", None)}
     stale = [p for p in audit._AUDITED_PATHS if p not in all_paths]
     check("nicio cale auditată orfană", not stale, str(stale))
 

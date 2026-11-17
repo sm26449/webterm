@@ -844,3 +844,14 @@ async def repair_user_id_floor(conn) -> None:
 
 def now() -> float:
     return time.time()
+
+
+async def set_setting(key: str, value) -> None:
+    await execute(
+        "INSERT INTO app_settings(key, value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value)
+
+
+async def get_setting(key: str, default=None):
+    row = await fetchone("SELECT value FROM app_settings WHERE key=?", key)
+    return row["value"] if row else default

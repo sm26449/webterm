@@ -78,11 +78,17 @@ agent/
                            with WEBTERM_NO_SHELL_INTEGRATION=1); appends one line to ~/.bashrc
 gateway/app/
   main.py                  FastAPI app, security headers, static files, periodic reapers
-  api.py                   every REST route + the agent / browser / shared websockets + the
-                           installer. 13k lines in sections `# ── [tag] Title ──`: list them with
-                           `grep -n '^# ── ' gateway/app/api.py`; one feature in api.py + core.py:
-                           `grep -n '^# ── \[ssh\]' gateway/app/{api,core}.py`. Only main.py
-                           imports it (tests/import_layers_test.py)
+  api.py                   the REST routes not yet in their own module + the agent / browser /
+                           shared websockets + the installer. 11k lines in sections
+                           `# ── [tag] Title ──`: list them with `grep -n '^# ── ' gateway/app/api.py`;
+                           one feature across files: `grep -n '^# ── \[ssh\]' gateway/app/{api,hosts_api,core}.py`.
+                           Only main.py imports it (tests/import_layers_test.py)
+  hosts_api.py             host routes: list / create / update / delete / uninstall, per-host flags,
+                           host-key alarm + accept, the Add-host connection test. Own router,
+                           mounted in main.py; same `[tag]` sections
+  hostmodel.py             what api.py and hosts_api.py share about hosts: HostIn, tags, stored
+                           credentials, the credential policy, SSH / telnet dial, install
+                           one-liners, validate + insert, host-key pins from the Add-host test
   core.py                  runtime: SessionHub, AgentConnection, liveness reconciliation, the
                            per-connection sources (SSH, SSH-jump, telnet, serial), forwards,
                            file transfer; same `[tag]` sections

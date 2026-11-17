@@ -491,3 +491,21 @@ async def loop(forward_domain_fn) -> None:
         except Exception:                   # noqa: BLE001 — the loop must survive anything
             log.exception("certmon: the certificate check failed")
         await asyncio.sleep(CHECK_INTERVAL)
+
+
+# Monitoring is read-only (certmon.py: a TLS handshake to Traefik, the leaf it serves). Renewal is
+# a HOST action the gateway cannot perform — and must not be able to: the app container gets no
+# ACME volume and no docker-socket write. What it can do, for an Owner (`certs.renew`) with a fresh
+# second factor, is open a terminal on the gateway host the Owner picked, with
+# `sudo -k <dir>/scripts/cert-renew.sh --domain <name>` TYPED but not run — the same "your terminal,
+# your permissions" model as "OS upgrade in a terminal" (2.6.0). The person reads it and presses
+# Enter; sudo on the host decides whether they may.
+K_CERT_RENEW_HOST = "cert_renew_host_id"
+
+
+async def cert_renew_host_id() -> Optional[int]:
+    v = await db.get_setting(K_CERT_RENEW_HOST)
+    try:
+        return int(v) if v else None
+    except ValueError:
+        return None

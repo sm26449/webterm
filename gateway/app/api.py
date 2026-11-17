@@ -35,7 +35,7 @@ from . import gitpanel, owners
 from . import webauthn_api
 from . import fscopy
 from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
-               db, email_alerts, health, healthcmd, push, pyruntime, replay, rootmove, scim,
+               db, email_alerts, health, healthcmd, hostmodel, push, pyruntime, replay, rootmove, scim,
                security, shares, conntypes, fwddomain, signing, ssomap, stepup,
                syshealth, totp, updatecheck)
 
@@ -136,7 +136,6 @@ async def init_setup_token() -> None:
         "=" * 64, _setup_token[:6], _SETUP_TOKEN_FILE, "=" * 64)
 
 
-
 @router.get("/healthz")
 async def healthz():
     """Sondă de sănătate (fără auth): confirmă că procesul răspunde și că DB-ul
@@ -169,7 +168,7 @@ async def app_state(request: Request):
                 "SELECT id, name, hostkey_alarm FROM hosts WHERE hostkey_alarm IS NOT NULL"):
             if not authz.in_visible(vis, h["id"]):
                 continue
-            a = _hostkey_alarm(h)
+            a = hostmodel.hostkey_alarm(h)
             if a:
                 hostkey_changed.append({"host_id": h["id"], "host_name": h["name"], **a})
         # punctul de pe rotiţă: backup nou de descărcat SAU un eşec de backup programat
@@ -296,9 +295,6 @@ def _check_password(pw: str, what: str = "password") -> None:
         raise ApiError(400, "account.passwordTooLong",
                        "the %s must be at most %d characters" % (what, PASSWORD_MAX),
                        vars={"max": PASSWORD_MAX})
-
-
-
 
 
 # Erorile de fişiere vin de la agent ca text de `strerror` („/etc/shadow: Permission denied").
@@ -499,22 +495,6 @@ def _cloud_api_error(e: Exception) -> ApiError:
     else:
         code = "cloud.failed"
     return ApiError(400, code, msg)
-
-
-def _hostkey_alarm(row):
-    """Alarma de host-key schimbat de pe rândul hostului → dict pentru UI (fără cheia brută),
-    sau None. `hostkey_alarm` vine dintr-o migraţie, deci verificăm prezenţa coloanei."""
-    raw = row["hostkey_alarm"] if "hostkey_alarm" in row.keys() else None
-    if not raw:
-        return None
-    try:
-        a = json.loads(raw)
-    except ValueError:
-        return None
-    return {"old_fp": a.get("old_fp") or "", "new_fp": a.get("new_fp") or "",
-            "changed_at": a.get("changed_at"),
-            # primul contact (lot 2): nu e o schimbare, e o amprentă de confirmat înainte de parolă
-            "first": bool(a.get("first"))}
 
 
 # ── [auth] Login, session cookie, logout, share/replay link revocation ────────────────────────────
@@ -995,10 +975,6 @@ async def _after_access_change(uid: int) -> None:
     await shares.revoke_unauthorized_derived(uid)
 
 
-def _scope_label(kind: str, value: str) -> str:
-    return "all hosts" if kind == "all" else "%s %s" % (kind, value)
-
-
 def _role_label(role) -> str:
     """Cheia unui rol predefinit (ca în 3.6.0), numele unuia custom."""
     return role.key or role.name
@@ -1098,7 +1074,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
                 " expires, created, created_by_id) VALUES(?,?,?,?,'manual',?,?,?)",
                 uid, role.id, kind, value, expires, time.time(), user["id"])
         authz.bump_epoch()
-    rdesc = ("%s @ %s%s" % (_role_label(role), _scope_label(kind, value), _expiry_label(expires))
+    rdesc = ("%s @ %s%s" % (_role_label(role), authz.scope_label(kind, value), _expiry_label(expires))
              if role else "none")
     log.info("new account created: %s (by %s, role %s)", email, user["email"], rdesc)
     audit.detail(request, "account %s created, role %s%s" % (email, rdesc, _crown_note(crown)))
@@ -1262,7 +1238,7 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
                 raise ApiError(409, "authz.bindingExists", "that account already has this role here")
         await _after_access_change(uid)
     role = _role_label(role)
-    what = "%s granted %s @ %s%s" % (target["email"], role, _scope_label(kind, value),
+    what = "%s granted %s @ %s%s" % (target["email"], role, authz.scope_label(kind, value),
                                      _expiry_label(expires))
     audit.detail(request, "role " + what + _crown_note(crown))
     log.warning("role binding added: %s (by %s)", what, user["email"])
@@ -1270,11 +1246,11 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     email_alerts.notify_security_change("role granted: " + what, ip, user["email"], fleet=True,
                                         what_key="role_granted",
                                         what_params={"account": target["email"], "role": role,
-                                                     "scope": _scope_label(kind, value)})
+                                                     "scope": authz.scope_label(kind, value)})
     email_alerts.notify_security_change("your access changed: " + what, ip, target["email"],
                                         user_id=uid, what_key="access_changed",
                                         what_params={"role": role,
-                                                     "scope": _scope_label(kind, value)})
+                                                     "scope": authz.scope_label(kind, value)})
     return {"bindings": await _user_bindings(uid)}
 
 
@@ -1328,11 +1304,11 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
         await _after_access_change(uid)
     rlabel = row["role_key"] or row["role_name"]
     what = "%s lost %s @ %s" % (row["email"], rlabel,
-                                _scope_label(row["scope_kind"], row["scope_value"]))
+                                authz.scope_label(row["scope_kind"], row["scope_value"]))
     audit.detail(request, "role " + what)
     log.warning("role binding removed: %s (by %s)", what, user["email"])
     ip = security.client_ip(request)
-    scope = _scope_label(row["scope_kind"], row["scope_value"])
+    scope = authz.scope_label(row["scope_kind"], row["scope_value"])
     email_alerts.notify_security_change("role removed: " + what, ip, user["email"], fleet=True,
                                         what_key="role_removed",
                                         what_params={"account": row["email"],
@@ -1353,7 +1329,7 @@ async def sweep_expired_bindings() -> int:
         security.bump_forward_epoch(uid)
         await shares.revoke_unauthorized_derived(uid)
     for g in gone:
-        scope = _scope_label(g["scope_kind"], g["scope_value"])
+        scope = authz.scope_label(g["scope_kind"], g["scope_value"])
         what = "role binding expired: %s lost %s @ %s" % (g["email"] or "#%s" % g["user_id"],
                                                           g["role"], scope)
         await audit.record(time.time(), "system", "-", "SYSTEM", "/janitor/binding-expired", 200,
@@ -1431,7 +1407,7 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
                            "this role binding was changed meanwhile; reload and try again")
         await _after_access_change(uid)
     rlabel = row["role_key"] or row["role_name"]
-    scope = _scope_label(row["scope_kind"], row["scope_value"])
+    scope = authz.scope_label(row["scope_kind"], row["scope_value"])
     what = "%s: %s @ %s now %s" % (row["email"], rlabel, scope,
                                    "permanent" if new is None else "ends" + _expiry_label(new))
     audit.detail(request, "role " + what + _crown_note(crown))
@@ -1819,7 +1795,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
         except sqlite3.IntegrityError:
             raise ApiError(409, "ssoMap.exists", "that group already maps to this role there")
         authz.bump_epoch()
-    what = "SSO group '%s' mapped to %s @ %s" % (grp, _role_label(fresh), _scope_label(kind, value))
+    what = "SSO group '%s' mapped to %s @ %s" % (grp, _role_label(fresh), authz.scope_label(kind, value))
     audit.detail(request, what + _crown_note(crown))
     log.warning("%s (by %s)", what, user["email"])
     # `*` = FIECARE cont SSO: întotdeauna alertă critică, oricât de mic e rolul
@@ -1827,7 +1803,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
                                         fleet=True, what_key="sso_mapping_added",
                                         severity="critical" if grp == ssomap.WILDCARD else "warning",
                                         what_params={"group": grp, "role": _role_label(fresh),
-                                                     "scope": _scope_label(kind, value)})
+                                                     "scope": authz.scope_label(kind, value)})
     return await _oidc_roles_json()
 
 
@@ -1871,7 +1847,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
         changed = await ssomap.prune_locked()
         authz.bump_epoch()
     what = "SSO group '%s' no longer maps to %s @ %s" % (
-        row["grp"], _role_label(info), _scope_label(row["scope_kind"], row["scope_value"]))
+        row["grp"], _role_label(info), authz.scope_label(row["scope_kind"], row["scope_value"]))
     removed = sum(len(r["removed"]) for _u, _e, r in changed)
     audit.detail(request, "%s; %d SSO binding(s) removed" % (what, removed))
     log.warning("%s (by %s; %d SSO binding(s) removed)", what, user["email"], removed)
@@ -1879,7 +1855,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     email_alerts.notify_security_change(what, ip, user["email"], fleet=True,
                                         what_key="sso_mapping_removed",
                                         what_params={"group": row["grp"], "role": _role_label(info),
-                                                     "scope": _scope_label(row["scope_kind"],
+                                                     "scope": authz.scope_label(row["scope_kind"],
                                                                            row["scope_value"]),
                                                      "n": removed})
     for uid, email, res in changed[:50]:
@@ -2207,7 +2183,7 @@ async def create_token(body: TokenIn, request: Request, user=Depends(authz.perm(
         name, security.sha256_hex(raw), ",".join(scopes), time.time(), user["email"],
         user["id"], time.time() + days * 86400,
         role.id if role else None, tkind, tvalue)
-    cap = "%s @ %s" % (_role_label(role), _scope_label(tkind, tvalue)) if role else "no role cap"
+    cap = "%s @ %s" % (_role_label(role), authz.scope_label(tkind, tvalue)) if role else "no role cap"
     log.info("automation token created: %s (%s, %dd, %s) by %s", name, ",".join(scopes), days,
              cap, user["email"])
     audit.detail(request, "automation token %s created (%s; %s; %d days)" % (
@@ -2244,22 +2220,6 @@ async def list_enroll_groups(user=Depends(authz.perm('hosts.create'))):
     return [_enroll_group_row(r) for r in rows]
 
 
-# Parola de instalare ajunge INTERPOLATĂ în one-liner-ul copiat de admin (curl -H 'X-Enroll-Pass: …',
-# iar la userul dedicat şi într-un `sh -c '…'`): un apostrof sau `$(…)` ar rupe/altera exact comanda
-# pe care o lipeşti pe host. Alfabet strict + plafon de lungime (argon2 pe input nelimitat = CPU
-# gratuit pentru oricine loveşte endpointul). Face adevărat comentariul „generată/validată" de la
-# emitere, care până acum promitea o validare inexistentă (audit 2026-09).
-_ENROLL_PASS_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
-
-
-def _clean_enroll_pass(raw: str) -> str:
-    p = (raw or "").strip()
-    if p and not _ENROLL_PASS_RE.fullmatch(p):
-        raise ApiError(400, "enroll.badPassChars",
-                       "install password: letters, digits, . _ - only, max 64 characters")
-    return p
-
-
 @router.post("/api/enroll-groups")
 async def create_enroll_group(body: EnrollGroupIn, request: Request,
                               user=Depends(authz.perm('hosts.create'))):
@@ -2274,7 +2234,7 @@ async def create_enroll_group(body: EnrollGroupIn, request: Request,
     days = min(max(int(body.days), 1), ENROLL_GROUP_MAX_DAYS)     # expirarea NU e opțională
     max_uses = max(0, min(int(body.max_uses), ENROLL_GROUP_MAX_USES))
     raw = security.new_token()
-    pw = _clean_enroll_pass(body.enroll_password)
+    pw = hostmodel.clean_enroll_pass(body.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     await db.execute(
         "INSERT INTO enroll_groups(name, token_hash, created, created_by, created_by_id, expires,"
@@ -2417,17 +2377,6 @@ class SmtpIn(BaseModel):
     current_password: str = ""  # cerut la ORICE schimbare (SMTP-ul poartă codurile de email)
 
 
-async def _set_setting(key: str, value) -> None:
-    await db.execute(
-        "INSERT INTO app_settings(key, value) VALUES(?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value)
-
-
-async def _get_setting(key: str, default=None):
-    row = await db.fetchone("SELECT value FROM app_settings WHERE key=?", key)
-    return row["value"] if row else default
-
-
 # --- Watermark (overlay de identitate pentru trasabilitatea scurgerilor) -----
 # Overlay client-side (tiled canvas) peste workspace-ul autentificat și peste
 # link-urile read-only partajate. NU se poate „arde" în transcript (.cast e text
@@ -2445,7 +2394,7 @@ class WatermarkIn(BaseModel):
 
 
 async def _load_watermark() -> dict:
-    raw = await _get_setting("watermark")
+    raw = await db.get_setting("watermark")
     if not raw:
         return dict(WATERMARK_DEFAULT)
     try:
@@ -2484,7 +2433,7 @@ class CommandGuardIn(BaseModel):
 
 
 async def _load_command_guard() -> dict:
-    raw = await _get_setting("command_guard")
+    raw = await db.get_setting("command_guard")
     if not raw:
         return {k: (list(v) if isinstance(v, list) else v) for k, v in COMMAND_GUARD_DEFAULT.items()}
     try:
@@ -2605,7 +2554,7 @@ async def save_command_guard(body: CommandGuardIn, user=Depends(authz.perm('sett
     finally:
         security.regex_worker_release()
     cfg = {"enabled": bool(body.enabled), "rules": rules}
-    await _set_setting("command_guard", json.dumps(cfg))
+    await db.set_setting("command_guard", json.dumps(cfg))
     return cfg
 
 
@@ -2624,7 +2573,7 @@ async def save_watermark(body: WatermarkIn, user=Depends(authz.perm('settings.ma
         "angle": min(90, max(-90, int(body.angle))),
         "fontSize": min(40, max(8, int(body.fontSize))),
     }
-    await _set_setting("watermark", json.dumps(cfg))
+    await db.set_setting("watermark", json.dumps(cfg))
     return cfg
 
 
@@ -2678,22 +2627,22 @@ async def save_smtp(body: SmtpIn, request: Request, user=Depends(authz.perm('set
                 "smtp_starttls": "1" if body.starttls else "0", "alert_webhook": wh}
     changed = bool(body.password)          # parolă SMTP nouă = schimbare (nu o putem compara)
     for k, v in new_vals.items():
-        if ((await _get_setting(k)) or "") != v:
+        if ((await db.get_setting(k)) or "") != v:
             changed = True
             break
     if changed:
         await stepup.require_reauth_for_secret(user, body.current_password,
                                         "changing the alert/SMTP settings")
-    await _set_setting("smtp_host", sh)
-    await _set_setting("smtp_port", str(body.port))
-    await _set_setting("smtp_user", body.user.strip())
-    await _set_setting("smtp_from", body.from_addr.strip())
-    await _set_setting("smtp_to", body.to_addr.strip())
-    await _set_setting("smtp_starttls", "1" if body.starttls else "0")
-    await _set_setting("alert_webhook", body.webhook.strip())
+    await db.set_setting("smtp_host", sh)
+    await db.set_setting("smtp_port", str(body.port))
+    await db.set_setting("smtp_user", body.user.strip())
+    await db.set_setting("smtp_from", body.from_addr.strip())
+    await db.set_setting("smtp_to", body.to_addr.strip())
+    await db.set_setting("smtp_starttls", "1" if body.starttls else "0")
+    await db.set_setting("alert_webhook", body.webhook.strip())
     # parola: doar dacă a fost furnizată (gol = păstreaz-o pe cea existentă)
     if body.password:
-        await _set_setting("smtp_password_enc", security.encrypt_secret(body.password))
+        await db.set_setting("smtp_password_enc", security.encrypt_secret(body.password))
     return {"ok": True}
 
 
@@ -2741,7 +2690,7 @@ async def save_alert_thresholds(body: ThresholdsIn, user=Depends(authz.perm('set
     for key, value in (("cpu", body.cpu), ("mem", body.mem), ("disk", body.disk)):
         if not 0 <= value <= 100:
             raise ApiError(400, "settings.badThreshold", "thresholds must be between 0 and 100")
-        await _set_setting(f"alert_{key}", str(value))
+        await db.set_setting(f"alert_{key}", str(value))
     email_alerts.invalidate_thresholds()   # cache-ul de la check_metrics
     return {"ok": True}
 
@@ -2945,394 +2894,12 @@ async def push_test(user=Depends(security.require_user)):
 # Hosts
 # ---------------------------------------------------------------------------
 
-# ── [hosts] HostIn model, tags, stored credentials, direct SSH/telnet dial, host JSON ─────────────
-
-class HostIn(BaseModel):
-    name: str
-    note: str = ""
-    folder: str = ""
-    # conectare directă (agent = comportamentul clasic, fără câmpurile de mai jos)
-    connection_type: str = "agent"       # agent | ssh | ssh-jump | telnet
-    hostname: str = ""
-    ssh_username: str = ""
-    # None = „portul implicit al protocolului" (22 ssh, 23 telnet), hotărât server-side în
-    # create_host. Era `int = 22` necondiţionat, iar `host_row["ssh_port"] or 23` din core nu se
-    # declanşa niciodată → telnet/telnet-jump create prin API sunau la 22. UI-ul trimite mereu
-    # portul explicit (AddHostModal pune 23 la telnet), deci contractul lui nu se schimbă.
-    ssh_port: Optional[int] = None
-    via_host_id: int = 0                 # ssh-jump: hostul-agent prin al cărui tunel ajungem
-    auth_method: str = "password"        # password | key
-    credential: str = ""                 # write-only: parola sau cheia privată
-    passphrase: str = ""                 # write-only: passphrase-ul cheii
-    require_2fa: bool = False
-    credential_policy: str = "stored"    # stored | ask | ephemeral
-    tags: str = ""                       # etichete libere, virgulă/spaţiu separat (normalizate)
-    # „Conectează o dată" (fără salvare): creează o ţintă ssh-jump/telnet-jump EFEMERĂ, doar
-    # ca să deschizi o sesiune acum. Ascunsă din sidebar; reaper-ul o şterge când moare sesiunea.
-    ephemeral: bool = False
-    # Înrolare (doar agent): cât e valid link-ul + o parolă temporară OPŢIONALĂ cerută la instalare
-    enroll_ttl: int = 3600               # secunde; implicit 1h (plafonat 5min..30 zile)
-    enroll_password: str = ""            # write-only; gol = fără parolă
-    # Testul de conexiune (POST /api/hosts/test): cheia de host văzută de test. Serverul o
-    # acceptă DOAR dacă e exact cea din cache-ul testului (user + ţintă, ~10 min) — altfel un
-    # client ar putea pina o cheie arbitrară. Gol = TOFU la prima conectare, ca până acum.
-    pin_hostkey: str = ""
-    # Cheia generată în formular (POST /api/hosts/ssh-key/pending): privata, deja în seif, devine
-    # credenţialul stocat al hostului (auth key, politica `stored`); rândul în aşteptare se şterge.
-    pending_key_id: str = ""
-
-
-MAX_TAGS = 20
-
-
-def _tag_list(s: str, limit: Optional[int] = MAX_TAGS) -> list:
-    """Lista de etichete normalizate: lowercase, fără spaţii/duplicate, max 32 de caractere
-    fiecare. `limit=None` NU taie — ţintele de snippet vor să ştie câte au venit, ca să refuze
-    peste plafon în loc să piardă în tăcere etichetele de la coadă."""
-    seen, out = set(), []
-    for tag in (s or "").replace(",", " ").split():
-        tag = tag.strip().lower()[:32]
-        if tag and tag not in seen:
-            seen.add(tag)
-            out.append(tag)
-        if limit is not None and len(out) >= limit:
-            break
-    return out
-
-
-def _norm_tags(s: str) -> str:
-    """Normalizează etichetele: lowercase, fără spaţii/duplicate, plafon de număr şi lungime
-    (un host compromis... nu, hosturile nu-şi setează tag-urile — dar UI-ul poate trimite orice)."""
-    return ",".join(_tag_list(s))
-
-
-# Politicile de credenţiale cunoscute. Serverul accepta ORICE text: un `credential_policy` scris
-# greşit printr-un client API (`"Ask"`, `"never"`) era tratat ca `stored` în unele locuri şi ca
-# altceva în altele (3.5.2). Refuzăm la intrare, cu cod.
-_CRED_POLICIES = ("stored", "ask", "ephemeral")
-
-
-def _check_cred_policy(policy: str) -> None:
-    if policy not in _CRED_POLICIES:
-        raise ApiError(400, "host.badCredentialPolicy",
-                       "credential_policy must be one of: %s" % ", ".join(_CRED_POLICIES),
-                       vars={"allowed": ", ".join(_CRED_POLICIES)})
-
-
-def _credential_blob(h: "HostIn"):
-    """Fernet blob holding the credentials, or None (agent host / `ask` policy / empty)."""
-    if h.connection_type == "agent" or h.credential_policy == "ask" or not h.credential:
-        return None
-    if h.auth_method == "key":
-        payload = {"key": h.credential}
-        if h.passphrase:
-            payload["passphrase"] = h.passphrase
-    else:
-        payload = {"password": h.credential}
-    return security.encrypt_secret(json.dumps(payload))
-
-
-def _decode_credential(blob: str) -> dict:
-    """Blobul de credenţiale din seif → {password} / {key, passphrase?}.
-    Formatul e JSON (vezi `_credential_blob`). EXCEPŢIE moştenită: `/ssh-key/generate` scria până
-    în 3.5.4 PEM-ul GOL, nu JSON — iar conectarea cu un astfel de host crăpa cu JSONDecodeError
-    (500) la `json.loads`. Rândurile vechi rămân citibile: un PEM gol devine {key}."""
-    raw = security.decrypt_secret(blob)
-    try:
-        cred = json.loads(raw)
-    except ValueError:
-        cred = None
-    if isinstance(cred, dict):
-        return cred
-    if raw.lstrip().startswith("-----BEGIN"):
-        return {"key": raw}
-    raise ApiError(400, "sshkey.badKey", "the stored credential is unreadable")
-
-
-def _resolve_credential(row, body_credential="", body_passphrase=""):
-    """Credențialele de folosit la conectare: din request (politică `ask`) sau
-    decriptate din seif. Returnează dict {password} sau {key, passphrase?}."""
-    if row["credential_policy"] == "ask":
-        if not body_credential:
-            raise ApiError(400, "host.credentialsRequired", "credentials required (policy: ask every time)")
-        if row["auth_method"] == "key":
-            return {"key": body_credential, "passphrase": body_passphrase or None}
-        return {"password": body_credential}
-    if not row["credential_encrypted"]:
-        raise ApiError(400, "host.noStoredCredentials", "no stored credentials for this host")
-    return _decode_credential(row["credential_encrypted"])
-
-
-async def _connect_direct(row, request, body_credential="", body_passphrase=""):
-    """Ensure a connected SSH source for the host (dial + pin the host key). Rate-limited.
-    `ssh-jump` dials over the agent tunnel (dial_ssh_jump); plain `ssh` dials a direct socket."""
-    if isinstance(core.sources.get(row["id"]), core.SshSource):
-        return
-    ip = security.client_ip(request)
-    allowed, retry = security.login_allowed(ip)
-    if not allowed:
-        raise rate_limited(retry)
-    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
-    # Alarmă de host-key NEREZOLVATĂ → refuz FĂRĂ dial. Fail-closed era deja (dial-ul pica la
-    # fiecare încercare), dar redialul (a) retrimitea cererea spre o ţintă suspectă la fiecare
-    # click şi (b) făcea starea invizibilă între două toast-uri. Acum hostul stă blocat, cu
-    # amprentele la vedere, până când omul le verifică out-of-band şi apasă „accept" (sau
-    # resetează pinul mutând hostul). (audit UX §6.e1/§6.e2)
-    alarm = _hostkey_alarm(row)
-    if alarm and alarm["first"]:
-        raise ApiError(409, "ssh.hostKeyUnverified",
-                       "first connection: confirm the host key fingerprint %s before signing in"
-                       % (alarm["new_fp"] or "?"), vars={"new_fp": alarm["new_fp"]})
-    if alarm:
-        raise ApiError(409, "ssh.hostKeyChanged",
-                       "the host key fingerprint changed (%s → %s) — possible MITM; connection "
-                       "refused until the new key is reviewed" % (alarm["old_fp"] or "?", alarm["new_fp"] or "?"),
-                       vars={"old_fp": alarm["old_fp"], "new_fp": alarm["new_fp"]})
-    cred = _resolve_credential(row, body_credential, body_passphrase)
-    jump = (row["connection_type"] or "") == "ssh-jump"
-    try:
-        if jump:
-            await core.dial_ssh_jump(row, cred)
-        else:
-            await core.dial_ssh(row, cred)
-    except (core.ForwardError, core.HostKeyMismatch, asyncssh.Error, OSError,
-            asyncio.TimeoutError) as e:
-        if isinstance(e, asyncssh.PermissionDenied):
-            security.record_login_failure(ip)
-        raise _ssh_dial_error(e, row)
-    security.record_login_success(ip)
-
-
-def _ssh_dial_error(e: BaseException, row) -> ApiError:
-    """Clasificatorul COMUN al eşecurilor de dial SSH (direct / jump): conectarea reală
-    (`_connect_direct`) şi testul de conexiune (`POST /api/hosts/test`) dau ACELAŞI cod pentru
-    aceeaşi cauză, deci omul vede acelaşi mesaj în formular şi la prima conectare."""
-    if isinstance(e, core.ForwardError):
-        # agentul nu poate deschide TCP spre ţintă (refuzat / fără rută / gazdă greşită)
-        return ApiError(502, "sshjump.unreachable",
-                        "the agent could not reach %s:%s — %s"
-                        % (row["hostname"], row["ssh_port"] or 22, e))
-    if isinstance(e, core.HostKeyUnverified) and not e.new_fp:
-        # serverul n-a prezentat o cheie pe care s-o putem arăta: nimic de confirmat, nimic trimis
-        return ApiError(502, "ssh.hostKeyUnreadable",
-                        "the server did not present a host key WebTerm can show — nothing was sent")
-    if isinstance(e, core.HostKeyUnverified):
-        return ApiError(409, "ssh.hostKeyUnverified",
-                        "first connection: confirm the host key fingerprint %s before signing in"
-                        % (e.new_fp or "?"), vars={"new_fp": e.new_fp})
-    if isinstance(e, core.HostKeyMismatch):
-        return ApiError(409, "ssh.hostKeyChanged",
-                        "the host key fingerprint changed (%s → %s) — possible MITM; connection refused"
-                        % (e.old_fp or "?", e.new_fp or "?"),
-                        vars={"old_fp": e.old_fp, "new_fp": e.new_fp})
-    if isinstance(e, asyncssh.PermissionDenied):
-        # ţinta a răspuns, dar a RESPINS credenţialele (user/parolă greşite ori metodă nepotrivită)
-        return ApiError(401, "ssh.authFailed",
-                        "%s@%s rejected the credentials — wrong password, or the server wants a key"
-                        % (row["ssh_username"] or "", row["hostname"]))
-    if isinstance(e, asyncio.TimeoutError):
-        # TCP s-a conectat, dar NICIUN banner SSH în SSH_CONNECT_TIMEOUT: aproape sigur
-        # portul e greşit / nu e un server SSH acolo / e filtrat. `str(TimeoutError)` e gol,
-        # deci construim noi un mesaj cu sens (altfel UI-ul arăta „cannot connect: ").
-        return ApiError(504, "ssh.noBanner",
-                        "no SSH greeting from %s:%s within %ds — wrong port, not an SSH server, "
-                        "or filtered" % (row["hostname"], row["ssh_port"] or 22, core.SSH_CONNECT_TIMEOUT))
-    return ApiError(502, "ssh.connectFailed", f"cannot connect over SSH: {e or type(e).__name__}")
-
-
-async def _connect_telnet(row, request, body_credential=""):
-    """Asigură o sursă Telnet conectată (dial + auto-login best-effort). Rate-limited."""
-    if isinstance(core.sources.get(row["id"]), core.TelnetSource):
-        return
-    ip = security.client_ip(request)
-    allowed, retry = security.login_allowed(ip)
-    if not allowed:
-        raise rate_limited(retry)
-    await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
-    password = ""
-    if row["credential_policy"] == "ask":
-        password = body_credential or ""
-    elif row["credential_encrypted"]:
-        password = _decode_credential(row["credential_encrypted"]).get("password", "")
-    creds = {"username": row["ssh_username"] or "", "password": password}
-    try:
-        await core.dial_telnet(row, creds)
-    except (OSError, asyncio.TimeoutError, ConnectionRefusedError) as e:
-        raise ApiError(502, "telnet.connectFailed", f"cannot connect over Telnet: {e or type(e).__name__}")
-    security.record_login_success(ip)
-
-
-def _host_updates(row) -> dict | None:
-    """Rezumatul update-urilor OS (agent v51+): {count, security, manager}, pentru badge-ul din
-    sidebar — număr, fără lista pachetelor (aia se cere la deschiderea panoului).
-    Citit din coloana `updates_summary`, scrisă la primirea diagnosticului (core.updates_summary):
-    listarea hosturilor e poll la 5 s per client şi parsa tot blobul de diagnostic pentru FIECARE
-    host — un agent compromis cu un snapshot mare scumpea fiecare poll (audit 2026-10-04, S-03).
-    None dacă agentul nu raportează încă (v50) sau verificarea e dezactivată pe host.
-    Fallback: rând de dinaintea coloanei (NULL) → parsăm blobul vechi, dar DOAR sub plafon."""
-    keys = row.keys()
-    if "updates_summary" in keys and row["updates_summary"] is not None:
-        if not row["updates_summary"]:
-            return None
-        try:
-            u = json.loads(row["updates_summary"])
-        except (TypeError, ValueError):
-            return None
-        return u if isinstance(u, dict) and isinstance(u.get("count"), int) else None
-    if "diagnostics" not in keys or not row["diagnostics"]:
-        return None
-    if len(row["diagnostics"]) > core.DIAG_MAX_BYTES:
-        return None        # blob moştenit peste plafon: nu-l re-parsăm la fiecare poll
-    try:
-        d = json.loads(row["diagnostics"])
-    except (TypeError, ValueError):
-        return None
-    # un agent compromis/buggy poate fi stocat un JSON top-level NON-obiect (`[1,2]`, `42`):
-    # core.updates_summary verifică tipul înainte de .get — altfel un singur host otrăvit dădea
-    # 500 pe toată lista.
-    return core.updates_summary(d)
-
-
-def _host_supervision(row) -> dict | None:
-    """Pornirea la boot a agentului (agent v57+): {mode, linger, boot[, scope, watchdog]} din
-    coloana `supervision_summary` (scrisă la primirea diagnosticului / după comutarea din UI).
-    None = necunoscut (agent mai vechi, coloană goală sau JSON stricat) — UI-ul arată „necunoscut",
-    nu „nu"."""
-    raw = row["supervision_summary"] if "supervision_summary" in row.keys() else None
-    if not raw:
-        return None
-    try:
-        s = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    return core.supervision_summary({"supervision": s})
-
-
-
-def _host_online(row) -> bool:
-    """Hostul e „online" = i se poate deschide o sesiune ACUM. Pentru agent/ssh/telnet direct
-    înseamnă o sursă proprie în `core.sources`. Pentru familia jump (ssh-jump, telnet-jump)
-    sesiunile se deschid prin tunelul AGENTULUI `via_host_id` (core.create_telnet_jump_session /
-    dial_ssh_jump), iar telnet-jump nu înregistrează NIMIC sub propriul id (sursa e per-sesiune,
-    în `session_sources`) → `online` era permanent False, deci `isSessionLive` din client
-    ascundea/înnegrea sesiunile lui LIVE în toată aplicaţia (Sessions, tab-uri, Dashboard).
-    Regula corectă: jump = agentul părinte conectat (sau sursa proprie, pentru ssh-jump activ).
-    Primeşte orice rând cu `id`, `connection_type`, `via_host_id` (nu doar `SELECT *`)."""
-    if row["id"] in core.sources:
-        return True
-    ctype = conntypes.of(row["connection_type"] if "connection_type" in row.keys() else None)
-    via = row["via_host_id"] if "via_host_id" in row.keys() else None
-    if ctype in conntypes.JUMP and via:
-        return isinstance(core.sources.get(via), core.AgentConnection)
-    return False
-
-
-def _sees_crown(request) -> bool:
-    """3.6.10 (review): the crown-jewel flag says "this host runs WebTerm / holds its backups" —
-    a map for an attacker. Only an Owner or a holder of users.manage (who decides who gets a shell
-    where) sees it; never an automation token, never a plain host viewer."""
-    p = getattr(request.state, "principal", None)
-    if p is None or p.kind != "user":
-        return False
-    g = authz.grants_of(request)
-    return g.is_owner() or g.has_global("users.manage")
-
-
-def _host_json(row, crown: bool = False) -> dict:
-    conn = core.sources.get(row["id"])
-    ctype = conntypes.of(row)
-    is_agent = ctype == "agent"
-    expected = core.agent_expected()["version"]
-    out = {
-        "id": row["id"], "name": row["name"], "note": row["note"],
-        "alerts_muted": bool(row["alerts_muted"]) if "alerts_muted" in row.keys() else False,
-        "online": _host_online(row), "hostname": row["hostname"],
-        "agent_user": row["agent_user"], "agent_version": row["agent_version"],
-        "backend": row["backend"], "last_heartbeat": row["last_heartbeat"],
-        "folder": (row["folder"] or "") if "folder" in row.keys() else "",
-        "tags": [t for t in ((row["tags"] or "").split(",")
-                             if "tags" in row.keys() and row["tags"] else [])],
-        "updates": _host_updates(row),
-        "supervision": _host_supervision(row) if is_agent else None,
-        # 3.6.9: the agent's Python is (likely / confirmed) older than its 3.6 minimum — file
-        # operations fail there. None = no sign of it (the agent does not report its version).
-        "agent_python_old": (core.agent_python_old.get(row["id"])
-                             if is_agent and core.agent_python_old.get(row["id"]) in ("likely", "confirmed")
-                             else None),
-        "conflict": core.host_conflict(row["id"]),
-        # Agentul a fost scos de pe host. Hostul rămâne până când cineva confirmă în UI —
-        # poate nu vrei să-l ştergi, ci doar să-l reinstalezi, caz în care marcajul dispare
-        # singur la reconectare. Expus DOAR când e credibil (heartbeat-urile s-au oprit
-        # imediat după marcaj): un marcaj plantat de cineva cu shell pe host nu ajunge
-        # badge în UI, deci nu poate invita operatorul să şteargă un host viu.
-        "uninstalled_at": (row["uninstalled_at"]
-                           if "uninstalled_at" in row.keys()
-                           and core.uninstall_marker_credible(row["uninstalled_at"],
-                                                              row["last_heartbeat"])
-                           else None),
-        "metrics": conn.metrics if conn else None,
-        "agent_latest": expected,
-        # Link de instalare încă VALABIL şi NEFOLOSIT (agentul nu s-a conectat niciodată): un
-        # semnal ca să observi un link uitat/scurs. Se stinge singur la prima conectare a
-        # agentului (enroll_token → NULL la revendicare) sau la expirare.
-        "enroll_pending": is_agent and row["agent_version"] is None
-            and ("enroll_token" in row.keys() and bool(row["enroll_token"]))
-            and (row["enroll_expires"] or 0) > time.time(),
-        "enroll_protected": is_agent and "enroll_pass_hash" in row.keys()
-            and bool(row["enroll_pass_hash"]),
-        # de ce NU se poate actualiza (dacă e cazul) — altfel UI-ul arată „update disponibil"
-        # la infinit, fără motiv şi fără remediu
-        "update_blocked": (row["update_blocked"] if "update_blocked" in row.keys() else None),
-        "update_pending": is_agent and (bool(core.pending_updates.get(row["id"]))
-            or (conn is not None and expected is not None
-                and (conn.agent_version or 0) < expected)),
-        # conectare directă (niciun secret nu iese de aici)
-        "connection_type": ctype,
-        "via_host_id": row["via_host_id"] if "via_host_id" in row.keys() else None,
-        "ephemeral": bool(row["ephemeral"]) if "ephemeral" in row.keys() else False,
-        "ssh_username": row["ssh_username"],
-        "ssh_port": row["ssh_port"],
-        "auth_method": row["auth_method"],
-        "require_2fa": bool(row["require_2fa"]),
-        "credential_policy": row["credential_policy"],
-        "has_credentials": bool(row["credential_encrypted"]),
-        # alarmă de host-key schimbat (SSH direct/jump), persistentă până la accept/re-pin;
-        # cât e setată, conectarea e refuzată (ssh.hostKeyChanged) fără dial
-        "hostkey_alarm": _hostkey_alarm(row),
-    }
-    if crown:
-        # 3.6.10: runs the gateway / holds its backups — a shell there equals Owner (badge in the
-        # UI). Only for an Owner or users.manage (`_sees_crown`); absent for everyone else.
-        out["crown_jewel"] = bool(row["crown_jewel"]) if "crown_jewel" in row.keys() else False
-    return out
-
 
 # ── [install] Agent install one-liners (step-up helpers: stepup.py) ────────────────────────────────
 
-AGENT_USER = "webterm"          # userul dedicat propus în varianta cu privilegii minime
-
-
-def _install_command(enroll_token: str, password: str = "") -> str:
-    # self-signed gateway: the one-liner itself must skip cert verification
-    flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
-    wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
-    url = "%s/install/%s.sh" % (config.PUBLIC_URL, enroll_token)
-    # Parola temporară călătoreşte ca HEADER, nu în URL: un proxy/access-log înregistrează
-    # metoda+URL-ul, nu anteturile, deci un URL scurs acolo NU conţine parola. Ambele mijloace
-    # de aducere (curl/wget) o trimit. Parola conţine doar caractere din alfabetul nostru
-    # (generată/validată), fără ghilimele — dar o punem între ghilimele oricum.
-    ch = ' -H "X-Enroll-Pass: %s"' % password if password else ""
-    wh = ' --header="X-Enroll-Pass: %s"' % password if password else ""
-    # Fallback pe wget: scriptul PE CARE îl aducem are deja fallback curl→wget, dar comanda
-    # care îl aduce nu avea, deci pe o imagine minimală fără curl (debian-slim, alpine)
-    # înrolarea murea cu `sh: 1: curl: not found` înainte să apuce să ruleze ceva. Ironia e
-    # că exact acel caz e explicat într-un comentariu din scriptul nelivrat.
-    return ("(command -v curl >/dev/null && curl %s%s %s || wget %s%s-qO- %s) | sh"
-            % (flags, ch, url, wflags, wh, url))
-
 
 def _group_install_command(group_token: str, password: str = "") -> str:
-    """Acelaşi one-liner ca `_install_command`, dar spre `/install/group/<token>`: îl rulezi pe
+    """Acelaşi one-liner ca `hostmodel.install_command`, dar spre `/install/group/<token>`: îl rulezi pe
     N maşini, iar gateway-ul auto-creează câte un host (cu token propriu) la fiecare rulare."""
     flags = "-fsSk" if config.AGENT_INSECURE else "-fsS"
     wflags = "--no-check-certificate " if config.AGENT_INSECURE else ""
@@ -3341,21 +2908,6 @@ def _group_install_command(group_token: str, password: str = "") -> str:
     wh = ' --header="X-Enroll-Pass: %s"' % password if password else ""
     return ("(command -v curl >/dev/null && curl %s%s %s || wget %s%s-qO- %s) | sh"
             % (flags, ch, url, wflags, wh, url))
-
-
-def _install_command_dedicated(enroll_token: str, password: str = "") -> str:
-    """Aceeaşi instalare, dar sub un user dedicat, fără drepturi.
-
-    Rulat ca root, agentul înseamnă root shell pe host: cine compromite gateway-ul sau contul
-    tău are hostul. Sub `webterm`, are doar ce are `webterm`.
-
-    `loginctl enable-linger` NU e opţional aici: fără el, `systemd --user` opreşte serviciul
-    când userul n-are sesiune de login şi nu-l porneşte la boot — agentul ar părea că moare
-    singur. `useradd` e tolerat dacă userul există deja (|| true), ca să poţi relua comanda."""
-    inner = _install_command(enroll_token, password)
-    return ("sudo useradd -m -s /bin/bash %s 2>/dev/null || true; "
-            "sudo loginctl enable-linger %s; "
-            "sudo -iu %s sh -c '%s'" % (AGENT_USER, AGENT_USER, AGENT_USER, inner))
 
 
 # ── [status] /api/status, version + update check ──────────────────────────────────────────────────
@@ -3371,7 +2923,7 @@ async def status(request: Request, user=Depends(authz.perm('host.view', list=Tru
     vis = await authz.visible_hosts(grants, "host.view")
     hosts = [h for h in await db.fetchall("SELECT id, connection_type, via_host_id FROM hosts")
              if authz.in_visible(vis, h["id"])]
-    online = sum(1 for h in hosts if _host_online(h))   # jump = agentul părinte (vezi _host_online)
+    online = sum(1 for h in hosts if hostmodel.host_online(h))   # jump = agentul părinte (vezi hostmodel.host_online)
     svis = await authz.visible_hosts(grants, "session.watch", "recording.view")
     if svis is None:
         rows = await db.fetchall("SELECT state, COUNT(*) AS c FROM sessions GROUP BY state")
@@ -3414,7 +2966,7 @@ def _with_command(data: dict) -> dict:
 
 async def _update_check_enabled() -> bool:
     """Comutatorul din Setări; implicit pornit, dar `WEBTERM_UPDATE_CHECK=0` bate setarea."""
-    return (await _get_setting("update_check", "1")) == "1"
+    return (await db.get_setting("update_check", "1")) == "1"
 
 
 @router.get("/api/version")
@@ -3428,7 +2980,7 @@ async def version_info(user=Depends(security.require_user)):
 async def version_check_toggle(body: UpdateCheckIn, user=Depends(authz.perm('settings.manage'))):
     """Pornește/oprește verificarea. Oprită, gateway-ul nu mai face NICIO conexiune
     din proprie inițiativă spre exterior — de-aia merită să fie la un click."""
-    await _set_setting("update_check", "1" if body.enabled else "0")
+    await db.set_setting("update_check", "1" if body.enabled else "0")
     updatecheck.reset_cache()          # răspuns imediat, nu la următoarea fereastră
     # aceeaşi formă ca GET /api/version şi /refresh: UI-ul înlocuieşte starea cu acest răspuns,
     # deci fără comanda şi link-ul de release notes ele dispăreau până la redeschiderea panoului
@@ -3443,122 +2995,6 @@ async def version_refresh(user=Depends(authz.perm('settings.manage'))):
     if not enabled:
         raise ApiError(400, "updates.checkOff", "the version check is turned off")
     return _with_command(await updatecheck.check(force=True, enabled=True))
-
-
-# ── [hosts] List / create hosts ───────────────────────────────────────────────────────────────────
-
-@router.get("/api/hosts")
-async def list_hosts(request: Request,
-                     user=Depends(authz.perm('host.view', list=True, tokens='read'))):
-    vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
-    rows = await db.fetchall("SELECT * FROM hosts ORDER BY name")
-    gw_host = (await _cert_renew_host_id()) if authz.grants_of(request).is_owner() else None
-    crown = _sees_crown(request)
-    out = []
-    for r in rows:
-        if not authz.in_visible(vis, r["id"]):
-            continue
-        j = _host_json(r, crown)
-        # o ţintă jump vizibilă al cărei agent `via` NU e vizibil: nu-i dăm id-ul agentului
-        # (oracol de existenţă); UI-ul o afişează atunci la nivelul de sus, nu sub părinte
-        if j.get("via_host_id") and not authz.in_visible(vis, j["via_host_id"]):
-            j["via_host_id"] = None
-        # 3.6.10: a hint for the Owner, never for others (it says which host runs the gateway):
-        # the host picked as the gateway host for certificate renewals is a crown jewel
-        if gw_host and r["id"] == gw_host and not j.get("crown_jewel"):
-            j["crown_hint"] = "gateway"
-        out.append(j)
-    return out
-
-
-
-async def _validate_host(host: HostIn, user, grants=None) -> dict:
-    """SINGURA cale de validare pentru un host nou — `POST /api/hosts` şi importul CSV trec
-    amândouă pe aici, ca un rând de CSV să nu poată crea ceva ce formularul ar refuza (sau
-    invers). Întoarce valorile normalizate pe care le scrie `_insert_host`."""
-    ctype = conntypes.of(host.connection_type)
-    # Un tip necunoscut („SSH", typo de script) era coerce TĂCUT la agent: 200 cu un host agent
-    # şi credenţialul aruncat de _credential_blob. PATCH-ul dădea deja 400 — acum şi POST-ul.
-    if ctype not in conntypes.ALL:
-        raise ApiError(400, "host.badType", "unknown connection type")
-    # Numele gol trecea: UI-ul are `required`, dar API-ul (şi acum CSV-ul) nu — un host fără
-    # nume e un rând pe care nu-l mai găseşti în sidebar.
-    if not host.name.strip():
-        raise ApiError(400, "host.nameRequired", "a host name is required")
-    _check_cred_policy(host.credential_policy)
-    if ctype in conntypes.NETWORK and not host.hostname.strip():
-        raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if ctype in conntypes.SSH_FAMILY and not host.ssh_username.strip():
-        raise ApiError(400, "ssh.userRequired", "an SSH username is required")
-    # metoda de autentificare era scrisă orbeşte; un „pasword" dintr-un CSV ar fi dat un host
-    # care nu se mai conectează niciodată, fără nicio explicaţie
-    if ctype in conntypes.SSH_FAMILY and host.auth_method not in ("password", "key"):
-        raise ApiError(400, "host.badAuthMethod", "auth_method must be password or key")
-    if host.ssh_port is not None and not 1 <= host.ssh_port <= 65535:
-        raise ApiError(400, "host.badPort", "the port must be between 1 and 65535")
-    if ctype in conntypes.JUMP:
-        # 3.6 (§A.11.4): o ţintă jump deschide TCP DIN hostul `via` — un pivot de reţea, deci
-        # cere `forward.manage` acolo. Verificat înaintea existenţei: un `via` invizibil dă
-        # acelaşi 404 ca unul inexistent. `grants=None` doar din apelanţi interni fără cerere.
-        if grants is None:
-            raise authz.not_found("host_id")
-        await authz.require_on(grants, host.via_host_id, "forward.manage")
-        via = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", host.via_host_id)
-        if not via or not conntypes.is_agent(via):
-            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
-    port = host.ssh_port or conntypes.default_port(ctype)
-    # pin din testul de conexiune: doar cheia pe care TESTUL a văzut-o pe aceeaşi ţintă
-    known = None
-    if host.pin_hostkey:
-        if ctype not in conntypes.SSH_FAMILY:
-            raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
-        known = _verified_pin(user["id"], ctype, host.hostname, port, host.via_host_id, host.pin_hostkey)
-    if host.pending_key_id and ctype not in conntypes.SSH_FAMILY:
-        raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
-    return {"ctype": ctype, "port": port, "known": known}
-
-
-async def _insert_host(host: HostIn, user, v: dict):
-    """Scrie hostul validat de `_validate_host`. Întoarce (rândul, tokenul de enroll, parola)."""
-    ctype, port, known = v["ctype"], v["port"], v["known"]
-    cred_blob, auth_method, policy = _credential_blob(host), host.auth_method, host.credential_policy
-    if host.pending_key_id:
-        # revendicare ATOMICĂ (DELETE … RETURNING): cheia se leagă o singură dată, doar de userul ei
-        cred_blob = await _claim_pending_key(user["id"], host.pending_key_id)
-        auth_method, policy = "key", "stored"
-    token = security.new_token()
-    enroll = security.new_token()[:32]
-    ttl = max(300, min(30 * 86400, int(host.enroll_ttl or 3600)))   # 5 min .. 30 zile, implicit 1h
-    pw = _clean_enroll_pass(host.enroll_password)
-    pass_hash = await security.hash_password_async(pw) if pw else None
-    host_id = await db.execute(
-        # `folder` lipsea din INSERT deşi `HostIn` îl acceptă: hostul creat direct într-un grup
-        # ieşea mereu în afara lui, fără nicio eroare. Aceeaşi clasă cu PATCH-ul care accepta
-        # câmpuri de conexiune şi le ignora.
-        "INSERT INTO hosts(name, note, folder, token_hash, token_encrypted, enroll_token,"
-        " enroll_expires, enroll_pass_hash, created, connection_type, hostname, ssh_username,"
-        " ssh_port, auth_method, credential_encrypted, require_2fa, credential_policy, tags,"
-        " via_host_id, ephemeral, known_hosts)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        host.name.strip(), host.note, host.folder.strip(), security.sha256_hex(token),
-        security.encrypt_secret(token), enroll,
-        time.time() + ttl, pass_hash, time.time(),
-        ctype, host.hostname.strip() or None, host.ssh_username.strip() or None,
-        port, auth_method, cred_blob,
-        int(host.require_2fa), policy, _norm_tags(host.tags),
-        host.via_host_id if ctype in conntypes.JUMP else None,
-        1 if (host.ephemeral and ctype in conntypes.JUMP) else 0, known)
-    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
-    return row, enroll, pw
-
-
-@router.post("/api/hosts")
-async def create_host(host: HostIn, request: Request, user=Depends(authz.perm('hosts.create'))):
-    v = await _validate_host(host, user, authz.grants_of(request))
-    row, enroll, pw = await _insert_host(host, user, v)
-    return dict(_host_json(row, _sees_crown(request)), install_command=_install_command(enroll, pw),
-                install_command_dedicated=_install_command_dedicated(enroll, pw),
-                enroll_expires=row["enroll_expires"])
 
 
 # ── [hosts-csv] Export / import CSV ──────────────────────────────────────────────────────
@@ -3597,7 +3033,7 @@ def _hosts_csv(rows, names_by_id: dict) -> str:
             "" if agent else (r["ssh_port"] or ""),
             "" if agent else (r["ssh_username"] or ""),
             names_by_id.get(via, "") if via else "",
-            r["folder"] or "", " ".join(_tag_list(r["tags"] or "", None)), r["note"] or "",
+            r["folder"] or "", " ".join(hostmodel.tag_list(r["tags"] or "", None)), r["note"] or "",
             1 if r["require_2fa"] else 0,
             "" if agent else (r["credential_policy"] or ""),
             (r["auth_method"] or "") if ctype in conntypes.SSH_FAMILY else "",
@@ -3701,7 +3137,7 @@ async def _resolve_via(name: str) -> int:
     raise ApiError(400, "hostcsv.viaMissing", "no agent host with this name", vars={"name": name})
 
 
-async def _check_duplicate(h: HostIn, v: dict) -> None:
+async def _check_duplicate(h: hostmodel.HostIn, v: dict) -> None:
     """Serverul re-verifică duplicatele — statusul din previzualizarea clientului nu contează.
     Duplicat = acelaşi nume (fără diferenţă de majuscule) SAU, la conexiunile directe, aceeaşi
     adresă + port + user. Ţintele efemere nu contează (dispar singure)."""
@@ -3727,7 +3163,7 @@ async def _import_row(r: HostCsvRow, opts: HostImportOptions, user, grants=None)
     agent = ctype == "agent"
     port = None if agent else _csv_port(r.port)
     via_id = await _resolve_via(r.via_host) if ctype in conntypes.JUMP else 0
-    h = HostIn(
+    h = hostmodel.HostIn(
         name=r.name, note=r.note, folder=opts.folder.strip() or r.folder,
         connection_type=ctype, hostname=r.hostname, ssh_username="" if agent else r.username,
         ssh_port=port, via_host_id=via_id,
@@ -3738,15 +3174,15 @@ async def _import_row(r: HostCsvRow, opts: HostImportOptions, user, grants=None)
         credential_policy="stored" if agent else (
             opts.credential_policy or r.credential_policy.strip().lower() or "ask"),
         tags=" ".join(x for x in (r.tags, opts.tags) if x.strip()), enroll_ttl=opts.enroll_ttl)
-    v = await _validate_host(h, user, grants)
+    v = await hostmodel.validate_host(h, user, grants)
     await _check_duplicate(h, v)
-    return await _insert_host(h, user, v)
+    return await hostmodel.insert_host(h, user, v)
 
 
 @router.post("/api/hosts/import")
 async def import_hosts(body: HostImportIn, request: Request, user=Depends(authz.perm("hosts.create"))):
     """Importă hosturi dintr-un CSV parsat de client. Fiecare rând trece prin EXACT validarea
-    lui `POST /api/hosts` (`_validate_host`); duplicatele sunt sărite. Rândurile agent intră
+    lui `POST /api/hosts` (`hostmodel.validate_host`); duplicatele sunt sărite. Rândurile agent intră
     PRIMELE, ca ţintele ssh-jump/telnet-jump din acelaşi fişier să-şi găsească agentul după nume.
 
     Agenţii importaţi sunt hosturi în aşteptare, ca la Add host → Agent: token propriu + link de
@@ -3757,7 +3193,7 @@ async def import_hosts(body: HostImportIn, request: Request, user=Depends(authz.
                        vars={"max": HOSTS_IMPORT_MAX})
     opts = body.options
     if opts.credential_policy:
-        _check_cred_policy(opts.credential_policy)
+        hostmodel.check_cred_policy(opts.credential_policy)
     parsed = []
     for i, raw in enumerate(body.rows):
         try:
@@ -3780,8 +3216,8 @@ async def import_hosts(body: HostImportIn, request: Request, user=Depends(authz.
         created += 1
         res = {"index": i, "ok": True, "id": row["id"], "name": row["name"]}
         if conntypes.is_agent(row):
-            res.update(install_command=_install_command(enroll, pw),
-                       install_command_dedicated=_install_command_dedicated(enroll, pw),
+            res.update(install_command=hostmodel.install_command(enroll, pw),
+                       install_command_dedicated=hostmodel.install_command_dedicated(enroll, pw),
                        enroll_expires=row["enroll_expires"])
         results[i] = res
     skipped = len(body.rows) - created
@@ -3806,14 +3242,14 @@ async def renew_enroll(host_id: int, user=Depends(authz.perm('host.admin', host=
         raise ApiError(404, "host.missing", "no such host")
     enroll = security.new_token()[:32]
     ttl = max(300, min(30 * 86400, int(body.enroll_ttl or 3600)))
-    pw = _clean_enroll_pass(body.enroll_password)
+    pw = hostmodel.clean_enroll_pass(body.enroll_password)
     pass_hash = await security.hash_password_async(pw) if pw else None
     exp = time.time() + ttl
     await db.execute(
         "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL"
         " WHERE id=?", enroll, exp, pass_hash, host_id)
-    return {"install_command": _install_command(enroll, pw),
-            "install_command_dedicated": _install_command_dedicated(enroll, pw),
+    return {"install_command": hostmodel.install_command(enroll, pw),
+            "install_command_dedicated": hostmodel.install_command_dedicated(enroll, pw),
             "enroll_expires": exp}
 
 
@@ -4465,7 +3901,7 @@ async def _ensure_forward_source(host_id: int):
     if row["require_2fa"] or row["credential_policy"] != "stored" or not row["credential_encrypted"]:
         return None
     try:
-        cred = _decode_credential(row["credential_encrypted"])
+        cred = hostmodel.decode_credential(row["credential_encrypted"])
         return await core.dial_ssh(row, cred)
     except Exception:
         return None
@@ -4801,28 +4237,12 @@ async def save_forward_settings(body: ForwardDomainIn,
                        "the app domain (%s) would become a forward subdomain — "
                        "pick a domain that does NOT contain it (e.g. apps.%s)" % (app_host, d),
                        vars={"app_host": app_host, "domain": d})
-    await _set_setting("forward_domain", d)
+    await db.set_setting("forward_domain", d)
     await fwddomain.load_forward_domain()
     return await _forward_settings_json()
 
 
 # ── [certs] TLS certificates (3.6.7) ─────────────────────────────────────────────────
-# Monitoring is read-only (certmon.py: a TLS handshake to Traefik, the leaf it serves). Renewal is
-# a HOST action the gateway cannot perform — and must not be able to: the app container gets no
-# ACME volume and no docker-socket write. What it can do, for an Owner (`certs.renew`) with a fresh
-# second factor, is open a terminal on the gateway host the Owner picked, with
-# `sudo -k <dir>/scripts/cert-renew.sh --domain <name>` TYPED but not run — the same "your terminal,
-# your permissions" model as "OS upgrade in a terminal" (2.6.0). The person reads it and presses
-# Enter; sudo on the host decides whether they may.
-K_CERT_RENEW_HOST = "cert_renew_host_id"
-
-
-async def _cert_renew_host_id() -> Optional[int]:
-    v = await _get_setting(K_CERT_RENEW_HOST)
-    try:
-        return int(v) if v else None
-    except ValueError:
-        return None
 
 
 async def _certs_json(request: Request) -> dict:
@@ -4847,7 +4267,7 @@ async def _certs_json(request: Request) -> dict:
         it["wildcard_hint"] = bool(it.get("wildcard")) and (
             it.get("level", 0) > 0 or config.CERT_RESOLVER == "le")
         items.append(it)
-    host_id = await _cert_renew_host_id()
+    host_id = await certmon.cert_renew_host_id()
     host = None
     if host_id:
         row = await db.fetchone("SELECT id, name, connection_type FROM hosts WHERE id=?", host_id)
@@ -4897,10 +4317,10 @@ async def certs_renew_host(body: CertRenewHostIn, request: Request,
         if not conntypes.is_agent(row):
             raise ApiError(400, "certs.renewAgentOnly", "pick an agent host (the gateway host itself)")
         await authz.require_on(request, body.host_id, "session.open")
-        await _set_setting(K_CERT_RENEW_HOST, str(row["id"]))
+        await db.set_setting(certmon.K_CERT_RENEW_HOST, str(row["id"]))
         audit.detail(request, "certificate renewal host set to %s (#%d)" % (row["name"], row["id"]))
     else:
-        await db.execute("DELETE FROM app_settings WHERE key=?", K_CERT_RENEW_HOST)
+        await db.execute("DELETE FROM app_settings WHERE key=?", certmon.K_CERT_RENEW_HOST)
         audit.detail(request, "certificate renewal host cleared")
     return await _certs_json(request)
 
@@ -4927,7 +4347,7 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
     require_2fa (`stepup.require_fresh_factor`, the deploy-key gate). Tokens never pass (`perm` without
     `tokens=`, and the fresh-factor gate refuses them again)."""
     await authz.require_on(request, host_id, "session.open")
-    want = await _cert_renew_host_id()
+    want = await certmon.cert_renew_host_id()
     if not want:
         raise ApiError(409, "certs.noRenewHost",
                        "pick the gateway host first (Settings → Infrastructure → Certificates)")
@@ -5019,7 +4439,7 @@ async def _health_json(request: Request) -> dict:
             c["commands"] = []
     host = None
     if can_terminal:
-        hid = await _cert_renew_host_id()
+        hid = await certmon.cert_renew_host_id()
         if hid:
             row = await db.fetchone("SELECT id, name FROM hosts WHERE id=?", hid)
             if row:
@@ -5113,7 +4533,7 @@ async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request
     gateway host → the check exists and has that command (a certificate name must still be one
     WebTerm monitors) → a fresh second factor → a private session (origin `health-fix`)."""
     await authz.require_on(request, host_id, "session.open")
-    want = await _cert_renew_host_id()
+    want = await certmon.cert_renew_host_id()
     if not want:
         raise ApiError(409, "certs.noRenewHost",
                        "pick the gateway host first (Settings → Infrastructure → Certificates)")
@@ -5184,15 +4604,15 @@ _backup_lock = asyncio.Lock()           # niciodată două backup-uri simultan (
 
 async def _get_json_setting(key: str) -> dict:
     try:
-        return json.loads(await _get_setting(key, "") or "") or {}
+        return json.loads(await db.get_setting(key, "") or "") or {}
     except ValueError:
         return {}
 
 
 async def _backup_needs_attention() -> bool:
-    last = float(await _get_setting("backup_last", "0") or 0)
+    last = float(await db.get_setting("backup_last", "0") or 0)
     err_ts = float((await _get_json_setting("backup_last_error")).get("ts") or 0)
-    seen = float(await _get_setting("backup_seen", "0") or 0)
+    seen = float(await db.get_setting("backup_seen", "0") or 0)
     return max(last, err_ts) > seen
 
 
@@ -5206,32 +4626,32 @@ async def scheduled_backup_tick(now: float | None = None, force: bool = False) -
     complet (local + off-host, dacă există) îl goleşte. Întoarce un dict de diagnostic
     (`skipped` / `ok` / `error`) — util testelor şi logului."""
     now = time.time() if now is None else now
-    sched = await _get_setting("backup_schedule", "off")
+    sched = await db.get_setting("backup_schedule", "off")
     if sched not in ("daily", "weekly") and not force:
         return {"skipped": "off"}
-    last_ok = float(await _get_setting("backup_last", "0") or 0)
+    last_ok = float(await db.get_setting("backup_last", "0") or 0)
     if not force and not backup.is_due(sched, last_ok, now):
         return {"skipped": "not_due", "next_due": backup.next_due(sched, last_ok, now)}
     if _backup_lock.locked():
         return {"skipped": "running"}       # un alt tick (sau un catch-up) e deja în lucru
     async with _backup_lock:
-        inc = (await _get_setting("backup_include_tx", "0")) == "1"
+        inc = (await db.get_setting("backup_include_tx", "0")) == "1"
         try:
             name = await asyncio.to_thread(backup.run_scheduled_backup, inc)
         except Exception as e:              # noqa: BLE001 — orice eşec trebuie VĂZUT, nu doar logat
             err = str(e)[:300] or e.__class__.__name__
             log.exception("the scheduled backup failed")
-            await _set_setting("backup_last_run", json.dumps(
+            await db.set_setting("backup_last_run", json.dumps(
                 {"ts": now, "ok": False, "name": "", "error": err}))
-            await _set_setting("backup_last_error", json.dumps(
+            await db.set_setting("backup_last_error", json.dumps(
                 {"ts": now, "error": err, "stage": "snapshot"}))
             try:
                 email_alerts.notify_local_backup_failed(err, last_ok)
             except Exception:               # noqa: BLE001 — alerta nu rupe programarea
                 log.exception("backup-failure alert could not be sent")
             return {"error": err}
-        await _set_setting("backup_last", str(now))
-        await _set_setting("backup_last_run", json.dumps(
+        await db.set_setting("backup_last", str(now))
+        await db.set_setting("backup_last_run", json.dumps(
             {"ts": now, "ok": True, "name": name, "error": ""}))
         log.info("scheduled backup (%s) written: %s", sched, name)
         # copie off-host, dacă e configurat un cloud: criptată cu parola userului; eşecul
@@ -5239,27 +4659,27 @@ async def scheduled_backup_tick(now: float | None = None, force: bool = False) -
         # de backup, nu doar în cea de cloud (audit G-14 / UX §7.f2)
         cloud_err = await cloudbackup.upload_scheduled(name)
         if cloud_err:
-            await _set_setting("backup_last_error", json.dumps(
+            await db.set_setting("backup_last_error", json.dumps(
                 {"ts": time.time(), "error": cloud_err, "stage": "cloud"}))
             return {"ok": True, "name": name, "error": cloud_err}
-        await _set_setting("backup_last_error", "")
+        await db.set_setting("backup_last_error", "")
         return {"ok": True, "name": name}
 
 
 @router.get("/api/backup/status")
 async def backup_status(user=Depends(authz.perm('backups.manage'))):
-    sched = await _get_setting("backup_schedule", "off")
-    last = float(await _get_setting("backup_last", "0") or 0)
+    sched = await db.get_setting("backup_schedule", "off")
+    last = float(await db.get_setting("backup_last", "0") or 0)
     return {
         "schedule": sched,
-        "include_transcripts": (await _get_setting("backup_include_tx", "0")) == "1",
+        "include_transcripts": (await db.get_setting("backup_include_tx", "0")) == "1",
         "last_scheduled": last,
         "last_run": (await _get_json_setting("backup_last_run")) or None,
         "last_error": (await _get_json_setting("backup_last_error")) or None,
         "next_due": backup.next_due(sched, last),
         "backups": backup.list_backups(),
         "retention_days": backup.RETENTION_DAYS,
-        "restore_verified_at": float(await _get_setting(syshealth.K_RESTORE_VERIFIED, "0") or 0) or None,
+        "restore_verified_at": float(await db.get_setting(syshealth.K_RESTORE_VERIFIED, "0") or 0) or None,
     }
 
 
@@ -5329,7 +4749,7 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
 async def _restore_verified(request: Request, what: str) -> None:
     """3.6.8: a backup that was never restored is a hope, not a backup. A successful verification
     is recorded (System health → "backup.restore") and audited."""
-    await _set_setting(syshealth.K_RESTORE_VERIFIED, str(time.time()))
+    await db.set_setting(syshealth.K_RESTORE_VERIFIED, str(time.time()))
     audit.detail(request, "backup verified (decrypted, unpacked, database integrity OK): %s" % what)
 
 
@@ -5372,8 +4792,8 @@ async def backup_verify_upload(request: Request, user=Depends(authz.perm('backup
 async def backup_schedule(body: BackupScheduleIn, user=Depends(authz.perm('backups.manage'))):
     if body.schedule not in ("off", "daily", "weekly"):
         raise ApiError(400, "backup.badSchedule", "invalid schedule (off/daily/weekly)")
-    await _set_setting("backup_schedule", body.schedule)
-    await _set_setting("backup_include_tx", "1" if body.include_transcripts else "0")
+    await db.set_setting("backup_schedule", body.schedule)
+    await db.set_setting("backup_include_tx", "1" if body.include_transcripts else "0")
     return await backup_status(user)
 
 
@@ -5392,9 +4812,9 @@ async def backup_delete_stored(name: str, user=Depends(authz.perm('backups.manag
 @router.post("/api/backup/seen")
 async def backup_seen(user=Depends(authz.perm('backups.manage'))):
     # „văzut" acoperă şi ultimul eşec, nu doar ultimul succes (tab-ul Backup arată ambele)
-    last = float(await _get_setting("backup_last", "0") or 0)
+    last = float(await db.get_setting("backup_last", "0") or 0)
     err_ts = float((await _get_json_setting("backup_last_error")).get("ts") or 0)
-    await _set_setting("backup_seen", str(max(last, err_ts)))
+    await db.set_setting("backup_seen", str(max(last, err_ts)))
     return {"ok": True}
 
 
@@ -6748,7 +6168,7 @@ def _host_ipv4_ifaces(diag_json):
         d = json.loads(diag_json)
     except (TypeError, ValueError):
         return out
-    # acelaşi guard ca _host_updates: un diagnostics top-level non-obiect ar arunca AttributeError
+    # acelaşi guard ca hostmodel.host_updates: un diagnostics top-level non-obiect ar arunca AttributeError
     net = d.get("network") if isinstance(d, dict) else None
     ifaces = (net.get("interfaces") if isinstance(net, dict) else None) or []
     for f in ifaces:
@@ -7135,86 +6555,6 @@ async def audit_list(request: Request, limit: int = 200, before: float = 0.0, q:
             "retention_days": config.AUDIT_RETENTION_DAYS}
 
 
-class HostKeyAcceptIn(BaseModel):
-    # amprenta pe care omul a VĂZUT-o în dialog: accept-ul pinează doar dacă e chiar cea a alarmei
-    # de acum (un dialog vechi nu pinează o cheie pe care nimeni n-a văzut-o — review lot 2, M5)
-    fingerprint: str = ""
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-# ── [ssh] Host key alarm: read / accept (fingerprint-bound) ───────────────────────────────────────
-
-@router.get("/api/hosts/{host_id}/hostkey")
-async def host_hostkey(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
-    """Starea pinului de host-key al unui host SSH (direct/jump): amprenta curentă (cea pinată,
-    sau cea OFERITĂ dacă e o alarmă activă), cea anterioară şi momentul schimbării — ca omul să
-    poată compara cu `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` pe server, out-of-band."""
-    row = await db.fetchone("SELECT id, known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    alarm = _hostkey_alarm(row)
-    pinned_fp = core.hostkey_fingerprint(row["known_hosts"] or "")
-    if alarm:
-        return {"fingerprint": alarm["new_fp"], "previous": alarm["old_fp"] or pinned_fp,
-                "changed_at": alarm["changed_at"], "pinned": bool(row["known_hosts"]), "alarm": True,
-                "first": alarm["first"]}
-    return {"fingerprint": pinned_fp, "previous": None, "changed_at": None,
-            "pinned": bool(row["known_hosts"]), "alarm": False}
-
-
-# INV-03 (docs/design/INVARIANTS.md): acceptul e legat de amprenta văzută; altă cheie între timp = ssh.hostKeyStale.
-@router.post("/api/hosts/{host_id}/hostkey/accept")
-async def host_hostkey_accept(host_id: int, body: HostKeyAcceptIn, request: Request,
-                              user=Depends(authz.perm('host.edit', host='host_id'))):
-    """Re-pinează cheia NOUĂ după verificare out-of-band şi stinge alarma. Singura cale de
-    re-pin din UI — înainte trucul era „schimb portul şi-l pun la loc" (audit UX §6.e2).
-    Pe hosturile 2FA cere step-up (e echivalentul lui „ştergi known_hosts"); e auditat şi
-    alertat ca schimbare de securitate, fiindcă un accept greşit legitimează un MITM."""
-    row = await db.fetchone("SELECT id, name, known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    try:
-        alarm = json.loads(row["hostkey_alarm"] or "null")
-    except ValueError:
-        alarm = None
-    if not alarm:
-        raise ApiError(409, "ssh.noHostKeyAlarm", "no host-key change is pending for this host")
-    if (body.fingerprint or "").strip() != (alarm.get("new_fp") or ""):
-        raise ApiError(409, "ssh.hostKeyStale",
-                       "the host key changed since you looked at it — review the new fingerprint")
-    if alarm.get("first") and row["known_hosts"]:
-        # între timp hostul a primit un pin (test verificat): alarma de prim contact nu-l înlocuieşte
-        await db.execute("UPDATE hosts SET hostkey_alarm=NULL WHERE id=?", host_id)
-        raise ApiError(409, "ssh.noHostKeyAlarm", "this host already has a pinned key")
-    new_key = alarm.get("new_key") or ""
-    old_fp, new_fp = alarm.get("old_fp") or "?", alarm.get("new_fp") or "?"
-    # Condiţionat de alarma CITITĂ: între citire şi aici e step-up-ul (await-uri), iar un PATCH
-    # concurent (pin verificat de test, mutare) nu trebuie suprascris cu cheia unei alarme vechi
-    # (review 2). Fără cheie capturată (asyncssh vechi?) → pinul se resetează: confirmare la dial.
-    await db.execute("UPDATE hosts SET known_hosts=?, hostkey_alarm=NULL WHERE id=? AND hostkey_alarm=?",
-                     new_key or None, host_id, row["hostkey_alarm"])
-    after = await db.fetchone("SELECT known_hosts, hostkey_alarm FROM hosts WHERE id=?", host_id)
-    if not after or after["hostkey_alarm"] is not None or (after["known_hosts"] or None) != (new_key or None):
-        raise ApiError(409, "ssh.hostKeyStale", "the host changed while you were confirming — review it again")
-    if alarm.get("first") and new_key:
-        # primul contact confirmat: pin iniţial, nu o re-pinare — auditat, fără alertă de flotă
-        audit.detail(request, "host-key first contact confirmed: %s" % new_fp)
-        await core.record_agent_event(host_id, "hostkey_accepted", reason="hostkey_first_confirmed",
-                                      detail="%s by %s" % (new_fp, user["email"]))
-        return {"ok": True, "fingerprint": new_fp, "pinned": True}
-    audit.detail(request, "host-key accepted: %s → %s" % (old_fp, new_fp))
-    await core.record_agent_event(host_id, "hostkey_accepted", reason="hostkey_accepted",
-                                  detail="%s → %s by %s" % (old_fp, new_fp, user["email"]))
-    email_alerts.notify_security_change(
-        "SSH host key re-pinned for host '%s' (%s → %s)" % (row["name"], old_fp, new_fp),
-        security.client_ip(request), user["email"], fleet=True, host_id=host_id,
-        what_key="host_key_repinned", what_params={"host": row["name"], "old_fp": old_fp, "new_fp": new_fp})
-    return {"ok": True, "fingerprint": new_fp if new_key else None, "pinned": bool(new_key)}
-
-
 # ── [agent] Agent events, agent log, diagnostics refresh ──────────────────────────────────────────
 
 @router.get("/api/hosts/{host_id}/events")
@@ -7239,7 +6579,7 @@ async def host_events(host_id: int, user=Depends(authz.perm('host.diagnostics', 
         except (ValueError, TypeError):
             diag = None
     return {
-        "online": _host_online(hrow),
+        "online": hostmodel.host_online(hrow),
         "last_heartbeat": hrow["last_heartbeat"],
         "agent_version": hrow["agent_version"],
         "connection_type": hrow["connection_type"],
@@ -8053,544 +7393,6 @@ async def search(q: str, request: Request, user=Depends(authz.perm('recording.vi
     return {"sessions": results}
 
 
-class HostPatch(BaseModel):
-    """Editare PARȚIALĂ: doar câmpurile trimise se aplică.
-
-    Vechiul PATCH lua un `HostIn` întreg și scria doar name/note/folder. Două consecințe:
-    câmpurile de conexiune (hostname, user, port, credențiale) erau acceptate și IGNORATE
-    tăcut — clientul primea `ok: true` fără să se fi schimbat nimic — iar un PATCH parțial
-    ȘTERGEA nota și folderul, fiindcă lipsa lor din corp înseamnă `""` în `HostIn`.
-    Cu `None` ca „netrimis", ambele dispar."""
-    name: Optional[str] = None
-    note: Optional[str] = None
-    folder: Optional[str] = None
-    connection_type: Optional[str] = None
-    hostname: Optional[str] = None
-    ssh_username: Optional[str] = None
-    ssh_port: Optional[int] = None
-    auth_method: Optional[str] = None
-    credential: Optional[str] = None      # write-only; netrimis = păstrează ce e stocat
-    passphrase: Optional[str] = None
-    credential_policy: Optional[str] = None
-    via_host_id: Optional[int] = None     # ssh-jump: hostul-agent prin care tunelăm
-    tags: Optional[str] = None
-    alerts_muted: Optional[bool] = None   # opreşte alertele de host-offline pentru acest host
-    pin_hostkey: Optional[str] = None     # vezi HostIn: doar cheia văzută de testul de conexiune
-    pending_key_id: Optional[str] = None  # vezi HostIn: cheia generată în formular devine credenţialul
-    # 3.6.10: mutarea unui host crown-jewel într-un folder/tag cu legături ⚑ cere confirmare
-    confirm_crown_jewel: bool = False
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-# câmpurile care schimbă UNDE și CU CE ne conectăm — aceeași clasă cu provisioning-ul
-_CONN_FIELDS = ("connection_type", "hostname", "ssh_username", "ssh_port",
-                "auth_method", "credential", "credential_policy", "via_host_id")
-
-
-# INV-01 (docs/design/INVARIANTS.md): un secret salvat aparține ȚINTEI (protocol, gazdă, port, via), nu rândului; o mutare cere parola din nou.
-def _conn_target(ctype: str, hostname, port, via) -> tuple:
-    """Ţinta la care pleacă un credenţial: (protocol, gazdă, port, rută jump). `via` contează doar
-    pe tipurile jump (un ssh direct pleacă din reţeaua gateway-ului, oricare ar fi `via` rămas)."""
-    proto = conntypes.target_proto(ctype)
-    jump = ctype in conntypes.JUMP
-    return (proto, (hostname or "").strip().lower(), int(port or conntypes.default_port(proto)),
-            int(via or 0) if jump else 0)
-
-
-def _has_stored_password(row) -> bool:
-    """Rândul ţine o PAROLĂ în seif (ssh sau telnet), oricare ar fi tipul/politica/metoda de acum.
-    Blob ilizibil → True (fail-closed: nu ştim ce e, tratăm ca secret)."""
-    if not row["credential_encrypted"]:
-        return False
-    try:
-        cred = _decode_credential(row["credential_encrypted"])
-    except Exception:                       # noqa: BLE001
-        return True
-    return isinstance(cred, dict) and bool(cred.get("password"))
-
-
-def _retargets(row, new_type: str, hostname, port, via) -> bool:
-    """Ţinta s-ar muta faţă de cea pentru care a fost salvat credenţialul. Parola unui host
-    `agent` vine din provisioning-ul prin SSH, deci ţinta ei e SSH pe adresa lui — NU protocolul
-    cerut acum (altfel ssh → agent+adresă nouă → ssh/telnet o muta fără întrebare; review 2, H)."""
-    old_type = conntypes.of(row)
-    if old_type == conntypes.AGENT:
-        old_type = conntypes.SSH
-    return (_conn_target(old_type, row["hostname"], row["ssh_port"], row["via_host_id"])
-            != _conn_target(new_type, hostname, port, via))
-
-
-# ── [hosts] Update host (PATCH): retarget binding, credentials, TOFU reset ────────────────────────
-
-@router.patch("/api/hosts/{host_id}")
-async def update_host(host_id: int, host: HostPatch, request: Request,
-                      user=Depends(authz.perm('host.edit', host='host_id'))):
-    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    given = host.model_dump(exclude_unset=True)
-    # 3.6 (§A.11.1): folderul şi etichetele DECID cine vede hostul — mutarea lui în `lab` dă
-    # shell fiecărui Operator din lab. Deci `host.edit` singur nu ajunge: cere `hosts.create` @ all.
-    grants = authz.grants_of(request)
-    scope_moved = (("folder" in given and (given["folder"] or "").strip() != (row["folder"] or ""))
-                   or ("tags" in given and _norm_tags(given["tags"] or "") != (row["tags"] or "")))
-    if scope_moved:
-        authz.require_global(grants, "hosts.create")
-    crown_moved = []
-    if scope_moved and (row["crown_jewel"] or 0) and not (row["ephemeral"] or 0):
-        # 3.6.10 (§A.11.2): mutat într-un folder/tag peste care cineva (ne-Owner) are un rol ⚑,
-        # hostul crown-jewel îi dă acelui cont un shell pe instanţă. Aceeaşi confirmare ca la o
-        # legătură nouă; doar legăturile/mapările care NU-l acopereau deja contează.
-        old_ref = authz.HostRef(host_id, row["folder"] or "", authz.tag_set(row["tags"]))
-        new_ref = authz.HostRef(
-            host_id,
-            (given["folder"] or "").strip() if "folder" in given else (row["folder"] or ""),
-            authz.tag_set(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
-        crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
-        if crown_moved and not _sees_crown(request):
-            # who cannot see the crown flag must not learn it from this answer either
-            raise ApiError(403, "host.moveNeedsOwner",
-                           "this folder/tag change needs an Owner or an account manager")
-        if crown_moved and not host.confirm_crown_jewel:
-            raise ApiError(409, "authz.crownJewelMove",
-                           "moving this crown-jewel host gives a shell on it to %d more role "
-                           "binding(s) or SSO mapping(s); confirm to move it anyway"
-                           % len(crown_moved), vars={"host": row["name"] or "", "n": len(crown_moved)})
-    # …iar o ţintă jump deschide TCP DIN hostul `via` (§A.11.4): orice atingere a ţintei (adresă,
-    # port, tip, via — schimbată SAU doar retrimisă) cere `forward.manage` pe via-ul EFECTIV, ca la
-    # creare şi la /api/hosts/test. Altfel `host.edit` pe jump ar re-ţinti pivotul oriunde.
-    eff_type = given.get("connection_type") or conntypes.of(row)
-    if eff_type in conntypes.JUMP and any(
-            f in given for f in ("hostname", "ssh_port", "connection_type", "via_host_id")):
-        eff_via = given["via_host_id"] if "via_host_id" in given else row["via_host_id"]
-        if eff_via:                 # fără via → refuzat mai jos (400 sshjump.needsAgent)
-            await authz.require_on(grants, eff_via, "forward.manage")
-    # `touches_conn` = un câmp de conexiune se SCHIMBĂ efectiv, nu doar e prezent în payload.
-    # UI-ul (AddHostModal) trimite MEREU `connection_type`, chiar şi la o redenumire pură, deci
-    # „prezent" însemna că ORICE editare pica pe calea de re-provisioning: agentul deconectat
-    # degeaba (host offline câteva secunde), step-up cerut inutil pe hosturi 2FA, iar terminalul
-    # deschis rămânea fără input. Comparăm cu valoarea curentă; `credential` e write-only, deci
-    # o valoare prezentă = schimbare. (Bug raportat: redenumire → nu mai poţi scrie.)
-    def _conn_changed(f):
-        if f not in given:
-            return False
-        if f == "credential":
-            return bool(given[f])
-        return given[f] != row[f]
-    touches_conn = any(_conn_changed(f) for f in _CONN_FIELDS)
-    # cheia generată în formular = credenţial nou; un pin de host-key diferit de cel stocat =
-    # schimbă CE maşină acceptăm. Ambele sunt din clasa provisioning-ului (step-up pe 2FA).
-    pin_given = (given.get("pin_hostkey") or "").strip()
-    pend_given = (given.get("pending_key_id") or "").strip()
-    if pend_given or (pin_given and not _same_hostkey(pin_given, row["known_hosts"] or "")):
-        touches_conn = True
-    if touches_conn:
-        # Repointarea unui host către altă mașină (sau altă credențială) e echivalentă cu
-        # provisioning-ul: cine are doar cookie-ul nu trebuie să poată face asta pe un host 2FA.
-        await stepup.require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password, host.stepup_totp)
-    elif given.get("alerts_muted") and row["require_2fa"]:
-        # A REDUCE monitorizarea unui host 2FA cere step-up: sweep-ul refuză explicit ca marcajul
-        # neautentificat de uninstall să cumpere tăcere (core.py, audit 2026-08) — un cookie furat
-        # n-are voie s-o cumpere nici pe calea asta. RE-activarea alertelor rămâne liberă (întăreşte
-        # monitorizarea), simetric cu politica din `set_require_2fa`.
-        await stepup.require_host_stepup(host_id, user, host.stepup_grant, host.stepup_password, host.stepup_totp)
-
-    old_type = conntypes.of(row)
-    new_type = given.get("connection_type", old_type)
-    if new_type not in conntypes.ALL:
-        raise ApiError(400, "host.badType", "unknown connection type")
-    eff = lambda f, col=None: (given[f] if f in given else row[col or f])   # noqa: E731
-    hostname = (eff("hostname") or "").strip()
-    ssh_username = (eff("ssh_username") or "").strip()
-    policy = eff("credential_policy") or "stored"
-    _check_cred_policy(policy)
-    auth_method = eff("auth_method") or "password"
-
-    if new_type in conntypes.NETWORK and not hostname:
-        raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    if new_type in conntypes.SSH_FAMILY and not ssh_username:
-        raise ApiError(400, "ssh.userRequired", "an SSH username is required")
-    # la editarea unui jump, agentul `via` trebuie să rămână un host de tip agent (ca la creare)
-    if new_type in conntypes.JUMP:
-        via_id = eff("via_host_id")
-        # Self-via: un host AGENT retipizat la jump cu `via_host_id=<propriul id>` trecea regula
-        # „via e agent" (rândul lui încă zice agent), apoi `touches_conn` îi scotea propria sursă
-        # → „agent offline" la orice conectare, fără remediu în UI. La fel un ciclu A→B→A, posibil
-        # doar pe DB-uri în care `via_host_id` a rămas agăţat pe un rând retipizat la agent
-        # (defectul de mai jos) — urcăm lanţul cu o buclă mărginită, nu avem încredere în date.
-        if via_id == host_id:
-            raise ApiError(400, "sshjump.viaLoop", "a jump host cannot route through itself")
-        via = (await db.fetchone("SELECT connection_type, via_host_id FROM hosts WHERE id=?", via_id)
-               if via_id else None)
-        if not via or not conntypes.is_agent(via):
-            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
-        cur, hops = via["via_host_id"], 0
-        while cur and hops < 16:
-            if cur == host_id:
-                raise ApiError(400, "sshjump.viaLoop", "the jump chain would loop back to this host")
-            nxt = await db.fetchone("SELECT via_host_id FROM hosts WHERE id=?", cur)
-            cur, hops = (nxt["via_host_id"] if nxt else None), hops + 1
-    # Un agent prin care trec ţinte jump SALVATE nu-şi poate schimba tipul: copiii ar rămâne cu
-    # `via` spre un non-agent (conectare imposibilă) şi ar dispărea din sidebar, care îi randează
-    # doar sub părinte. Acelaşi refuz ca la ştergere — operatorul re-leagă sau şterge copiii întâi.
-    if old_type == "agent" and new_type != "agent":
-        await _refuse_if_jump_children(host_id)
-    # Întoarcerea la SSH după ce agentul a preluat: detaliile de conexiune supraviețuiesc
-    # provisioning-ului, dar credențialul e ȘTERS dacă politica era `ephemeral`. Fără el nu
-    # ne putem conecta, deci cerem unul acum, în loc să eșuăm abia la prima conectare.
-    if pend_given and new_type not in conntypes.SSH_FAMILY:
-        raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
-    # Parola STOCATĂ e a destinaţiei de acum. Mutarea hostului pe altă adresă / port / rută jump
-    # o păstra, iar prima conectare (TOFU, pinul resetat) o trimitea noii ţinte — inclusiv unui
-    # server SSH al celui care a făcut mutarea (raport de securitate 2026-11, lot 2). Acum ţinta
-    # nouă cere parola din nou. Doar parola: o cheie privată nu pleacă niciodată la server
-    # (semnătura e legată de sesiune), deci schimbarea IP-ului unui host cu cheie rămâne liberă.
-    # Regula se ia din parola STOCATĂ, nu din câmpurile cererii: tipul, politica („ask") sau metoda
-    # („key") schimbate odată cu adresa, apoi readuse într-un al doilea PATCH, ocoleau o verificare
-    # legată de ele — iar telnet o trimitea chiar în clar (review lot 2, C1). Agent = nu o foloseşte.
-    pw_moves = (not given.get("credential") and not pend_given and _has_stored_password(row)
-                and _retargets(row, new_type, hostname, eff("ssh_port"), eff("via_host_id")))
-    # Pe `agent` parola nu se foloseşte: o ţintă mutată nu cere parola, dar o ŞTERGE din seif — ca
-    # să nu reînvie la întoarcerea pe ssh/telnet spre noua adresă (review 2, H)
-    drop_secret = pw_moves and new_type == "agent"
-    if pw_moves and new_type != "agent":
-        raise ApiError(400, "host.retargetNeedsPassword",
-                       "the host now points somewhere else — enter the password again; the stored "
-                       "one is only sent to the address it was saved for")
-    if (new_type == "ssh" and policy == "stored" and not pend_given
-            and not given.get("credential") and not row["credential_encrypted"]):
-        raise ApiError(400, "host.noStoredCredentials",
-                       "the host no longer has stored SSH credentials "
-                       "(removed when the agent was installed) — enter the password or key")
-
-    # Pinul de host-key aparține MAȘINII vechi: dacă am mutat hostul în altă parte, pinul
-    # respinge noua mașină la fiecare încercare, iar mesajul arată ca un MITM. Îl resetăm
-    # explicit (TOFU repinează la prima conectare) și O SPUNEM în răspuns.
-    # Ţinta = protocol + gazdă (fără diferenţe de majuscule) + port + rută jump: şi un ssh-jump
-    # devenit ssh direct (alt drum, altă reţea) e altă ţintă (review lot 2, H2)
-    repinned = _retargets(row, new_type, hostname, eff("ssh_port"), eff("via_host_id"))
-    new_pin = None
-    if pin_given:
-        if new_type not in conntypes.SSH_FAMILY:
-            raise ApiError(400, "hosttest.pinMismatch", "only SSH hosts have a host key to pin")
-        eff_port = (given["ssh_port"] if "ssh_port" in given else row["ssh_port"]) or 22
-        new_pin = _verified_pin(user["id"], new_type, hostname, eff_port, eff("via_host_id") or 0, pin_given)
-        # Pe ACEEAŞI ţintă, un pin existent se schimbă doar prin fluxul de alarmă („accept",
-        # cu amprentele la vedere, auditat şi alertat) — nu printr-un test făcut fără host_id
-        # (care n-a comparat cu pinul) urmat de un PATCH. Altfel testul ar ocoli alarma de MITM.
-        if not repinned and row["known_hosts"] and not _same_hostkey(new_pin, row["known_hosts"]):
-            raise ApiError(409, "hosttest.pinConflict",
-                           "this host already has a different pinned host key — review it with the "
-                           "host-key alarm instead")
-    if pend_given:
-        given["auth_method"], given["credential_policy"] = "key", "stored"
-        given.pop("credential", None)
-
-    sets, vals = [], []
-    for col, key in (("name", "name"), ("note", "note"), ("folder", "folder"),
-                     ("hostname", "hostname"), ("ssh_username", "ssh_username"),
-                     ("auth_method", "auth_method"), ("credential_policy", "credential_policy")):
-        if key in given:
-            v = given[key]
-            sets.append(f"{col}=?")
-            vals.append(v.strip() if isinstance(v, str) else v)
-    # `via_host_id` are sens DOAR în familia jump. Când hostul iese din ea (ssh-jump → ssh/agent)
-    # îl golim explicit: altfel clientul îl considera în continuare cuibărit (`isNested`), iar un
-    # fost jump devenit agent, cu `via` agăţat, era singura cale spre un ciclu de via-uri.
-    if new_type in conntypes.JUMP:
-        if "via_host_id" in given:
-            sets.append("via_host_id=?"); vals.append(given["via_host_id"])
-    elif row["via_host_id"] is not None or "via_host_id" in given:
-        sets.append("via_host_id=NULL")
-    if "ssh_port" in given:
-        sets.append("ssh_port=?"); vals.append(given["ssh_port"])
-    if "tags" in given:
-        sets.append("tags=?"); vals.append(_norm_tags(given["tags"]))
-    if "alerts_muted" in given:
-        # la re-activarea alertelor curăţăm şi dedup-ul (DB + backstop-ul RAM): un host încă
-        # offline va re-declanşa o alertă la următorul sweep (vrei să ştii că e tot jos),
-        # nu să rămână tăcut din inerţie.
-        sets.append("alerts_muted=?"); vals.append(1 if given["alerts_muted"] else 0)
-        if not given["alerts_muted"]:
-            sets.append("offline_notified=?"); vals.append(0)
-            core.rearm_offline_alert(host_id)
-    if "connection_type" in given:
-        sets.append("connection_type=?"); vals.append(new_type)
-    if given.get("credential"):
-        blob = _credential_blob(HostIn(
-            name=row["name"], connection_type=new_type, auth_method=auth_method,
-            credential=given["credential"], passphrase=given.get("passphrase") or "",
-            credential_policy=policy))
-        sets.append("credential_encrypted=?"); vals.append(blob)
-    elif drop_secret or (policy == "ask" and row["credential_encrypted"] and not pend_given):
-        # „cere de fiecare dată" = nimic stocat. Lăsat în seif, secretul revenea la viaţă la
-        # întoarcerea pe „stored" — pe o ţintă mutată între timp (review lot 2, C1)
-        sets.append("credential_encrypted=NULL")
-    # Cheie → PAROLĂ pe aceeaşi ţintă: pinul a fost pus tăcut (TOFU e păstrat doar pentru chei), deci
-    # nimeni nu l-a confirmat. Îl ştergem: prima conectare cu parola cere confirmarea amprentei,
-    # dacă formularul nu aduce chiar acum un pin verificat de test (review 2, pin moştenit).
-    if (not repinned and not new_pin and new_type in conntypes.SSH_FAMILY and row["known_hosts"]
-            and (row["auth_method"] or "password") == "key" and auth_method == "password"):
-        sets.append("known_hosts=NULL"); sets.append("hostkey_alarm=NULL")
-    if repinned:
-        # ţintă nouă: pinul vechi pleacă; dacă testul a văzut-o, pinăm direct cheia ei
-        sets.append("known_hosts=?"); vals.append(new_pin)
-        sets.append("hostkey_alarm=NULL")      # pin nou = alarma veche nu mai are obiect
-    elif new_pin and not row["known_hosts"]:
-        sets.append("known_hosts=?"); vals.append(new_pin)
-        # pinul verificat de test înlocuieşte o alarmă de prim contact rămasă (posibil cu cheia
-        # unui MITM văzută la un dial anterior) — altfel „Trust" ar fi suprascris pinul bun (M4)
-        sets.append("hostkey_alarm=NULL")
-    if not sets and not pend_given:
-        return {"ok": True, "changed": False}
-    async with authz.bindings_lock:
-        if scope_moved:
-            # revizuirea 3.6.10: între verificarea de sus şi scriere au trecut step-up-ul şi alte
-            # aşteptări — cineva a putut marca hostul crown-jewel, mutat folderul/etichetele sau
-            # acorda o legătură ⚑ între timp. Expunerea se recalculează pe starea de ACUM, sub
-            # lock-ul legăturilor (acordările îl ţin şi ele), imediat înainte de UPDATE.
-            cur = await db.fetchone("SELECT name, folder, tags, COALESCE(crown_jewel, 0) AS cj,"
-                                    " COALESCE(ephemeral, 0) AS eph FROM hosts WHERE id=?", host_id)
-            if not cur:
-                raise ApiError(404, "host.missing", "no such host")
-            crown_moved = []
-            if cur["cj"] and not cur["eph"]:
-                old_ref = authz.HostRef(host_id, cur["folder"] or "", authz.tag_set(cur["tags"]))
-                new_ref = authz.HostRef(
-                    host_id,
-                    (given["folder"] or "").strip() if "folder" in given else (cur["folder"] or ""),
-                    authz.tag_set(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
-                crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
-                if crown_moved and not _sees_crown(request):
-                    raise ApiError(403, "host.moveNeedsOwner",
-                                   "this folder/tag change needs an Owner or an account manager")
-                if crown_moved and not host.confirm_crown_jewel:
-                    raise ApiError(409, "authz.crownJewelMove",
-                                   "moving this crown-jewel host gives a shell on it to %d more role "
-                                   "binding(s) or SSO mapping(s); confirm to move it anyway"
-                                   % len(crown_moved),
-                                   vars={"host": cur["name"] or "", "n": len(crown_moved)})
-        if pend_given:
-            # ultima, după toate validările: revendicarea şterge rândul în aşteptare
-            sets.append("credential_encrypted=?")
-            vals.append(await _claim_pending_key(user["id"], pend_given))
-        vals.append(host_id)
-        await db.execute("UPDATE hosts SET %s WHERE id=?" % ", ".join(sets), *vals)
-    if "name" in given and isinstance(given["name"], str) \
-            and given["name"].strip() != (row["name"] or ""):
-        # 3.6.5: WEBTERM_OIDC_ROLE_MAP numeşte hostul după NUME, rezolvat doar la pornire
-        await ssomap.note_config_host_change(host_id, "renamed from '%s' to '%s'" % (
-            (row["name"] or "")[:80], given["name"].strip()[:80]))
-    if scope_moved or "via_host_id" in given or "connection_type" in given:
-        authz.bump_epoch()          # cine vede hostul s-a putut schimba: socket-urile re-verifică
-    if crown_moved:
-        what = "crown-jewel host %s moved (folder/tags) — CONFIRMED: now also reachable with a " \
-               "shell through %s" % (row["name"], "; ".join(
-                   "%s %s (%s @ %s)" % (e["kind"], e["who"], e["role"],
-                                        _scope_label(e["scope_kind"], e["scope_value"]))
-                   for e in crown_moved[:authz.CROWN_LIST_MAX]))
-        audit.detail(request, what)
-        log.warning("%s (by %s)", what, user["email"])
-
-    # O conexiune vie ține parametrii VECHI: fără demontare, editarea pare fără efect până
-    # la următoarea deconectare accidentală.
-    dropped = False
-    if touches_conn:
-        conn = core.sources.pop(host_id, None)
-        if conn:
-            dropped = True
-            try:
-                await conn.disconnect()
-            except Exception:
-                pass
-        # Detaşăm EXPLICIT hub-urile hostului. `sources.pop` de mai sus face ca `was_current`
-        # din `_shutdown` să fie False (sursa nu mai e în dicţionar când agentul cade), deci
-        # `on_detached` NU rulează şi hub-urile rămân `attached=True`. La reconectarea agentului
-        # `ensure_attached` iese imediat (no-op), aşa că noua conexiune nu re-primeşte niciodată
-        # `attach` pentru sesiunile vii → terminalul deschis nu mai poate scrie deşi hostul e
-        # online şi sesiunea „live". (Bug raportat: editarea unui host agent → nu mai poţi tasta.)
-        core.detach_host_hubs(host_id)
-    return {"ok": True, "changed": True, "connection_type": new_type,
-            "host_key_reset": repinned, "disconnected": dropped}
-
-
-class Toggle2fa(BaseModel):
-    enabled: bool
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-# ── [hosts] Per-host flags: require 2FA, crown jewel, provision, forget credentials ───────────────
-
-@router.post("/api/hosts/{host_id}/require-2fa")
-async def set_require_2fa(host_id: int, body: Toggle2fa, user=Depends(authz.perm('host.admin', host='host_id'))):
-    """Activează/dezactivează cererea de 2FA la conectarea pe acest host.
-    GAP-fix: DEZACTIVAREA cere step-up — altfel un cookie furat stingea 2FA pe host și tot
-    gard-ul H1 devenea no-op. `stepup.require_host_stepup` citește valoarea CURENTĂ (încă 1 la
-    dezactivare → cere step-up; 0 la activare → no-op, întărirea securității nu cere factor)."""
-    await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    await db.execute("UPDATE hosts SET require_2fa=? WHERE id=?", int(body.enabled), host_id)
-    if body.enabled:
-        # Biletul de forward e valabil 12h şi nu ştie de host. Cine marchează un host „cere 2FA"
-        # tocmai fiindcă e îngrijorat rămânea cu tunelurile deschise până la expirare: handshake-ul
-        # NOU cerea step-up, cel vechi mergea în continuare. `logout` bumpează deja epoch-ul.
-        security.bump_forward_epoch()
-        # 3.5.13: parola singură nu mai deschide un host 2FA. Nu blocăm activarea (întărirea
-        # securităţii nu cere nimic), dar spunem ACUM că, fără passkey/TOTP/SSO, contul nu va
-        # putea deschide hostul până nu înrolează un factor — nu la primul click pe Conectare.
-        if not await stepup.user_has_factor(user):
-            return {"ok": True, "warning": "stepup.needsFactor"}
-    return {"ok": True}
-
-
-class CrownJewelIn(BaseModel):
-    enabled: bool
-    current_password: str = ""     # doar la SCOATEREA marcajului (reduce o protecţie)
-    totp_code: str = ""
-    email_code: str = ""
-    stepup_grant: str = ""
-
-
-@router.post("/api/hosts/{host_id}/crown-jewel")
-async def set_crown_jewel(host_id: int, body: CrownJewelIn, request: Request,
-                          user=Depends(authz.perm('host.admin', host='host_id'))):
-    """3.6.10 (§A.11.2): mark a host as a crown jewel — it runs the gateway or holds its backups,
-    so a shell there IS Owner. Owner-only both ways (the route's `host.admin` + Owner @ all in the
-    handler). Marking tightens (no re-auth); clearing loosens, so it takes the password (or SSO /
-    passkey re-auth) and the second factor, like any access change. Audited and alerted. The
-    answer lists the non-Owner role bindings and SSO mappings that already give a shell there —
-    the flag guards FUTURE grants; existing ones are for the Owner to review."""
-    grants = authz.grants_of(request)
-    if not grants.is_owner():
-        raise ApiError(403, "authz.ownerOnly", "only an Owner can mark or unmark a crown-jewel host")
-    row = await db.fetchone("SELECT id, name, COALESCE(crown_jewel, 0) AS cj,"
-                            " COALESCE(ephemeral, 0) AS eph FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    if row["eph"]:
-        raise ApiError(400, "host.crownEphemeral", "a connect-once target cannot be a crown jewel")
-    want = bool(body.enabled)
-    if bool(row["cj"]) == want:
-        return {"ok": True, "crown_jewel": want, "changed": False,
-                "exposure": await authz.crown_exposure(await authz.host_ref(host_id)) if want else []}
-    if not want:
-        await stepup.reauth_for_access_change(user, request, body, "remove the crown-jewel mark")
-    async with authz.bindings_lock:
-        authz.forget_cached(user["id"])  # re-auth was a suspension point: re-check NOW
-        if not (await authz.grants_for_user(user["id"])).is_owner():
-            raise ApiError(403, "authz.ownerOnly", "only an Owner can mark or unmark a crown-jewel host")
-        await db.execute("UPDATE hosts SET crown_jewel=? WHERE id=?", 1 if want else 0, host_id)
-    exposure = await authz.crown_exposure(await authz.host_ref(host_id)) if want else []
-    what = "host %s %s a crown jewel" % (row["name"], "marked as" if want else "is no longer")
-    audit.detail(request, what + (" (%d non-Owner shell grant(s) already cover it)" % len(exposure)
-                                  if exposure else ""))
-    log.warning("%s (by %s)", what, user["email"])
-    email_alerts.notify_security_change(what, security.client_ip(request), user["email"],
-                                        fleet=True, what_key="crown_jewel_changed",
-                                        what_params={"host": row["name"] or "",
-                                                     "state": "on" if want else "off"})
-    return {"ok": True, "crown_jewel": want, "changed": True, "exposure": exposure}
-
-
-@router.post("/api/hosts/{host_id}/provision")
-async def provision_agent(host_id: int, request: Request, user=Depends(authz.perm('host.admin', host='host_id'))):
-    """Instalează agentul pe un host SSH: se conectează prin SSH, rulează
-    installer-ul, AȘTEAPTĂ ca agentul să se conecteze (test), apoi trece host-ul
-    în mod agent și șterge credențialele dacă politica e `ephemeral`."""
-    await stepup.require_host_stepup(host_id, user)   # H1
-    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    if conntypes.of(row) != conntypes.SSH:
-        raise ApiError(400, "provision.sshOnly", "provisioning is only available for SSH hosts")
-    # 1) conexiune SSH (creds stocate; rate-limited; pin host-key)
-    await _connect_direct(row, request)
-    src = core.sources.get(host_id)
-    if not isinstance(src, core.SshSource):
-        raise ApiError(502, "provision.noSsh", "the SSH connection is not available")
-    # 2) enroll token proaspăt + rulează installer-ul prin canalul SSH
-    enroll = security.new_token()[:32]
-    await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL WHERE id=?",
-                     enroll, time.time() + 3600, host_id)
-    try:
-        result = await asyncio.wait_for(src._conn.run(_install_command(enroll), check=False), 150)
-    except Exception as e:
-        log.warning("install over SSH failed on host %s: %s: %s", host_id, type(e).__name__, e)
-        raise ApiError(502, "provision.installFailed", f"install over SSH failed: {e}")
-    out = ((result.stdout or "") + (result.stderr or ""))[-1200:]
-    # 3) TEST: așteaptă agentul să sune acasă (dovada că merge)
-    connected = False
-    for _ in range(40):
-        await asyncio.sleep(1)
-        if isinstance(core.sources.get(host_id), core.AgentConnection):
-            connected = True
-            break
-    if not connected:
-        raise ApiError(504, "provision.agentNotConnected",
-                       "the installed agent did not connect in time.\n\n" + out)
-    # 4) succes: mod agent + ștergere credențiale după politică
-    delete_creds = row["credential_policy"] == "ephemeral"
-    await db.execute("UPDATE hosts SET connection_type=? WHERE id=?", conntypes.AGENT, host_id)
-    if delete_creds:
-        await db.execute(
-            "UPDATE hosts SET credential_encrypted=NULL, credential_policy='stored' WHERE id=?",
-            host_id)
-        await _drop_ssh_credential_in_memory(host_id)   # vezi helperul: DB-ul singur nu ajunge
-    return {"ok": True, "credentials_deleted": delete_creds}
-
-
-async def _drop_ssh_credential_in_memory(host_id: int) -> bool:
-    """Închide conexiunea SSH vie a hostului, dacă există. Întoarce True dacă a fost una.
-
-    Ştergerea rândului din DB nu e suficientă ca „uită credenţialele" să fie adevărat:
-    `asyncssh` păstrează `password` şi `client_keys` ÎN CLAR în opţiunile conexiunii
-    (`SSHClientConnectionOptions`), iar `SSHClientConnection` le ţine cât trăieşte ea. Deci
-    parola rămânea în memoria gateway-ului până când conexiunea pica singură — uneori ore.
-
-    Nu e o escaladare (ca s-o citeşti îţi trebuie execuţie de cod în proces, iar atunci ai
-    şi cheia seifului), dar butonul promite ceva şi oamenii îl apasă tocmai ca acel ceva să
-    nu mai existe. O promisiune pe jumătate adevărată e mai rea decât una absentă.
-
-    Costul asumat: sesiunile SSH vii de pe hostul ăla se termină. E consecinţa corectă —
-    „uită credenţialele" se apasă când calea SSH nu mai e necesară (agentul a preluat), iar
-    o conexiune care supravieţuieşte ştergerii credenţialei e exact ce voiai să eviţi.
-    Semnalat ca zonă neexaminată de un audit extern; verificat şi confirmat în asyncssh."""
-    src = core.sources.get(host_id)
-    if not isinstance(src, core.SshSource):
-        return False
-    core.sources.pop(host_id, None)
-    try:
-        await src.disconnect()
-    except Exception:                       # noqa: BLE001 — închiderea e best-effort
-        log.warning("closing the ssh connection for host=%s failed", host_id, exc_info=True)
-    return True
-
-
-class ForgetCredsIn(BaseModel):
-    current_password: str = ""
-
-
-@router.post("/api/hosts/{host_id}/forget-credentials")
-async def forget_credentials(host_id: int, body: ForgetCredsIn,
-                             user=Depends(authz.perm('host.admin', host='host_id'))):
-    """Delete the stored SSH credentials (once the agent has taken over, or at any time).
-
-    F-05: ştergerea e IREVERSIBILĂ — dacă hostul nu mai are agent, credenţiala aia era
-    singurul mod de a ajunge la el din WebTerm. Cerea doar un cookie valid, deci era şi
-    ţinta ideală a unui CSRF (endpoint fără body, deci cerere „simplă"). Acum are body,
-    step-up pe hosturile cu 2FA, şi re-autentificare cu parola."""
-    await stepup.require_host_stepup(host_id, user)
-    if not await stepup.verify_reauth_password(user, body.current_password):
-        raise ApiError(401, "auth.wrongCurrentPassword",
-                       "re-enter your account password to forget the stored credentials")
-    await db.execute("UPDATE hosts SET credential_encrypted=NULL WHERE id=?", host_id)
-    dropped = await _drop_ssh_credential_in_memory(host_id)
-    return {"ok": True, "connection_closed": dropped}
-
-
 # ── [snippets] Snippets (comenzi salvate) ───────────────────────────────────────────
 
 class SnippetIn(BaseModel):
@@ -8604,8 +7406,8 @@ class SnippetIn(BaseModel):
 
 def _snippet_targets(raw) -> Optional[str]:
     """Validează + normalizează ţintele unui snippet → JSON de stocat sau None (fără ţinte).
-    Etichetele se normalizează EXACT ca la hosturi (`_tag_list`), ca „Prod" să nimerească
-    hostul etichetat „prod". Peste MAX_TAGS → 400, nu tăiere tăcută."""
+    Etichetele se normalizează EXACT ca la hosturi (`hostmodel.tag_list`), ca „Prod" să nimerească
+    hostul etichetat „prod". Peste hostmodel.MAX_TAGS → 400, nu tăiere tăcută."""
     if raw is None:
         return None
     if not isinstance(raw, dict) or set(raw) - {"tags"}:
@@ -8613,10 +7415,10 @@ def _snippet_targets(raw) -> Optional[str]:
     tags = raw.get("tags") or []
     if not isinstance(tags, list) or not all(isinstance(x, str) for x in tags):
         raise ApiError(400, "snippet.badTargets", "targets.tags must be a list of strings")
-    norm = _tag_list(" ".join(tags), limit=None)
-    if len(norm) > MAX_TAGS:
-        raise ApiError(400, "snippet.tooManyTags", "at most %d target tags" % MAX_TAGS,
-                       vars={"limit": MAX_TAGS})
+    norm = hostmodel.tag_list(" ".join(tags), limit=None)
+    if len(norm) > hostmodel.MAX_TAGS:
+        raise ApiError(400, "snippet.tooManyTags", "at most %d target tags" % hostmodel.MAX_TAGS,
+                       vars={"limit": hostmodel.MAX_TAGS})
     return json.dumps({"tags": norm}) if norm else None
 
 
@@ -8671,14 +7473,14 @@ async def seed_default_snippets() -> None:
     """Seed o singură dată snippet-urile de transfer. Idempotent (flag în KV); pe
     instalări existente rulează o dată, apoi niciodată. Utilizatorul le poate
     edita/șterge ca pe orice snippet."""
-    if await _get_setting("snippets_seeded"):
+    if await db.get_setting("snippets_seeded"):
         return
     for title, body in DEFAULT_SNIPPETS:
         dup = await db.fetchone("SELECT id FROM snippets WHERE title=? AND body=?", title, body)
         if not dup:
             await db.execute("INSERT INTO snippets(title, body, created) VALUES(?,?,?)",
                              title, body, time.time())
-    await _set_setting("snippets_seeded", "1")
+    await db.set_setting("snippets_seeded", "1")
 
 
 @router.get("/api/snippets")
@@ -8731,160 +7533,7 @@ async def delete_snippet(sid: int, user=Depends(security.require_user)):
     return {"ok": True}
 
 
-async def _refuse_if_jump_children(host_id: int) -> None:
-    """409 dacă sub host stau ţinte jump PERSISTENTE (`via_host_id`). Verificat ÎNAINTE de orice
-    efect ireversibil (deconectarea sursei, `uninstall` cerut agentului) — `core.purge_host` ar
-    refuza şi el, dar prea târziu. Copiii efemeri nu blochează: pleacă odată cu părintele."""
-    kids = await db.fetchall(
-        "SELECT id, name FROM hosts WHERE via_host_id=? AND id!=? AND ephemeral=0 ORDER BY name",
-        host_id, host_id)
-    if kids:
-        raise ApiError(409, "host.hasJumpChildren",
-                       "saved jump targets are routed through this host (%s); re-route or delete "
-                       "them first" % ", ".join(k["name"] for k in kids[:5]))
-
-
-# ── [hosts] Delete / uninstall host, autostart ────────────────────────────────────────────────────
-
-@router.delete("/api/hosts/{host_id}")
-async def delete_host(host_id: int, user=Depends(authz.perm("host.admin", host="host_id"))):
-    await stepup.require_host_stepup(host_id, user)   # F-05: ştergerea unui host cu 2FA e o acţiune de host
-    live = await db.fetchone(
-        "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')",
-        host_id)
-    if live:
-        raise ApiError(409, "host.hasLiveSessions", "the host has live sessions; close them first")
-    await _refuse_if_jump_children(host_id)
-    conn = core.sources.pop(host_id, None)
-    if conn:
-        try:
-            # prin interfața SessionSource, NU `conn.ws` — doar AgentConnection are `.ws`;
-            # pt. un host SSH (SshSource) `conn.ws` dădea AttributeError înghițit → conexiunea
-            # SSH nu se închidea niciodată (leak). `disconnect()` e definit pt. toate sursele.
-            await conn.disconnect()
-        except Exception:
-            pass
-    # Nimic nu cade automat: PRAGMA foreign_keys nu e setat, deci FOREIGN KEY ... ON DELETE CASCADE
-    # e inactiv, iar id-urile de host se reutilizează (INTEGER PRIMARY KEY fără AUTOINCREMENT).
-    # Aici se ştergeau doar `connections` (audit v53) — hostul următor cu acelaşi id moştenea
-    # forward-urile, sesiunile, cheia de deploy şi evenimentele celui vechi (G-12). `purge_host`
-    # curăţă TOT ce referenţiază hostul (transcripturile se arhivează, nu rămân orfane); cu
-    # curăţarea completă, reutilizarea id-ului e inofensivă — nu rescriem tabelul la AUTOINCREMENT.
-    await _purge_host_rows(host_id)
-    return {"ok": True}
-
-
-async def _purge_host_rows(host_id: int) -> None:
-    """`core.purge_host` tradus în răspuns HTTP: copiii jump persistenţi → 409 cu cod stabil."""
-    try:
-        await core.purge_host(host_id)
-    except core.HostHasDependents as e:
-        raise ApiError(409, "host.hasJumpChildren",
-                       "saved jump targets are routed through this host (ids %s); re-route or "
-                       "delete them first" % ", ".join(str(c) for c in e.children[:5]))
-
-
-@router.post("/api/hosts/{host_id}/uninstall")
-async def uninstall_host(host_id: int, force: bool = False,
-                         user=Depends(authz.perm("host.admin", host="host_id"))):
-    """Dezinstalează COMPLET agentul de pe server: îi cere să-și scoată supravegherea
-    (systemd/cron) + serverul tmux + fișierele din ~/.webterm/ și să iasă, apoi îl scoate din
-    WebTerm. Hosturile directe SSH/telnet n-au nimic instalat → doar scoatere din WebTerm.
-    `force=1`: scoate doar din WebTerm chiar dacă agentul e offline (fișierele rămân pe host)."""
-    await stepup.require_host_stepup(host_id, user)   # H1
-    row = await db.fetchone("SELECT * FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    live = await db.fetchone(
-        "SELECT id FROM sessions WHERE host_id=? AND state IN ('creating','live')", host_id)
-    if live:
-        raise ApiError(409, "host.hasLiveSessions", "the host has live sessions; close them first")
-    await _refuse_if_jump_children(host_id)     # înainte să-i cerem agentului să se dezinstaleze
-
-    ctype = conntypes.of(row)
-    uninstalled = False
-    warnings = []
-    if ctype == "agent":
-        conn = core.sources.get(host_id)
-        if isinstance(conn, core.AgentConnection):
-            try:
-                resp = await conn.request("uninstall", timeout=20)
-                uninstalled = bool(resp.get("ok"))
-                warnings = resp.get("warnings", []) or []
-            except (core.AgentGone, asyncio.TimeoutError):
-                if not force:
-                    raise ApiError(409, "host.uninstallNoAnswer",
-                                   "the agent did not answer; retry while it is online, "
-                                   "or pass force=1 to drop it from WebTerm only "
-                                   "(the files stay on the server, to be cleaned up by hand)")
-        elif not force:
-            raise ApiError(409, "host.uninstallOffline",
-                           "the agent is offline; it cannot be uninstalled remotely "
-                           "right now. Bring it online and retry, or pass force=1 to "
-                           "drop it from WebTerm only.")
-
-    c = core.sources.pop(host_id, None)
-    if c and not uninstalled:
-        try:
-            await c.disconnect()
-        except Exception:
-            pass
-    await _purge_host_rows(host_id)     # curăţare completă, vezi delete_host (G-12)
-    return {"ok": True, "uninstalled": uninstalled, "warnings": warnings}
-
-
-class AutostartIn(BaseModel):
-    enable: bool
-    stepup_grant: str = ""       # 2FA: grant/parolă pt. host-uri cu require_2fa (H1)
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-AUTOSTART_MIN_AGENT = 57         # op-ul `autostart` există din agentul v57
-
-
-@router.post("/api/hosts/{host_id}/autostart")
-async def host_autostart(host_id: int, body: AutostartIn, request: Request,
-                         user=Depends(authz.perm('host.admin', host='host_id'))):
-    """Porneşte / opreşte pornirea agentului la boot (systemd --user, altfel cron — ca
-    instalatorul). Agentul care rulează ACUM nu e atins: efectul e la următorul reboot.
-    Răspunsul poartă starea NOUĂ citită înapoi de agent, stocată imediat (badge-ul din sidebar
-    nu aşteaptă diagnosticul orar). Fără root, `linger` rămâne de obicei oprit → `hint`."""
-    await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)   # H1
-    audit.detail(request, "autostart %s" % ("enable" if body.enable else "disable"))
-    row = await db.fetchone("SELECT id, connection_type FROM hosts WHERE id=?", host_id)
-    if not row:
-        raise ApiError(404, "host.missing", "no such host")
-    if not conntypes.is_agent(row):
-        raise ApiError(400, "host.autostartNotAgent",
-                       "only hosts with an agent have something to start at boot")
-    conn = core.sources.get(host_id)
-    if not isinstance(conn, core.AgentConnection):
-        raise ApiError(409, "host.offline", "the host is offline; its agent is not connected")
-    if (conn.agent_version or 0) < AUTOSTART_MIN_AGENT:
-        raise ApiError(409, "host.autostartAgentOld",
-                       "the agent on this host is too old to change autostart (needs v%d, has v%s); "
-                       "update it first" % (AUTOSTART_MIN_AGENT, conn.agent_version),
-                       vars={"need": AUTOSTART_MIN_AGENT, "have": conn.agent_version or 0})
-    try:
-        resp = await conn.request("autostart", enable=body.enable, timeout=30)
-    except (core.AgentGone, asyncio.TimeoutError):
-        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
-    sup = core.supervision_summary({"supervision": resp.get("supervision")})
-    if sup:
-        await db.execute("UPDATE hosts SET supervision_summary=? WHERE id=?",
-                         json.dumps(sup), host_id)
-    if not resp.get("ok"):
-        raise ApiError(400, "host.autostartFailed",
-                       "could not change autostart: %s" % core.clip(resp.get("msg") or
-                                                                    resp.get("code") or "?", 300),
-                       vars={"reason": core.clip(resp.get("msg") or "", 200) or ""})
-    return {"ok": True, "supervision": sup, "hint": core.clip(resp.get("hint") or "", 500) or ""}
-
-
-# ---------------------------------------------------------------------------
-# Sessions
-# ---------------------------------------------------------------------------
+# ── [sessions] Session request models + JSON ────────────────────────────────────────────────────
 
 class SessionIn(BaseModel):
     title: str = ""
@@ -9048,8 +7697,8 @@ async def host_generate_ssh_key(host_id: int, body: SessionIn, user=Depends(auth
         raise ApiError(400, "sshkey.notSsh", "SSH key generation is only for SSH hosts")
     await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     k = asyncssh.generate_private_key("ssh-ed25519")
-    # ACELAŞI format de blob ca `_credential_blob` ({"key": PEM}). Până în 3.5.4 aici se scria
-    # PEM-ul gol, iar conectarea cu cheia generată crăpa la json.loads (vezi _decode_credential).
+    # ACELAŞI format de blob ca `hostmodel.credential_blob` ({"key": PEM}). Până în 3.5.4 aici se scria
+    # PEM-ul gol, iar conectarea cu cheia generată crăpa la json.loads (vezi hostmodel.decode_credential).
     await db.execute(
         "UPDATE hosts SET auth_method='key', credential_policy='stored', credential_encrypted=? WHERE id=?",
         security.encrypt_secret(json.dumps({"key": k.export_private_key().decode()})), host_id)
@@ -9070,364 +7719,12 @@ async def host_ssh_key_public(host_id: int, body: SessionIn, user=Depends(authz.
     try:
         # blobul e {"key": PEM, "passphrase"?} (sau PEM gol, pe rânduri dinainte de 3.5.4);
         # înainte se importa blobul JSON ca atare, deci „Show public key" pica pe ORICE cheie lipită
-        cred = _decode_credential(row["credential_encrypted"])
+        cred = hostmodel.decode_credential(row["credential_encrypted"])
         k = asyncssh.import_private_key(cred["key"], cred.get("passphrase") or None)
     except Exception:                                   # noqa: BLE001
         raise ApiError(400, "sshkey.badKey", "the stored SSH credential is not a private key (it may be a password)")
     return {"public_key": k.export_public_key().decode().strip(), "fingerprint": k.get_fingerprint(),
             "known_hosts": row["known_hosts"] or ""}
-
-
-# ── [hosts-test] Testul de conexiune din Add host + cheia generată la creare (3.5.4) ──────
-# `POST /api/hosts/test` rulează dial-ul real (core.probe_ssh / probe_telnet) cu câmpurile din
-# formular, fără să salveze nimic. Poate sonda ORICE gazdă:port, adică e un scaner de porturi
-# din interiorul reţelei gazdei — de-aia: doar cookie (nu token de automatizare), plafon per
-# user, metadatele cloud blocate (după rezolvare, nu doar pe text), portul validat, audit fără
-# credenţial. Credenţialul din cerere trăieşte doar în memorie, pe durata testului.
-
-# Aceeaşi listă ca la webhook / SMTP: reţelele private rămân permise (un server SSH în LAN e
-# exact ţinta unui produs self-hosted), doar serviciul de metadate al cloudului e refuzat.
-_METADATA_HOSTS = ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254")
-
-
-def _is_metadata_target(host: str) -> bool:
-    """Numele sau adresa (inclusiv forma IPv4-mapată `::ffff:169.254.169.254`) e cea de metadate."""
-    import ipaddress
-    h = (host or "").strip().strip("[]").lower().rstrip(".")
-    if h in _METADATA_HOSTS:
-        return True
-    try:
-        ip = ipaddress.ip_address(h.split("%", 1)[0])
-    except ValueError:
-        return False
-    if ip.version == 6 and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
-    return str(ip) in _METADATA_HOSTS
-
-
-HOSTTEST_RATE = 10              # teste per user …
-HOSTTEST_WINDOW = 60.0          # … pe fereastra asta (secunde)
-_hosttest_hits: dict = {}       # user_id -> [monotonic, …]
-
-
-def _hosttest_rate(user_id) -> None:
-    now = time.monotonic()
-    hits = [t for t in _hosttest_hits.get(user_id, []) if now - t < HOSTTEST_WINDOW]
-    if len(hits) >= HOSTTEST_RATE:
-        retry = int(HOSTTEST_WINDOW - (now - hits[0])) + 1
-        _hosttest_hits[user_id] = hits
-        raise ApiError(429, "hosttest.rateLimited",
-                       "too many connection tests; retry in %ds" % retry,
-                       headers={"Retry-After": str(retry)}, vars={"retry": retry})
-    hits.append(now)
-    _hosttest_hits[user_id] = hits
-
-
-# Cheia de host văzută de ultimul test, per (user, ţintă). Create/update acceptă `pin_hostkey`
-# DOAR dacă e exact cheia de aici: clientul nu poate „inventa" un pin, poate doar confirma ce a
-# văzut serverul. RAM, ~10 min — un restart îl goleşte (salvarea cade atunci pe TOFU).
-HOSTKEY_TEST_TTL = 600.0
-_tested_hostkeys: dict = {}     # (user_id, via, host, port) -> (keyline, fingerprint, monotonic)
-
-
-def _test_target(user_id, ctype: str, hostname: str, port, via) -> tuple:
-    jump = ctype in conntypes.JUMP
-    return (user_id, int(via or 0) if jump else 0, (hostname or "").strip().lower(), int(port or 0))
-
-
-def _same_hostkey(a: str, b: str) -> bool:
-    """Două linii de cheie publică OpenSSH sunt aceeaşi cheie (tip + blob; comentariul nu contează)."""
-    pa, pb = (a or "").split(), (b or "").split()
-    return len(pa) >= 2 and len(pb) >= 2 and pa[:2] == pb[:2]
-
-
-def _remember_tested_hostkey(target: tuple, keyline: str, fp: str) -> None:
-    now = time.monotonic()
-    for k in [k for k, v in _tested_hostkeys.items() if now - v[2] > HOSTKEY_TEST_TTL]:
-        _tested_hostkeys.pop(k, None)
-    if len(_tested_hostkeys) > 2000:            # plafon dur: cel mai vechi pleacă
-        _tested_hostkeys.pop(min(_tested_hostkeys, key=lambda k: _tested_hostkeys[k][2]), None)
-    _tested_hostkeys[target] = (keyline, fp, now)
-
-
-def _verified_pin(user_id, ctype: str, hostname: str, port, via, pin: str) -> str:
-    """Linia de cheie de pinat (cea văzută de server, NU textul clientului) — sau 400. `pin` poate
-    fi linia publică întoarsă de test sau amprenta ei SHA256."""
-    ent = _tested_hostkeys.get(_test_target(user_id, ctype, hostname, port, via))
-    pin = (pin or "").strip()
-    if (ent and time.monotonic() - ent[2] <= HOSTKEY_TEST_TTL
-            and (pin == ent[1] or _same_hostkey(pin, ent[0]))):
-        return ent[0]
-    raise ApiError(400, "hosttest.pinMismatch",
-                   "pin_hostkey does not match the host key seen by a recent connection test "
-                   "of this target — run the test again")
-
-
-async def _pending_key(user_id, pending_id: str):
-    """Rândul cheii în aşteptare — al ACESTUI user şi neexpirat — sau 400."""
-    row = None
-    if pending_id:
-        row = await db.fetchone(
-            "SELECT * FROM pending_ssh_keys WHERE id=? AND user_id=? AND created>=?",
-            pending_id, user_id, time.time() - core.PENDING_KEY_TTL)
-    if not row:
-        raise ApiError(400, "sshkey.pendingMissing",
-                       "the generated key expired or does not exist — generate a new one")
-    return row
-
-
-async def _claim_pending_key(user_id, pending_id: str) -> str:
-    """Revendicare ATOMICĂ (DELETE … RETURNING): blobul criptat al privatei, o singură dată."""
-    row = await db.execute_returning(
-        "DELETE FROM pending_ssh_keys WHERE id=? AND user_id=? AND created>=? "
-        "RETURNING credential_encrypted",
-        pending_id, user_id, time.time() - core.PENDING_KEY_TTL)
-    if not row:
-        raise ApiError(400, "sshkey.pendingMissing",
-                       "the generated key expired or does not exist — generate a new one")
-    return row["credential_encrypted"]
-
-
-@router.post("/api/hosts/ssh-key/pending")
-async def pending_ssh_key(request: Request, user=Depends(authz.perm("hosts.create"))):
-    """Generează o pereche Ed25519 ÎNAINTE ca hostul să existe (formularul Add host): privata
-    stă criptată în seif, legată de user, ~1h; întoarce publica + `pending_key_id`. Create /
-    update cu `pending_key_id` o leagă de host ca credenţial stocat. Doar Ed25519."""
-    await core.purge_pending_ssh_keys()
-    # plafon per user: cele mai vechi pleacă (un dublu-click nu blochează pe nimeni o oră)
-    old = await db.fetchall("SELECT id FROM pending_ssh_keys WHERE user_id=? ORDER BY created DESC",
-                            user["id"])
-    for r in old[core.PENDING_KEYS_PER_USER - 1:]:
-        await db.execute("DELETE FROM pending_ssh_keys WHERE id=?", r["id"])
-    k = asyncssh.generate_private_key("ssh-ed25519", comment="webterm")
-    pub = k.export_public_key().decode().strip()
-    fp = k.get_fingerprint()
-    pid = security.new_token()[:32]
-    now = time.time()
-    await db.execute(
-        "INSERT INTO pending_ssh_keys(id, user_id, credential_encrypted, public_key, fingerprint, created)"
-        " VALUES(?,?,?,?,?,?)", pid, user["id"],
-        security.encrypt_secret(json.dumps({"key": k.export_private_key().decode()})), pub, fp, now)
-    audit.detail(request, "generated a pending SSH key %s" % fp)
-    return {"pending_key_id": pid, "public_key": pub, "fingerprint": fp,
-            "expires": now + core.PENDING_KEY_TTL}
-
-
-class HostTestIn(BaseModel):
-    connection_type: str = "ssh"         # ssh | ssh-jump | telnet | telnet-jump
-    hostname: str = ""
-    ssh_port: Optional[int] = None       # None = portul implicit al protocolului
-    ssh_username: str = ""
-    auth_method: str = "password"        # password | key
-    credential: str = ""                 # write-only, doar în memorie pe durata testului
-    passphrase: str = ""
-    via_host_id: int = 0                 # familia jump: agentul prin care tunelăm
-    host_id: int = 0                     # editare: hostul existent (credenţialul stocat + pinul lui)
-    pending_key_id: str = ""             # cheia generată în formular, încă nelegată
-    # lot 2: cheia publică pe care omul a văzut-o (amprenta) şi o acceptă — abia atunci testul
-    # trimite PAROLA; fără ea, la primul contact testul se opreşte la host key
-    trust_hostkey: str = ""
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-# Etapa picată → cod i18n, când clasa e a testului (TCP, banner, pin…). Cauzele care au deja un
-# cod la conectarea reală (auth respinsă, agent care nu ajunge la ţintă, eroare SSH) trec prin
-# `_ssh_dial_error`, ca formularul să arate EXACT mesajul pe care l-ar vedea omul la conectare.
-_HOSTTEST_CODES = (
-    ("tcp:dns", "hosttest.dns"),
-    ("tcp:refused", "hosttest.refused"),
-    ("tcp:unreachable", "hosttest.unreachable"),
-    ("tcp:timeout", "hosttest.tcpTimeout"),
-    ("banner:not_ssh", "hosttest.notSsh"),
-    ("banner:closed", "hosttest.closed"),
-    ("banner:silent", "hosttest.telnetSilent"),
-    ("hostkey:mismatch", "hosttest.hostKeyMismatch"),
-    ("hostkey:timeout", "hosttest.timeout"),
-    ("auth:timeout", "hosttest.timeout"),
-    ("auth:skipped", "hosttest.authSkipped"),
-)
-
-
-def _hosttest_stage(st: dict, row: dict, ssh: bool, expected_fp: str = "", offered_fp: str = "") -> dict:
-    """Etapa din core → forma publică {id, ok, ms?, code?, vars?, detail?, warn?, skipped?}.
-    Excepţia (cu textul ei englezesc) NU iese din server — doar codul."""
-    out = {"id": st["id"], "ok": bool(st["ok"])}
-    for f in ("ms", "detail", "warn", "skipped"):
-        if st.get(f) is not None:
-            out[f] = st[f]
-    if st["ok"]:
-        return out
-    kind, exc = st.get("kind") or "", st.get("exc")
-    code = dict(_HOSTTEST_CODES).get("%s:%s" % (st["id"], kind)) if kind else None
-    if st["id"] == "banner" and kind == "timeout":
-        code = "ssh.noBanner" if ssh else "hosttest.closed"
-    if code is None:
-        if exc is not None:
-            err = _ssh_dial_error(exc, row)
-            code = err.code
-            if err.vars:
-                out["vars"] = err.vars
-        else:
-            code = "hosttest.failed"
-    if code == "hosttest.hostKeyMismatch":
-        out["vars"] = {"old_fp": expected_fp, "new_fp": offered_fp}
-    out["code"] = code
-    return out
-
-
-# INV-01 (docs/design/INVARIANTS.md): parola stocată se folosește doar pe ACEEAȘI țintă.
-@router.post("/api/hosts/test")
-async def test_host_connection(body: HostTestIn, request: Request, user=Depends(authz.perm('hosts.create'))):
-    """„Test connection" din Add host / Edit host: tcp → banner → host key → auth, cu dial-ul real,
-    fără să salveze nimic. Întoarce {ok, stages, hostkey?}; textul îl pune UI-ul din coduri."""
-    ctype = body.connection_type or ""
-    if ctype not in conntypes.NETWORK:
-        raise ApiError(400, "hosttest.badType", "connection tests are for ssh, ssh-jump, telnet and telnet-jump")
-    ssh = ctype in conntypes.SSH_FAMILY
-    hostname = body.hostname.strip()
-    # urma în jurnal ÎNAINTE de orice refuz: o sondă blocată (metadate, plafon) contează la audit
-    audit.detail(request, "connection test (%s) to %s:%s" % (ctype, hostname[:200], body.ssh_port or ""))
-    if not hostname:
-        raise ApiError(400, "host.hostnameRequired", "hostname required for a direct connection")
-    port = body.ssh_port if body.ssh_port is not None else (22 if ssh else 23)
-    if not 1 <= int(port) <= 65535:
-        raise ApiError(400, "hosttest.badPort", "the port must be between 1 and 65535")
-    if ssh and not body.ssh_username.strip():
-        raise ApiError(400, "ssh.userRequired", "an SSH username is required")
-    if len(hostname) > 253 or any(c.isspace() or ord(c) < 32 for c in hostname):
-        raise ApiError(400, "hosttest.badHost", "not a valid host name or address")
-    row = None
-    # 3.6: testul foloseşte credenţialul STOCAT al hostului editat → `host.edit` pe el; o ţintă
-    # jump deschide TCP din agentul `via` → `forward.manage` acolo (§A.11.4). Ambele înainte de
-    # existenţă/step-up: un host invizibil dă 404 ca unul inexistent.
-    if body.host_id:
-        await authz.require_on(request, body.host_id, "host.edit")
-    if ctype in conntypes.JUMP and body.via_host_id:
-        await authz.require_on(request, body.via_host_id, "forward.manage")
-    if body.host_id:
-        row = await db.fetchone("SELECT * FROM hosts WHERE id=?", body.host_id)
-        if not row:
-            raise ApiError(404, "host.missing", "no such host")
-        # testul cu credenţialul STOCAT al unui host = conectare la el: aceleaşi cerinţe de step-up
-        await stepup.require_host_stepup(body.host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    _hosttest_rate(user["id"])
-    if _is_metadata_target(hostname):
-        raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
-    via = body.via_host_id if ctype in conntypes.JUMP else 0
-    if via:
-        vrow = await db.fetchone("SELECT connection_type FROM hosts WHERE id=?", via)
-        if not vrow or not conntypes.is_agent(vrow):
-            raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
-        if not isinstance(core.sources.get(via), core.AgentConnection):
-            raise ApiError(409, "hosttest.viaOffline", "the jump host's agent is offline — the test needs it online")
-    elif ctype in conntypes.JUMP:
-        raise ApiError(400, "sshjump.needsAgent", "pick an agent host to reach the target through")
-
-    # credenţialul: cheia generată > ce s-a tastat > cel stocat al hostului editat (doar dacă
-    # metoda e aceeaşi — altfel parola stocată ar fi încercată drept cheie). Nimic → auth sărit.
-    auth = "key" if body.auth_method == "key" else "password"
-    cred = None
-    if ssh:
-        if body.pending_key_id:
-            pk = await _pending_key(user["id"], body.pending_key_id)
-            cred, auth = _decode_credential(pk["credential_encrypted"]), "key"
-        elif body.credential:
-            cred = ({"key": body.credential, "passphrase": body.passphrase or None} if auth == "key"
-                    else {"password": body.credential})
-        elif (row is not None and row["credential_encrypted"] and row["credential_policy"] != "ask"
-              and (row["auth_method"] or "password") == auth
-              and (auth == "key" or not _retargets(row, ctype, hostname, port, via))):
-            # parola stocată doar spre ţinta pentru care a fost salvată (lot 2): pe o adresă nouă
-            # testul sare peste auth, ca la politica „ask" — nu trimite parola unui server nou
-            cred = _decode_credential(row["credential_encrypted"])
-        if cred is not None and auth == "key":
-            try:
-                asyncssh.import_private_key(cred.get("key") or "", cred.get("passphrase") or None)
-            except Exception:                           # noqa: BLE001 — cheie greşită / passphrase greşit
-                raise ApiError(400, "hosttest.badKey",
-                               "the private key could not be read — wrong passphrase, or not a private key")
-    target = {"id": body.host_id or 0, "name": row["name"] if row else hostname,
-              "connection_type": ctype, "hostname": hostname, "ssh_port": int(port),
-              "ssh_username": body.ssh_username.strip(), "auth_method": auth,
-              "via_host_id": via or None, "known_hosts": None}
-    # hostul editat, pe ACEEAŞI ţintă, are deja un pin: testul îl verifică (şi refuză înainte
-    # de auth dacă diferă) — exact ce ar face conectarea reală.
-    expected = ""
-    if (ssh and row is not None and row["known_hosts"]
-            and (row["hostname"] or "").lower() == hostname.lower()
-            and int(row["ssh_port"] or 22) == int(port)
-            and (row["via_host_id"] or 0) == (via or 0)):
-        expected = row["known_hosts"]
-    # Primul contact cu PAROLĂ (fără pin): parola pleacă abia după ce omul a văzut amprenta şi a
-    # acceptat-o (`trust_hostkey`), ca la OpenSSH. Probe-ul refuză ÎNAINTE de auth o cheie oferită
-    # diferită de cea acceptată. Fără acceptare: doar până la host key (raport 2026-11, lot 2).
-    needs_trust = False
-    if ssh and not expected and cred is not None and auth == "password":
-        trusted = (body.trust_hostkey or "").strip()
-        if trusted:
-            try:
-                asyncssh.import_public_key(trusted)
-            except Exception:                           # noqa: BLE001
-                raise ApiError(400, "hosttest.badTrustKey", "that is not an SSH public key")
-            expected = trusted
-        else:
-            cred, needs_trust = None, True
-
-    # rezolvare + poartă de metadate pe ADRESELE rezultate (un nume care rezolvă la 169.254.169.254
-    # nu trece). Jump: rezolvă agentul, în reţeaua lui — verificăm best-effort şi local.
-    addrs, pre = None, None
-    try:
-        resolved = await core.resolve_target(hostname, int(port))
-    except core.ProbeFailed as pf:
-        resolved = []
-        if not via:
-            pre = pf
-    if any(_is_metadata_target(sa[0]) for _f, sa in resolved):
-        raise ApiError(400, "hosttest.blocked", "that address is the cloud metadata service")
-    if not via:
-        addrs = resolved
-
-    if pre is not None:
-        res = {"stages": [{"id": "tcp", "ok": False, "ms": 0, "kind": pre.kind, "exc": pre.exc}],
-               "hostkey": None}
-    else:
-        probe = (core.probe_ssh(target, cred, addrs, expected) if ssh
-                 else core.probe_telnet(target, addrs))
-        try:
-            # plasa de siguranţă: probe-ul îşi respectă singur bugetul de PROBE_TIMEOUT
-            res = await asyncio.wait_for(probe, core.PROBE_TIMEOUT + 3)
-        except asyncio.TimeoutError:
-            res = {"stages": [{"id": "tcp", "ok": False, "kind": "timeout"}], "hostkey": None}
-
-    expected_fp = core.hostkey_fingerprint(expected) if expected else ""
-    hk = res.get("hostkey")
-    stages = [_hosttest_stage(st, target, ssh, expected_fp, hk["fingerprint_sha256"] if hk else "")
-              for st in res["stages"]]
-    ok = bool(stages) and all(s["ok"] or s.get("warn") or s.get("skipped") for s in stages)
-    hostkey_ok = any(s["id"] == "hostkey" and s["ok"] for s in stages)
-    if needs_trust and hostkey_ok:
-        # nu „reuşit": sign-in-ul aşteaptă confirmarea amprentei (UI: „Trust and test sign-in")
-        for st in stages:
-            if st["id"] == "auth":
-                st.update(ok=False, skipped=True, code="hosttest.confirmHostkey")
-        ok = False
-    out = {"ok": ok, "stages": stages}
-    if needs_trust and hostkey_ok:
-        out["needs_trust"] = True
-    if hk:
-        out["hostkey"] = {"type": hk["type"], "fingerprint_sha256": hk["fingerprint_sha256"]}
-        if hostkey_ok:
-            # cheia pe care create/update o vor accepta ca `pin_hostkey` (şi doar pe ea)
-            out["hostkey"]["key"] = hk["key"]
-            _remember_tested_hostkey(_test_target(user["id"], ctype, hostname, port, via),
-                                     hk["key"], hk["fingerprint_sha256"])
-    failed = next((s for s in stages if not s["ok"] and not s.get("warn") and not s.get("skipped")), None)
-    audit.detail(request, "connection test (%s) to %s:%s%s → %s" % (
-        ctype, hostname, port, " via host #%d" % via if via else "",
-        "ok" if not failed else "failed at %s (%s)" % (failed["id"], failed.get("code", ""))))
-    return out
 
 
 # ── [deploy-keys] Chei de deploy host→host (Toolbox → SSH keys) ────────────────────────────
@@ -9570,7 +7867,7 @@ async def _dk_policy() -> dict:
     `require_2fa_source`: nu generezi o cheie pe un host-sursă fără require_2fa (sursele =
     bijuteriile coroanei; un dev compromis poate sări pe ţinte). `require_restrict`: nu
     deployezi o cheie de shell complet — trebuie `restrict` şi/sau un `command=` forţat."""
-    raw = await _get_setting("deploykey_policy")
+    raw = await db.get_setting("deploykey_policy")
     cfg = {"require_2fa_source": False, "require_restrict": False}
     if raw:
         try:
@@ -9593,7 +7890,7 @@ async def get_deploy_key_policy(user=Depends(authz.perm('settings.manage'))):
 @router.post("/api/settings/deploy-key-policy")
 async def set_deploy_key_policy(body: DeployKeyPolicyIn, user=Depends(authz.perm('settings.manage'))):
     cfg = {"require_2fa_source": body.require_2fa_source, "require_restrict": body.require_restrict}
-    await _set_setting("deploykey_policy", json.dumps(cfg))
+    await db.set_setting("deploykey_policy", json.dumps(cfg))
     return cfg
 
 
@@ -10111,9 +8408,9 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
     await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     ctype = conntypes.of(row)
     if ctype in conntypes.SSH_FAMILY:
-        await _connect_direct(row, request, body.credential, body.passphrase)
+        await hostmodel.connect_direct(row, request, body.credential, body.passphrase)
     elif ctype == "telnet":
-        await _connect_telnet(row, request, body.credential)
+        await hostmodel.connect_telnet(row, request, body.credential)
     # telnet-jump: nicio pre-conectare per-host — sesiunea (ForwardTelnetSource) deschide
     # singură tunelul prin agentul `via_host_id` în create_telnet_jump_session (mai jos).
     title = body.title.strip()
@@ -10158,7 +8455,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # ca la docker_container. Glue, nu un package-manager reimplementat.
         if ctype != "agent":
             raise ApiError(400, "session.upgradeAgentOnly", "OS upgrade is only available on agent hosts")
-        mgr = (_host_updates(row) or {}).get("manager")
+        mgr = (hostmodel.host_updates(row) or {}).get("manager")
         base = {"apt": "apt-get update && apt-get upgrade", "dnf": "dnf upgrade"}.get(mgr)
         if not base:
             raise ApiError(400, "updates.noManager", "no known OS package manager on this host")
@@ -10528,8 +8825,8 @@ _BACKUP_GRACE = 86400
 
 
 async def _check_backup() -> dict:
-    sched = await _get_setting("backup_schedule", "off")
-    last_local = float(await _get_setting("backup_last", "0") or 0)
+    sched = await db.get_setting("backup_schedule", "off")
+    last_local = float(await db.get_setting("backup_last", "0") or 0)
     stored = backup.list_backups()
     if stored:
         last_local = max(last_local, float(stored[0]["created"]))
@@ -11504,7 +9801,7 @@ def _install_script_for(token: str) -> str:
 async def install_script(enroll_token: str, request: Request):
     enroll_token = enroll_token[:-3] if enroll_token.endswith(".sh") else enroll_token
     # Dacă hostul are o parolă de înrolare, o verificăm ÎNAINTE de revendicare (parola vine din
-    # header, nu din URL — vezi _install_command). Verificarea e SEPARATĂ de claim-ul single-use:
+    # header, nu din URL — vezi hostmodel.install_command). Verificarea e SEPARATĂ de claim-ul single-use:
     # o parolă greşită NU consumă tokenul (altfel o singură greşeală ar omorî înrolarea), dar e
     # plafonată per-host, ca tokenul din URL să nu poată fi folosit ca oracol de brute-force pe parolă.
     probe = await db.fetchone(
@@ -12186,7 +10483,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         "type": "init", "state": row["state"], "title": row["title"],
         "rows": row["rows"], "cols": row["cols"],
         "exit_status": row["exit_status"], "close_reason": row["close_reason"],
-        "host_online": bool(hrow) and _host_online(hrow),
+        "host_online": bool(hrow) and hostmodel.host_online(hrow),
         "your_id": client.id if client else None,
         # idle-lock (host 2FA): pragul şi momentul estimat al blocării, ca UI-ul să poată
         # avertiza („se blochează în 60 s") în loc să blocheze din senin (audit UX §6.c1)
@@ -12309,7 +10606,7 @@ async def browser_ws(ws: WebSocket, sid: str):
             host = await db.fetchone("SELECT * FROM hosts WHERE id=?", row["host_id"])
             if host and host["connection_type"] == "ssh" and host["credential_encrypted"]:
                 try:
-                    cred = _decode_credential(host["credential_encrypted"])
+                    cred = hostmodel.decode_credential(host["credential_encrypted"])
                     conn = await core.dial_ssh(host, cred)
                     await conn.create(sid, row["rows"], row["cols"], "xterm-256color")
                 except Exception as e:

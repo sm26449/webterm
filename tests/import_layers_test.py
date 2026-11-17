@@ -73,6 +73,15 @@ def main():
     check("doar main.py importă api (rutele sunt vârful, nu o bibliotecă)", not back,
           "importă api: %s — mută helperul într-un modul de jos (vezi shares.py, fwddomain.py)" % back)
 
+    # Rutele mutate din api.py în module proprii (hosts_api.py…) sunt tot vârful: doar main.py
+    # le montează. Un modul de rute care importă alt modul de rute e începutul ciclului de dinainte.
+    route_mods = {"hosts_api"}
+    check("modulele de rute mutate din api.py chiar există", all((APP / (m + ".py")).exists() for m in route_mods),
+          str(route_mods))
+    back = sorted({(f.stem, m) for f in files for m, _ in imports(f) if m in route_mods and f.stem != "main"})
+    check("doar main.py importă modulele de rute (hosts_api)", not back,
+          "%s — helperul comun coboară în hostmodel.py (sau alt modul de jos)" % back)
+
     local = {(f.stem, m) for f in files for m, is_local in imports(f) if is_local and m != f.stem}
     new = sorted(local - set(LOCAL_OK))
     check("niciun import local nou între module (ar ascunde un ciclu)", not new,

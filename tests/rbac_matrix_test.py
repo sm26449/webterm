@@ -15,13 +15,17 @@ Separat: ordinea autorizare → step-up (pe un host 2FA, cine n-are acces prime�
 `stepup.*` — step-up-ul nu e un oracol; cine are acces dă în continuare de step-up).
 """
 import asyncio
+import pathlib
 import re
 
 import rbac_util as U
-from app import api, authz, db, oidc_api, webauthn_api
+from app import api, authz, db, hosts_api, oidc_api, webauthn_api
 
 check = U.Checker()
-ROUTERS = [api.router, webauthn_api.router, oidc_api.router]
+ROUTERS = {"api": api.router, "hosts_api": hosts_api.router, "webauthn_api": webauthn_api.router,
+           "oidc_api": oidc_api.router}
+# SCIM nu intră în matrice: e autentificat cu bearer-ul SCIM, nu cu cookie + rol (scim_*_test).
+NOT_IN_MATRIX = {"scim"}
 NOPE = 987654          # id care nu există
 
 
@@ -79,6 +83,13 @@ LOC_CODE = {"host_id": "host.missing", "body": "host.missing", "sid": "session.m
 
 
 async def main():
+    # Garda de completitudine (ca în route_auth_test): un router montat în main.py şi uitat aici
+    # scotea TĂCUT toate rutele lui din matrice — aşa au ieşit rutele de hosts la mutarea în
+    # hosts_api.py (84 de verificări), cu testul tot verde.
+    main_src = (pathlib.Path(__file__).resolve().parent.parent / "gateway" / "app" / "main.py").read_text()
+    mounted = set(re.findall(r"app\.include_router\((\w+)\.router\)", main_src))
+    check("fiecare router montat în main.py e în matrice (sau exclus cu motiv)",
+          mounted == set(ROUTERS) | NOT_IN_MATRIX, "montate: %s | în matrice: %s" % (sorted(mounted), sorted(ROUTERS)))
     await U.boot()
     owner = await U.owner_client()
     a = await U.add_host(owner, "alpha", folder="prod", tags="web")
@@ -116,7 +127,7 @@ async def main():
          "token": False},
     ]
 
-    rp = authz.route_perms(ROUTERS)
+    rp = authz.route_perms(list(ROUTERS.values()))
     routes = sorted((k, v) for k, v in rp.items() if v[0] != "public" and k[0] != "WS")
     check("matricea are rute de testat (generată, nu scrisă de mână)", len(routes) > 150,
           str(len(routes)))

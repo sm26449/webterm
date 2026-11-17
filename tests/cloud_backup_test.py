@@ -186,13 +186,13 @@ async def main():
     T0 = 1_800_000_000.0
     r = await api.scheduled_backup_tick(now=T0)
     check("schedule off → tick sărit", r.get("skipped") == "off")
-    await api._set_setting("backup_schedule", "daily")
-    await api._set_setting("backup_last", "0")
+    await db.set_setting("backup_schedule", "daily")
+    await db.set_setting("backup_last", "0")
     r = await api.scheduled_backup_tick(now=T0)
     check("daily fără backup anterior → rulează la PRIMUL tick (nu după 1h de la boot)",
           r.get("ok") is True)
-    check("backup_last = ts-ul succesului", float(await api._get_setting("backup_last")) == T0)
-    check("backup_last_error gol după succes", not (await api._get_setting("backup_last_error")))
+    check("backup_last = ts-ul succesului", float(await db.get_setting("backup_last")) == T0)
+    check("backup_last_error gol după succes", not (await db.get_setting("backup_last_error")))
     check("arhiva programată a plecat şi off-host",
           any(f["name"] == r["name"].replace(".wtsnap", ".wtbk") for f in fake.files))
     r = await api.scheduled_backup_tick(now=T0 + 3600)
@@ -216,21 +216,21 @@ async def main():
     finally:
         backup.run_scheduled_backup = orig_run
         email_alerts.notify_local_backup_failed = orig_alert
-    err = json.loads(await api._get_setting("backup_last_error") or "{}")
+    err = json.loads(await db.get_setting("backup_last_error") or "{}")
     check("eşec → backup_last_error cu mesaj + ts",
           "No space" in err.get("error", "") and err.get("ts") == T1)
     check("eşec → backup_last rămâne la ultimul SUCCES",
-          float(await api._get_setting("backup_last")) == T_OK)
-    run = json.loads(await api._get_setting("backup_last_run") or "{}")
+          float(await db.get_setting("backup_last")) == T_OK)
+    run = json.loads(await db.get_setting("backup_last_run") or "{}")
     check("backup_last_run reflectă încercarea eşuată", run.get("ok") is False)
     check("alerta „backup local eşuat” a fost emisă cu mesajul şi ultimul succes",
           len(alerts) == 1 and "No space" in alerts[0][0] and alerts[0][1] == T_OK)
-    await api._set_setting("backup_seen", str(T_OK))
+    await db.set_setting("backup_seen", str(T_OK))
     check("punctul de notificare se aprinde şi la eşec, nu doar la succes",
           await api._backup_needs_attention())
     r = await api.scheduled_backup_tick(now=T1 + 60)
     check("după eşec reîncercarea e scadentă imediat şi reuşeşte", r.get("ok") is True)
-    check("succesul GOLEŞTE backup_last_error", not (await api._get_setting("backup_last_error")))
+    check("succesul GOLEŞTE backup_last_error", not (await db.get_setting("backup_last_error")))
 
     # eşec DOAR off-host → backup-ul local e bun, dar eroarea (cu destinaţia) apare în backup
     orig_up = fake.upload
@@ -242,7 +242,7 @@ async def main():
         r = await api.scheduled_backup_tick(now=T1 + 86400 + 120)
     finally:
         fake.upload = orig_up
-    err = json.loads(await api._get_setting("backup_last_error") or "{}")
+    err = json.loads(await db.get_setting("backup_last_error") or "{}")
     check("eşec cloud → local ok, backup_last_error = destinaţie + mesaj (stage=cloud)",
           r.get("ok") is True and err.get("stage") == "cloud" and err.get("error", "").startswith("fake:"))
 
@@ -262,7 +262,7 @@ async def main():
     check("gardă: din două tick-uri simultane rulează UNUL, celălalt e sărit (`running`)",
           sum(1 for x in (r1, r2) if x.get("ok")) == 1
           and any(x.get("skipped") == "running" for x in (r1, r2)) and len(calls) == 1)
-    await api._set_setting("backup_schedule", "off")
+    await db.set_setting("backup_schedule", "off")
 
     # ── schimbarea providerului invalidează autorizarea (token pentru alt cont) ──
     await cloudbackup.save_config("fake", "alt-client", "", BK_PASS, 3, False)

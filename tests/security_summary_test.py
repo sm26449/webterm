@@ -133,10 +133,10 @@ async def main():
         check("guardrail: implicit (activ, cu reguli) → ok",
               s["guardrail"]["status"] == "ok" and s["guardrail"]["value"]["rules"] > 0,
               str(s["guardrail"]))
-        await api._set_setting("command_guard", '{"enabled": false, "rules": [{"pattern": "x"}]}')
+        await db.set_setting("command_guard", '{"enabled": false, "rules": [{"pattern": "x"}]}')
         s = await summary(c)
         check("guardrail: dezactivat → warn", s["guardrail"]["status"] == "warn", str(s["guardrail"]))
-        await api._set_setting("command_guard", '{"enabled": true, "rules": []}')
+        await db.set_setting("command_guard", '{"enabled": true, "rules": []}')
         s = await summary(c)
         check("guardrail: activ dar 0 reguli → warn",
               s["guardrail"]["status"] == "warn" and s["guardrail"]["value"] == {"enabled": True, "rules": 0},
@@ -160,35 +160,35 @@ async def main():
         check("backup: niciodată → bad",
               s["backup"]["status"] == "bad" and s["backup"]["value"]["last_ok"] is None,
               str(s["backup"]))
-        await api._set_setting("backup_last", str(time.time() - 3600))
+        await db.set_setting("backup_last", str(time.time() - 3600))
         s = await summary(c)
         check("backup: reuşit acum o oră → ok", s["backup"]["status"] == "ok", str(s["backup"]))
         check("backup: fără off-site → nu se pretinde criptat",
               s["backup"]["value"]["offsite"] is False and s["backup"]["value"]["encrypted"] is False,
               str(s["backup"]["value"]))
-        await api._set_setting("backup_last", str(time.time() - 3 * 86400))
+        await db.set_setting("backup_last", str(time.time() - 3 * 86400))
         s = await summary(c)
         check("backup: ultimul reuşit acum 3 zile (fără programare) → warn",
               s["backup"]["status"] == "warn", str(s["backup"]))
-        await api._set_setting("backup_schedule", "weekly")
+        await db.set_setting("backup_schedule", "weekly")
         s = await summary(c)
         check("backup: 3 zile pe o programare SĂPTĂMÂNALĂ → ok (nu zgomot)",
               s["backup"]["status"] == "ok", str(s["backup"]))
-        await api._set_setting("backup_last_error",
+        await db.set_setting("backup_last_error",
                                '{"ts": %f, "error": "disk full", "stage": "snapshot"}' % time.time())
         s = await summary(c)
         check("backup: ultima încercare a eşuat → bad, cu etapa (fără textul erorii)",
               s["backup"]["status"] == "bad" and s["backup"]["value"]["failed_stage"] == "snapshot"
               and "disk full" not in str(s["backup"]), str(s["backup"]))
-        await api._set_setting("backup_last_error", "")
+        await db.set_setting("backup_last_error", "")
 
         # ── alerts ────────────────────────────────────────────────────────────
         check("alerts: nici SMTP, nici webhook → warn",
               s["alerts"]["status"] == "warn" and s["alerts"]["value"] == {"smtp": False, "webhook": False},
               str(s["alerts"]))
         hook = "https://hooks.example.com/services/SECRET-PATH-123"
-        await api._set_setting("alert_webhook", hook)
-        await api._set_setting("smtp_password_enc", security.encrypt_secret("smtp-parola-secreta"))
+        await db.set_setting("alert_webhook", hook)
+        await db.set_setting("smtp_password_enc", security.encrypt_secret("smtp-parola-secreta"))
         r = await c.get("/api/security/summary")
         s = {x["id"]: x for x in r.json()["checks"]}
         check("alerts: webhook configurat → ok", s["alerts"]["status"] == "ok", str(s["alerts"]))
