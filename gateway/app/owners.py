@@ -79,7 +79,7 @@ async def last_break_glass(uid: int, exclude_binding: Optional[int] = None) -> b
     `has_local_password`). Nothing to protect when `uid` is not such an account itself (an
     SSO-only or disabled one, or one whose Owner binding is not the one being removed): then
     the change does not touch the break-glass count, whatever that count is. Call under
-    `authz._lock` wherever the caller writes."""
+    `authz.bindings_lock` wherever the caller writes."""
     row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d, COALESCE(local_password, 1) AS lp"
                             " FROM users WHERE id=?", uid)
     if row is None or row["d"] or not row["lp"]:

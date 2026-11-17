@@ -176,7 +176,7 @@ _CACHE_TTL = 30.0
 # without that, an expired binding kept working for up to _CACHE_TTL.
 _cache: dict[int, tuple[int, float, Optional[float], "Grants"]] = {}
 _waiters: set = set()                  # asyncio.Event per live WebSocket / forward socket
-_lock = asyncio.Lock()                 # serialises binding mutations (check-then-act)
+bindings_lock = asyncio.Lock()         # serialises binding mutations (check-then-act)
 
 
 def epoch() -> int:
@@ -191,6 +191,12 @@ def bump_epoch() -> None:
     _cache.clear()
     for ev in list(_waiters):
         ev.set()
+
+
+def forget_cached(user_id: int) -> None:
+    """Uită grantul din cache al unui singur user, ca următoarea verificare să-l recitească din DB
+    (după o suspendare — re-auth — sau după o schimbare care îl priveşte doar pe el)."""
+    _cache.pop(user_id, None)
 
 
 def subscribe() -> asyncio.Event:
@@ -219,7 +225,7 @@ async def poll_external_epoch() -> None:
 
 
 # ── grants ───────────────────────────────────────────────────────────────────────────────────
-def _tags(s) -> frozenset:
+def tag_set(s) -> frozenset:
     """Same tokenisation as api._tag_list (comma/space separated, lowercase, 32 chars)."""
     return frozenset(t.strip().lower()[:32] for t in (s or "").replace(",", " ").split() if t.strip())
 
@@ -341,7 +347,7 @@ def _binding_from_row(r, now: float) -> Optional[Binding]:
                    r["expires"], r["role_id"])
 
 
-async def _load_bindings(user_id: int) -> list:
+async def load_bindings(user_id: int) -> list:
     now = time.time()
     rows = await db.fetchall(
         "SELECT " + _BINDING_COLS
@@ -351,7 +357,7 @@ async def _load_bindings(user_id: int) -> list:
 
 async def load_bindings_for(user_ids) -> dict:
     """{uid: [Binding, …]} for all `user_ids` in ONE query per 500 — the per-account
-    `_load_bindings` SELECT, batched, so the Accounts list is one query, not one per account
+    `load_bindings` SELECT, batched, so the Accounts list is one query, not one per account
     (PF-01/SC-14). Every requested uid gets an entry (empty list if it has no bindings)."""
     now = time.time()
     ids = sorted({int(u) for u in user_ids})
@@ -421,7 +427,7 @@ async def grants_for_user(user_id: Optional[int]) -> Grants:
     # 3.6.11: un cont DEZACTIVAT (SCIM) nu are niciun drept — legăturile rămân (pentru o
     # reactivare), dar nu se citesc. Necunoscut/lipsă = cont şters: tot nimic (fail-closed).
     row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d FROM users WHERE id=?", user_id)
-    bindings = [] if row is None or row["d"] else await _load_bindings(user_id)
+    bindings = [] if row is None or row["d"] else await load_bindings(user_id)
     g = Grants.from_bindings(user_id, bindings)
     ends = earliest_expiry(bindings)
     _cache[user_id] = (_epoch, now, ends, g)
@@ -480,7 +486,7 @@ async def host_refs() -> dict[int, HostRef]:
         src = r
         if (r["ephemeral"] or 0) and r["via_host_id"] and r["via_host_id"] in raw:
             src = raw[r["via_host_id"]]
-        out[hid] = HostRef(src["id"], src["folder"] or "", _tags(src["tags"]))
+        out[hid] = HostRef(src["id"], src["folder"] or "", tag_set(src["tags"]))
     return out
 
 
@@ -495,8 +501,8 @@ async def host_ref(host_id) -> Optional[HostRef]:
     if (r["ephemeral"] or 0) and r["via_host_id"]:
         p = await db.fetchone("SELECT id, folder, tags FROM hosts WHERE id=?", r["via_host_id"])
         if p:
-            return HostRef(p["id"], p["folder"] or "", _tags(p["tags"]))
-    return HostRef(r["id"], r["folder"] or "", _tags(r["tags"]))
+            return HostRef(p["id"], p["folder"] or "", tag_set(p["tags"]))
+    return HostRef(r["id"], r["folder"] or "", tag_set(r["tags"]))
 
 
 async def perms_on(grants: Grants, host_id) -> frozenset:
@@ -1082,7 +1088,7 @@ async def target_grants(user_id: int) -> Grants:
     still an Owner as far as who may change its access is concerned (review 3.6.11 — otherwise an
     Admin could edit the bindings of, or delete, an Owner the IdP disabled). Never use it for what
     the account itself may DO: that is `grants_for_user` (empty while disabled)."""
-    return Grants.from_bindings(user_id, await _load_bindings(user_id))
+    return Grants.from_bindings(user_id, await load_bindings(user_id))
 
 
 async def is_owner_user(user_id: int) -> bool:
@@ -1102,7 +1108,7 @@ async def owner_level_given_in_webterm(user_id: int) -> bool:
     """The account holds an Owner-level binding that did NOT come from an SSO group (manual,
     migration, CLI…): the identity provider (SCIM) must not adopt, disable, delete or re-enable
     it — only an Owner, in WebTerm, can (§A.5)."""
-    return any(owner_level(b) and b.source != "sso" for b in await _load_bindings(user_id))
+    return any(owner_level(b) and b.source != "sso" for b in await load_bindings(user_id))
 
 
 def normalize_scope(kind: str, value) -> tuple[str, str]:
@@ -1159,7 +1165,7 @@ ROLE_DESC_MAX = 300
 CUSTOM_ROLES_MAX = 200        # a bound on the table (the editor is an admin, still: no unbounded rows)
 
 
-def _row_role(r) -> RoleInfo:
+def row_role(r) -> RoleInfo:
     if r["builtin"] and r["key"] in BUILTIN_ROLES:
         perms = BUILTIN_ROLES[r["key"]]["perms"]
     else:
@@ -1179,7 +1185,7 @@ async def role_by_id(rid) -> Optional[RoleInfo]:
         return None
     r = await db.fetchone("SELECT id, key, name, description, perms, builtin FROM roles WHERE id=?",
                           rid)
-    return _row_role(r) if r else None
+    return row_role(r) if r else None
 
 
 async def resolve_role(key: str = "", rid=0) -> RoleInfo:
@@ -1193,7 +1199,7 @@ async def resolve_role(key: str = "", rid=0) -> RoleInfo:
     elif key in BUILTIN_ROLES:
         r = await db.fetchone(
             "SELECT id, key, name, description, perms, builtin FROM roles WHERE key=?", key)
-        info = _row_role(r) if r else None
+        info = row_role(r) if r else None
     if info is None:
         raise ApiError(400, "authz.badRole", "unknown role")
     return info
@@ -1460,7 +1466,7 @@ async def roles_json(viewer: Grants) -> dict:
     custom = []
     for r in await db.fetchall("SELECT id, key, name, description, perms, builtin, created, updated"
                                " FROM roles WHERE builtin=0 ORDER BY name COLLATE NOCASE, id"):
-        info = _row_role(r)
+        info = row_role(r)
         custom.append({"id": info.id, "name": info.name, "description": info.description,
                        "perms": sorted(info.perms), "shell": bool(info.perms & SHELL_PERMS),
                        "global_perms": sorted(info.perms & GLOBAL_PERMS),
@@ -1482,7 +1488,7 @@ def catalogue_json() -> dict:
 
 
 # ── time-bound bindings (3.6.10, §A.10) ─────────────────────────────────────────────────────
-# `role_bindings.expires` (NULL = permanent) is honoured at READ time (`_load_bindings` skips an
+# `role_bindings.expires` (NULL = permanent) is honoured at READ time (`load_bindings` skips an
 # expired row; a cached grant is stale from its earliest binding end), so HTTP access ends on the
 # second even if the janitor is late or stopped, and a timer armed at load time wakes open
 # terminals and forward sockets right then (`_arm_expiry_wake`). The janitor
@@ -1515,7 +1521,7 @@ async def check_owner_expiry(role, kind: str, expires: Optional[float], target_u
                              exclude_binding: Optional[int] = None) -> None:
     """The system must never lock itself out: an EXPIRING Owner @ all is allowed only while
     another account keeps a PERMANENT Owner @ all. `exclude_binding` = an existing binding that
-    is being made time-bound (otherwise: a new binding for `target_uid`). Call under `_lock`."""
+    is being made time-bound (otherwise: a new binding for `target_uid`). Call under `bindings_lock`."""
     info = _as_role(role)
     if info.key != "owner" or kind != "all" or expires is None:
         return
@@ -1538,7 +1544,7 @@ async def sweep_expired_bindings() -> list:
     expires}] (the caller audits and revokes derived access). Bumps the epoch when any went."""
     now = time.time()
     out = []
-    async with _lock:
+    async with bindings_lock:
         rows = await db.fetchall(
             "SELECT b.id, b.user_id, b.scope_kind, b.scope_value, b.source, b.expires,"
             " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
@@ -1625,7 +1631,7 @@ async def crown_exposure(ref: HostRef, before: Optional[HostRef] = None) -> list
             " JOIN users u ON u.id=b.user_id ORDER BY u.email"):
         if r["expires"] is not None and r["expires"] <= now:
             continue
-        info = _row_role(r)
+        info = row_role(r)
         if hits(info, r["scope_kind"], r["scope_value"]):
             out.append({"kind": "binding", "who": r["email"], "role": info.key or info.name,
                         "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or ""})
@@ -1633,7 +1639,7 @@ async def crown_exposure(ref: HostRef, before: Optional[HostRef] = None) -> list
             "SELECT m.grp, m.scope_kind, m.scope_value, r.id, r.key, r.name, r.description,"
             " r.perms, r.builtin FROM oidc_group_roles m JOIN roles r ON r.id=m.role_id"
             " ORDER BY m.grp"):
-        info = _row_role(r)
+        info = row_role(r)
         if hits(info, r["scope_kind"], r["scope_value"]):
             out.append({"kind": "mapping", "who": r["grp"], "role": info.key or info.name,
                         "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or ""})
@@ -1668,7 +1674,7 @@ async def explain(target_uid: int, host_id: int, ref: HostRef, crown: bool = Fal
     for r in rows:
         if r["scope_kind"] not in SCOPE_KINDS:
             continue
-        info = _row_role(r)
+        info = row_role(r)
         b = Binding(r["bid"], info.key, info.name, info.perms, r["scope_kind"],
                     r["scope_value"] or "", r["source"] or "manual", r["expires"], info.id)
         if not b.matches(ref):

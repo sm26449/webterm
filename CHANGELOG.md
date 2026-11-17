@@ -22,6 +22,12 @@ back.
   DOMPurify 3.4.15 to 3.4.17 in the production build only. The dev server pre-bundles Monaco with
   esbuild, which skips Vite's build plugins, so local development still ran the vulnerable copy.
   The same redirect now runs there as well. The shipped image was not affected.
+- **Gateway modules no longer reach into each other's private names.** The binding lock, tag
+  parsing, binding loading, role rows, the agent lookup and the upload temp name had `_private`
+  names but were used from other modules (40+ places); they now have public names
+  (`authz.bindings_lock`, `tag_set`, `load_bindings`, `row_role`, `forget_cached`;
+  `core.agent_or_raise`, `clip`, `upload_tmp`; `security.stepup_window_record`), so it is clear
+  what a module offers and what may change under it. No change in behaviour.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

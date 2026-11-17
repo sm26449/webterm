@@ -99,7 +99,7 @@ async def consume_factor(host_id: int, user, grant: str, password: str,
 
 
 # OP-01: which step-up windows the PASSWORD alone opened ((user_id, host_id) → opened_at of
-# that window). A window record (security._stepup_windows) does not say what opened it, and
+# that window). A window record (security.stepup_window_record) does not say what opened it, and
 # the gateway root terminal must not accept one the password opened on a host without 2FA.
 # The mark is tied to the window's own `opened_at`: a later passkey / TOTP / SSO window on the
 # same host has a newer timestamp, so the mark no longer matches. Bounded by users × hosts;
@@ -108,15 +108,15 @@ _password_windows: dict = {}
 
 
 def _mark_password_window(user_id: int, host_id: int) -> None:
-    rec = security._stepup_windows.get((user_id, host_id))
-    for k in [k for k in _password_windows if k not in security._stepup_windows]:
+    rec = security.stepup_window_record(user_id, host_id)
+    for k in [k for k in _password_windows if security.stepup_window_record(*k) is None]:
         _password_windows.pop(k, None)
     if rec:
         _password_windows[(user_id, host_id)] = rec[0]
 
 
 def _window_opened_by_password(user_id: int, host_id: int) -> bool:
-    rec = security._stepup_windows.get((user_id, host_id))
+    rec = security.stepup_window_record(user_id, host_id)
     return bool(rec) and _password_windows.get((user_id, host_id)) == rec[0]
 
 

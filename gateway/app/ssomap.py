@@ -102,7 +102,7 @@ async def _desired(groups: set, exclude_mid: Optional[int] = None) -> tuple[set,
             continue
         # 3.6.5, apărare în adâncime: o mapare din configuraţie nu acordă NICIODATĂ Owner (nici
         # un rol custom cu permisiuni doar-de-Owner), chiar dacă rândul a ajuns cumva în DB.
-        if m["source"] == "config" and not config_role_allowed(authz._row_role(m)):
+        if m["source"] == "config" and not config_role_allowed(authz.row_role(m)):
             continue
         kind, value = m["scope_kind"], m["scope_value"] or ""
         if kind not in authz.SCOPE_KINDS:
@@ -129,7 +129,7 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
                         add_roles: Optional[set] = None,
                         defer_bump: bool = False) -> dict:
     """Make the user's sso bindings equal `desired` (or only remove, `remove_only`). Caller
-    holds authz._lock. Manual/migration bindings are read only to avoid duplicates.
+    holds authz.bindings_lock. Manual/migration bindings are read only to avoid duplicates.
     `add_roles` (3.6.11, SCIM): only these role ids may be ADDED; the rest of `desired` is still
     kept (never removed), just not granted from here.
     `defer_bump` (3.6.x, SC-03): skip the GLOBAL `authz.bump_epoch()` here and let a batch caller
@@ -165,7 +165,7 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
             continue
         # RB-06 (re-review P1): nor the Owner @ all binding of the break-glass account — the last
         # permanent Owner with a local password — while every other permanent Owner is SSO-only
-        # (the caller holds authz._lock; same rule as api.update_account / admin passwd)
+        # (the caller holds authz.bindings_lock; same rule as api.update_account / admin passwd)
         if t[0] == owner_rid and t[1] == "all" and await owners.last_break_glass(uid, exclude_binding=bid):
             kept_bg.append(t)
             continue
@@ -206,7 +206,7 @@ async def scim_grantable_roles() -> set:
     given only at an interactive SSO sign-in, never by a background push."""
     out = set()
     for r in await db.fetchall("SELECT id, key, name, description, perms, builtin FROM roles"):
-        if config_role_allowed(authz._row_role(r)):
+        if config_role_allowed(authz.row_role(r)):
             out.add(r["id"])
     return out
 
@@ -232,7 +232,7 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                            "SSO roles NOT synced (%s): no groups claim" % via, actor_id=uid)
         return {"added": [], "removed": [], "kept_last_owner": [], "skipped": True}
     gs = claim_groups(groups)
-    async with authz._lock:
+    async with authz.bindings_lock:
         # sub lock: o editare de rol concurentă nu poate strecura o permisiune doar-de-Owner
         add_roles = await scim_grantable_roles() if scim else None
         desired, matched = await _desired(gs)
@@ -288,7 +288,7 @@ def _stored(u) -> set:
 
 async def prune_plan(exclude_mid: int) -> list:
     """Dry run of prune_locked() as if mapping `exclude_mid` were gone: [uid] of the accounts
-    that would lose a binding. Caller holds authz._lock. Nothing is written."""
+    that would lose a binding. Caller holds authz.bindings_lock. Nothing is written."""
     out = []
     for u in await _sso_users():
         desired, _m = await _desired(_stored(u), exclude_mid)
@@ -302,7 +302,7 @@ async def prune_plan(exclude_mid: int) -> list:
 async def prune_locked() -> list:
     """After a mapping was removed: drop, for every account holding sso bindings, those no
     remaining mapping still justifies (from the groups recorded at its last sync). Removal only.
-    Caller holds authz._lock. → [(uid, email, result)] for the accounts that changed."""
+    Caller holds authz.bindings_lock. → [(uid, email, result)] for the accounts that changed."""
     out = []
     for u in await _sso_users():
         desired, _m = await _desired(_stored(u))
@@ -420,13 +420,13 @@ async def _resolve_role_token(tok: str):
     if key in authz.BUILTIN_ROLES:
         r = await db.fetchone(
             "SELECT id, key, name, description, perms, builtin FROM roles WHERE key=?", key)
-        return (authz._row_role(r) if r else None), "built-in role missing"
+        return (authz.row_role(r) if r else None), "built-in role missing"
     rows = await db.fetchall(
         "SELECT id, key, name, description, perms, builtin FROM roles WHERE builtin=0"
         " AND lower(name)=lower(?)", tok)
     if len(rows) != 1:
         return None, ("no role with that key or name" if not rows else "ambiguous role name")
-    return authz._row_role(rows[0]), ""
+    return authz.row_role(rows[0]), ""
 
 
 async def _resolve_entries(raw: str):
@@ -508,7 +508,7 @@ async def reconcile_config(raw: Optional[str] = None) -> dict:
     try:
         desired, errors, warnings, owner_refused = await _resolve_entries(raw)
         out["errors"], out["warnings"], out["owner_refused"] = errors, warnings, owner_refused
-        async with authz._lock:
+        async with authz.bindings_lock:
             rows = await db.fetchall(
                 "SELECT id, grp, role_id, scope_kind, scope_value, COALESCE(source, 'ui') AS source"
                 " FROM oidc_group_roles")

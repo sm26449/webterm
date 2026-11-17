@@ -227,7 +227,7 @@ async def _gw_scenario(ver):
         half = 1 * 1024 * 1024
         off = await core.fs_upload_chunk(hid, dest, uid, 0, src(payload[:half]))
         off = await core.fs_upload_chunk(hid, dest, uid, off, src(payload[half:]))
-        landed = len(fake.files[core._upload_tmp(dest, uid)])
+        landed = len(fake.files[core.upload_tmp(dest, uid)])
         # commit cu CRC bun
         written = await core.fs_upload_commit(hid, dest, uid, crc32=want_crc)
         committed = bytes(fake.files.get(dest, b""))
@@ -255,7 +255,7 @@ async def _gw_mismatch(ver):
             await core.fs_upload_commit(hid, dest, uid, crc32=0xDEADBEEF)   # CRC greşit
         except core.FileError:
             failed = True
-        tmp_gone = core._upload_tmp(dest, uid) not in fake.files
+        tmp_gone = core.upload_tmp(dest, uid) not in fake.files
         committed = dest in fake.files
         return failed, tmp_gone, committed
     finally:

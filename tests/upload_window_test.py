@@ -79,7 +79,7 @@ async def t_in_order():
     hid, uid, dest = 7001, "a" * 32, "/home/u/seq.bin"
     fake = FakeAgent(hid)
     core.sources[hid] = fake
-    tmp = core._upload_tmp(dest, uid)
+    tmp = core.upload_tmp(dest, uid)
     payload = bytes((i * 7 + 3) % 256 for i in range(2500))
     C = 1000
     try:
@@ -101,7 +101,7 @@ async def t_out_of_order():
     hid, uid, dest = 7002, "b" * 32, "/home/u/ooo.bin"
     fake = FakeAgent(hid)
     core.sources[hid] = fake
-    tmp = core._upload_tmp(dest, uid)
+    tmp = core.upload_tmp(dest, uid)
     payload = bytes((i * 13 + 1) % 256 for i in range(2000))
     C = 1000
     try:
@@ -176,7 +176,7 @@ async def t_idempotent_dup():
     hid, uid, dest = 7004, "d" * 32, "/home/u/dup.bin"
     fake = FakeAgent(hid)
     core.sources[hid] = fake
-    tmp = core._upload_tmp(dest, uid)
+    tmp = core.upload_tmp(dest, uid)
     data = b"felia-unu-" * 50
     try:
         off1 = await one_chunk(hid, dest, uid, 0, data)

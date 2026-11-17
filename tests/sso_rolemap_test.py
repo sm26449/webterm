@@ -266,7 +266,7 @@ async def test_api(owner):
 # ── revizuirea de securitate 3.6.5: fiecare exploit trebuie să EŞUEZE acum ───────────────────
 async def global_perms(email):
     uid = await uid_of(email)
-    authz._cache.pop(uid, None)
+    authz.forget_cached(uid)
     return (await authz.grants_for_user(uid)).global_perms
 
 

@@ -926,7 +926,7 @@ async def window_checks(owner, hid):
         r = await op.delete("%s?path=%s&upload_id=%s" % (up, shared, uid2))
         check("M1: another user's abort → 409", r.status_code == 409 and r.json().get("code") == "files.uploadForeign",
               (r.status_code, r.text[:120]))
-        check("M1: nothing of theirs landed", fake.sizes.get(core._upload_tmp(shared, uid2)) == 3, fake.sizes)
+        check("M1: nothing of theirs landed", fake.sizes.get(core.upload_tmp(shared, uid2)) == 3, fake.sizes)
 
         # the owner resumes: status (the landed offset), the next chunk, commit
         r = await owner.get("%s/status?path=%s&upload_id=%s" % (up, shared, uid2))

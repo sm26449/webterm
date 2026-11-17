@@ -414,7 +414,7 @@ async def _fs_write_error(host_id: int, e: Exception, path: str, status: int = 4
     code = spec[0]
     if spec[1]:
         try:
-            resp = await core._agent_or_raise(host_id).request("fs_stat", path=d, timeout=3)
+            resp = await core.agent_or_raise(host_id).request("fs_stat", path=d, timeout=3)
             mode = resp.get("mode") if resp.get("ok") and resp.get("exists") else None
             if isinstance(mode, int) and not isinstance(mode, bool) and 0 <= mode <= 0o777:
                 vars["mode"] = "%03o" % mode
@@ -744,7 +744,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     # revizuirea 3.6.11 (cursă): între verificarea `scim_managed` de sus şi scriere a trecut al
     # doilea factor — SCIM a putut adopta contul între timp. Re-verificat ÎN scriere (atomic).
     guarded = bool(body.new_password) or email != user["email"]
-    async with authz._lock:
+    async with authz.bindings_lock:
         if body.remove_password:
             # RB-01: the second factor above was a suspension point — the other break-glass
             # Owner may have lost its password or its Owner role meanwhile; decided again under
@@ -760,7 +760,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     if body.new_password:
         # 3.6.2: o parolă locală nouă = rolurile din grupuri SSO pleacă ACUM (cine ştie parola nu
         # moşteneşte ce dau grupurile); legăturile manuale rămân
-        async with authz._lock:
+        async with authz.bindings_lock:
             n = 0
             for b in await db.fetchall(
                     "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r"
@@ -932,7 +932,7 @@ class BindingExpiryIn(BaseModel):
 
 
 async def _user_bindings(uid: int) -> list:
-    return [authz.binding_json(b) for b in await authz._load_bindings(uid)]
+    return [authz.binding_json(b) for b in await authz.load_bindings(uid)]
 
 
 async def _users_json(user, grants) -> list:
@@ -1023,8 +1023,8 @@ _UNKNOWN_ROLE = authz.RoleInfo(0, "", "?", authz.HOST_PERMS | authz.GLOBAL_PERMS
 
 async def _fresh_grants(user, perm: str):
     """Drepturile CURENTE ale contului (fără cache: epoca s-a putut schimba chiar acum). Pentru
-    re-verificarea de sub `authz._lock`, imediat înainte de scriere (tiparul cursei din 3.6.0)."""
-    authz._cache.pop(user["id"], None)
+    re-verificarea de sub `authz.bindings_lock`, imediat înainte de scriere (tiparul cursei din 3.6.0)."""
+    authz.forget_cached(user["id"])
     g = await authz.grants_for_user(user["id"])
     if not g.has_global(perm):
         raise ApiError(403, "authz.denied", "your role does not allow this here (%s)" % perm,
@@ -1038,7 +1038,7 @@ _NOT_A_GRANT = object()
 async def _recheck_granter(user, role, kind, value, target_uid, removing=False,
                            expires=_NOT_A_GRANT):
     """Regulile de acordare, din nou, pe drepturile CURENTE ale celui care acordă ŞI pe definiţia
-    CURENTĂ a rolului (un rol custom s-a putut edita între timp). Chemată sub `authz._lock`,
+    CURENTĂ a rolului (un rol custom s-a putut edita între timp). Chemată sub `authz.bindings_lock`,
     imediat înainte de scriere. `expires` (sfârşitul acordării, None = permanentă): şi regula
     „nu acorzi mai mult decât ţine propriul tău drept" (revizuirea 3.6.10). → rolul proaspăt."""
     g = await _fresh_grants(user, "users.manage")
@@ -1057,7 +1057,7 @@ async def _check_can_strip(g, uid: int) -> None:
     """Ştergerea unui cont = scoaterea TUTUROR legăturilor lui: o poţi face doar dacă ai putea
     scoate fiecare legătură (3.6.2 — cu rolurile custom, „doar Owner atinge Owner" nu mai ajunge)."""
     await authz.check_target(g, uid)
-    for b in await authz._load_bindings(uid):
+    for b in await authz.load_bindings(uid):
         info = (await authz.role_by_id(b.role_id)) or _UNKNOWN_ROLE
         await authz.check_can_grant(g, info, b.scope_kind, b.scope_value, removing=True)
 
@@ -1084,7 +1084,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
         raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
     crown = []
-    async with authz._lock:
+    async with authz.bindings_lock:
         if role:
             role = await _recheck_granter(user, role, kind, value, None, expires=expires)
             crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
@@ -1128,9 +1128,9 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
     await _check_can_strip(grants, uid)
     await stepup.reauth_for_access_change(user, request, body, "delete a WebTerm account")
-    async with authz._lock:
+    async with authz.bindings_lock:
         # drepturile celui care şterge, pe starea de ACUM (o retrogradare concurentă contează)
-        authz._cache.pop(user["id"], None)
+        authz.forget_cached(user["id"])
         g = await authz.grants_for_user(user["id"])
         if not g.has_global("users.manage"):
             raise ApiError(403, "authz.denied", "your role does not allow this here (users.manage)",
@@ -1233,7 +1233,7 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     # factor nu se consumă pe o cerere care oricum se întoarce cu 409)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz._lock:
+    async with authz.bindings_lock:
         # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
         # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
         # SUB lock, pe drepturile de ACUM (şi pe definiţia de ACUM a rolului).
@@ -1306,7 +1306,7 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
     info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz._lock:
+    async with authz.bindings_lock:
         await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
                                removing=True)
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
@@ -1345,7 +1345,7 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
 
 async def sweep_expired_bindings() -> int:
     """3.6.10, from the reaper (main._session_reaper, every minute): delete the bindings whose
-    time is up. Access already ended at read time (authz._load_bindings) — this tidies the rows,
+    time is up. Access already ended at read time (authz.load_bindings) — this tidies the rows,
     wakes live sockets (epoch), revokes derived access (live shares, replay links) the account
     can no longer create, leaves one audit row per binding and tells the person."""
     gone = await authz.sweep_expired_bindings()
@@ -1405,7 +1405,7 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
         await authz.check_grant_lifetime(grants, info, row["scope_kind"], row["scope_value"], new)
         await authz.check_crown(info, row["scope_kind"], row["scope_value"], body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz._lock:
+    async with authz.bindings_lock:
         # revizuirea 3.6.10: re-auth-ul a fost un punct de suspendare — legătura s-a putut schimba
         # (alt sfârşit, scoasă, expirată). Totul se decide din nou pe rândul de ACUM: „mai scurt"
         # (reguli de scoatere) sau „mai lung" (reguli de acordare) se recalculează aici.
@@ -1494,7 +1494,7 @@ async def list_roles(request: Request,
 #     care-l are un Owner; nimeni nu atinge contul cuiva care are mai mult decât el);
 #   * ştergerea unui rol folosit e REFUZATĂ (409 cu numărători) — întâi scoţi legăturile şi
 #     mapările. Alegerea mai sigură: nicio revocare în masă tăcută dintr-un singur click;
-#   * re-auth + al doilea factor, ca la legături; verificările se refac SUB `authz._lock`
+#   * re-auth + al doilea factor, ca la legături; verificările se refac SUB `authz.bindings_lock`
 #     imediat înainte de scriere; epoca creşte imediat (socket-urile re-verifică ACUM).
 
 class RoleIn(BaseModel):
@@ -1567,7 +1567,7 @@ async def create_role(body: RoleIn, request: Request, user=Depends(authz.perm('r
     authz.check_can_define(grants, perms)
     await _role_name_free(name, None)
     await stepup.reauth_for_access_change(user, request, body, "create a role")
-    async with authz._lock:
+    async with authz.bindings_lock:
         g = await _fresh_grants(user, "roles.manage")
         authz.check_can_define(g, perms)
         await _role_name_free(name, None)
@@ -1627,7 +1627,7 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
     await _role_name_free(name, rid)
     await _check_config_map_role(rid, perms)
     await stepup.reauth_for_access_change(user, request, body, "change a role")
-    async with authz._lock:
+    async with authz.bindings_lock:
         g = await _fresh_grants(user, "roles.manage")
         role = await _custom_role(rid)                 # definiţia de ACUM, nu cea de mai sus
         authz.check_can_define(g, role.perms | perms)
@@ -1692,7 +1692,7 @@ async def delete_role(rid: int, body: ReauthOnly, request: Request,
                            "mapping(s), %(tokens)d token(s)) — remove those first" % use, vars=use)
     await _refuse_if_used()
     await stepup.reauth_for_access_change(user, request, body, "delete a role")
-    async with authz._lock:
+    async with authz.bindings_lock:
         g = await _fresh_grants(user, "roles.manage")
         role = await _custom_role(rid)
         authz.check_can_define(g, role.perms)
@@ -1798,7 +1798,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     _check_wildcard(grants, grp, role, kind)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "map an SSO group to a role")
-    async with authz._lock:
+    async with authz.bindings_lock:
         g = await _fresh_grants(user, "users.manage")
         fresh = await authz.role_by_id(role.id)
         if fresh is None:
@@ -1844,7 +1844,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
     _check_wildcard(grants, row["grp"], info, row["scope_kind"])
     await stepup.reauth_for_access_change(user, request, body, "remove an SSO group mapping")
-    async with authz._lock:
+    async with authz.bindings_lock:
         g = await _fresh_grants(user, "users.manage")
         row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
         if not row:
@@ -1917,7 +1917,7 @@ async def scim_token(body: ReauthOnly, request: Request, user=Depends(authz.perm
     """Creează sau ROTEŞTE tokenul SCIM (cel vechi moare pe loc). Arătat O SINGURĂ DATĂ."""
     _owner_only(authz.grants_of(request), "manage SCIM provisioning")
     await stepup.reauth_for_access_change(user, request, body, "create a SCIM provisioning token")
-    async with authz._lock:
+    async with authz.bindings_lock:
         _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
         rotated = (await scim.status_json())["configured"]
         raw = scim.new_token()
@@ -1937,7 +1937,7 @@ async def scim_token(body: ReauthOnly, request: Request, user=Depends(authz.perm
 async def scim_revoke(body: ReauthOnly, request: Request, user=Depends(authz.perm('users.manage'))):
     _owner_only(authz.grants_of(request), "manage SCIM provisioning")
     await stepup.reauth_for_access_change(user, request, body, "revoke the SCIM provisioning token")
-    async with authz._lock:
+    async with authz.bindings_lock:
         _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
         await scim.revoke_token()
     audit.detail(request, "SCIM provisioning token revoked")
@@ -1956,7 +1956,7 @@ async def scim_enabled(body: ScimEnabledIn, request: Request,
         if not (await scim.status_json())["configured"]:
             raise ApiError(409, "scim.noToken", "create a SCIM token first")
         await stepup.reauth_for_access_change(user, request, body, "turn SCIM provisioning on")
-    async with authz._lock:
+    async with authz.bindings_lock:
         _owner_only(await _fresh_grants(user, "users.manage"), "manage SCIM provisioning")
         await scim.set_enabled(body.enabled)
     what = "SCIM provisioning turned %s" % ("on" if body.enabled else "off")
@@ -4006,7 +4006,7 @@ _chunk_log_at: dict[str, float] = {}
 
 
 def _check_upload_id(upload_id: str) -> None:
-    """Validăm `upload_id` la GRANIŢA API — înainte de orice folosire. `core._upload_tmp` îl
+    """Validăm `upload_id` la GRANIŢA API — înainte de orice folosire. `core.upload_tmp` îl
     re-validează (apărare în adâncime), dar id-ul brut ajungea întâi în `_log_chunk_start`
     (`log.info(... upload_id=%s ...)`): un id cu `\\n`/`\\r` putea forja linii de log, iar unul
     arbitrar de lung umfla cheia din `_chunk_log_at`. Refuzăm devreme, cu ACELAŞI tipar strict
@@ -4306,8 +4306,8 @@ async def fs_copy_start(body: FsCopyIn, request: Request, user=Depends(authz.per
     if body.dst_host != body.src_host:
         await stepup.require_host_stepup(body.dst_host, user)
     try:
-        core._agent_or_raise(body.src_host)
-        core._agent_or_raise(body.dst_host)
+        core.agent_or_raise(body.src_host)
+        core.agent_or_raise(body.dst_host)
         # dst_dir canonic (absolut) + verificat că e un director: fs_list pe destinaţie
         listing = await core.fs_list(body.dst_host, body.dst_dir)
         dst_dir = listing.get("path") or body.dst_dir
@@ -4375,8 +4375,8 @@ async def fs_copy_retry(job_id: str, request: Request, user=Depends(security.req
     if old.dst_host != old.src_host:
         await stepup.require_host_stepup(old.dst_host, user)
     try:
-        core._agent_or_raise(old.src_host)
-        core._agent_or_raise(old.dst_host)
+        core.agent_or_raise(old.src_host)
+        core.agent_or_raise(old.dst_host)
     except core.AgentGone:
         raise ApiError(409, "host.offline", "the host is offline")
     try:
@@ -8143,11 +8143,11 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         # 3.6.10 (§A.11.2): mutat într-un folder/tag peste care cineva (ne-Owner) are un rol ⚑,
         # hostul crown-jewel îi dă acelui cont un shell pe instanţă. Aceeaşi confirmare ca la o
         # legătură nouă; doar legăturile/mapările care NU-l acopereau deja contează.
-        old_ref = authz.HostRef(host_id, row["folder"] or "", authz._tags(row["tags"]))
+        old_ref = authz.HostRef(host_id, row["folder"] or "", authz.tag_set(row["tags"]))
         new_ref = authz.HostRef(
             host_id,
             (given["folder"] or "").strip() if "folder" in given else (row["folder"] or ""),
-            authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
+            authz.tag_set(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
         crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
         if crown_moved and not _sees_crown(request):
             # who cannot see the crown flag must not learn it from this answer either
@@ -8345,7 +8345,7 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         sets.append("hostkey_alarm=NULL")
     if not sets and not pend_given:
         return {"ok": True, "changed": False}
-    async with authz._lock:
+    async with authz.bindings_lock:
         if scope_moved:
             # revizuirea 3.6.10: între verificarea de sus şi scriere au trecut step-up-ul şi alte
             # aşteptări — cineva a putut marca hostul crown-jewel, mutat folderul/etichetele sau
@@ -8357,11 +8357,11 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
                 raise ApiError(404, "host.missing", "no such host")
             crown_moved = []
             if cur["cj"] and not cur["eph"]:
-                old_ref = authz.HostRef(host_id, cur["folder"] or "", authz._tags(cur["tags"]))
+                old_ref = authz.HostRef(host_id, cur["folder"] or "", authz.tag_set(cur["tags"]))
                 new_ref = authz.HostRef(
                     host_id,
                     (given["folder"] or "").strip() if "folder" in given else (cur["folder"] or ""),
-                    authz._tags(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
+                    authz.tag_set(_norm_tags(given["tags"] or "")) if "tags" in given else old_ref.tags)
                 crown_moved = await authz.crown_exposure(new_ref, before=old_ref)
                 if crown_moved and not _sees_crown(request):
                     raise ApiError(403, "host.moveNeedsOwner",
@@ -8478,8 +8478,8 @@ async def set_crown_jewel(host_id: int, body: CrownJewelIn, request: Request,
                 "exposure": await authz.crown_exposure(await authz.host_ref(host_id)) if want else []}
     if not want:
         await stepup.reauth_for_access_change(user, request, body, "remove the crown-jewel mark")
-    async with authz._lock:
-        authz._cache.pop(user["id"], None)      # re-auth was a suspension point: re-check NOW
+    async with authz.bindings_lock:
+        authz.forget_cached(user["id"])  # re-auth was a suspension point: re-check NOW
         if not (await authz.grants_for_user(user["id"])).is_owner():
             raise ApiError(403, "authz.ownerOnly", "only an Owner can mark or unmark a crown-jewel host")
         await db.execute("UPDATE hosts SET crown_jewel=? WHERE id=?", 1 if want else 0, host_id)
@@ -8876,10 +8876,10 @@ async def host_autostart(host_id: int, body: AutostartIn, request: Request,
                          json.dumps(sup), host_id)
     if not resp.get("ok"):
         raise ApiError(400, "host.autostartFailed",
-                       "could not change autostart: %s" % core._clip(resp.get("msg") or
+                       "could not change autostart: %s" % core.clip(resp.get("msg") or
                                                                     resp.get("code") or "?", 300),
-                       vars={"reason": core._clip(resp.get("msg") or "", 200) or ""})
-    return {"ok": True, "supervision": sup, "hint": core._clip(resp.get("hint") or "", 500) or ""}
+                       vars={"reason": core.clip(resp.get("msg") or "", 200) or ""})
+    return {"ok": True, "supervision": sup, "hint": core.clip(resp.get("hint") or "", 500) or ""}
 
 
 # ---------------------------------------------------------------------------
@@ -9026,7 +9026,7 @@ async def host_stepup(host_id: int, body: SessionIn, request: Request,
     # Say what happened (3.6.7 follow-up): it answered `window: 300` even when NOTHING opened (a
     # body without a factor on a host without 2FA), which reads as "you are stepped up".
     # `opened` = this call opened/refreshed the window; `window` = seconds left on it now (0 = none).
-    rec = security._stepup_windows.get((user["id"], host_id))
+    rec = security.stepup_window_record(user["id"], host_id)
     now = time.time()
     opened = bool(rec and rec[0] >= t_call)
     left = int(rec[1] - now) if rec and rec[1] > now else 0

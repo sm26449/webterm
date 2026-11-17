@@ -191,7 +191,7 @@ def _abs_src(job: CopyJob, p: str) -> str:
 
 
 async def _stat(host_id: int, path: str) -> dict:
-    resp = await core._agent_or_raise(host_id).request("fs_stat", path=path, timeout=30)
+    resp = await core.agent_or_raise(host_id).request("fs_stat", path=path, timeout=30)
     if not resp.get("ok"):
         raise core.FileError(resp.get("msg", "eroare"))
     return resp
@@ -494,8 +494,8 @@ async def _chmod(job: CopyJob, f: CopyFile) -> None:
     if not job.modes or f.mode is None or not f.dst:
         return
     try:
-        resp = await core._agent_or_raise(job.dst_host).request("fs_chmod", path=f.dst,
-                                                                mode=f.mode & 0o777, timeout=30)
+        resp = await core.agent_or_raise(job.dst_host).request("fs_chmod", path=f.dst,
+                                                               mode=f.mode & 0o777, timeout=30)
         if not resp.get("ok"):
             raise core.FileError(resp.get("msg") or resp.get("code") or "chmod failed")
     except asyncio.CancelledError:
@@ -513,7 +513,7 @@ async def _copy_file(job: CopyJob, f: CopyFile) -> None:
         raise core.FileError("this file is staged by another user (move as root)")
     f.state = "running"
     uid = uuid.uuid4().hex                     # 32 hex: tiparul `_UPLOAD_UID` + `_upload_gc`
-    src_conn = core._agent_or_raise(job.src_host)
+    src_conn = core.agent_or_raise(job.src_host)
     q: asyncio.Queue = asyncio.Queue(maxsize=COPY_PREFETCH)
     first: dict = {}
 

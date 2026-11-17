@@ -2862,7 +2862,7 @@ async def force_update_agent(host_id: int) -> dict:
     return {"deferred": deferred, "agent_version": conn.agent_version}
 
 
-def _clip(v, limit: int = 255):
+def clip(v, limit: int = 255):
     """Şir raportat de agent, mărginit. `None` rămâne `None` (COALESCE păstrează valoarea)."""
     return v[:limit] if isinstance(v, str) else None
 
@@ -2950,7 +2950,7 @@ def updates_summary(diag) -> Optional[dict]:
     sec = u.get("security")
     return {"count": u["count"],
             "security": sec if isinstance(sec, int) and not isinstance(sec, bool) else None,
-            "manager": _clip(u.get("manager"), 32)}
+            "manager": clip(u.get("manager"), 32)}
 
 
 # 3.6.8 (System health): the agent's clock, WITHOUT an agent change — every diagnostics snapshot
@@ -3034,7 +3034,7 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
     # tăiate: se scriu în `hosts` şi se întorc la fiecare listare; un agent compromis putea
     # umfla rândul şi fiecare răspuns cu şiruri de orice lungime. `or None`: un hostname gol nu
     # suprascrie (COALESCE păstrează) şi nu declanşează adopţia de nume de mai jos.
-    hn = _clip(msg.get("hostname")) or None
+    hn = clip(msg.get("hostname")) or None
     await db.execute(
         "UPDATE hosts SET agent_version=?, backend=?, last_heartbeat=?,"
         " hostname=COALESCE(?, hostname), agent_user=COALESCE(?, agent_user),"
@@ -3044,7 +3044,7 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
         " name_auto = CASE WHEN name_auto=1 AND ? IS NOT NULL THEN 0 ELSE name_auto END"
         " WHERE id=?",
         conn.agent_version, conn.backend, time.time(),
-        hn, _clip(msg.get("user")),
+        hn, clip(msg.get("user")),
         hn, hn, hn, conn.host_id)
 
     reported = {s["sid"]: s for s in msg.get("sessions", [])}
@@ -5270,7 +5270,7 @@ FS_CHUNK = 1024 * 1024   # bloc pe hopul gateway→agent: 1 MiB (mai puţine rou
 
 # ── [files] File ops over the agent (list, read, archive, write) ──────────────────────────────────
 
-def _agent_or_raise(host_id: int) -> "AgentConnection":
+def agent_or_raise(host_id: int) -> "AgentConnection":
     conn = sources.get(host_id)
     if not isinstance(conn, AgentConnection):
         raise AgentGone("host offline")
@@ -5278,7 +5278,7 @@ def _agent_or_raise(host_id: int) -> "AgentConnection":
 
 
 async def fs_list(host_id: int, path: str) -> dict:
-    resp = await _agent_or_raise(host_id).request("fs_list", path=path or "~")
+    resp = await agent_or_raise(host_id).request("fs_list", path=path or "~")
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     if agent_python_old.get(host_id) not in (None, "fine"):
@@ -5291,7 +5291,7 @@ async def fs_crc32(host_id: int, path: str, seed: bool = False) -> int:
     Agentul îl citeşte în streaming; timeout generos (fişier mare = citire lungă pe disc).
     `seed` (agent v55): cere agentului să memoreze şi (dimensiune, crc) în starea lui de upload,
     ca FRAME_FSWRITE-urile de după un resume să continue CRC-ul incremental fără re-citire."""
-    resp = await _agent_or_raise(host_id).request("fs_crc32", path=path, seed=seed, timeout=600)
+    resp = await agent_or_raise(host_id).request("fs_crc32", path=path, seed=seed, timeout=600)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     return int(resp.get("crc32", 0)) & 0xffffffff
@@ -5340,7 +5340,7 @@ async def fs_read_all(host_id: int, path: str, start: int = 0, limit: Optional[i
     """Async generator yielding a remote file's bytes, chunk by chunk, from `start` (default 0).
     `limit` (opţional): opreşte-te după atâţia octeţi — pentru un Range `bytes=start-end` de download
     resumabil (phase 2). Agentul `fs_read` citeşte deja de la orice offset, deci NU se schimbă."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     offset = start
     remaining = limit
     while True:
@@ -5373,7 +5373,7 @@ async def fs_stat_file(host_id: int, path: str) -> Optional[tuple]:
     `lstat`, deci pentru un link `size` e lungimea ŢINTEI ca text, nu a fişierului — un
     Content-Length/Range construit din ea ar trunchia (sau rupe) descărcarea. Fără mărime, endpoint-ul
     cade pe streamingul fără Range, care urmează link-ul corect (fs_read)."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     if (conn.agent_version or 0) < 50:
         return None
     resp = await conn.request("fs_stat", path=path, timeout=30)
@@ -5400,7 +5400,7 @@ async def fs_archive_prepare(host_id: int, path: str) -> str:
     nivel de vârf cu numele ţintei, deci dezarhivarea produce exact folderul aşteptat.
     Plafonul e RUN_MAX_TIMEOUT al agentului (5 min) — un director uriaş pică cu mesaj clar,
     nu atârnă."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     target = path.rstrip("/")
     if not target or target in ("/", "~"):
         raise FileError("refusing to archive the filesystem root")
@@ -5436,7 +5436,7 @@ async def fs_archive_prepare(host_id: int, path: str) -> str:
 async def fs_archive_cleanup(host_id: int, tmp: str) -> None:
     """Şterge temp-ul de arhivă, best-effort (numele e al nostru, .wtarch.<hex>.tgz)."""
     try:
-        await _agent_or_raise(host_id).request("fs_delete", path=tmp, timeout=15)
+        await agent_or_raise(host_id).request("fs_delete", path=tmp, timeout=15)
     except Exception:
         pass
 
@@ -5444,7 +5444,7 @@ async def fs_archive_cleanup(host_id: int, tmp: str) -> None:
 async def fs_read_head(host_id: int, path: str, max_bytes: int):
     """Citește primii `max_bytes` dintr-un fișier (pentru preview/editare fără a
     trage un fișier de 40GB în browser). Întoarce (bytes, size_total, mtime)."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     resp = await conn.request("fs_read", path=path, offset=0, timeout=60)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
@@ -5464,7 +5464,7 @@ async def fs_write_stream(host_id: int, path: str, source, if_mtime=None) -> int
     Un upload/salvare care pică la mijloc NU lasă fișierul final trunchiat —
     important pentru config-uri (un `sshd_config` corupt te blochează afară).
     `if_mtime` (opțional): commit-ul refuză dacă ținta s-a schimbat între timp."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     _stage_break(host_id, path)          # a staged "move as root" file is only hashed via chunks
     # sufix aleator: două upload-uri simultane pe aceeași cale nu se mai calcă pe
     # același temp (conținut amestecat), iar numele nu mai e predictibil (un
@@ -5620,7 +5620,7 @@ def _upload_forget(key) -> None:
     _upload_windows.pop(key, None)     # starea de reordonare dispare odată cu upload-ul (commit/abort)
 
 
-def _upload_tmp(path: str, upload_id: str) -> str:
+def upload_tmp(path: str, upload_id: str) -> str:
     if not _UPLOAD_UID.match(upload_id or ""):
         raise FileError("upload_id invalid")
     return "%s.wtpart.%s" % (path, upload_id)
@@ -5632,8 +5632,8 @@ async def _upload_landed(host_id: int, path: str, upload_id: str) -> int:
     Agent v50+: `fs_stat` — O(1), corect şi într-un director cu >FS_MAX_LIST intrări (unde `fs_list`
     trunchia şi resume-ul reluă din greşeală de la 0). Agent mai vechi: cădem pe `fs_list` (acelaşi
     comportament ca înainte) cât flota încă se actualizează."""
-    conn = _agent_or_raise(host_id)
-    tmp = _upload_tmp(path, upload_id)
+    conn = agent_or_raise(host_id)
+    tmp = upload_tmp(path, upload_id)
     if (conn.agent_version or 0) >= 50:
         resp = await conn.request("fs_stat", path=tmp, timeout=30)
         if not resp.get("ok"):
@@ -5655,9 +5655,9 @@ async def _upload_gc(host_id: int, path: str, keep: str) -> None:
     `.wtpart.` + 32 hex (formatul pe care-l produce clientul, crypto.randomUUID) — ca să nu poată
     prinde din greşeală un fişier al utilizatorului care s-ar termina întâmplător cu `.wtpart.<hex>`."""
     try:
-        conn = _agent_or_raise(host_id)
+        conn = agent_or_raise(host_id)
         parent = path.rsplit("/", 1)[0] or "/"
-        keep_name = _upload_tmp(path, keep).rsplit("/", 1)[-1]
+        keep_name = upload_tmp(path, keep).rsplit("/", 1)[-1]
         resp = await conn.request("fs_list", path=parent, timeout=30)
         now = time.time()
         for e in resp.get("entries", []):
@@ -5680,7 +5680,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str, user=None) -
     din offset-ul real (pe v54 clientul renunţa la verificare după un resume). CRC-ul se calculează pe
     un worker (fs_crc32 seed=True), care seed-uieşte şi starea agentului pentru FRAME_FSWRITE-urile de
     după; îl memorăm şi noi, ca `_upload_crc`, pentru compararea la commit fără re-citire."""
-    conn = _agent_or_raise(host_id)
+    conn = agent_or_raise(host_id)
     key = _upload_key(host_id, path, upload_id)
     _upload_check_user(key, user)
     n = await _upload_landed(host_id, path, upload_id)
@@ -5691,7 +5691,7 @@ async def fs_upload_status(host_id: int, path: str, upload_id: str, user=None) -
     _upload_window(key, user).offset = n
     out = {"offset": n}
     if n > 0 and (conn.agent_version or 0) >= AGENT_PROTO_BIN_FSWRITE:
-        tmp = _upload_tmp(path, upload_id)
+        tmp = upload_tmp(path, upload_id)
         crc = await fs_crc32(host_id, tmp, seed=True)
         _remember_crc(key, crc)
         out["crc32"] = crc
@@ -5819,8 +5819,8 @@ async def fs_upload_chunk(host_id: int, path: str, upload_id: str, offset: int, 
     felia care umple gap-ul le scrie contiguu. Un retry al unei felii deja aterizate e idempotent
     (întoarce offset-ul curent), unul suprapus parţial dă conflict, iar peste plafon → 429 (busy).
     Întoarce offset-ul aterizat (≥ sfârşitul feliei acesteia la succes)."""
-    conn = _agent_or_raise(host_id)
-    tmp = _upload_tmp(path, upload_id)
+    conn = agent_or_raise(host_id)
+    tmp = upload_tmp(path, upload_id)
     key = _upload_key(host_id, path, upload_id)
     _upload_check_user(key, user)              # before reading the body: refused early, fail closed
     # Citim TOT corpul feliei în memorie ÎNAINTE de a prelua lock-ul. Aici se petrece urcarea
@@ -5895,8 +5895,8 @@ async def fs_upload_commit(host_id: int, path: str, upload_id: str, if_mtime=Non
     """Commit atomic: rename temp → ţintă (acelaşi mecanism ca fs_write_stream). Dacă clientul dă un
     `crc32`, verificăm integritatea temp-ului ÎNAINTE de rename — un fişier corupt nu ajunge niciodată
     la ţintă (îl ştergem şi eşuăm)."""
-    conn = _agent_or_raise(host_id)
-    tmp = _upload_tmp(path, upload_id)
+    conn = agent_or_raise(host_id)
+    tmp = upload_tmp(path, upload_id)
     key = _upload_key(host_id, path, upload_id)
     _upload_check_user(key, user)
     # Sub acelaşi lock ca şi chunk-urile: altfel (două tab-uri pe acelaşi fişier) commit-ul putea
@@ -5954,7 +5954,7 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str, user=None) ->
         _upload_forget(key)
         _stage_restart(host_id, path)
         try:
-            await _agent_or_raise(host_id).request("fs_delete", path=_upload_tmp(path, upload_id), timeout=15)
+            await agent_or_raise(host_id).request("fs_delete", path=upload_tmp(path, upload_id), timeout=15)
         except Exception:
             pass
     _upload_locks.pop(key, None)          # abia după eliberare (vezi _upload_forget)
@@ -5963,14 +5963,14 @@ async def fs_upload_abort(host_id: int, path: str, upload_id: str, user=None) ->
 # ── [files] delete / rename / mkdir / cwd, file errors ────────────────────────────────────────────
 
 async def fs_delete(host_id: int, path: str, recursive: bool = False) -> None:
-    resp = await _agent_or_raise(host_id).request(
+    resp = await agent_or_raise(host_id).request(
         "fs_delete", path=path, recursive=recursive)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
 
 
 async def fs_rename(host_id: int, path: str, to: str) -> None:
-    resp = await _agent_or_raise(host_id).request(
+    resp = await agent_or_raise(host_id).request(
         "fs_rename", path=path, to=to, overwrite=False)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
@@ -5979,7 +5979,7 @@ async def fs_rename(host_id: int, path: str, to: str) -> None:
 async def session_cwd(host_id: int, sid: str) -> str:
     """Directorul curent al shell-ului unei sesiuni (fără shell integration) —
     ca panoul de fișiere să se deschidă unde ești în terminal."""
-    resp = await _agent_or_raise(host_id).request("session_cwd", sid=sid)
+    resp = await agent_or_raise(host_id).request("session_cwd", sid=sid)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     return resp.get("cwd") or "~"
@@ -5988,7 +5988,7 @@ async def session_cwd(host_id: int, sid: str) -> str:
 async def fs_mkdir(host_id: int, path: str, parents: bool = False) -> Optional[str]:
     """→ the ABSOLUTE path the agent created (it expands `~`), or None from an agent that does not
     report it."""
-    resp = await _agent_or_raise(host_id).request("fs_mkdir", path=path, parents=parents)
+    resp = await agent_or_raise(host_id).request("fs_mkdir", path=path, parents=parents)
     if not resp.get("ok"):
         raise FileError(resp.get("msg", "eroare"))
     p = resp.get("path")

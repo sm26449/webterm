@@ -904,6 +904,13 @@ def stepup_window_fresh(user_id: int, host_id: int, max_age: float = 120.0) -> b
     return exp >= now and now - opened_at <= max_age
 
 
+def stepup_window_record(user_id: int, host_id: int) -> Optional[tuple]:
+    """Rândul brut al ferestrei (opened_at, expiry) sau None — FĂRĂ verificarea expirării, fără
+    glisare, fără ştergere. Pentru cine compară momente (stepup: ce factor a deschis-o; api:
+    „s-a deschis la acest apel?"), nu pentru a decide accesul: acolo `stepup_window_ok/is_open`."""
+    return _stepup_windows.get((user_id, host_id))
+
+
 def clear_stepup_for(user_id: int) -> None:
     """Închide ferestrele de step-up + grant-urile în așteptare ale userului. Chemat la
     logout / schimbare de parolă / schimbare de passkey — un cookie furat nu mai păstrează

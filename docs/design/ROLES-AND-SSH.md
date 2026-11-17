@@ -1485,7 +1485,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   bump triggers at once); `create_web_session` raises `auth.accountDisabled` as a backstop; the
   password, passkey and OIDC paths refuse explicitly (after verifying the credential, so it is no
   existence oracle). `owner_count` ignores disabled accounts. `accounts.disable` runs the last-Owner
-  check and the state change under `authz._lock`, then clears step-up windows, bumps the forward
+  check and the state change under `authz.bindings_lock`, then clears step-up windows, bumps the forward
   epoch, deletes the account's automation tokens and revokes its shares and replay links (the
   account-deletion path, minus the deletion). Re-enable: SCIM `active:true` (SCIM accounts),
   `POST /api/users/{uid}/enable` (Owner), `python3 -m app.admin enable`.
@@ -1506,7 +1506,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   the `WEBTERM_OIDC_ROLE_MAP` rule); everything else (removals, the last-Owner keep, the
   local-password rule, audit, alerts) is the sign-in path unchanged. A group PUT without `members`
   keeps them (Authentik PUTs then PATCHes members; clearing in between would flap roles and close
-  terminals). SCIM writes are serialised by `scim._lock` (taken before `authz._lock`, never the
+  terminals). SCIM writes are serialised by `scim._lock` (taken before `authz.bindings_lock`, never the
   other way round).
 - **Security review fixes (before release):** `externalId` write-once (`scimType: mutability`);
   no SCIM email change on an account with `sso_subject IS NULL` that holds a non-sso binding; the
@@ -1524,7 +1524,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   `scim_managed=0` (the second factor is a suspension point). SCIM changes the email only of rows
   it created and never of an Owner-level account. SCIM never disables, deletes or re-enables an
   account with an Owner-level binding given in WebTerm (403 + critical alert; `accounts.disable`
-  re-checks under `authz._lock`, `accounts.enable` through `recheck`), nor re-enables an account
+  re-checks under `authz.bindings_lock`, `accounts.enable` through `recheck`), nor re-enables an account
   whose `disabled_by` is not `scim`/`scim-delete`. Target rules read `authz.target_grants`
   (bindings even while disabled): an Admin cannot edit or delete a disabled Owner; "last Owner"
   checks keep counting active Owners only. PATCH paths are strict: `urn:…:core:2.0:User:` /
