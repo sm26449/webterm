@@ -32,7 +32,7 @@ os.environ.pop("WEBTERM_OIDC_ROLE_MAP", None)
 os.environ.pop("WEBTERM_OIDC_SSO_ONLY", None)
 
 import rbac_util as U  # noqa: E402
-from app import accounts, admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api, owners  # noqa: E402
+from app import accounts, admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api, owners, forward_api  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 
 check = U.Checker()
@@ -178,7 +178,7 @@ async def test_disable(owner, c, host):
     hub = core.get_or_create_hub(row)
     hub.attached = True
     hub._source = lambda: FakeSource()
-    api.WS_REVALIDATE_SECS = 30           # închiderea trebuie să vină din epoch bump, nu din tick
+    security.WS_REVALIDATE_SECS = 30           # închiderea trebuie să vină din epoch bump, nu din tick
     ws = FakeWS(cop.cookies.get(security.COOKIE_NAME))
     task = asyncio.create_task(api.browser_ws(ws, live))
     for _ in range(50):
@@ -189,7 +189,7 @@ async def test_disable(owner, c, host):
           str(ws.sent_text[:2]))
     await U.add_forward(host, "svc")
     ticket = security.make_forward_token("svc", op)
-    check("înainte: biletul de forward e valid", await api._forward_authz_ok("svc", ticket))
+    check("înainte: biletul de forward e valid", await forward_api._forward_authz_ok("svc", ticket))
 
     r = await c.patch("/scim/v2/Users/" + sid_op, json=deactivate())
     check("PATCH active:false → 200, active=false", r.status_code == 200 and r.json()["active"] is False,
@@ -211,7 +211,7 @@ async def test_disable(owner, c, host):
     s = await db.fetchone("SELECT share_token FROM sessions WHERE id=?", live)
     check("share-ul live revocat", s["share_token"] is None)
     check("link-ul de replay revocat", not await db.fetchone("SELECT 1 FROM replay_links WHERE user_id=?", op))
-    check("biletul de forward nu mai trece", not await api._forward_authz_ok("svc", ticket))
+    check("biletul de forward nu mai trece", not await forward_api._forward_authz_ok("svc", ticket))
     g = await authz.grants_for_user(op)
     check("drepturile sunt GOALE", not g.global_perms and not g.all_host_perms
           and not await authz.perms_on(g, host))

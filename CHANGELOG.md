@@ -54,6 +54,14 @@ back.
   one (the curl → wget fallback was once fixed in only one of them); both now come from
   `hostmodel.install_command`. Same output as before, checked against the old code on 20,000
   random inputs.
+- **The port-forward code has its own module** (`gateway/app/forward_api.py`, ~1,100 lines out of
+  `api.py`, now ~9,700): the HTTP and WebSocket proxy through the agent tunnel, the subdomain
+  routing with its sign-in handshake and step-up ticket, the reachability probe, the forward
+  domain settings, and creating / editing / deleting forwards. The five names it shared with the
+  rest of the API moved one layer down (`errors.runtime_api_error`, `core.stamp_session`,
+  `security.origin_tuple` + `DEFAULT_PORTS`, `security.WS_REVALIDATE_SECS`). Same routes, same permissions, same
+  matching order (all 252 routes checked); the function bodies are unchanged (compared as syntax
+  trees). The tests that read source code or list routers cover the new module too.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

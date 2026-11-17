@@ -6026,3 +6026,13 @@ class UploadBusy(FileError):
     înaintea rândului lor). Mapat la 429 în API: clientul dă backoff şi reîncearcă felia — nu e
     eroare, e backpressure. Definit lângă FileError fiindcă moşteneşte din ea (evaluat la import)."""
     pass
+
+
+async def stamp_session(result, user, origin: str = "web") -> None:
+    """Cine a deschis sesiunea (3.6, §A.6.9 / Q5): Operatorii tastează doar în sesiunile LOR.
+    Scris imediat după creare; un rând pre-3.6 (NULL) rămâne „al tuturor"."""
+    sid = result.get("id") if isinstance(result, dict) else None
+    uid = user.get("actor_id") if isinstance(user, dict) else user["id"]
+    if sid and uid:
+        await db.execute("UPDATE sessions SET created_by_id=?, origin=? WHERE id=?",
+                         uid, origin, sid)

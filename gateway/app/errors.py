@@ -18,9 +18,13 @@ regex pe mesaj (`/2FA|passkey|parola contului/i`) — fragil la orice reformular
 greşit: prindea şi „the host requires 2FA — not reachable with an automation token", care NU
 e o cerere de step-up.
 """
+import asyncio
 import json
+import logging
 
 from fastapi import HTTPException
+
+log = logging.getLogger("webterm")
 
 
 class ApiError(HTTPException):
@@ -48,3 +52,27 @@ def rate_limited(retry: int) -> ApiError:
     """429 uniform pentru lockout-ul per IP (login/setup/reauth/conectare directă)."""
     return ApiError(429, "auth.rateLimited", f"too many attempts; retry in {retry}s",
                     headers={"Retry-After": str(retry)}, vars={"retry": int(retry)})
+
+
+def runtime_api_error(e: Exception, default_code: str, status: int = 502) -> ApiError:
+    """RuntimeError-urile din core (update de agent, telnet/serial/sesiune) poartă mesaje
+    englezeşti cu instrucţiuni de meniu („unlock it from Settings → Security") — le dăm cod,
+    textul rămâne în `detail` şi în log."""
+    msg = str(e) or type(e).__name__
+    low = msg.lower()
+    if "signing key" in low and "locked" in low:
+        code = "signing.locked"
+    elif ".sig missing" in low:
+        code = "signing.sigMissing"
+    elif "refused the update" in low:
+        code = "update.refused"
+    elif "agent refused" in low:
+        code = "agent.refused"
+    elif "source missing" in low or "no parsable" in low:
+        code = "agent.sourceMissing"
+    elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+        code = "host.noAnswer"
+    else:
+        code = default_code
+    log.info("%s: %s", code, msg)
+    return ApiError(status, code, msg)

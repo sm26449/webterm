@@ -14,6 +14,7 @@ import socket
 import sys
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from argon2 import PasswordHasher
 from argon2.exceptions import Argon2Error, InvalidHashError, VerifyMismatchError
@@ -1040,3 +1041,25 @@ def valid_email(addr: str) -> bool:
     if "." not in domain or domain.startswith(".") or domain.endswith(".") or ".." in domain:
         return False
     return True
+
+
+# Re-verifică sesiunea pe WS-urile de lungă durată (terminal, share, forward): logout/idle.
+# Citit la fiecare tick ca `security.WS_REVALIDATE_SECS` (testele îl modifică).
+WS_REVALIDATE_SECS = 60
+
+
+DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def origin_tuple(url: str):
+    """(scheme, hostname, port) normalizat, sau None dacă nu e un origin http(s) valid."""
+    try:
+        p = urlparse((url or "").strip())
+        scheme = (p.scheme or "").lower()
+        host = (p.hostname or "").lower()
+        port = p.port if p.port is not None else DEFAULT_PORTS.get(scheme)
+    except ValueError:            # port nenumeric / în afara intervalului
+        return None
+    if scheme not in ("http", "https") or not host or port is None:
+        return None
+    return scheme, host, port

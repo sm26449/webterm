@@ -12,7 +12,7 @@ os.environ["WEBTERM_DATA_DIR"] = tempfile.mkdtemp()
 os.environ.setdefault("WEBTERM_PUBLIC_URL", "http://127.0.0.1:8000")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app.api import _validate_forward  # noqa: E402
+from app.forward_api import _validate_forward  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 ok = 0

@@ -145,7 +145,7 @@ same review.
 - Forward tickets are re-checked against the issuer's **current** grants on every request.
 - Automation tokens never reach a `require_2fa` host and never exceed their creator.
 
-**Enforced in**: `authz.py` (`perm`, `declared`, `not_found`); `api.py` `_forward_authz_ok`.
+**Enforced in**: `authz.py` (`perm`, `declared`, `not_found`); `forward_api.py` `_forward_authz_ok`.
 **Tests**: `route_auth` (also checks Appendix A of `ROLES-AND-SSH.md`), `rbac_filter`,
 `rbac_escalation`, `rbac_crown`.
 
@@ -234,5 +234,5 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - There are no anonymous or "demo" links. This was decided on 2026-10-23: a bearer link to an
   internal service cannot be made as safe as not having one. Public demos belong outside WebTerm.
 
-**Enforced in**: `api.py` `[forward]`: `_forward_authz_ok`, `_fwd_origin_for_target`.
+**Enforced in**: `forward_api.py` `[forward]`: `_forward_authz_ok`, `_fwd_origin_for_target`.
 **Tests**: `forward_stepup`, `forward_proxy_headers`.

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
 from . import (api, audit, authz, backup, certmon, config, conntypes, core, db, email_alerts,
-               fwddomain, health, hosts_api, oidc_api, scim, security, signing, ssomap, syshealth,
+               forward_api, fwddomain, health, hosts_api, oidc_api, scim, security, signing, ssomap, syshealth,
                webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -397,7 +397,7 @@ async def forward_router(request: Request, call_next):
     # de aici susţinea invers. Funcţionează fiindcă `security_headers` sare peste gazdele de
     # forward; cine mută middleware-urile bazându-se pe vechea afirmaţie ar rupe izolarea.
     try:
-        resp = await api.route_forward(request)
+        resp = await forward_api.route_forward(request)
     except HTTPException as e:
         # Rulăm ca middleware ASGI, deci ÎN AFARA stivei de excepţii a FastAPI: orice
         # `raise HTTPException` din proxy ajungea la handler-ul de erori de server şi ieşea ca
@@ -538,7 +538,7 @@ class ForwardWSMiddleware:
             host = hdrs.get(b"host", b"").decode("latin1").split(":")[0].lower()
             main = fwddomain.forward_domain()
             if host and host != main and host.endswith("." + main):
-                await api.handle_forward_ws(scope, receive, send)
+                await forward_api.handle_forward_ws(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
@@ -561,6 +561,7 @@ app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)
 app.include_router(hosts_api.router)
+app.include_router(forward_api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 app.include_router(scim.router)

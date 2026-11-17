@@ -26,7 +26,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, db, fwddomain, security  # noqa: E402
+from app import api, config, db, fwddomain, security, forward_api  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -153,17 +153,17 @@ async def main():
 
         class _Req:
             def __init__(self, ticket=None):
-                self.cookies = {api.FWD_COOKIE: ticket} if ticket else {}
+                self.cookies = {forward_api.FWD_COOKIE: ticket} if ticket else {}
 
         ticket = security.make_forward_token(gated_slug, uid, security.STEPUP_WINDOW_MAX)
-        allowed = await api._forward_stepup_ok(plain_slug, _Req())
+        allowed = await forward_api._forward_stepup_ok(plain_slug, _Req())
         check("host FĂRĂ 2FA: tunelul nu cere fereastră de step-up", allowed is True)
 
-        allowed = await api._forward_stepup_ok(gated_slug, _Req())
+        allowed = await forward_api._forward_stepup_ok(gated_slug, _Req())
         check("host CU 2FA, fără bilet: tunelul e refuzat", allowed is False)
 
         security.open_stepup_window(uid, gated)
-        allowed = await api._forward_stepup_ok(gated_slug, _Req(ticket))
+        allowed = await forward_api._forward_stepup_ok(gated_slug, _Req(ticket))
         check("host CU 2FA, bilet + fereastră deschisă, FĂRĂ cookie de sesiune: trece",
               allowed is True, allowed)
 
@@ -171,16 +171,16 @@ async def main():
         exp_s, _uid_s, sig = ticket.split(".")
         forged = "%s.%d.%s" % (exp_s, uid + 7, sig)
         security.open_stepup_window(uid + 7, gated)
-        allowed = await api._forward_stepup_ok(gated_slug, _Req(forged))
+        allowed = await forward_api._forward_stepup_ok(gated_slug, _Req(forged))
         check("bilet cu uid rescris (semnătură ruptă): refuzat chiar cu fereastra acelui uid deschisă",
               allowed is False)
         security._stepup_windows.pop((uid + 7, gated), None)
 
         security._stepup_windows.clear()
-        allowed = await api._forward_stepup_ok(gated_slug, _Req(ticket))
+        allowed = await forward_api._forward_stepup_ok(gated_slug, _Req(ticket))
         check("host CU 2FA, fereastră închisă: tunelul se închide şi el", allowed is False)
 
-        allowed = await api._forward_stepup_ok("slug-inexistent", _Req())
+        allowed = await forward_api._forward_stepup_ok("slug-inexistent", _Req())
         check("slug necunoscut: nu aruncă, doar lasă calea normală să dea 404",
               allowed is True)
 
@@ -188,7 +188,7 @@ async def main():
         fwd_host = f"{gated_slug}.{fwddomain.forward_domain()}"
         async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=30,
                                      follow_redirects=False) as sub:
-            H = {"host": fwd_host, "cookie": f"{api.FWD_COOKIE}={ticket}"}
+            H = {"host": fwd_host, "cookie": f"{forward_api.FWD_COOKIE}={ticket}"}
             security.open_stepup_window(uid, gated)
             r = await sub.get("/grafana?x=1", headers=H)
             # hostul e un agent offline → proxy-ul dă 409; esenţialul e că NU e redirect
@@ -241,14 +241,14 @@ async def main():
             scope = {"type": "websocket", "path": "/ws", "query_string": b"",
                      "headers": [(b"host", fwd_host.encode()),
                                  (b"origin", f"{origin_scheme}://{fwd_host}".encode()),
-                                 (b"cookie", f"{api.FWD_COOKIE}={ticket_val}".encode())]}
+                                 (b"cookie", f"{forward_api.FWD_COOKIE}={ticket_val}".encode())]}
 
             async def receive():
                 return {"type": "websocket.connect"}
 
             async def send(m):
                 sent.append(m)
-            await api.handle_forward_ws(scope, receive, send)
+            await forward_api.handle_forward_ws(scope, receive, send)
             return sent
 
         security._stepup_windows.clear()

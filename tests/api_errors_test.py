@@ -21,7 +21,7 @@ os.environ["WEBTERM_IP_MAX_FAILS"] = "3"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, config, core, db, security, errors  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -77,7 +77,7 @@ def unit_checks():
         ("serial open failed", "session.createFailed"),
     ]
     for msg, code in rt:
-        r = api._runtime_api_error(RuntimeError(msg), "session.createFailed")
+        r = errors.runtime_api_error(RuntimeError(msg), "session.createFailed")
         check("_runtime_api_error(%r) → %s" % (msg[:28], code), r.code == code and r.status_code == 502, r.code)
 
     bk = [("wrong passphrase, or the file is corrupt", "backup.badPassphrase"),

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 from starlette.requests import Request  # noqa: E402
 
-from app import api, fwddomain  # noqa: E402
+from app import api, fwddomain, forward_api  # noqa: E402
 
 ok = 0
 total = 0
@@ -73,13 +73,13 @@ async def main():
 
     async def fake_source(host_id):
         return conn
-    orig = api._ensure_forward_source
-    api._ensure_forward_source = fake_source
+    orig = forward_api._ensure_forward_source
+    forward_api._ensure_forward_source = fake_source
     try:
         req = make_request([(b"host", b"slug.fwd.example"), (b"trailer", b"Expires"),
                             (b"te", b"trailers"), (b"x-keep", b"yes"), (b"connection", b"keep-alive"),
                             (b"upgrade", b"h2c"), (b"accept", b"*/*")])
-        resp = await api.proxy_forward_http(req, 1, "10.0.0.9", 8080, "/x", "http")
+        resp = await forward_api.proxy_forward_http(req, 1, "10.0.0.9", 8080, "/x", "http")
         sent = conn.stream.sent.decode("latin1")
         head = sent.split("\r\n\r\n", 1)[0].lower().split("\r\n")
         names = {ln.split(":", 1)[0] for ln in head[1:]}
@@ -106,8 +106,8 @@ async def main():
 
         # setul însuşi: numele corect, fără forma greşită care nu potrivea nimic
         check("_HOP_BY_HOP are `trailer` şi nu `trailers`",
-              "trailer" in api._HOP_BY_HOP and "trailers" not in api._HOP_BY_HOP
-              and "te" in api._HOP_BY_HOP)
+              "trailer" in forward_api._HOP_BY_HOP and "trailers" not in forward_api._HOP_BY_HOP
+              and "te" in forward_api._HOP_BY_HOP)
 
         # Origin (Grafana `POST /api/ds/query` → 403 „origin not allowed"): Origin-ul propriu
         # al forward-ului e rescris pe originea ţintei; unul străin e refuzat de noi; lipsă → lipsă
@@ -116,10 +116,10 @@ async def main():
 
             async def src(host_id):
                 return c
-            api._ensure_forward_source = src
+            forward_api._ensure_forward_source = src
             hdrs = [(b"host", b"slug.fwd.example")] + ([(b"origin", origin)] if origin else [])
             try:
-                await api.proxy_forward_http(make_request(hdrs, b"POST"), 1, "10.0.0.9", 8080, "/x", "http")
+                await forward_api.proxy_forward_http(make_request(hdrs, b"POST"), 1, "10.0.0.9", 8080, "/x", "http")
             except Exception as e:                     # noqa: BLE001
                 return None, e
             return c.stream.sent.decode("latin1").split("\r\n\r\n", 1)[0].split("\r\n"), None
@@ -140,36 +140,36 @@ async def main():
         check("Origin „null” → nu e trimis ţintei", err is None
               and not any(h.lower().startswith("origin:") for h in head), str(head or err))
     finally:
-        api._ensure_forward_source = orig
+        forward_api._ensure_forward_source = orig
 
     # 3.6.4 (audit funcţional): linkul forward-ului păstrează portul public al gateway-ului
-    check("port: implicit https → fără sufix", api._fwd_port_suffix("https://wt.example.com") == "")
-    check("port: :443 explicit pe https → fără sufix", api._fwd_port_suffix("https://wt.example.com:443") == "")
-    check("port: :80 pe http → fără sufix", api._fwd_port_suffix("http://wt.test:80") == "")
-    check("port: :8443 pe https → :8443", api._fwd_port_suffix("https://wt.example.com:8443") == ":8443")
-    check("port: PUBLIC_URL invalid → fără sufix (nu aruncă)", api._fwd_port_suffix("http://x:notaport") == "")
-    base = api._fwd_base("graf")
+    check("port: implicit https → fără sufix", forward_api._fwd_port_suffix("https://wt.example.com") == "")
+    check("port: :443 explicit pe https → fără sufix", forward_api._fwd_port_suffix("https://wt.example.com:443") == "")
+    check("port: :80 pe http → fără sufix", forward_api._fwd_port_suffix("http://wt.test:80") == "")
+    check("port: :8443 pe https → :8443", forward_api._fwd_port_suffix("https://wt.example.com:8443") == ":8443")
+    check("port: PUBLIC_URL invalid → fără sufix (nu aruncă)", forward_api._fwd_port_suffix("http://x:notaport") == "")
+    base = forward_api._fwd_base("graf")
     check("URL-ul forward-ului include portul PUBLIC_URL (http://localhost:8000)",
           base == "http://graf.%s:8000" % fwddomain.forward_domain(), base)
     # Origin-ul de pe subdomeniu CU port trece la fel ca fără (rutarea/verificarea ignoră portul)
     fhost = "graf.%s:8000" % fwddomain.forward_domain()
     check("Origin cu portul public → acceptat, rescris la ţintă",
-          api._fwd_origin_for_target(base, fhost, "http", "127.0.0.1", 3000) == "http://127.0.0.1:3000")
+          forward_api._fwd_origin_for_target(base, fhost, "http", "127.0.0.1", 3000) == "http://127.0.0.1:3000")
     try:
-        api._fwd_origin_for_target("http://evil.%s:8000" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        forward_api._fwd_origin_for_target("http://evil.%s:8000" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
         check("Origin străin (alt subdomeniu) → tot refuzat", False)
     except api.ApiError:
         check("Origin străin (alt subdomeniu) → tot refuzat", True)
     # raport 2026-11, punct 8: originea se compară ÎNTREAGĂ — acelaşi subdomeniu pe ALT port e altă
     # origine (alt serviciu pe aceeaşi gazdă), nu pagina forward-ului
     try:
-        api._fwd_origin_for_target("http://graf.%s:9999" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
+        forward_api._fwd_origin_for_target("http://graf.%s:9999" % fwddomain.forward_domain(), fhost, "http", "127.0.0.1", 3000)
         check("Origin pe acelaşi subdomeniu, ALT port → refuzat", False)
     except api.ApiError:
         check("Origin pe acelaşi subdomeniu, ALT port → refuzat", True)
     check("port implicit: Host fără port ↔ Origin fără port (https:443) → acceptat",
-          api._host_header_port("graf.example.com", "https") == 443
-          and api._host_header_port("graf.example.com:8443", "https") == 8443)
+          forward_api._host_header_port("graf.example.com", "https") == 443
+          and forward_api._host_header_port("graf.example.com:8443", "https") == 8443)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

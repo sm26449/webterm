@@ -15,7 +15,7 @@ import asyncio
 import json
 
 import rbac_util as U
-from app import api, core, db, fwddomain, security
+from app import api, core, db, fwddomain, security, forward_api
 
 check = U.Checker()
 
@@ -108,7 +108,7 @@ async def main():
     await U.add_user("other@x.co", bindings=[("operator", "folder", "lab")])
     await U.add_user("vw@x.co", bindings=[("viewer", "host", a)])
     op, other, vw = await U.login("op@x.co"), await U.login("other@x.co"), await U.login("vw@x.co")
-    api.WS_REVALIDATE_SECS = 30          # revalidarea vine din epoch bump, nu din tick
+    security.WS_REVALIDATE_SECS = 30          # revalidarea vine din epoch bump, nu din tick
 
     s_own = await U.add_session(a, state="live", created_by=op_id)
     s_foreign = await U.add_session(a, state="live", created_by=1)
@@ -196,14 +196,14 @@ async def main():
     fid = await U.add_forward(a, "svc", enabled=1)
     del fid
     ticket = security.make_forward_token("svc", op_id)
-    check("bilet + forward.use pe host → acces", await api._forward_authz_ok("svc", ticket))
+    check("bilet + forward.use pe host → acces", await forward_api._forward_authz_ok("svc", ticket))
     host = "svc." + fwddomain.forward_domain()
-    async with U.client(cookies={api.FWD_COOKIE: ticket}) as fc:
+    async with U.client(cookies={forward_api.FWD_COOKIE: ticket}) as fc:
         r = await fc.get("http://%s/" % host, headers={"host": host, "origin": "http://" + host})
         check("cerere pe subdomeniu cu bilet valid: trece de autorizare (host offline → 409)",
               r.status_code == 409, "%s %s" % (r.status_code, r.text[:80]))
         await U.unbind_all(op_id)
-        check("legătura scoasă: ACELAŞI bilet nu mai trece", not await api._forward_authz_ok("svc", ticket))
+        check("legătura scoasă: ACELAŞI bilet nu mai trece", not await forward_api._forward_authz_ok("svc", ticket))
         r = await fc.get("http://%s/" % host, headers={"host": host, "origin": "http://" + host})
         check("…cererea e trimisă la handshake (302), nu proxy-ată", r.status_code == 302
               and "/__wtfwd/auth" in r.headers.get("location", ""), str(r.status_code))
@@ -215,7 +215,7 @@ async def main():
     check("handshake cu forward.use (Viewer): bilet emis (302 spre subdomeniu)",
           r.status_code == 302 and "/__wtfwd/set" in r.headers.get("location", ""))
     ticket_other = security.make_forward_token("svc", 99999)
-    check("bilet al unui cont inexistent: refuz", not await api._forward_authz_ok("svc", ticket_other))
+    check("bilet al unui cont inexistent: refuz", not await forward_api._forward_authz_ok("svc", ticket_other))
 
     for c in (owner, op, other, vw):
         await c.aclose()

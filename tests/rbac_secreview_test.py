@@ -25,7 +25,7 @@ import json
 import time
 
 import rbac_util as U
-from app import api, stepup, core, db, security, webauthn_api
+from app import api, stepup, core, db, security, webauthn_api, forward_api
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -304,7 +304,7 @@ async def main():
     owner = await U.owner_client()
     prod = await U.add_host(owner, "alpha", folder="prod")
     lab = await U.add_host(owner, "beta", folder="lab")
-    api.WS_REVALIDATE_SECS = 30
+    security.WS_REVALIDATE_SECS = 30
     await ws_tests(owner, prod)
 
     # ── M2: re-ţintirea unei ţinte jump ──
@@ -434,11 +434,11 @@ async def main():
     class BadConn:
         async def open_forward(self, h, p):
             raise core.ForwardError("connect to 10.9.9.9:6379 refused (internal-db.corp)")
-    orig = api._ensure_forward_source
+    orig = forward_api._ensure_forward_source
 
     async def fake_src(host_id):
         return BadConn()
-    api._ensure_forward_source = fake_src
+    forward_api._ensure_forward_source = fake_src
     try:
         await U.add_user("pv@x.co", bindings=[("viewer", "folder", "prod")])
         pv = await U.login("pv@x.co")
@@ -449,7 +449,7 @@ async def main():
               and "10.9.9.9" not in r.text and "internal-db" not in r.text, r.text[:160])
         await pv.aclose()
     finally:
-        api._ensure_forward_source = orig
+        forward_api._ensure_forward_source = orig
 
     await second_pass(owner, prod)
 

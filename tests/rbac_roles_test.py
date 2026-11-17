@@ -19,7 +19,7 @@ import json
 
 import rbac_util as U
 import rbac_ws_test as W
-from app import api, stepup, authz, core, db
+from app import stepup, authz, core, db, security
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -229,7 +229,7 @@ async def main():
     sh_id = await U.add_user("sh@x.co")
     await bind_id(sh_id, shell, "folder", "prod")
     sh = await U.login("sh@x.co")
-    api.WS_REVALIDATE_SECS = 30
+    security.WS_REVALIDATE_SECS = 30
     sid = await U.add_session(a, state="live", created_by=sh_id)
     src = W.FakeSource()
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
