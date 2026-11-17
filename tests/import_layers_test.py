@@ -75,7 +75,8 @@ def main():
 
     # Rutele mutate din api.py în module proprii (hosts_api.py…) sunt tot vârful: doar main.py
     # le montează. Un modul de rute care importă alt modul de rute e începutul ciclului de dinainte.
-    route_mods = {"hosts_api", "forward_api", "backup_api", "docker_api", "services_api"}
+    route_mods = {"hosts_api", "forward_api", "backup_api", "docker_api", "services_api",
+                  "deploy_keys_api"}
     check("modulele de rute mutate din api.py chiar există", all((APP / (m + ".py")).exists() for m in route_mods),
           str(route_mods))
     back = sorted({(f.stem, m) for f in files for m, _ in imports(f) if m in route_mods and f.stem != "main"})

@@ -11,7 +11,8 @@ decides when they are required:
   * `verify_reauth_password`, `require_reauth_for_secret`, `reauth_for_access_change`: the
     account password (rate-limited) before secrets or access change hands.
 
-Routes stay in api.py (`[stepup]`, `[deploy-keys]`, `[install]`...); nothing here imports api.
+The routes that call it are in api.py (`[stepup]`, `[install]`...) and the `*_api.py` route modules
+(`deploy_keys_api.py`, `hosts_api.py`, `docker_api.py`...); nothing here imports api.py.
 """
 from . import config, db, security, webauthn_api
 from .errors import ApiError, rate_limited

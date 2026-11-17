@@ -75,6 +75,12 @@ back.
   command through the agent and validates Docker container and systemd unit names (also used by
   deploy keys and the Docker Logs / Shell sessions). Same routes, same permissions, same matching
   order; the function bodies are unchanged.
+- **Deploy keys have their own module** (`gateway/app/deploy_keys_api.py`, ~700 lines out of
+  `api.py`, now ~8,000): generating, deploying, revoking, verifying, testing and rotating the
+  host-to-host SSH keys of Toolbox → SSH keys, the ssh config snippet and the deploy-key policy.
+  Nothing else had to move. A missing section heading in `api.py` made the session code after it
+  look like part of deploy keys; it now has its own `[sessions]` heading. Same routes, same
+  permissions, same matching order; the function bodies are unchanged.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

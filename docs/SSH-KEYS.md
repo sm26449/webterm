@@ -120,7 +120,7 @@ deploy form — the policy only refuses the unrestricted choice.
 
 ## Maintenance notes
 
-- Backend: `gateway/app/api.py` (`/api/hosts/{id}/deploy-key/*`, `/api/settings/deploy-key-policy`),
+- Backend: `gateway/app/deploy_keys_api.py` (`/api/hosts/{id}/deploy-key/*`, `/api/settings/deploy-key-policy`),
   tables `ssh_keys` and `ssh_key_deployments`; tests in `tests/ssh_keys_test.py` (the rotate
   case runs only where `ssh-keygen` is installed).
 - Only ed25519 keys are generated and accepted; the path `~/.ssh/webterm_ed25519` is fixed.
