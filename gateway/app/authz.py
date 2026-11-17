@@ -1129,9 +1129,16 @@ def normalize_scope(kind: str, value) -> tuple[str, str]:
     if kind == "all":
         return "all", ""
     if kind == "tag":
-        v = v.lower()[:32]
-        if not v or " " in v or "," in v:
+        # Exact ce citeşte potrivirea (`tag_tokens`): un singur tag, sau refuz. Regula proprie de
+        # dinainte respingea doar spaţiul şi virgula, deci `prod<TAB>db` sau `prod<NBSP>db` treceau
+        # şi dădeau o legătură care nu potriveşte NICIUN host (tokenizerul le desparte) — moartă,
+        # fără nicio eroare. Iar o valoare de peste 32 de caractere era tăiată la 32 înainte de
+        # verificare, deci `<32 car.> b` pierdea tăcut al doilea tag.
+        # Şi nimic de curăţat: `prod,` sau `,prod` se refuză ca înainte, nu devin în tăcere `prod`.
+        toks = list(tag_tokens(v))
+        if len(toks) != 1 or toks[0] != v.lower()[:32]:
             raise ApiError(400, "authz.badScope", "a tag scope needs one tag")
+        v = toks[0]
     elif kind == "folder":
         v = v[:120]
         if not v:

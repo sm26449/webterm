@@ -82,6 +82,22 @@ async def main():
     r = await adm.post("/api/users/%d/bindings" % opu["id"],
                        json={"role": "viewer", "scope_kind": "nope", "current_password": PW})
     check("scope necunoscut → 400", r.status_code == 400 and U.code(r) == "authz.badScope")
+    # Un scope `tag:` = exact UN tag, aşa cum îl citeşte potrivirea (authz.tag_tokens). Tab-ul,
+    # NBSP-ul sau un al doilea tag după caracterul 32 dădeau o legătură moartă / trunchiată tăcut.
+    for bad in ("prod\tdb", "prod\u00a0db", "x" * 32 + ",b", "prod,", "a b", " ", ""):
+        r = await adm.post("/api/users/%d/bindings" % opu["id"],
+                           json={"role": "viewer", "scope_kind": "tag", "scope_value": bad, "current_password": PW})
+        check("scope tag:%r → 400 authz.badScope" % bad[:12], r.status_code == 400 and U.code(r) == "authz.badScope",
+              "%s %s" % (r.status_code, r.text[:120]))
+    # Aceeaşi funcţie pe mapările SSO din UI şi pe token-uri: acelaşi refuz.
+    for path, body in (("/api/settings/oidc-roles", {"group": "g-tab", "role": "viewer"}),
+                       ("/api/tokens", {"name": "t-tab", "scopes": ["read"], "days": 1, "role": "viewer"})):
+        r = await owner.post(path, json=dict(body, scope_kind="tag", scope_value="prod\tdb", current_password=U.OWNER_PW))
+        check("%s cu tag:prod<TAB>db → 400 authz.badScope" % path, r.status_code == 400 and U.code(r) == "authz.badScope",
+              "%s %s" % (r.status_code, r.text[:120]))
+    # …iar un tag valid rămâne normalizat ca înainte (lowercase, plafon 32).
+    for raw, want in (("Prod", "prod"), ("Y" * 40, "y" * 32)):
+        check("normalize_scope tag:%r → %r" % (raw[:8], want[:8]), authz.normalize_scope("tag", raw) == ("tag", want))
     r = await adm.post("/api/users/%d/bindings" % opu["id"],
                        json={"role": "viewer", "scope_kind": "host", "scope_value": "9999",
                              "current_password": PW})

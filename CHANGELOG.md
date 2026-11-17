@@ -9,6 +9,17 @@ back.
 
 ## [Unreleased]
 
+### Fixed
+- **A role scoped to a tag must name exactly one tag.** A tag scope with a tab or a
+  non-breaking space inside (`prod<TAB>db`, easy to paste from a spreadsheet) was saved, but it
+  could never match a host, because hosts split their tags on any whitespace: the role looked
+  granted and gave nothing, with no error. And a value longer than 32 characters was cut at 32
+  before it was checked, so a second tag after that point vanished silently. Both are now
+  refused with "Pick a valid scope", the same error as a space or a comma, when you add a role,
+  an SSO group mapping in Settings or an automation token. Valid tags are saved exactly as
+  before, and existing role assignments are not touched. (`WEBTERM_OIDC_ROLE_MAP` already
+  refused such values.)
+
 ### Changed
 - **The "never lock out the last Owner" rule lives in one module** (`gateway/app/owners.py`), moved
   out of five files with no change in behaviour. That rule says WebTerm always keeps a permanent
