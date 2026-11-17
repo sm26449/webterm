@@ -21,7 +21,7 @@ os.environ["WEBTERM_IP_MAX_FAILS"] = "3"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security, errors  # noqa: E402
+from app import api, config, core, db, security, errors, backup_api  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -85,7 +85,7 @@ def unit_checks():
           ("backup without the vault key — a restore would leave the credentials unreadable", "backup.noVaultKey"),
           ("nu pare un backup WebTerm", "backup.badFile")]
     for msg, code in bk:
-        check("_backup_value_error(%r) → %s" % (msg[:24], code), api._backup_value_error(ValueError(msg)).code == code)
+        check("_backup_value_error(%r) → %s" % (msg[:24], code), backup_api._backup_value_error(ValueError(msg)).code == code)
     check("_signing_value_error: not ed25519", api._signing_value_error(ValueError("the key is not ed25519")).code == "signing.notEd25519")
     check("_signing_value_error: exists → 409", api._signing_value_error(ValueError("a signing key already exists")).status_code == 409)
 

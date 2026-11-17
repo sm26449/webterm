@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, certmon, config, conntypes, core, db, email_alerts,
+from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, email_alerts,
                forward_api, fwddomain, health, hosts_api, oidc_api, scim, security, signing, ssomap, syshealth,
                webauthn_api)
 
@@ -188,7 +188,7 @@ _BACKUP_BOOT_DELAY = 60.0      # prima verificare la scurt timp DUPĂ boot, nu d
 async def _scheduled_backup() -> None:
     """Backup automat (off/daily/weekly), scris necriptat în data/backups/ (serverul are
     oricum cheia). Retenție 7 zile. Logica (scadenţă faţă de ultimul backup REUŞIT, gardă de
-    suprapunere, `backup_last_error`, alertă) stă în `api.scheduled_backup_tick`.
+    suprapunere, `backup_last_error`, alertă) stă în `backup_api.scheduled_backup_tick`.
 
     De ce prima verificare e la 60 s şi nu la 1 h: cu `sleep(TICK)` la ÎNCEPUTUL buclei, un
     gateway care reporneşte mai des decât o oră (crash-loop, health-gate la deploy, upgrade-uri
@@ -198,7 +198,7 @@ async def _scheduled_backup() -> None:
     await asyncio.sleep(_BACKUP_BOOT_DELAY)
     while True:
         try:
-            await api.scheduled_backup_tick()
+            await backup_api.scheduled_backup_tick()
         except Exception:
             log.exception("the scheduled backup tick failed")
         await asyncio.sleep(_BACKUP_TICK)
@@ -562,6 +562,7 @@ app.add_middleware(ForwardWSMiddleware)
 app.include_router(api.router)
 app.include_router(hosts_api.router)
 app.include_router(forward_api.router)
+app.include_router(backup_api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 app.include_router(scim.router)

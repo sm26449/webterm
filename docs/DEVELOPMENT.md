@@ -79,7 +79,7 @@ agent/
 gateway/app/
   main.py                  FastAPI app, security headers, static files, periodic reapers
   api.py                   the REST routes not yet in their own module + the agent / browser /
-                           shared websockets + the installer. 9.7k lines in sections
+                           shared websockets + the installer. 9.2k lines in sections
                            `# ── [tag] Title ──`: list them with `grep -n '^# ── ' gateway/app/api.py`;
                            one feature across files: `grep -n '^# ── \[ssh\]' gateway/app/{api,*_api,core}.py`.
                            Only main.py imports it (tests/import_layers_test.py)
@@ -89,6 +89,8 @@ gateway/app/
   forward_api.py           port forwards: the HTTP and WebSocket proxy through the tunnel, the
                            subdomain routing + auth handshake, the probe, forward-domain settings,
                            forward CRUD; own router, plus the two hooks main.py's middleware calls
+  backup_api.py            backup / restore routes, the backup schedule (`scheduled_backup_tick`,
+                           run by main.py) and off-host cloud / SFTP / FTPS backup; own router
   hostmodel.py             what api.py and hosts_api.py share about hosts: HostIn, tags, stored
                            credentials, the credential policy, SSH / telnet dial, install
                            one-liners, validate + insert, host-key pins from the Add-host test

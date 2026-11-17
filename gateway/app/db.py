@@ -1,5 +1,6 @@
 """SQLite access layer (aiosqlite, no ORM)."""
 
+import json
 import logging
 import time
 
@@ -855,3 +856,10 @@ async def set_setting(key: str, value) -> None:
 async def get_setting(key: str, default=None):
     row = await fetchone("SELECT value FROM app_settings WHERE key=?", key)
     return row["value"] if row else default
+
+
+async def get_json_setting(key: str) -> dict:
+    try:
+        return json.loads(await get_setting(key, "") or "") or {}
+    except ValueError:
+        return {}

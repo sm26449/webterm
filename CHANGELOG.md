@@ -62,6 +62,12 @@ back.
   `security.origin_tuple` + `DEFAULT_PORTS`, `security.WS_REVALIDATE_SECS`). Same routes, same permissions, same
   matching order (all 252 routes checked); the function bodies are unchanged (compared as syntax
   trees). The tests that read source code or list routers cover the new module too.
+- **Backup and restore have their own module** (`gateway/app/backup_api.py`, ~440 lines out of
+  `api.py`, now ~9,200): download, restore and verify, stored backups, the schedule (whose tick
+  `main.py` runs) and off-host backup to Google Drive, Dropbox, SFTP or FTPS, with the two
+  mappers that turn their errors into codes. The settings reader they shared with the security
+  summary moved to `db.get_json_setting`. Same routes, same permissions, same matching order; the
+  function bodies are unchanged.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 
