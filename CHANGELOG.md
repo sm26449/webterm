@@ -81,6 +81,13 @@ back.
   Nothing else had to move. A missing section heading in `api.py` made the session code after it
   look like part of deploy keys; it now has its own `[sessions]` heading. Same routes, same
   permissions, same matching order; the function bodies are unchanged.
+- **The file routes have their own module** (`gateway/app/files_api.py`, ~720 lines out of
+  `api.py`, now ~7,200). They were spread over four places, one of them without a heading:
+  browsing, download, folder archive, resumable upload, mkdir / rename / delete, the editor
+  preview, upload-and-move-as-root and the host-to-host copy. The code that turns the agent's
+  file errors into codes (and says which user cannot write which folder) moved one layer down to
+  `fserrors.py`, because the git panel uses it too. Same routes, same permissions, same matching
+  order; the function bodies are unchanged.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

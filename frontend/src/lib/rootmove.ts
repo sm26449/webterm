@@ -20,7 +20,7 @@ import { startUpload } from './uploads'
 import { uploadStore } from './uploadStore'
 import { isSafeToType, shellQuote, typeIntoOutcome, type TypeOutcome } from './transfers'
 
-/** Codurile de refuz care înseamnă „userul agentului nu poate scrie aici" (gateway: _fs_write_error). */
+/** Codurile de refuz care înseamnă „userul agentului nu poate scrie aici" (gateway: fserrors.fs_write_error). */
 export const WRITE_DENIED = new Set(['files.writeDenied', 'files.writeDeniedMode', 'files.permissionDenied'])
 export const isWriteDenied = (code: string | undefined): boolean => !!code && WRITE_DENIED.has(code)
 export const errIsWriteDenied = (e: unknown): boolean => e instanceof ApiError && isWriteDenied(e.code)

@@ -384,7 +384,7 @@ function publish(c: Ctl, p: Partial<UploadJob>) {
   })
 }
 
-/** Coduri de eroare pe care o reîncercare NU le schimbă (gateway: _file_api_error/_fs_write_error). */
+/** Coduri de eroare pe care o reîncercare NU le schimbă (gateway: fserrors.file_api_error / fs_write_error). */
 export const DEFINITIVE_CODES = new Set([
   'files.writeDenied', 'files.writeDeniedMode', 'files.permissionDenied', 'files.readOnly',
   'files.readOnlyAt', 'files.noSpace', 'files.noSpaceAt', 'files.dirMissing', 'files.notFound',

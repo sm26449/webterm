@@ -32,7 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
-from app import api, core, db, rootmove, syshealth  # noqa: E402
+from app import api, core, db, rootmove, syshealth, files_api, fserrors  # noqa: E402
 
 check = U.Checker()
 INBOX = "/home/webterm/.webterm/inbox"
@@ -607,19 +607,19 @@ class FakeAgent(core.AgentConnection):
 
 async def mapping_checks():
     print("── error mapping")
-    r = api._file_api_error(core.FileError("/srv/x: Input/output error"))
+    r = fserrors.file_api_error(core.FileError("/srv/x: Input/output error"))
     check("unknown strerror → files.failedReason + sanitised reason",
           r.code == "files.failedReason" and r.vars == {"reason": "Input/output error"}, (r.code, r.vars))
-    r = api._file_api_error(core.FileError("eroare"))
+    r = fserrors.file_api_error(core.FileError("eroare"))
     check("no message from the agent → plain files.failed", r.code == "files.failed" and not r.vars)
-    r = api._file_api_error(core.FileError("agent internal error: '__exit__'"))
+    r = fserrors.file_api_error(core.FileError("agent internal error: '__exit__'"))
     check("agent internal error → files.agentInternal + its text",
           r.code == "files.agentInternal" and r.vars.get("reason") == "'__exit__'", (r.code, r.vars))
-    r = api._file_api_error(core.FileError("agent internal error: [Errno 2] No such file: '/x'"))
+    r = fserrors.file_api_error(core.FileError("agent internal error: [Errno 2] No such file: '/x'"))
     check("internal wins over the substring table (not files.notFound)", r.code == "files.agentInternal")
     check("copy rows: codes needing {reason} fall back to files.failed",
-          api._copy_code_of("agent internal error: x") == "files.failed"
-          and api._copy_code_of("/x: weird") == "files.failed")
+          files_api._copy_code_of("agent internal error: x") == "files.failed"
+          and files_api._copy_code_of("/x: weird") == "files.failed")
 
     owner = await U.owner_client()
     hid = await U.add_host(owner, "lists-host")
@@ -627,30 +627,30 @@ async def mapping_checks():
     fake = FakeAgent(hid, deny={"/srv/bin/lists"})
     core.sources[hid] = fake
     try:
-        e = await api._fs_write_error(hid, core.FileError("/srv/bin/lists/a.wtpart.x: Permission denied"),
+        e = await fserrors.fs_write_error(hid, core.FileError("/srv/bin/lists/a.wtpart.x: Permission denied"),
                                       "/srv/bin/lists/a")
         check("permission denied → files.writeDeniedMode {user, dir, mode}",
               e.code == "files.writeDeniedMode" and e.vars == {"user": "webterm", "dir": "/srv/bin/lists", "mode": "755"},
               (e.code, e.vars))
-        e = await api._fs_write_error(hid, core.FileError("/srv/other/a: Permission denied"), "/srv/other/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/srv/other/a: Permission denied"), "/srv/other/a")
         check("mode unknown (fs_stat says missing) → files.writeDenied without mode",
               e.code == "files.writeDenied" and "mode" not in e.vars, (e.code, e.vars))
-        e = await api._fs_write_error(hid, core.FileError("/sys/a: Read-only file system"), "/sys/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/sys/a: Read-only file system"), "/sys/a")
         check("read-only → files.readOnlyAt {dir}", e.code == "files.readOnlyAt" and e.vars.get("dir") == "/sys")
-        e = await api._fs_write_error(hid, core.FileError("/v/a: No space left on device"), "/v/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/v/a: No space left on device"), "/v/a")
         check("no space → files.noSpaceAt", e.code == "files.noSpaceAt")
-        e = await api._fs_write_error(hid, core.FileError("/nope/a: No such file or directory"), "/nope/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/nope/a: No such file or directory"), "/nope/a")
         check("missing folder on a write → files.dirMissing", e.code == "files.dirMissing")
-        e = await api._fs_write_error(hid, core.FileError("/x/a: No such file or directory"), "/x/a",
+        e = await fserrors.fs_write_error(hid, core.FileError("/x/a: No such file or directory"), "/x/a",
                                       missing_is_dir=False)
         check("missing on delete/commit stays files.notFound", e.code == "files.notFound")
-        e = await api._fs_write_error(hid, core.FileError("/x/a\x1b[2J: Permission denied"), "/x/a\x1b[2J")
+        e = await fserrors.fs_write_error(hid, core.FileError("/x/a\x1b[2J: Permission denied"), "/x/a\x1b[2J")
         check("a control character in the folder is neutralised for display",
               "\x1b" not in e.vars.get("dir", "") and e.vars.get("dir") == "/x", e.vars)
         await db.execute("UPDATE hosts SET agent_user=NULL WHERE id=?", hid)
-        e = await api._fs_write_error(hid, core.FileError("/srv/bin/lists/a: Permission denied"), "/srv/bin/lists/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/srv/bin/lists/a: Permission denied"), "/srv/bin/lists/a")
         check("agent user unknown → plain files.permissionDenied", e.code == "files.permissionDenied")
-        e = await api._fs_write_error(hid, core.FileError("/sys/a: Read-only file system"), "/sys/a")
+        e = await fserrors.fs_write_error(hid, core.FileError("/sys/a: Read-only file system"), "/sys/a")
         check("agent user unknown → read-only still names the folder (no user needed)",
               e.code == "files.readOnlyAt" and e.vars == {"dir": "/sys"}, (e.code, e.vars))
         await db.execute("UPDATE hosts SET agent_user='webterm' WHERE id=?", hid)

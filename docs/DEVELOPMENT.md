@@ -79,7 +79,7 @@ agent/
 gateway/app/
   main.py                  FastAPI app, security headers, static files, periodic reapers
   api.py                   the REST routes not yet in their own module + the agent / browser /
-                           shared websockets + the installer. 8k lines in sections
+                           shared websockets + the installer. 7.2k lines in sections
                            `# ── [tag] Title ──`: list them with `grep -n '^# ── ' gateway/app/api.py`;
                            one feature across files: `grep -n '^# ── \[ssh\]' gateway/app/{api,*_api,core}.py`.
                            Only main.py imports it (tests/import_layers_test.py)
@@ -95,6 +95,9 @@ gateway/app/
   services_api.py          Services panel: systemd units, listening ports, diagnostics probes
   deploy_keys_api.py       deploy keys (Toolbox → SSH keys): generate / deploy / revoke / rotate…,
                            the deploy-key policy
+  files_api.py             files on a host: browse, download, archive, resumable upload, mkdir /
+                           rename / delete, preview, upload-and-move-as-root, host→host copy
+  fserrors.py              agent file errors → stable codes (Files routes + the git panel)
   cmdguard.py              server-side command guardrail (admin block / confirm rules, time-budgeted
                            matching); every route that sends a command to a host calls it first
   hostcmd.py               host_run (the agent `run` op), Docker / systemd name checks, the Docker

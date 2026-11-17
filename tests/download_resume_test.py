@@ -24,7 +24,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, config, core, db, security, files_api  # noqa: E402
 from app.main import app  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
@@ -140,8 +140,8 @@ async def main():
               (r.status_code, dict(r.headers)))
         a.agent_version = 57
 
-        check("download_etag: lipsă mtime → None", api.download_etag(10, None) is None
-              and api.download_etag(None, 5) is None and api.download_etag(0, 5) == 'W/"0-5"')
+        check("download_etag: lipsă mtime → None", files_api.download_etag(10, None) is None
+              and files_api.download_etag(None, 5) is None and files_api.download_etag(0, 5) == 'W/"0-5"')
 
     await db.close()
     print("\n%d/%d teste trecute" % (ok, total))

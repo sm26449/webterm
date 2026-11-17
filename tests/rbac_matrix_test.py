@@ -19,12 +19,12 @@ import pathlib
 import re
 
 import rbac_util as U
-from app import api, authz, backup_api, db, deploy_keys_api, docker_api, forward_api, services_api, hosts_api, oidc_api, webauthn_api
+from app import api, authz, backup_api, db, deploy_keys_api, docker_api, files_api, forward_api, services_api, hosts_api, oidc_api, webauthn_api
 
 check = U.Checker()
 ROUTERS = {"api": api.router, "hosts_api": hosts_api.router, "forward_api": forward_api.router, "backup_api": backup_api.router,
            "docker_api": docker_api.router, "services_api": services_api.router,
-           "deploy_keys_api": deploy_keys_api.router, "webauthn_api": webauthn_api.router,
+           "deploy_keys_api": deploy_keys_api.router, "files_api": files_api.router, "webauthn_api": webauthn_api.router,
            "oidc_api": oidc_api.router}
 # SCIM nu intră în matrice: e autentificat cu bearer-ul SCIM, nu cu cookie + rol (scim_*_test).
 NOT_IN_MATRIX = {"scim"}

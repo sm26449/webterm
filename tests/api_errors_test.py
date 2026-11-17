@@ -21,7 +21,7 @@ os.environ["WEBTERM_IP_MAX_FAILS"] = "3"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security, errors, backup_api  # noqa: E402
+from app import api, config, core, db, security, errors, backup_api, fserrors  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -61,10 +61,10 @@ def unit_checks():
         (TimeoutError(), 504, "files.timeout"),
     ]
     for exc, status, code in cases:
-        r = api._file_api_error(exc, 504 if isinstance(exc, TimeoutError) else 400)
+        r = fserrors.file_api_error(exc, 504 if isinstance(exc, TimeoutError) else 400)
         check("_file_api_error(%r) → %d %s" % (str(exc)[:30], status, code),
               r.status_code == status and r.code == code, "%s %s" % (r.status_code, r.code))
-    r = api._file_api_error(core.FileError("/etc/shadow: Permission denied"))
+    r = fserrors.file_api_error(core.FileError("/etc/shadow: Permission denied"))
     check("_file_api_error păstrează calea în detail (nu se pierde informaţia)",
           "/etc/shadow" in r.detail)
 
