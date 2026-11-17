@@ -32,7 +32,7 @@ os.environ.pop("WEBTERM_OIDC_ROLE_MAP", None)
 os.environ.pop("WEBTERM_OIDC_SSO_ONLY", None)
 
 import rbac_util as U  # noqa: E402
-from app import accounts, admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api  # noqa: E402
+from app import accounts, admin, api, authz, core, db, oidc, oidc_api, scim, security, webauthn_api, owners  # noqa: E402
 from app.errors import ApiError  # noqa: E402
 
 check = U.Checker()
@@ -336,7 +336,7 @@ async def test_last_owner(owner, c):
     # boss devine SINGURUL Owner permanent: Owner-ul local e retrogradat la unul temporar
     await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 7200, oid)
     authz.bump_epoch()
-    check("pregătire: boss e singurul Owner permanent", await authz.owner_count() == 1)
+    check("pregătire: boss e singurul Owner permanent", await owners.owner_count() == 1)
     r = await c.patch("/scim/v2/Users/" + sid_boss, json={"Operations": [
         {"op": "replace", "path": "displayName", "value": "Renamed Boss"},
         {"op": "replace", "path": "active", "value": False}]})
@@ -361,7 +361,7 @@ async def test_last_owner(owner, c):
     r = await c.patch("/scim/v2/Users/" + sid_boss, json=deactivate())
     check("cu un al doilea Owner permanent: boss se poate dezactiva", r.status_code == 200
           and r.json()["active"] is False)
-    check("…iar un Owner dezactivat nu mai numără ca Owner", await authz.owner_count() == 1)
+    check("…iar un Owner dezactivat nu mai numără ca Owner", await owners.owner_count() == 1)
     r = await owner.post("/api/users/%d/bindings/%d/delete" % (oid, (await db.fetchone(
         "SELECT b.id FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=? AND r.key='owner'",
         oid))["id"]), json={"current_password": PW})
@@ -1008,7 +1008,7 @@ async def test_rb06_scim_break_glass(owner, c):
         await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
     authz.bump_epoch()
     check("pregătire: bg-scim e singurul break-glass, dar nu singurul Owner permanent",
-          await authz.owner_count(with_local_password=True) == 1 and await authz.owner_count() >= 2)
+          await owners.owner_count(with_local_password=True) == 1 and await owners.owner_count() >= 2)
     n_au = await audit_n("%refused to disable bg-scim@x.co: the last permanent Owner with a local password%")
     try:
         try:
@@ -1109,7 +1109,7 @@ async def test_flt03_passwd_detaches(owner, c):
     authz.bump_epoch()
     try:
         check("pregătire: pw2 e singurul Owner permanent, cu legătura Owner din SSO",
-              await authz.owner_count(exclude_user=pw2) == 0 and await authz.owner_count() == 1)
+              await owners.owner_count(exclude_user=pw2) == 0 and await owners.owner_count() == 1)
         admin._read_new_password = lambda: "Parola-noua-123"
         try:
             await admin.cmd_passwd(argparse.Namespace(email="pw2@x.co"))
@@ -1119,7 +1119,7 @@ async def test_flt03_passwd_detaches(owner, c):
         check("admin passwd pe ULTIMUL Owner: legătura Owner @ all (sso) RĂMÂNE, viewer (sso) pleacă",
               t == [("owner", "all", "", "sso", None)], str(t))
         check("…acum e cont break-glass (Owner permanent cu parolă locală)",
-              await authz.owner_count(with_local_password=True) == 1 and await authz.last_break_glass(pw2))
+              await owners.owner_count(with_local_password=True) == 1 and await owners.last_break_glass(pw2))
     finally:
         for bid in parked:
             await db.execute("UPDATE role_bindings SET expires=NULL WHERE id=?", bid)
@@ -1141,8 +1141,8 @@ async def test_flt03_passwd_detaches(owner, c):
             await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
         authz.bump_epoch()
         check("pregătire: alţi Owneri permanenţi există, dar toţi SSO-only",
-              await authz.owner_count(exclude_user=pw4) >= 1 and await authz.owner_count(with_local_password=True) == 0,
-              "%d %d" % (await authz.owner_count(exclude_user=pw4), await authz.owner_count(with_local_password=True)))
+              await owners.owner_count(exclude_user=pw4) >= 1 and await owners.owner_count(with_local_password=True) == 0,
+              "%d %d" % (await owners.owner_count(exclude_user=pw4), await owners.owner_count(with_local_password=True)))
         admin._read_new_password = lambda: "Parola-noua-123"
         try:
             await admin.cmd_passwd(argparse.Namespace(email="pw4@x.co"))
@@ -1151,7 +1151,7 @@ async def test_flt03_passwd_detaches(owner, c):
         t = await binding_tuples(pw4)
         check("admin passwd pe ultimul Owner permanent CU PAROLĂ (ceilalţi SSO-only): legătura Owner (sso) RĂMÂNE, viewer pleacă",
               t == [("owner", "all", "", "sso", None)], str(t))
-        check("…pw4 e acum contul break-glass", await authz.last_break_glass(pw4))
+        check("…pw4 e acum contul break-glass", await owners.last_break_glass(pw4))
     finally:
         for o, lp in saved_lp.items():
             await db.execute("UPDATE users SET local_password=? WHERE id=?", lp, o)

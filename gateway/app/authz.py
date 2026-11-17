@@ -35,7 +35,7 @@ from typing import Any, Iterable, Optional
 from fastapi import Request
 from starlette.requests import HTTPConnection
 
-from . import db, security
+from . import db, owners, security
 from .errors import ApiError
 
 log = logging.getLogger("webterm")
@@ -1076,70 +1076,6 @@ async def role_id(key: str) -> Optional[int]:
     return r["id"] if r else None
 
 
-# INV-07 (docs/design/INVARIANTS.md): nicio acțiune nu scoate ultimul Owner / ultimul break-glass.
-async def owner_count(exclude_binding: Optional[int] = None,
-                      exclude_user: Optional[int] = None,
-                      with_local_password: bool = False) -> int:
-    """Accounts that hold a PERMANENT Owner @ all (the only Owner that can administer the
-    instance). 3.6.10: a time-bound Owner binding does not count — "the last Owner cannot be
-    removed" means the last one that will still be there tomorrow; otherwise removing the only
-    permanent Owner next to a 4-hour one would lock the instance out when the 4 hours end.
-    `with_local_password`: only the BREAK-GLASS ones — permanent Owners that can still sign in
-    when the IdP is down (COALESCE(local_password, 1)=1, the same definition as
-    `admin sso-only`; audit 2026-10-17 RB-01)."""
-    sql = ("SELECT COUNT(DISTINCT b.user_id) AS c FROM role_bindings b JOIN roles r ON r.id=b.role_id"
-           " JOIN users u ON u.id=b.user_id"
-           " WHERE r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL"
-           # 3.6.11: un Owner dezactivat nu poate administra nimic — nu e „încă un Owner"
-           " AND COALESCE(u.disabled, 0)=0")
-    args: list = []
-    if with_local_password:
-        sql += " AND COALESCE(u.local_password, 1)=1"
-    if exclude_binding is not None:
-        sql += " AND b.id<>?"
-        args.append(exclude_binding)
-    if exclude_user is not None:
-        sql += " AND b.user_id<>?"
-        args.append(exclude_user)
-    row = await db.fetchone(sql, *args)
-    return int(row["c"]) if row else 0
-
-
-# the one message for every way out of the break-glass invariant (%s = "you are" / "this
-# account is"). Two codes, one rule: `account.lastBreakGlass` when the caller's OWN account is
-# the break-glass one (Remove local password), `account.lastBreakGlassTarget` when an Owner
-# touches ANOTHER account (delete, remove / time-bound its Owner binding) — the UI shows
-# `err.account.<code>`, and the first-person text would be wrong for the second case
-# (re-review P1 RB-06).
-LAST_BREAK_GLASS_DETAIL = ("%s the last permanent Owner with a local password (the break-glass "
-                           "account): make another account a PERMANENT Owner with a local password "
-                           "first — a time-bound Owner does not count")
-
-
-async def last_break_glass(uid: int, exclude_binding: Optional[int] = None) -> bool:
-    """RB-06 (audit 2026-10-17): would taking `uid` out — deleting or disabling it, or, with
-    `exclude_binding`, removing / making time-bound that ONE binding of it — leave the instance
-    without a break-glass account? Same definition everywhere (`owner_count(with_local_password)`,
-    `admin sso-only`, System health): an ACTIVE account holding a PERMANENT Owner @ all with
-    COALESCE(local_password, 1)=1 — NULL counts as "has a password" (fail closed, as
-    `has_local_password`). Nothing to protect when `uid` is not such an account itself (an
-    SSO-only or disabled one, or one whose Owner binding is not the one being removed): then
-    the change does not touch the break-glass count, whatever that count is. Call under
-    `_lock` wherever the caller writes."""
-    row = await db.fetchone("SELECT COALESCE(disabled, 0) AS d, COALESCE(local_password, 1) AS lp"
-                            " FROM users WHERE id=?", uid)
-    if row is None or row["d"] or not row["lp"]:
-        return False
-    perm = ("SELECT 1 FROM role_bindings b JOIN roles r ON r.id=b.role_id WHERE b.user_id=?"
-            " AND r.key='owner' AND b.scope_kind='all' AND b.expires IS NULL")
-    if exclude_binding is not None:
-        if await db.fetchone(perm + " AND b.id<>?", uid, exclude_binding):
-            return False                    # another permanent Owner binding keeps it break-glass
-    if not await db.fetchone(perm, uid):
-        return False                        # not a permanent Owner at all
-    return await owner_count(exclude_user=uid, with_local_password=True) < 1
-
-
 async def target_grants(user_id: int) -> Grants:
     """What account `user_id` HOLDS — its bindings, read even when it is DISABLED (no cache).
     For the target rules ("only an Owner touches an Owner", "outranked"): a disabled Owner is
@@ -1584,17 +1520,17 @@ async def check_owner_expiry(role, kind: str, expires: Optional[float], target_u
     if info.key != "owner" or kind != "all" or expires is None:
         return
     if exclude_binding is not None:
-        left = await owner_count(exclude_binding=exclude_binding)
+        left = await owners.owner_count(exclude_binding=exclude_binding)
     else:
-        left = await owner_count(exclude_user=target_uid)
+        left = await owners.owner_count(exclude_user=target_uid)
     if left < 1:
         raise ApiError(400, "authz.lastOwner",
                        "the last permanent Owner cannot be made time-bound")
     # RB-06: a time-bound Owner is no break-glass account either — the last permanent Owner
     # with a local password keeps its binding permanent (same 409 as every other way out)
-    if exclude_binding is not None and await last_break_glass(target_uid, exclude_binding):
+    if exclude_binding is not None and await owners.last_break_glass(target_uid, exclude_binding):
         raise ApiError(409, "account.lastBreakGlassTarget",
-                       LAST_BREAK_GLASS_DETAIL % "this account is")
+                       owners.LAST_BREAK_GLASS_DETAIL % "this account is")
 
 
 async def sweep_expired_bindings() -> list:

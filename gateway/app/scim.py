@@ -69,7 +69,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import accounts, audit, authz, config, db, email_alerts, security, ssomap
+from . import accounts, audit, authz, config, db, email_alerts, owners, security, ssomap
 
 log = logging.getLogger("webterm")
 
@@ -823,15 +823,15 @@ async def _active_precheck(uid: int, active, ip: str = "-") -> None:
     if active is False and not row["d"]:
         if await authz.owner_level_given_in_webterm(uid):
             raise await _owner_level_refused(uid, "disable", ip)
-        if await accounts.is_permanent_owner(uid) \
-                and await authz.owner_count(exclude_user=uid) < 1:
-            await accounts.report_last_owner_refused(row["email"], actor=ACTOR, ip=ip,
-                                                     reason="SCIM active=false")
+        if await owners.is_permanent_owner(uid) \
+                and await owners.owner_count(exclude_user=uid) < 1:
+            await owners.report_last_owner_refused(row["email"], actor=ACTOR, ip=ip,
+                                                   reason="SCIM active=false")
             raise ScimError(403, "this account is the last permanent Owner of WebTerm and cannot "
                                  "be disabled; make another account a permanent Owner first")
-        if await authz.last_break_glass(uid):
-            await accounts.report_last_break_glass_refused(uid, row["email"], actor=ACTOR, ip=ip,
-                                                           reason="SCIM active=false")
+        if await owners.last_break_glass(uid):
+            await owners.report_last_break_glass_refused(uid, row["email"], actor=ACTOR, ip=ip,
+                                                         reason="SCIM active=false")
             raise _last_break_glass_error()
     if active is True and row["d"]:
         await _enable_check(uid, ip)
@@ -842,7 +842,7 @@ def _last_break_glass_error() -> ScimError:
     password — the break-glass account that still signs in when the IdP is down. 400
     `mutability` (`active` cannot change on this account), not 409: the same precheck runs
     inside POST /Users, where a 409 aborts Authentik's sync page ("never 409 on user create").
-    The refusal is audited and alerted (critical) by `accounts.report_last_break_glass_refused`."""
+    The refusal is audited and alerted (critical) by `owners.report_last_break_glass_refused`."""
     return ScimError(400, "this account is the last permanent Owner of WebTerm with a local "
                           "password (the break-glass account) and cannot be disabled by the "
                           "identity provider; make another account a permanent Owner with a local "

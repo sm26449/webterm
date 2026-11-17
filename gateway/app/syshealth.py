@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import alert_history, config, conntypes, db, fwddomain, healthcmd, hoststatus
+from . import alert_history, config, conntypes, db, fwddomain, healthcmd, hoststatus, owners
 
 log = logging.getLogger("webterm")
 
@@ -773,17 +773,6 @@ async def _n_users() -> int:
     return int((await db.fetchone("SELECT COUNT(*) AS c FROM users"))["c"])
 
 
-async def _permanent_owners(with_local_password: bool = False) -> int:
-    """Active accounts with a PERMANENT Owner @ all — authz.owner_count's definition; with
-    `with_local_password` only the break-glass ones (COALESCE(local_password, 1)=1, as
-    `admin sso-only` counts them). Read here, not through authz, so a check never depends on
-    the permission cache."""
-    row = await db.fetchone(
-        "SELECT COUNT(DISTINCT b.user_id) AS c " + _OWNER_ALL + " AND b.expires IS NULL"
-        + (" AND COALESCE(u.local_password, 1)=1" if with_local_password else ""))
-    return int(row["c"]) if row else 0
-
-
 async def c_roles_permanent_owner() -> Optional[Result]:
     """FL-14 (audit 2026-10-17): before 3.6.10 a time-bound Owner counted as "another Owner",
     so an instance may be left with none that is permanent; the time-bound ones cannot repair
@@ -792,7 +781,7 @@ async def c_roles_permanent_owner() -> Optional[Result]:
     when no Owner is left at all. The fix is typed (app.admin promote), never run."""
     if not await _n_users():
         return None                      # before the first account (setup)
-    n = await _permanent_owners()
+    n = await owners.owner_count()
     if n:
         return Result("ok", "permanent_owner_ok", {"count": n})
     now = time.time()
@@ -817,7 +806,7 @@ async def c_roles_break_glass() -> Optional[Result]:
     permanent-Owner check carries the escalation."""
     if not await _n_users():
         return None
-    n = await _permanent_owners(with_local_password=True)
+    n = await owners.owner_count(with_local_password=True)
     if n:
         return Result("ok", "break_glass_ok", {"count": n})
     return Result("warning", "no_break_glass", rec="break_glass_password", doc="break_glass")

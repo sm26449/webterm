@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 from email.utils import formatdate
 
 from .errors import ApiError, rate_limited
-from . import gitpanel
+from . import gitpanel, owners
 from . import webauthn_api
 from . import fscopy
 from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
@@ -658,12 +658,12 @@ async def _refuse_last_break_glass(user) -> None:
     keeps its local password while no OTHER active permanent Owner has one (a time-bound Owner
     does not count — it expires). Without that account an IdP outage locks every Owner out
     (passkeys go with the password), and the only way back is a shell on the server.
-    RB-06: the decision is `authz.last_break_glass` — shared with delete_user, remove_binding,
+    RB-06: the decision is `owners.last_break_glass` — shared with delete_user, remove_binding,
     the expiry route and accounts.disable (SCIM); nothing to protect when the account has no
     local password already (COALESCE(local_password, 1)=0: an SSO-only account is not the
     break-glass one, whatever the count)."""
-    if await authz.last_break_glass(user["id"]):
-        raise ApiError(409, "account.lastBreakGlass", authz.LAST_BREAK_GLASS_DETAIL % "you are")
+    if await owners.last_break_glass(user["id"]):
+        raise ApiError(409, "account.lastBreakGlass", owners.LAST_BREAK_GLASS_DETAIL % "you are")
 
 
 @router.post("/api/account")
@@ -766,7 +766,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
                     "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r"
                     " ON r.id=b.role_id WHERE b.user_id=? AND b.source='sso'", user["id"]):
                 if b["key"] == "owner" and b["scope_kind"] == "all":
-                    if await authz.owner_count(exclude_binding=b["id"]) < 1:
+                    if await owners.owner_count(exclude_binding=b["id"]) < 1:
                         # ultimul Owner: instanţa nu se blochează (aceeaşi regulă ca la sincronizare)
                         log.error("local password set on %s, the LAST Owner: its SSO Owner "
                                   "binding is kept", user["email"])
@@ -776,7 +776,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
                     # doar Owneri SSO-only (contul break-glass dispare la prima rotire a parolei,
                     # iar o pană a IdP-ului nu mai lasă pe nimeni să intre). local_password e deja
                     # 1 (scris mai sus), deci regula vede contul ca break-glass dacă e cazul.
-                    if await authz.last_break_glass(user["id"], exclude_binding=b["id"]):
+                    if await owners.last_break_glass(user["id"], exclude_binding=b["id"]):
                         log.error("local password set on %s, the last permanent Owner with a "
                                   "local password (break-glass): its SSO Owner binding is kept",
                                   user["email"])
@@ -1145,13 +1145,13 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         # „ultimul Owner" = ultimul ACTIV (un Owner dezactivat nu numără — owner_count): un cont
         # dezactivat se poate şterge fără să conteze ca ultimul (is_owner_user îl vede ca Owner)
         if (await authz.grants_for_user(uid)).is_owner() \
-                and await authz.owner_count(exclude_user=uid) < 1:
+                and await owners.owner_count(exclude_user=uid) < 1:
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
         # RB-06: nici ultimul Owner permanent CU PAROLĂ LOCALĂ (contul break-glass) — altfel o
         # pană a IdP-ului nu mai lasă pe nimeni să intre; aceeaşi regulă ca la remove_password
-        if await authz.last_break_glass(uid):
+        if await owners.last_break_glass(uid):
             raise ApiError(409, "account.lastBreakGlassTarget",
-                           authz.LAST_BREAK_GLASS_DETAIL % "this account is")
+                           owners.LAST_BREAK_GLASS_DETAIL % "this account is")
         # tot ce ţinea de el moare odată cu el: sesiuni web, passkey-uri, coduri de recuperare,
         # IP-uri cunoscute, legături de rol. Altfel un cookie al contului şters ar rămâne valid.
         for sql in ("DELETE FROM web_sessions WHERE user_id=?",
@@ -1310,13 +1310,13 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
         await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
                                removing=True)
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
-                and await authz.owner_count(exclude_binding=bid) < 1):
+                and await owners.owner_count(exclude_binding=bid) < 1):
             raise ApiError(400, "authz.lastOwner", "you cannot remove the last Owner")
         # RB-06: legătura Owner @ all a ultimului Owner permanent cu parolă locală rămâne (contul
         # break-glass) — un alt Owner permanent fără parolă nu ţine locul la o pană a IdP-ului
-        if await authz.last_break_glass(uid, exclude_binding=bid):
+        if await owners.last_break_glass(uid, exclude_binding=bid):
             raise ApiError(409, "account.lastBreakGlassTarget",
-                           authz.LAST_BREAK_GLASS_DETAIL % "this account is")
+                           owners.LAST_BREAK_GLASS_DETAIL % "this account is")
         # RB-02: re-auth-ul a fost un punct de suspendare — o sincronizare SSO a putut adopta
         # legătura între timp; ştergem DOAR ce nu e din SSO (fail closed: 0 rânduri = 409)
         gone = await db.execute_returning(
@@ -1889,7 +1889,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
                 user_id=uid, what_key="sso_access_changed",
                 what_params={"account": email, "added": "—", "removed": ", ".join(res["removed"])})
         if res["kept_last_owner"]:
-            ssomap.report_last_owner(uid, email, ip, res["kept_last_owner"])
+            owners.report_last_owner(uid, email, ip, res["kept_last_owner"])
     return await _oidc_roles_json()
 
 

@@ -1513,7 +1513,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   OIDC `externalId == sub` link also requires the account email; `/api/account` refuses a new
   password or email on a `scim_managed` account (`account.scimManaged`), `app.admin passwd`
   detaches it from SCIM; SCIM queries also require `local_password=0`; the last-Owner check runs
-  before any write; `admin._owner_ids` and the boot permanent-Owner count ignore disabled
+  before any write; `owners.owner_ids` and the boot permanent-Owner count ignore disabled
   accounts. Accepted and documented: the token can reach every mapped non-Owner role through a
   self-provisioned account (it is the IdP's credential).
 - **Independent review fixes (before release):** adoption of an existing account (one SCIM did

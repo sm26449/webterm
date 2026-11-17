@@ -161,8 +161,10 @@ same review.
 **The misconception.** "SSO group membership is the source of truth for every account." In 3.6.2
 the review found that an Admin could plant a local account and then have SSO adopt it into Owner.
 
-**Enforced in**: `authz.py` `owner_count`, `last_break_glass`; `ssomap.py` `has_local_password`;
-`accounts.py`; `scim.py`.
+**Enforced in**: `owners.py` (the whole rule: `owner_count`, `last_break_glass`,
+`is_permanent_owner`, `owner_ids`, and the audited refusals), called from `authz.py`,
+`accounts.py`, `scim.py`, `ssomap.py`, `api.py`, `admin.py` and `syshealth.py`;
+`ssomap.py` `has_local_password` (no SSO roles for local-password accounts).
 **Tests**: `rbac_escalation`, `sso_rolemap`, `scim_protocol`, `multi_account`.
 
 <a id="inv-08"></a>

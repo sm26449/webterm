@@ -33,7 +33,7 @@ os.environ["WEBTERM_OIDC_CLIENT_SECRET"] = "wt-secret"
 os.environ.pop("WEBTERM_OIDC_ALLOWED_GROUPS", None)
 
 import rbac_util as U  # noqa: E402
-from app import authz, config, db, oidc, oidc_api, security  # noqa: E402
+from app import authz, config, db, oidc, oidc_api, security, owners  # noqa: E402
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -430,7 +430,7 @@ async def main():
     owner_id = (await db.fetchone("SELECT id FROM users WHERE email=?", U.OWNER_EMAIL))["id"]
     await db.execute("DELETE FROM role_bindings WHERE user_id=?", owner_id)  # fixture: carol rămâne singurul
     authz.bump_epoch()
-    check("fixture: carol e singurul Owner", await authz.owner_count() == 1)
+    check("fixture: carol e singurul Owner", await owners.owner_count() == 1)
     await sso_login("sub-carol", "carol@x.co", [])
     check("grupul dispare, dar e ULTIMUL Owner: legătura e PĂSTRATĂ (instanţa nu se blochează)",
           ("owner", "all", "", "sso") in await sso_set("carol@x.co"))

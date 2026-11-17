@@ -14,7 +14,7 @@ import asyncio
 import time
 
 import rbac_util as U
-from app import authz, db
+from app import authz, db, owners
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -145,20 +145,20 @@ async def main():
     check("două Owner-e care se scot reciproc CONCURENT: exact unul reuşeşte (lock)",
           codes[0] == 200 and codes[1] in (400, 403), "%s %s / %s %s" % (
               r1.status_code, U.code(r1), r2.status_code, U.code(r2)))
-    check("…şi instanţa rămâne cu cel puţin un Owner", await authz.owner_count() >= 1)
+    check("…şi instanţa rămâne cu cel puţin un Owner", await owners.owner_count() >= 1)
     left = owner if r1.status_code == 200 else o2c
     left_id = owner_id if r1.status_code == 200 else o2
     gone_id = o2 if r1.status_code == 200 else owner_id
     r = await left.post("/api/users/%d/delete" % gone_id,
                         json={"current_password": U.OWNER_PW if left is owner else PW})
     check("ştergerea fostului Owner (acum fără rol) merge", r.status_code == 200, r.text[:160])
-    check("rămâne exact un Owner", await authz.owner_count() == 1)
+    check("rămâne exact un Owner", await owners.owner_count() == 1)
     lb = (await db.fetchone("SELECT id FROM role_bindings WHERE user_id=?", left_id))["id"]
     check("ultimul Owner nu-şi poate scoate singur rolul (self)",
           (await left.post("/api/users/%d/bindings/%d/delete" % (left_id, lb),
                            json={"current_password": U.OWNER_PW if left is owner else PW})).status_code == 403)
     check("owner_count exclude legătura scoasă → 0 (protecţia ar refuza)",
-          await authz.owner_count(exclude_binding=lb) == 0)
+          await owners.owner_count(exclude_binding=lb) == 0)
     owner = left
     opw = U.OWNER_PW if left_id == owner_id else PW
 

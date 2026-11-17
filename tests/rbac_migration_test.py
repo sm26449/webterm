@@ -17,7 +17,7 @@ import sys
 import time
 
 import rbac_util as U
-from app import authz, config, db, security
+from app import authz, config, db, security, owners
 
 check = U.Checker()
 
@@ -207,7 +207,7 @@ async def main():
     # break-glass: nicio legătură de Owner → `admin promote`
     await db.execute("DELETE FROM role_bindings")
     authz.bump_epoch()
-    check("fixture: instanţa nu mai are niciun Owner", await authz.owner_count() == 0)
+    check("fixture: instanţa nu mai are niciun Owner", await owners.owner_count() == 0)
     from app import admin
     old_argv = sys.argv
     sys.argv = ["app.admin", "promote", "ana@x.co"]
@@ -215,7 +215,7 @@ async def main():
         await admin.cmd_promote(type("A", (), {"email": "ana@x.co"})())
     finally:
         sys.argv = old_argv
-    check("`python3 -m app.admin promote` → Owner @ all", await authz.owner_count() == 1)
+    check("`python3 -m app.admin promote` → Owner @ all", await owners.owner_count() == 1)
     ep = await db.fetchone("SELECT value FROM app_settings WHERE key='authz_epoch'")
     check("…şi semnalează gateway-ului (authz_epoch în app_settings)", bool(ep and ep["value"]))
     au = await db.fetchone("SELECT detail FROM audit_log WHERE path='/admin/promote'")

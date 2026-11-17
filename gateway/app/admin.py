@@ -38,7 +38,7 @@ import getpass
 import sys
 import time
 
-from . import config, db, security
+from . import config, db, owners, security
 
 
 async def _find(email: str):
@@ -186,9 +186,9 @@ async def cmd_passwd(args) -> None:
     # instanţa rămâne fără niciun Owner chiar după comanda care trebuia să-l creeze) şi când,
     # cu parola tocmai scrisă, e ultimul Owner permanent CU PAROLĂ LOCALĂ (altfel rămân doar
     # Owneri SSO-only şi o pană a IdP-ului nu mai lasă pe nimeni să intre — revizuirea P1).
-    # authz nu se importă aici (proces separat), deci regula e scrisă pe acelaşi SQL.
-    others = await _owner_ids(permanent=True) - {user["id"]}
-    others_bg = await _owner_ids(permanent=True, with_local_password=True) - {user["id"]}
+    # Aceeaşi definiţie ca peste tot: owners.owner_ids (INV-07), fără authz şi cache-ul lui.
+    others = await owners.owner_ids(permanent=True) - {user["id"]}
+    others_bg = await owners.owner_ids(permanent=True, with_local_password=True) - {user["id"]}
     n = 0
     kept = None                            # "last-owner" | "break-glass"
     for b in await db.fetchall(
@@ -221,19 +221,6 @@ async def cmd_passwd(args) -> None:
     await _revoke_everything(user["id"], "password rotated")
 
 
-async def _owner_ids(permanent: bool = False, with_local_password: bool = False) -> set:
-    """Owner @ all (încă valabil). `permanent=True`: doar cei care vor mai fi Owner şi mâine
-    (revizuirea 3.6.10: un Owner TEMPORAR nu e un cont break-glass — expiră).
-    `with_local_password=True`: doar cei care pot intra şi fără IdP (COALESCE(local_password,1)=1,
-    NULL = are parolă, ca `authz.owner_count(with_local_password=True)`)."""
-    return {r["user_id"] for r in await db.fetchall(
-        "SELECT DISTINCT b.user_id FROM role_bindings b JOIN roles r ON r.id=b.role_id"
-        " JOIN users u ON u.id=b.user_id AND COALESCE(u.disabled, 0)=0"   # 3.6.11
-        " WHERE r.key='owner' AND b.scope_kind='all' AND (b.expires IS NULL OR b.expires > ?)"
-        + (" AND b.expires IS NULL" if permanent else "")
-        + (" AND COALESCE(u.local_password, 1)=1" if with_local_password else ""), time.time())}
-
-
 async def cmd_sso_only(args) -> None:
     """Acelaşi efect ca „Scoate parola locală" (api.update_account, remove_password), de pe
     server: parola devine un hash aleator (local_password=0), passkey-urile, TOTP-ul, codurile de
@@ -247,10 +234,10 @@ async def cmd_sso_only(args) -> None:
         print("SSO is not configured on this instance (WEBTERM_OIDC_*): an SSO-only account could "
               "not sign in at all. Nothing changed (use --force to do it anyway).", file=sys.stderr)
         raise SystemExit(2)
-    owners = await _owner_ids()
-    if user["id"] in owners:
+    owner_set = await owners.owner_ids()
+    if user["id"] in owner_set:
         with_pw = 0
-        for o in await _owner_ids(permanent=True) - {user["id"]}:
+        for o in await owners.owner_ids(permanent=True) - {user["id"]}:
             r = await db.fetchone("SELECT COALESCE(local_password, 1) AS lp FROM users WHERE id=?", o)
             if r is not None and r["lp"]:
                 with_pw += 1

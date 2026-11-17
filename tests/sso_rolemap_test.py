@@ -33,7 +33,7 @@ os.environ.pop("WEBTERM_OIDC_SSO_ONLY", None)
 os.environ.pop("WEBTERM_OIDC_SESSION_MAX_HOURS", None)
 
 import rbac_util as U  # noqa: E402
-from app import admin, authz, config, db, oidc, oidc_api, security, ssomap, webauthn_api  # noqa: E402
+from app import admin, authz, config, db, oidc, oidc_api, security, ssomap, webauthn_api, owners  # noqa: E402
 
 check = U.Checker()
 _ABSENT = object()
@@ -222,7 +222,7 @@ async def test_last_owner(owner):
     check("reconcilierea a scos maparea", "wt-db" in " ".join(res["removed"]), str(res))
     check("…dar legătura Owner a ultimului Owner e PĂSTRATĂ",
           ("owner", "all", "", "sso") in await bindings("carol@x.co"))
-    check("…instanţa are în continuare un Owner", await authz.owner_count() == 1)
+    check("…instanţa are în continuare un Owner", await owners.owner_count() == 1)
     for r in saved:
         await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source,"
                          " created) VALUES(?,?,?,?,?,?)", r["user_id"], r["role_id"], r["scope_kind"],
@@ -548,7 +548,7 @@ async def test_break_glass_api():
               "legătura Owner (sso) RĂMÂNE", r.status_code == 200
               and ("owner", "all", "", "sso") in await bindings("bg@x.co"),
               "%s %s %s" % (r.status_code, r.text[:120], await bindings("bg@x.co")))
-        check("…bg e în continuare contul break-glass", await authz.last_break_glass(bg))
+        check("…bg e în continuare contul break-glass", await owners.last_break_glass(bg))
         await db.execute("UPDATE users SET local_password=1 WHERE id=?", bg2)
         security.open_stepup_window(bg, 0)
         r = await c.post("/api/account", json={"new_password": "Parola-noua-124"})
@@ -577,7 +577,7 @@ async def test_break_glass_sync():
     contului break-glass NICI la propriul login SSO al omului (sincronizarea remove_only a unui
     cont cu parolă locală, ssomap.sync_user) cât timp ceilalţi Owneri permanenţi sunt SSO-only —
     altfel rămân doar Owneri pe care o pană a IdP-ului îi lasă afară. Regula e cea din
-    `authz.last_break_glass`, aplicată în ramura „kept" din ssomap._apply_locked."""
+    `owners.last_break_glass`, aplicată în ramura „kept" din ssomap._apply_locked."""
     print("── sincronizarea SSO: legătura Owner (sso) a contului break-glass rămâne")
     oid = await authz.role_id("owner")
     bgs = await U.add_user("bgs@x.co")
@@ -596,8 +596,8 @@ async def test_break_glass_sync():
             await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
         authz.bump_epoch()
         check("pregătire: bgs e contul break-glass, dar NU singurul Owner permanent",
-              await authz.last_break_glass(bgs) and await authz.owner_count(exclude_user=bgs) >= 1,
-              "%d %d" % (await authz.owner_count(with_local_password=True), await authz.owner_count()))
+              await owners.last_break_glass(bgs) and await owners.owner_count(exclude_user=bgs) >= 1,
+              "%d %d" % (await owners.owner_count(with_local_password=True), await owners.owner_count()))
         await sso_login("sub-bgs", "bgs@x.co", ["nothing"])
         check("login SSO cu grupuri care nu mai dau Owner: legătura Owner (sso) a contului break-glass RĂMÂNE",
               ("owner", "all", "", "sso") in await bindings("bgs@x.co"), str(await bindings("bgs@x.co")))
@@ -605,7 +605,7 @@ async def test_break_glass_sync():
                                " ORDER BY ts DESC, rowid DESC LIMIT 1", bgs)
         check("…rândul de audit „SSO roles synced” spune că a fost PĂSTRATĂ (KEPT break-glass Owner)",
               au is not None and "KEPT break-glass Owner" in au["detail"], str(au and dict(au)))
-        check("…instanţa are în continuare un cont break-glass", await authz.owner_count(with_local_password=True) == 1)
+        check("…instanţa are în continuare un cont break-glass", await owners.owner_count(with_local_password=True) == 1)
         await db.execute("UPDATE users SET local_password=1 WHERE id=?", osso)
         authz.bump_epoch()
         await sso_login("sub-bgs", "bgs@x.co", ["nothing"])

@@ -9,6 +9,14 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **The "never lock out the last Owner" rule lives in one module** (`gateway/app/owners.py`), moved
+  out of five files with no change in behaviour. That rule says WebTerm always keeps a permanent
+  Owner, and one with a local password that can still sign in when the identity provider is down.
+  It covers revoking and expiring Owner roles, deleting and disabling accounts, SCIM, SSO group
+  sync and System health. Each of those paths used to count Owners its own way, two of them with
+  their own copy of the same query.
+
 ### Contributors
 - **`npm run dev` serves the patched DOMPurify too.** 3.6.36 redirected Monaco's bundled
   DOMPurify 3.4.15 to 3.4.17 in the production build only. The dev server pre-bundles Monaco with

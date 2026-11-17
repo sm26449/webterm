@@ -24,7 +24,7 @@ import asyncio
 import time
 
 import rbac_util as U
-from app import admin, api, stepup, authz, db
+from app import admin, api, stepup, authz, db, owners
 
 check = U.Checker()
 PW = "parolabuna1"
@@ -367,8 +367,8 @@ async def main():
         await db.execute("UPDATE users SET local_password=0 WHERE id=?", o)
     authz.bump_epoch()
     check("pregătire RB-06: bg e singurul Owner permanent cu parolă locală, dar NU singurul Owner permanent",
-          await authz.owner_count(with_local_password=True) == 1 and await authz.owner_count() >= 2,
-          "%d %d" % (await authz.owner_count(with_local_password=True), await authz.owner_count()))
+          await owners.owner_count(with_local_password=True) == 1 and await owners.owner_count() >= 2,
+          "%d %d" % (await owners.owner_count(with_local_password=True), await owners.owner_count()))
     r = await owner.post("/api/users/%d/delete" % bg_id, json={"current_password": U.OWNER_PW})
     # codul e `account.lastBreakGlassTarget` (nu `…lastBreakGlass`, al rutei „Remove local password"):
     # UI-ul arată err.<cod>, iar textul la persoana I („Eşti ultimul Owner…") ar fi greşit aici

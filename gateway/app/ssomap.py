@@ -41,7 +41,7 @@ import time
 import unicodedata
 from typing import Optional
 
-from . import audit, authz, config, db, email_alerts, security, shares
+from . import audit, authz, config, db, email_alerts, owners, security, shares
 
 log = logging.getLogger("webterm")
 
@@ -49,8 +49,6 @@ GROUP_MAX_LEN = 256
 GROUPS_MAX = 5000
 MAPPINGS_MAX = 500
 WILDCARD = "*"
-
-_last_owner_alerted: dict[int, float] = {}
 
 
 def _clean_name(s: str) -> bool:
@@ -162,13 +160,13 @@ async def _apply_locked(uid: int, desired: set, *, remove_only: bool,
     for t, bid in sorted(sso.items()):
         if t in desired:
             continue
-        if t[0] == owner_rid and t[1] == "all" and await authz.owner_count(exclude_binding=bid) < 1:
+        if t[0] == owner_rid and t[1] == "all" and await owners.owner_count(exclude_binding=bid) < 1:
             kept.append(t)                 # never lock the instance out (docs/ROLES.md)
             continue
         # RB-06 (re-review P1): nor the Owner @ all binding of the break-glass account — the last
         # permanent Owner with a local password — while every other permanent Owner is SSO-only
         # (the caller holds authz._lock; same rule as api.update_account / admin passwd)
-        if t[0] == owner_rid and t[1] == "all" and await authz.last_break_glass(uid, exclude_binding=bid):
+        if t[0] == owner_rid and t[1] == "all" and await owners.last_break_glass(uid, exclude_binding=bid):
             kept_bg.append(t)
             continue
         await db.execute("DELETE FROM role_bindings WHERE id=? AND user_id=? AND source='sso'",
@@ -329,33 +327,9 @@ def _report(uid: int, email: str, ip: str, via: str, res: dict) -> None:
                                             user_id=uid, what_key="sso_access_changed",
                                             what_params=params)
     if res["kept_last_owner"]:
-        report_last_owner(uid, email, ip, res["kept_last_owner"])
+        owners.report_last_owner(uid, email, ip, res["kept_last_owner"])
     if res.get("kept_last_break_glass"):
-        report_last_break_glass(email, via, res["kept_last_break_glass"])
-
-
-def report_last_break_glass(email: str, via: str, kept: list) -> None:
-    """RB-06: the mapping (or the IdP's groups) would take the Owner @ all binding of the only
-    permanent Owner with a local password; it was kept so the instance stays openable without the
-    IdP. Log only (the sign-in audit row already says KEPT): nothing was granted, nothing removed."""
-    log.warning("SSO: kept the Owner binding of the break-glass account %s (%s) — every other "
-                "permanent Owner is SSO-only; give another permanent Owner a local password before "
-                "removing this one (%s)", email, ", ".join(kept), via)
-
-
-def report_last_owner(uid: int, email: str, ip: str, kept: list) -> None:
-    log.error("SSO: %s is the LAST Owner and its only Owner binding comes from SSO, but its "
-              "group no longer maps to Owner — the binding was KEPT so the instance is not "
-              "locked out. Make another account Owner (Settings → Users & roles, or "
-              "python3 -m app.admin promote), then fix the mapping.", email)
-    now = time.time()
-    if now - _last_owner_alerted.get(uid, 0) < 3600:
-        return                             # once an hour per account, not at every login
-    _last_owner_alerted[uid] = now
-    email_alerts.notify_security_change(
-        "the last Owner (%s) lost its SSO Owner group; the binding was kept" % email, ip, email,
-        fleet=True, severity="critical", what_key="sso_last_owner_kept",
-        what_params={"account": email, "binding": ", ".join(kept)})
+        owners.report_last_break_glass(email, via, res["kept_last_break_glass"])
 
 
 # ── 3.6.5: maparea din configuraţie (WEBTERM_OIDC_ROLE_MAP) ─────────────────────────────────
@@ -628,6 +602,6 @@ async def _report_config(out: dict, changed: list) -> None:
                 user_id=uid, what_key="sso_access_changed",
                 what_params={"account": email, "added": "—", "removed": ", ".join(res["removed"])})
         if res["kept_last_owner"]:
-            report_last_owner(uid, email, "-", res["kept_last_owner"])
+            owners.report_last_owner(uid, email, "-", res["kept_last_owner"])
         if res.get("kept_last_break_glass"):
-            report_last_break_glass(email, "config", res["kept_last_break_glass"])
+            owners.report_last_break_glass(email, "config", res["kept_last_break_glass"])
