@@ -6,7 +6,7 @@ agentul e un FakeAgent (ca în docker_sudo_test), iar comanda sesiunii de loguri
   * GET /api/hosts/{id}/docker/stats: aceleaşi reguli ca docker_list (cookie; tokenul de
     automatizare → 401; host 2FA fără step-up → 403), host inexistent, erori docker, timeout
     → „indisponibil" (nu eroare), cache + o singură rulare în zbor pe host;
-  * sesiunea „Logs": id validat cu _DOCKER_ID, shell-quotat, fallback `sudo -n`, fără prompt.
+  * sesiunea „Logs": id validat cu hostcmd.DOCKER_ID, shell-quotat, fallback `sudo -n`, fără prompt.
 """
 import asyncio
 import os
@@ -23,7 +23,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, security  # noqa: E402
+from app import api, config, core, db, security, docker_api, hostcmd  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -72,7 +72,7 @@ STATS_OK = {"ok": True, "exit_code": 0, "stdout": STATS_OUT, "stderr": ""}
 
 
 def test_parser():
-    P = api._parse_size
+    P = docker_api._parse_size
     check("B", P("0B") == 0 and P("512B") == 512)
     check("kB (zecimal)", P("1.2kB") == 1200)
     check("KB tolerat ca kB", P("2KB") == 2000)
@@ -89,20 +89,20 @@ def test_parser():
     check("unitate necunoscută → None, nu un număr inventat", P("12XB") is None)
     check("gunoi → None", P("abc") is None and P("1.2.3MB") is None and P("-5MB") is None)
 
-    Q = api._parse_pct
+    Q = docker_api._parse_pct
     check("% → float", Q("12.34%") == 12.34)
     check("CPU > 100% (mai multe nuclee) e păstrat", Q("250.5%") == 250.5)
     check("„--” / gol / gunoi → None", Q("--") is None and Q("") is None and Q("x%") is None)
     check("NaN / inf → None", Q("NaN%") is None and Q("inf%") is None)
     check("negativ → None", Q("-3%") is None)
 
-    R = api._parse_pair
+    R = docker_api._parse_pair
     check("pereche used / limit", R("12.3MiB / 7.6GiB") == (round(12.3 * 1024 ** 2), round(7.6 * 1024 ** 3)))
     check("pereche „-- / --”", R("-- / --") == (None, None))
     check("jumătate lipsă", R("1kB / --") == (1000, None))
     check("fără „/”", R("--") == (None, None))
 
-    rows = api._parse_docker_stats(STATS_OUT)
+    rows = docker_api._parse_docker_stats(STATS_OUT)
     check("linia non-JSON e sărită, restul parsate", len(rows) == 3, str(len(rows)))
     w = rows[0]
     check("rând complet: numere, nu text",
@@ -116,11 +116,11 @@ def test_parser():
                                      "net_tx", "block_read", "block_write", "pids")), str(s))
     b = rows[2]
     check("MemPerc lipsă → calculat din used/limit", b["mem_pct"] == 50.0, str(b))
-    check("ieşire goală → listă goală", api._parse_docker_stats("") == [])
+    check("ieşire goală → listă goală", docker_api._parse_docker_stats("") == [])
 
 
 def test_logs_cmd():
-    cmd = api._docker_logs_cmd("web-1.prod_x")
+    cmd = hostcmd.docker_logs_cmd("web-1.prod_x")
     check("comanda e `sh -c <quoted>`", cmd.startswith("sh -c '"))
     inner = shlex.split(cmd)[2]
     check("docker logs --tail 500 --timestamps -f <id>",
@@ -128,7 +128,7 @@ def test_logs_cmd():
     check("fallback `sudo -n`, niciodată sudo cu prompt",
           "exec sudo -n docker logs" in inner and "sudo docker" not in inner, inner)
     # quoting-ul: chiar dacă regex-ul ar lăsa vreodată să treacă ceva periculos, argumentul rămâne UN cuvânt
-    evil = api._docker_logs_cmd("x; touch /tmp/pwn")
+    evil = hostcmd.docker_logs_cmd("x; touch /tmp/pwn")
     check("un id cu `;` rămâne un singur argument quotat (apărare în adâncime)",
           "-f 'x; touch /tmp/pwn'" in shlex.split(evil)[2], evil)
 
@@ -166,7 +166,7 @@ def test_logs_cmd():
           "<x; touch /tmp/pwn>" in out, out)
 
     # ── 3.5.15: „Shell" (docker exec) — acelaşi direct → sudo -n → simplu + indicaţie ──
-    ex = api._docker_exec_cmd("web-1.prod_x")
+    ex = hostcmd.docker_exec_cmd("web-1.prod_x")
     check("exec: tot `sh -c <quoted>`, cu fallback `sudo -n` şi fără sudo cu prompt",
           ex.startswith("sh -c '") and "exec sudo -n docker exec -it" in shlex.split(ex)[2]
           and "sudo docker" not in shlex.split(ex)[2], ex)
@@ -180,7 +180,7 @@ def test_logs_cmd():
     out = run(ex)
     check("exec, fără niciun acces: comanda simplă (eroarea reală) + indicaţia WebTerm",
           "<exec>" in out and "[WebTerm]" in out and "|sudo=0" in out, out)
-    out = run(api._docker_exec_cmd("x; touch /tmp/pwn"), DOCKER_OK="1")
+    out = run(hostcmd.docker_exec_cmd("x; touch /tmp/pwn"), DOCKER_OK="1")
     check("exec: injecţia nu rulează, `;` rămâne text într-un singur argument",
           "<x; touch /tmp/pwn>" in out, out)
 
@@ -211,7 +211,7 @@ async def test_api():
         cmd, to = core.sources[hid].calls[0]
         check("stats: rulează `docker stats --no-stream --format '{{json .}}'`",
               cmd == "docker stats --no-stream --format '{{json .}}'", cmd)
-        check("stats: timeout de câteva secunde, nu 20", to == api._DOCKER_STATS_TIMEOUT and to <= 10, str(to))
+        check("stats: timeout de câteva secunde, nu 20", to == docker_api._DOCKER_STATS_TIMEOUT and to <= 10, str(to))
         await c.get(f"/api/hosts/{hid}/docker/stats")
         check("stats: a doua cerere în TTL vine din cache (o singură rulare)",
               len(core.sources[hid].calls) == 1, str(len(core.sources[hid].calls)))
@@ -221,16 +221,16 @@ async def test_api():
               j.get("host_cpus") is None, str(j.get("host_cpus")))
         await db.execute("UPDATE hosts SET diagnostics=? WHERE id=?",
                          json.dumps({"cpu": {"cores": 8, "model": "x"}}), hid)
-        api._docker_stats_cache.pop(hid, None)
+        docker_api._docker_stats_cache.pop(hid, None)
         j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
         check("stats: host_cpus din snapshot-ul de diagnostic din DB", j.get("host_cpus") == 8, str(j)[:200])
         core.sources[hid].diagnostics = {"cpu": {"cores": 4}}
-        api._docker_stats_cache.pop(hid, None)
+        docker_api._docker_stats_cache.pop(hid, None)
         j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
         check("stats: snapshot-ul din memorie (cel mai proaspăt) are prioritate", j.get("host_cpus") == 4, str(j)[:200])
         for bad in (0, -2, "8", True, 10 ** 6):
             core.sources[hid].diagnostics = {"cpu": {"cores": bad}}
-            api._docker_stats_cache.pop(hid, None)
+            docker_api._docker_stats_cache.pop(hid, None)
             j = (await c.get(f"/api/hosts/{hid}/docker/stats")).json()
             check(f"stats: cores invalid {bad!r} → null", j.get("host_cpus") is None, str(j.get("host_cpus")))
         core.sources[hid].diagnostics = None
@@ -245,7 +245,7 @@ async def test_api():
         check("timeout-ul nu e cache-uit (următorul tick reîncearcă)", len(core.sources[hid3].calls) == 2)
 
         # ── o singură rulare în zbor pentru cereri simultane ──
-        api._docker_stats_cache.pop(hid, None)
+        docker_api._docker_stats_cache.pop(hid, None)
         core.sources[hid] = FakeAgent(hid, [("docker stats", STATS_OK)], delay=0.2)
         rs = await asyncio.gather(*[c.get(f"/api/hosts/{hid}/docker/stats") for _ in range(3)])
         check("3 cereri simultane → o singură rulare pe host",
@@ -257,7 +257,7 @@ async def test_api():
                 ("absent", "sh: docker: command not found", "docker.absent"),
                 ("demon oprit", "Cannot connect to the Docker daemon at unix:///run/x.sock. Is the docker daemon running?",
                  "docker.failed")):
-            api._docker_stats_cache.pop(hid2, None)
+            docker_api._docker_stats_cache.pop(hid2, None)
             core.sources[hid2] = FakeAgent(hid2, [("docker", {"ok": True, "exit_code": 1, "stdout": "", "stderr": stderr})])
             r = await c.get(f"/api/hosts/{hid2}/docker/stats")
             check(f"eroare docker ({name}) → 400 {code}",
@@ -294,12 +294,12 @@ async def test_api():
         try:
             r = await c.post(f"/api/hosts/{hid}/sessions", json={"docker_logs": "3f2a1b4c5d6e", "title": "logs: web"})
             check("sesiune logs: 200", r.status_code == 200, r.text[:200])
-            check("sesiune logs: comanda e _docker_logs_cmd(id)", captured.get("cmd") == api._docker_logs_cmd("3f2a1b4c5d6e"))
+            check("sesiune logs: comanda e docker_logs_cmd(id)", captured.get("cmd") == hostcmd.docker_logs_cmd("3f2a1b4c5d6e"))
             check("sesiune logs: titlul trimis de client e păstrat", captured.get("title") == "logs: web")
             captured.clear()
             r = await c.post(f"/api/hosts/{hid}/sessions", json={"docker_container": "3f2a1b4c5d6e"})
-            check("3.5.15: sesiune Shell: comanda e _docker_exec_cmd(id) (fallback sudo -n)",
-                  r.status_code == 200 and captured.get("cmd") == api._docker_exec_cmd("3f2a1b4c5d6e"),
+            check("3.5.15: sesiune Shell: comanda e docker_exec_cmd(id) (fallback sudo -n)",
+                  r.status_code == 200 and captured.get("cmd") == hostcmd.docker_exec_cmd("3f2a1b4c5d6e"),
                   f"{r.status_code} {captured}")
             captured.clear()
             await c.post(f"/api/hosts/{hid}/sessions", json={"docker_logs": "web"})

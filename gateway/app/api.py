@@ -28,9 +28,9 @@ from .errors import ApiError, rate_limited
 from . import gitpanel, owners
 from . import webauthn_api
 from . import fscopy
-from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, config, core,
-               db, email_alerts, errors, health, healthcmd, hostmodel, push, pyruntime, replay, rootmove, scim,
-               security, shares, conntypes, fwddomain, signing, ssomap, stepup,
+from . import (accounts, alert_history, audit, authz, backup, certmon, cloudbackup, cmdguard, config,
+               core, db, email_alerts, errors, health, healthcmd, hostcmd, hostmodel, push, pyruntime,
+               replay, rootmove, scim, security, shares, conntypes, fwddomain, signing, ssomap, stepup,
                syshealth, totp, updatecheck)
 
 log = logging.getLogger("webterm")
@@ -204,7 +204,7 @@ async def app_state(request: Request):
             # overlay-ul de identitate; clientul rezolvă ${email}/${host}/${time}
             "watermark": (await _load_watermark()) if user is not None else None,
             # guardrail de comenzi (verificat client-side la Enter, via OSC 133)
-            "command_guard": (await _load_command_guard()) if user is not None else None,
+            "command_guard": (await cmdguard.load_command_guard()) if user is not None else None,
             # Idle-lock-ul e PER SESIUNE DE TERMINAL pe hosturile cu require_2fa (core.sweep_idle_locks),
             # nu per sesiune web: cronometrul îl resetează DOAR input-ul în terminal (şi mesajul WS
             # `touch`), nu orice cerere HTTP autentificată. Aici dăm pragul configurat (0 = oprit),
@@ -2340,23 +2340,6 @@ async def _load_watermark() -> dict:
     return {**WATERMARK_DEFAULT, **{k: cfg[k] for k in WATERMARK_DEFAULT if k in cfg}}
 
 
-# --- Guardrail de comenzi (client-side, single-account) ---------------------
-# Verificare la Enter în browser (via OSC 133): comenzi periculoase → block/confirm.
-# NU e enforcement server-side (ești singurul cont); e o plasă de siguranță contra
-# greșelilor (rm -rf /, mkfs, DROP DATABASE…). Reguli regex, editabile din Setări.
-COMMAND_GUARD_DEFAULT = {
-    "enabled": True,
-    "rules": [
-        {"pattern": r"\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r\s+-f|-f\s+-r)\s+/", "action": "confirm"},
-        {"pattern": r"\bmkfs\b", "action": "confirm"},
-        {"pattern": r"\bdd\b.*\bof=/dev/", "action": "confirm"},
-        {"pattern": r":\s*\(\s*\)\s*\{.*:\s*\|\s*:", "action": "confirm"},   # fork bomb
-        {"pattern": r"\bDROP\s+(DATABASE|TABLE)\b", "action": "confirm"},
-        {"pattern": r">\s*/dev/sd", "action": "confirm"},
-    ],
-}
-
-
 class CommandRuleIn(BaseModel):
     pattern: str
     action: str = "confirm"   # 'confirm' | 'block'
@@ -2367,25 +2350,6 @@ class CommandGuardIn(BaseModel):
     rules: list[CommandRuleIn] = []
 
 
-async def _load_command_guard() -> dict:
-    raw = await db.get_setting("command_guard")
-    if not raw:
-        return {k: (list(v) if isinstance(v, list) else v) for k, v in COMMAND_GUARD_DEFAULT.items()}
-    try:
-        cfg = json.loads(raw)
-    except (ValueError, TypeError):
-        return dict(COMMAND_GUARD_DEFAULT)
-    rules = []
-    for r in cfg.get("rules", []) if isinstance(cfg.get("rules"), list) else []:
-        if isinstance(r, dict) and r.get("pattern"):
-            rules.append({"pattern": str(r["pattern"])[:300],
-                          "action": "block" if r.get("action") == "block" else "confirm"})
-    return {"enabled": bool(cfg.get("enabled", True)), "rules": rules[:100]}
-
-
-# Bugetul per regulă (secunde). Un regex sănătos pe o linie de comandă termină în microsecunde;
-# ce depăşeşte asta e backtracking catastrofal, nu „o comandă lungă".
-GUARD_RE_BUDGET = security.REGEX_BUDGET
 # Corpus de fuzz la SALVARE: şiruri lungi şi uniforme pe clasele pe care le folosesc regulile
 # reale (litere, cifre, spaţii, separatori de shell), cu un caracter final care STRICĂ
 # potrivirea — exact forma care face `(a+)+$` sau `(\w+\s?)+$` să exploreze 2^n căi. 40 de
@@ -2396,71 +2360,11 @@ _GUARD_FUZZ = [c * 40 + "!" for c in "a A x 0 - / . _ \\ :".split(" ")] + [
     "rm -rf /" + "a" * 40, "sudo " * 8 + "!", "/dev/sd" + "a" * 40, "x=" * 20 + "!"]
 
 
-async def _guard_rule_over_budget(pattern: str, where: str) -> None:
-    """O regulă a depăşit bugetul: worker-ul a fost omorât şi regula NU se aplică pe comanda
-    asta. Lăsăm urmă (log + jurnal de audit, cu regula numită) — altfel plasa de siguranţă
-    s-ar rări în tăcere, iar adminul n-ar afla decât când o comandă „interzisă" trece."""
-    log.warning("command guard: rule %r exceeded the %.2fs budget (%s) — skipped",
-                pattern[:120], GUARD_RE_BUDGET, where)
-    await audit.record(time.time(), "system:guardrail", "-", "GUARD", "/api/settings/command-guard",
-                       408, "regulă de guardrail peste buget (%.2fs), sărită la %s: %s"
-                       % (GUARD_RE_BUDGET, where, pattern[:200]))
-
-
-async def _match_guard_rule(cmd: str) -> dict | None:
-    """Regula activă care se potriveşte pe comandă, sau None — regulile `block` ÎNAINTEA celor
-    `confirm`. Înainte câştiga prima din listă: un `confirm` larg (`rm`) pus deasupra unui
-    `block` (`rm -rf /`) făcea blocarea ocolibilă cu `confirmed: true` (3.5.1). Regex invalid =
-    ignorat (aceeaşi toleranţă ca în client: serverul validează la salvare)."""
-    guard = await _load_command_guard()
-    if not guard.get("enabled"):
-        return None
-    # F-09: regulile sunt scrise de admin, iar `re.search` e sincron şi neîntreruptibil. Prima
-    # mitigare (`wait_for` peste `to_thread`, buget 0,25 s) nu limita nimic: `wait_for` aşteaptă
-    # firul, deci cererea `/run` atârna cât regex-ul (măsurat de auditul din 2026-10-04: 12,9 s
-    # pentru `^(a+)+$` pe 28 de caractere) şi fiecare apel ocupa un thread din pool-ul implicit.
-    # Acum potrivirea rulează într-un proces separat care e OMORÂT la depăşire — CPU-ul chiar
-    # se eliberează, iar regula patologică e sărită cu urmă în audit (vezi
-    # `security.regex_search_budget`). Regulile sănătoase se comportă identic.
-    try:
-        rules = guard.get("rules", [])
-        ordered = [r for r in rules if r.get("action") == "block"] + \
-                  [r for r in rules if r.get("action") != "block"]
-        for r in ordered:
-            try:
-                hit = await security.regex_search_budget(r["pattern"], [cmd], re.IGNORECASE,
-                                                         GUARD_RE_BUDGET)
-            except re.error:
-                continue
-            if hit is None:
-                await _guard_rule_over_budget(r["pattern"], "run")
-                continue
-            if hit:
-                return r
-        return None
-    finally:
-        security.regex_worker_release()
-
-
-async def _enforce_guard(cmd: str, confirmed: bool) -> None:
-    """Aplică guardrail-ul pe o comandă care pleacă spre host: `block` → 403, `confirm` fără un DA
-    explicit → 409 (clientul întreabă omul şi retrimite cu `confirmed: true`). Folosit de `/run` ŞI
-    de acţiunile din panouri (git care scrie, docker, services): înainte doar `/run` era verificat,
-    deci o regulă `systemctl\\s+stop` nu oprea butonul Stop din panoul de servicii (3.5.2)."""
-    rule = await _match_guard_rule(cmd)
-    if rule and rule["action"] == "block":
-        raise ApiError(403, "run.guardBlocked", "command blocked by a guardrail: /%s/" % rule["pattern"],
-                       vars={"pattern": rule["pattern"]})
-    if rule and not confirmed:
-        raise ApiError(409, "run.guardConfirm", "command flagged for confirmation by a guardrail: /%s/"
-                       % rule["pattern"], vars={"pattern": rule["pattern"]})
-
-
 # ── [settings] Command guard, watermark, SMTP, webhook, alert settings ────────────────────────────
 
 @router.get("/api/settings/command-guard")
 async def get_command_guard(user=Depends(authz.perm("settings.manage"))):
-    return await _load_command_guard()
+    return await cmdguard.load_command_guard()
 
 
 @router.post("/api/settings/command-guard")
@@ -2479,8 +2383,8 @@ async def save_command_guard(body: CommandGuardIn, user=Depends(authz.perm('sett
             # rulată pe corpusul de fuzz cu acelaşi buget ca la `/run`. Aşa adminul află pe loc
             # că regula lui e inutilizabilă, în loc s-o vadă sărită în audit la prima comandă.
             if await security.regex_search_budget(pat, _GUARD_FUZZ, re.IGNORECASE,
-                                                  GUARD_RE_BUDGET) is None:
-                await _guard_rule_over_budget(pat, "save")
+                                                  cmdguard.GUARD_RE_BUDGET) is None:
+                await cmdguard.guard_rule_over_budget(pat, "save")
                 raise ApiError(
                     400, "guard.regexTooSlow",
                     f"regex too slow (catastrophic backtracking) — rule rejected: {pat}",
@@ -4259,7 +4163,7 @@ async def host_run(host_id: int, body: RunIn, request: Request,
     # strangulare curat: cine ocoleşte UI-ul ocolea şi regula. Semnalat de auditul extern
     # (2026-08-06). `block` refuză; `confirm` cere confirmare explicită în cerere — serverul
     # nu poate deschide un dialog, dar poate pretinde că cineva a răspuns la el.
-    await _enforce_guard(cmd, body.confirmed)
+    await cmdguard.enforce_guard(cmd, body.confirmed)
     cmd_timeout = min(max(int(body.timeout), 1), 300)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
@@ -4319,7 +4223,7 @@ async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', hos
             raise _file_api_error(e)
     cmd, guard = gitpanel.command(body.cwd, operation, **params)
     if operation in gitpanel.WRITE_OPS:
-        await _enforce_guard(guard, body.confirmed)
+        await cmdguard.enforce_guard(guard, body.confirmed)
     conn = core.source_for(host_id)
     if not isinstance(conn, core.AgentConnection):
         raise ApiError(409, "host.offline", "host offline or has no agent")
@@ -4339,463 +4243,6 @@ async def host_git(host_id: int, body: GitIn, user=Depends(authz.perm('run', hos
         access = gitpanel.access_fix(diag)
     return {"exit_code": resp.get("exit_code"), "stdout": stdout,
             "stderr": resp.get("stderr", ""), "access": access}
-
-
-# ── [docker] Docker: containere / volume / reţele, prin op-ul `run` (agent NEatins) ───
-# Acelaşi tipar ca panoul de git: CLI-ul docker rulează prin `run_command`, argv
-# shell-quotat server-side, ZERO op-uri noi în agent (deci fără re-semnare). Doar
-# citire + acţiuni de lifecycle (start/stop/restart) + logs; shell-ul în container
-# se face prin crearea unei sesiuni cu `docker exec` (vezi SessionIn.docker_container).
-_DOCKER_KINDS = {
-    # kind → (subcomanda de listare, format Go template pe linie = un JSON per rând)
-    "containers": ["ps", "-a", "--no-trunc", "--format", "{{json .}}"],
-    "images":     ["images", "--format", "{{json .}}"],
-    "volumes":    ["volume", "ls", "--format", "{{json .}}"],
-    "networks":   ["network", "ls", "--no-trunc", "--format", "{{json .}}"],
-}
-_DOCKER_ACTIONS = {"start", "stop", "restart"}     # lifecycle; NU rm/prune din UI (distructiv)
-_DOCKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")   # id sau nume de container
-
-
-def _docker_denied(err: str) -> bool:
-    """stderr-ul lui docker când userul agentului nu poate atinge socketul (nu e în grupul docker)."""
-    low = (err or "").lower()
-    return "permission denied" in low or "/var/run/docker.sock" in low
-
-
-async def _docker_run(host_id: int, argv: list[str], timeout: int = 20) -> dict:
-    """Rulează `docker <argv>` pe host prin op-ul `run`. Dacă userul agentului nu e în grupul
-    docker (permission denied pe socket), reîncearcă O DATĂ cu `sudo -n` — ca la os_upgrade: pe
-    hosturile unde agentul are sudo passwordless merge transparent; altfel `sudo -n` pică rapid
-    şi păstrăm răspunsul original (mesajul „adaugă-l în grupul docker"). Întoarce răspunsul brut."""
-    conn = core.source_for(host_id)
-    if not isinstance(conn, core.AgentConnection):
-        raise ApiError(409, "host.offline", "host offline or has no agent")
-    cmd = " ".join(shlex.quote(p) for p in (["docker"] + argv))
-    try:
-        resp = await conn.run_command(cmd, timeout)
-        if resp.get("ok") and resp.get("exit_code") not in (0, None) and _docker_denied(resp.get("stderr") or ""):
-            # `sudo -n`: NU agăţăm niciodată la un prompt de parolă — iese cu eroare dacă nu e passwordless
-            alt = await conn.run_command("sudo -n " + cmd, timeout)
-            if alt.get("ok") and alt.get("exit_code") == 0:
-                return alt
-    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
-    if not resp.get("ok"):
-        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
-    return resp
-
-
-def _docker_error(err: str) -> ApiError:
-    """Eroarea clară pentru un `docker …` cu exit≠0: lipsă / fără acces / altceva. Comună listei
-    şi statisticilor, ca acelaşi host să spună acelaşi lucru în ambele locuri."""
-    # docker lipseşte / demonul e oprit / userul agentului nu e în grupul docker: mesaj clar,
-    # nu o listă goală tăcută (frontend-ul deosebeşte „nu e docker aici" de „zero containere")
-    low = (err or "").lower()
-    if "command not found" in low or ("not found" in low and "docker" in low):
-        return ApiError(400, "docker.absent", "docker is not installed on this host")
-    if _docker_denied(err):
-        # am încercat deja `sudo -n` în _docker_run şi tot a picat → ghidăm userul să dea acces
-        # Onest (audit 2026-10-04, LOW #8): accesul la socketul docker ESTE root pe host, deci
-        # orice remediu renunţă la bariera userului dedicat din THREAT-MODEL. O spunem, nu o
-        # ascundem după comandă; regula sudoers îngustă e preferată (explicită, jurnalizată,
-        # merge imediat prin fallback-ul `sudo -n` de mai sus, fără restart de agent).
-        return ApiError(400, "docker.denied",
-                        "the agent's user isn't in the docker group and has no passwordless sudo. "
-                        "Either fix makes that user root-equivalent on the host (docker access is "
-                        "root) and gives up the dedicated-user barrier from the threat model — "
-                        "grant it deliberately, as root: a sudoers rule limited to docker "
-                        "(preferred), or usermod -aG docker <agent-user> and restart the agent.")
-    return ApiError(400, "docker.failed", (err or "").strip()[:300] or "docker failed")
-
-
-@router.get("/api/hosts/{host_id}/docker")
-async def docker_list(host_id: int, kind: str, user=Depends(authz.perm('docker.view', host='host_id'))):
-    """Listează containere/imagini/volume/reţele. Fiecare rând e un JSON (format Go template),
-    parsat aici într-o listă de obiecte — frontend-ul primeşte date, nu text de ecran."""
-    await stepup.require_host_stepup(host_id, user)   # citeşte date de pe host → aceeaşi poartă ca fs_list
-    argv = _DOCKER_KINDS.get(kind)
-    if not argv:
-        raise ApiError(400, "docker.badKind", "unknown docker kind")
-    resp = await _docker_run(host_id, argv)
-    ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
-    if ec != 0:
-        raise _docker_error(err)
-    rows = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-    return {"kind": kind, "rows": rows}
-
-
-# ── [docker] Statistici per container (`docker stats --no-stream`) ────────────────────
-# docker scrie mărimile pentru oameni: memoria în unităţi BINARE („12.3MiB / 7.6GiB", go-units
-# BytesSize), reţeaua şi discul în ZECIMALE („1.2kB / 0B", HumanSize), procentele cu „%". Un
-# container care porneşte/se opreşte chiar în timpul eşantionării dă „--" (sau „-- / --"). Le
-# transformăm AICI în numere (octeţi, procente) — frontend-ul formatează, nu parsează text.
-_SIZE_UNITS = {
-    "b": 1,
-    "kb": 1000, "mb": 1000 ** 2, "gb": 1000 ** 3, "tb": 1000 ** 4, "pb": 1000 ** 5,
-    "kib": 1024, "mib": 1024 ** 2, "gib": 1024 ** 3, "tib": 1024 ** 4, "pib": 1024 ** 5,
-}
-_SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE]([+-]?[0-9]{1,3}))?\s*([A-Za-z]*)$")
-_STATS_NA = {"", "-", "--", "n/a", "na"}
-_DOCKER_STATS_TIMEOUT = 6    # secunde; `--no-stream` eşantionează ~2 s, peste asta hostul e încărcat
-_DOCKER_STATS_TTL = 3.0      # mai multe taburi pe acelaşi panou → o singură rulare pe host la ~3 s
-_docker_stats_cache: dict = {}      # host_id → (monotonic, rezultat)
-_docker_stats_inflight: dict = {}   # host_id → Task (o singură rulare în zbor pe host)
-
-
-def _parse_size(text) -> Optional[int]:
-    """„12.3MiB" → 12897485; „1.2kB" → 1200; „0B" → 0. `None` pentru „--", gol sau unitate
-    necunoscută (mai bine «indisponibil» decât un număr inventat)."""
-    if not isinstance(text, str):
-        return None
-    t = text.strip()
-    if t.lower() in _STATS_NA:
-        return None
-    m = _SIZE_RE.match(t)
-    if not m:
-        return None
-    mult = _SIZE_UNITS.get((m.group(3) or "b").lower())
-    if mult is None:
-        return None
-    val = float(m.group(1)) * (10 ** int(m.group(2)) if m.group(2) else 1) * mult
-    if val != val or val in (float("inf"), float("-inf")) or val < 0:   # NaN / inf
-        return None
-    return int(round(val))
-
-
-def _parse_pct(text) -> Optional[float]:
-    """„12.34%" → 12.34. `None` pentru „--"/gol/text. CPU poate trece de 100 (mai multe nuclee)."""
-    if not isinstance(text, str):
-        return None
-    t = text.strip().rstrip("%").strip()
-    if t.lower() in _STATS_NA:
-        return None
-    try:
-        v = float(t)
-    except ValueError:
-        return None
-    if v != v or v in (float("inf"), float("-inf")) or v < 0:
-        return None
-    return round(v, 2)
-
-
-def _parse_pair(text) -> tuple:
-    """„12.3MiB / 7.6GiB" → (12897485, 8160437862). Fiecare jumătate poate lipsi („-- / --")."""
-    if not isinstance(text, str) or "/" not in text:
-        return (_parse_size(text), None)
-    a, _, b = text.partition("/")
-    return (_parse_size(a), _parse_size(b))
-
-
-def _parse_docker_stats(out: str) -> list:
-    """Ieşirea lui `docker stats --no-stream --format '{{json .}}'` (un JSON pe linie) → rânduri
-    cu numere. Liniile care nu sunt JSON (avertismente, gunoi) sunt sărite, nu fatale."""
-    rows = []
-    for line in (out or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(r, dict):
-            continue
-        mem_used, mem_limit = _parse_pair(r.get("MemUsage"))
-        mem_pct = _parse_pct(r.get("MemPerc"))
-        if mem_pct is None and mem_used is not None and mem_limit:
-            mem_pct = round(mem_used * 100.0 / mem_limit, 2)
-        net_rx, net_tx = _parse_pair(r.get("NetIO"))
-        blk_r, blk_w = _parse_pair(r.get("BlockIO"))
-        pids = r.get("PIDs")
-        try:
-            pids = int(str(pids).strip())
-        except (TypeError, ValueError):
-            pids = None
-        rows.append({
-            "id": str(r.get("ID") or r.get("Container") or ""),
-            "name": str(r.get("Name") or ""),
-            "cpu_pct": _parse_pct(r.get("CPUPerc")),
-            "mem_used": mem_used, "mem_limit": mem_limit, "mem_pct": mem_pct,
-            "net_rx": net_rx, "net_tx": net_tx,
-            "block_read": blk_r, "block_write": blk_w,
-            "pids": pids,
-        })
-    return rows
-
-
-async def _docker_stats_fetch(host_id: int) -> dict:
-    resp = await _docker_run(host_id, ["stats", "--no-stream", "--format", "{{json .}}"],
-                             timeout=_DOCKER_STATS_TIMEOUT)
-    if resp.get("timed_out") or resp.get("exit_code") is None:
-        # hostul n-a terminat în timp (multe containere / încărcat): „indisponibil", NU o eroare —
-        # panoul îşi răreşte singur sondajul; nu cache-uim, următorul tick reîncearcă
-        return {"available": False, "reason": "timeout", "rows": []}
-    if resp.get("exit_code") != 0:
-        raise _docker_error(resp.get("stderr") or "")
-    out = {"available": True, "rows": _parse_docker_stats(resp.get("stdout", "")),
-           "host_cpus": await _host_cpu_count(host_id)}
-    _docker_stats_cache[host_id] = (time.monotonic(), out)
-    return out
-
-
-async def _host_cpu_count(host_id: int) -> Optional[int]:
-    """Nucleele hostului (3.5.15), ca UI-ul să arate CPU-ul unui container RELATIV la host:
-    `docker stats` dă procentul pe UN nucleu (400% = patru nuclee pline), deci pe o maşină de 8
-    nuclee „96%" înseamnă 12% din host. Sursa e snapshot-ul de diagnostic pe care agentul îl
-    pushează deja (`cpu.cores` din /proc/cpuinfo) — întâi cel din memorie, apoi cel din DB; nicio
-    rulare în plus pe host. `None` = necunoscut → UI-ul arată valoarea brută, marcată „per nucleu"."""
-    diag = None
-    conn = core.source_for(host_id)
-    if isinstance(getattr(conn, "diagnostics", None), dict):
-        diag = conn.diagnostics
-    else:
-        row = await db.fetchone("SELECT diagnostics FROM hosts WHERE id=?", host_id)
-        if row and row["diagnostics"] and len(row["diagnostics"]) <= core.DIAG_MAX_BYTES:
-            try:
-                diag = json.loads(row["diagnostics"])
-            except ValueError:
-                diag = None
-    cpu = diag.get("cpu") if isinstance(diag, dict) else None
-    n = cpu.get("cores") if isinstance(cpu, dict) else None
-    return n if isinstance(n, int) and not isinstance(n, bool) and 0 < n <= 4096 else None
-
-
-@router.get("/api/hosts/{host_id}/docker/stats")
-async def docker_stats(host_id: int, user=Depends(authz.perm('docker.view', host='host_id'))):
-    """CPU %, memorie (folosită/limită/%), I/O de reţea şi disc pentru containerele PORNITE.
-    Aceleaşi reguli de acces ca docker_list (cookie, step-up pe host 2FA); numere, nu text."""
-    await stepup.require_host_stepup(host_id, user)   # EXACT ca docker_list
-    hit = _docker_stats_cache.get(host_id)
-    if hit and time.monotonic() - hit[0] < _DOCKER_STATS_TTL:
-        return hit[1]
-    task = _docker_stats_inflight.get(host_id)
-    if task is None:
-        task = asyncio.ensure_future(_docker_stats_fetch(host_id))
-        _docker_stats_inflight[host_id] = task
-        task.add_done_callback(lambda _t, h=host_id: _docker_stats_inflight.pop(h, None))
-    # shield: un client care închide panoul (cerere anulată) nu anulează rularea pe care o
-    # aşteaptă şi celelalte taburi
-    return await asyncio.shield(task)
-
-
-class DockerAction(BaseModel):
-    container: str
-    action: str
-    confirmed: bool = False    # guardrail `confirm`
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-@router.post("/api/hosts/{host_id}/docker/action")
-async def docker_action(host_id: int, body: DockerAction, request: Request,
-                        user=Depends(authz.perm('docker.act', host='host_id'))):
-    """start/stop/restart pe un container. Acţiune pe host → aceeaşi poartă de step-up ca /run."""
-    await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    if body.action not in _DOCKER_ACTIONS:
-        raise ApiError(400, "docker.badAction", "unknown docker action")
-    if not _DOCKER_ID.match(body.container or ""):
-        raise ApiError(400, "docker.badContainer", "invalid container id")
-    # guardrail pe comanda echivalentă din shell, ca o regulă `docker\s+stop` să oprească şi butonul
-    await _enforce_guard("docker %s %s" % (body.action, body.container), body.confirmed)
-    audit.detail(request, "docker %s %s" % (body.action, body.container))
-    resp = await _docker_run(host_id, [body.action, body.container], timeout=30)
-    if resp.get("exit_code") != 0:
-        raise ApiError(400, "docker.failed", (resp.get("stderr") or "docker failed").strip()[:300])
-    return {"ok": True}
-
-
-_DOCKER_ACCESS_HINT = ("[WebTerm] If docker reported a permission error: the agent user cannot reach "
-                       "the Docker daemon. The Docker panel shows the fix options.")
-
-
-def _docker_session_cmd(docker_cmd: str) -> str:
-    """Învelişul comun al sesiunilor Docker din terminal („Logs", „Shell"): accesul la docker
-    urmează `_docker_run` — direct dacă userul agentului ajunge la socket, altfel `sudo -n`
-    (passwordless) dacă există, NICIODATĂ un prompt de parolă agăţat în terminal; altfel rulăm
-    comanda simplă, ca omul să vadă eroarea reală a lui docker, plus o indicaţie.
-    `docker_cmd` e deja compus din bucăţi shell-quotate de apelant."""
-    sh = ('if docker version >/dev/null 2>&1; then exec %s; '
-          'elif command -v sudo >/dev/null 2>&1 && sudo -n docker version >/dev/null 2>&1; then exec sudo -n %s; '
-          'else %s; echo; echo %s; fi') % (docker_cmd, docker_cmd, docker_cmd, shlex.quote(_DOCKER_ACCESS_HINT))
-    return "sh -c %s" % shlex.quote(sh)
-
-
-def _docker_logs_cmd(container: str) -> str:
-    """Comanda sesiunii „Logs" a unui container: `docker logs --tail 500 -f` într-un terminal
-    (culori, scrollback, căutare, Ctrl+C), ca „Logs" din Services (`journalctl -f`). Id-ul e
-    validat de apelant cu _DOCKER_ID ŞI shell-quotat aici. Acces: `_docker_session_cmd`."""
-    return _docker_session_cmd("docker logs --tail 500 --timestamps -f %s" % shlex.quote(container))
-
-
-def _docker_exec_cmd(container: str) -> str:
-    """Comanda sesiunii „Shell" a unui container (3.5.15: acelaşi direct → `sudo -n` → simplu +
-    indicaţie ca „Logs"; până acum era `docker exec` gol, care pe un host unde agentul nu e în
-    grupul docker murea cu „permission denied" chiar dacă lista şi logurile mergeau prin sudo).
-
-    bash dacă există, altfel sh. NU `exec bash || exec sh`: într-un shell NEinteractiv
-    `exec <lipsă>` iese cu 127 ÎNAINTE de `||`, deci pe imaginile fără bash (alpine/busybox)
-    sesiunea murea instant cu „bash: not found". `command -v` testează întâi, fără să iasă."""
-    inner = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
-    return _docker_session_cmd("docker exec -it %s sh -c %s" % (shlex.quote(container), shlex.quote(inner)))
-
-
-# ── [services] systemd services + listening ports: acelaşi model ca Docker (prin op-ul `run`, ZERO op nou
-#    în agent → fără re-semnare). Doar host-uri de agent (systemctl/ss sunt locale pe host). ──
-async def _host_run(host_id: int, cmd: str, timeout: int = 20) -> dict:
-    conn = core.source_for(host_id)
-    if not isinstance(conn, core.AgentConnection):
-        raise ApiError(409, "host.offline", "host offline or has no agent")
-    try:
-        resp = await conn.run_command(cmd, timeout)
-    except (core.AgentGone, TimeoutError, asyncio.TimeoutError):
-        raise ApiError(504, "host.noAnswer", "the host did not answer in time")
-    if not resp.get("ok"):
-        raise ApiError(502, "run.failed", resp.get("msg") or "run failed")
-    return resp
-
-
-_SERVICE_ACTIONS = {"start", "stop", "restart"}     # lifecycle; NU enable/disable/mask din UI
-# unitate systemd: nume + tip, fără spaţii/shell (`nginx.service`, `user@1000.service`, `sshd`)
-_UNIT_RE = re.compile(r"^[A-Za-z0-9@._\\:-]{1,128}$")
-
-
-@router.get("/api/hosts/{host_id}/services")
-async def services_list(host_id: int, failed: bool = False, user=Depends(authz.perm('services.view', host='host_id'))):
-    """Unităţile systemd de tip service (nume, load/active/sub, descriere). Citire de stare de
-    host → aceeaşi poartă de step-up ca docker_list / fs_list. `failed=1` → doar unităţile căzute
-    (triajul „ce e stricat pe hostul ăsta"), cu `--state=failed` în loc de `--all`."""
-    await stepup.require_host_stepup(host_id, user)
-    # --plain fără legendă/paginare: coloane fixe UNIT LOAD ACTIVE SUB DESCRIPTION.
-    # `--all` include şi serviciile oprite (altfel n-ai ce porni din UI). NU redirectăm stderr şi
-    # NU forţăm exit 0: altfel „systemctl: not found" ajungea în /dev/null şi ramura de absenţă era
-    # cod mort — un host fără systemd întorcea o listă goală tăcută, nedistinctă de „zero servicii"
-    # (audit 2026-09). Deosebim după exit_code + stderr, exact ca docker_list.
-    state = "--state=failed" if failed else "--all"
-    resp = await _host_run(host_id,
-        "systemctl list-units --type=service %s --no-legend --no-pager --plain" % state)
-    ec, out, err = resp.get("exit_code"), resp.get("stdout", ""), (resp.get("stderr") or "")
-    if ec != 0 and not out.strip():
-        low = err.lower()
-        if "not found" in low or "command not found" in low or "no such file" in low:
-            raise ApiError(400, "services.absent", "systemctl is not available on this host")
-        raise ApiError(400, "services.failed", err.strip()[:300] or "systemctl failed")
-    rows = []
-    for line in out.splitlines():
-        # marcajul de stare din prima coloană (●/×) apare doar cu --legend; --plain îl omite,
-        # dar tăiem defensiv orice non-alfanumeric de la început
-        line = line.lstrip("●×* \t")
-        f = line.split(None, 4)
-        if len(f) >= 4 and f[0].endswith(".service"):
-            rows.append({"unit": f[0], "load": f[1], "active": f[2], "sub": f[3],
-                         "desc": f[4] if len(f) == 5 else ""})
-    return {"rows": rows}
-
-
-class ServiceAction(BaseModel):
-    unit: str
-    action: str
-    confirmed: bool = False    # guardrail `confirm`
-    stepup_grant: str = ""
-    stepup_password: str = ""
-    stepup_totp: str = ""       # 2FA: cod TOTP/recovery (conturi cu TOTP fără passkey)
-
-
-@router.post("/api/hosts/{host_id}/services/action")
-async def service_action(host_id: int, body: ServiceAction, request: Request,
-                         user=Depends(authz.perm('services.act', host='host_id'))):
-    """start/stop/restart pe o unitate. Acţiune pe host → step-up ca /run şi docker_action.
-    Rulează ca userul agentului: fără root/policykit, stop/start pe unităţi de sistem eşuează
-    cu „access denied" — surfaced ca atare, nu tăcut."""
-    await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
-    if body.action not in _SERVICE_ACTIONS:
-        raise ApiError(400, "services.badAction", "unknown service action")
-    if not _UNIT_RE.match(body.unit or ""):
-        raise ApiError(400, "services.badUnit", "invalid unit name")
-    svc_cmd = "systemctl %s %s" % (shlex.quote(body.action), shlex.quote(body.unit))
-    await _enforce_guard(svc_cmd, body.confirmed)
-    audit.detail(request, "service %s %s" % (body.action, body.unit))
-    resp = await _host_run(host_id, svc_cmd, timeout=30)
-    if resp.get("exit_code") != 0:
-        raise ApiError(400, "services.failed", (resp.get("stderr") or "systemctl failed").strip()[:300])
-    return {"ok": True}
-
-
-@router.get("/api/hosts/{host_id}/ports")
-async def listening_ports(host_id: int, user=Depends(authz.perm('host.diagnostics', host='host_id'))):
-    """Socket-urile în ASCULTARE (`ss -tulnH`), parsate. Citire de stare de host → step-up.
-    Numele procesului cere de obicei root; fără el coloana `users` lipseşte, restul rămâne util."""
-    await stepup.require_host_stepup(host_id, user)
-    # `ss -tulnpH`: -p adaugă procesul (cere de obicei root). Dacă `ss` lipseşte, spunem asta —
-    # nu întoarcem o listă goală tăcută (ca la services). Prima încercare cu -p pe stderr propriu;
-    # fallback fără -p dacă -p n-a mers, dar tot verificăm că `ss` există.
-    resp = await _host_run(host_id,
-        "if command -v ss >/dev/null 2>&1; then ss -tulnpH 2>/dev/null || ss -tulnH; "
-        "else echo __NO_SS__; fi")
-    out = resp.get("stdout", "")
-    if out.strip() == "__NO_SS__":
-        raise ApiError(400, "ports.absent", "ss (iproute2) is not available on this host")
-    rows = []
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) < 5:
-            continue
-        # Netid State Recv-Q Send-Q Local:Port Peer:Port [Process]
-        local = f[4]
-        addr, _, port = local.rpartition(":")
-        proc = ""
-        m = re.search(r'\("([^"]+)",pid=(\d+)', line)
-        if m:
-            proc = "%s (%s)" % (m.group(1), m.group(2))
-        rows.append({"proto": f[0], "addr": addr or "*", "port": port, "process": proc})
-    # ordonate numeric după port, stabil
-    rows.sort(key=lambda r: (int(r["port"]) if r["port"].isdigit() else 1 << 20, r["proto"]))
-    return {"rows": rows}
-
-
-# Probe de diagnostic ON-DEMAND (nu în snapshot-ul orar al agentului, deci fără atingere de agent):
-# parsăm utilitarele standard şi întoarcem text ETICHETAT pe secţiuni. Read-only, degradează
-# curat fără root (smartctl/nft cer de obicei root → afişăm „needs root", nu listă goală tăcută).
-_DIAG_PROBES = {
-    "storage": (
-        "echo '### lsblk'; command -v lsblk >/dev/null 2>&1 && "
-        "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || echo '(lsblk unavailable)'; "
-        "echo; echo '### SMART health'; if command -v smartctl >/dev/null 2>&1; then "
-        "for d in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2==\"disk\"{print $1}'); do "
-        "echo \"/dev/$d:\"; smartctl -H \"/dev/$d\" 2>&1 | "
-        "grep -iE 'overall-health|SMART Health|result' || echo '  (no SMART data / needs root)'; "
-        "done; else echo '(smartctl not installed)'; fi; "
-        "echo; echo '### ZFS'; command -v zpool >/dev/null 2>&1 && zpool status 2>&1 || echo '(no zpool)'"),
-    "net": (
-        "echo '### neighbors (ARP/ND)'; command -v ip >/dev/null 2>&1 && ip neigh 2>/dev/null || "
-        "arp -an 2>/dev/null || echo '(no ip/arp)'; "
-        "echo; echo '### firewall'; if command -v nft >/dev/null 2>&1; then "
-        "nft list ruleset 2>&1 | head -n 300; "
-        "elif command -v iptables-save >/dev/null 2>&1; then iptables-save 2>&1 | head -n 300; "
-        "else echo '(no nft / iptables — or needs root)'; fi"),
-}
-
-
-@router.get("/api/hosts/{host_id}/diag-probe")
-async def diag_probe(host_id: int, kind: str = "storage", user=Depends(authz.perm('host.diagnostics', host='host_id'))):
-    """Probe on-demand (storage: lsblk/SMART/zpool · net: neighbors/firewall). Citire de stare de
-    host → step-up ca ports/services. Text brut etichetat pe secţiuni — nu reinterpretăm modelul
-    uneltei (glue), doar îl arătăm cohesiv."""
-    await stepup.require_host_stepup(host_id, user)
-    recipe = _DIAG_PROBES.get(kind)
-    if not recipe:
-        raise ApiError(400, "diag.badProbe", "unknown probe")
-    resp = await _host_run(host_id, recipe, timeout=25)
-    return {"text": (resp.get("stdout", "") or "")[:60000]}
 
 
 # ── [toolbox-db] Database connection launchers ────────────────────────────────────────────
@@ -6440,7 +5887,7 @@ async def _dk_deploy_one(key, target_id: int, from_ip: str, confirmed: bool,
         raise ApiError(409, "sshkey.pivot", "the target has its own active deploy key — this creates an access chain")
     line = (options + " " if options else "") + key["public_key"]
     blob, _fp = _dk_validate(key["public_key"])     # H-1: re-validare la DEPLOY, din DB
-    resp = await _host_run(target_id, _dk_deploy_recipe(line, blob), timeout=20)
+    resp = await hostcmd.host_run(target_id, _dk_deploy_recipe(line, blob), timeout=20)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.deployFailed",
                        ("deploy failed: " + (resp.get("stderr") or ""))[:300])
@@ -6493,7 +5940,7 @@ async def deploy_key_generate(host_id: int, body: DeployKeyIn, request: Request,
     cmd = ("umask 077; mkdir -p \"$HOME/.ssh\" || exit 1; "
            "[ -e %s ] || command ssh-keygen -q -t ed25519 -N '' -C webterm-deploy -f %s || exit 1"
            % (_DK_PATH, _DK_PATH))
-    resp = await _host_run(host_id, cmd, timeout=30)
+    resp = await hostcmd.host_run(host_id, cmd, timeout=30)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.keygenFailed",
                        ("ssh-keygen failed: " + (resp.get("stderr") or ""))[:300])
@@ -6583,7 +6030,7 @@ async def deploy_key_revoke(host_id: int, body: DeployKeyIn, request: Request,
     audit.detail(request, "deploy-key revoke %s from %s" % (key["fingerprint"], target["name"]))
     await stepup.require_host_stepup(host_id, user, body.stepup_grant, body.stepup_password, body.stepup_totp)
     blob, _fp = _dk_validate(key["public_key"])
-    resp = await _host_run(host_id, _dk_revoke_recipe(blob), timeout=20)
+    resp = await hostcmd.host_run(host_id, _dk_revoke_recipe(blob), timeout=20)
     out = resp.get("stdout") or ""
     # marcăm revoked DOAR când chiar am scos linia (WT_REMOVED) sau am CONFIRMAT că nu era
     # (WT_NONE, fişier lizibil). WT_ERROR / marker lipsă → NU atingem evidenţa: cheia poate fi
@@ -6620,7 +6067,7 @@ async def deploy_key_verify(host_id: int, body: DeployKeyIn, request: Request,
            "if command grep -qxF %s \"$f\"; then echo WT_OK; "
            "elif command grep -qF %s \"$f\"; then echo WT_EDITED; else echo WT_MISSING; fi"
            % (shlex.quote(dep["line"]), shlex.quote(blob)))
-    resp = await _host_run(host_id, cmd, timeout=20)
+    resp = await hostcmd.host_run(host_id, cmd, timeout=20)
     out = resp.get("stdout") or ""
     status = ("deployed" if "WT_OK" in out else
               "edited" if "WT_EDITED" in out else "missing")
@@ -6645,7 +6092,7 @@ async def deploy_key_delete(host_id: int, request: Request, stepup_grant: str = 
         " WHERE d.key_id=? AND d.revoked_at IS NULL AND d.status != 'missing' LIMIT 1", key["id"])
     if active:
         raise ApiError(409, "sshkey.hasDeployments", "revoke the key from all targets first")
-    resp = await _host_run(host_id, "rm -f %s %s.pub" % (_DK_PATH, _DK_PATH), timeout=20)
+    resp = await hostcmd.host_run(host_id, "rm -f %s %s.pub" % (_DK_PATH, _DK_PATH), timeout=20)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.deleteFailed",
                        ("could not remove the key files: " + (resp.get("stderr") or ""))[:300])
@@ -6683,7 +6130,7 @@ async def deploy_key_test(host_id: int, body: DeployKeyIn, request: Request,
     cmd = ("command ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
            "-o ConnectTimeout=8 -o PasswordAuthentication=no -i %s %s true 2>&1; "
            "echo \"WT_SSH_RC:$?\"" % (_DK_PATH, shlex.quote(dest)))
-    resp = await _host_run(host_id, cmd, timeout=20)
+    resp = await hostcmd.host_run(host_id, cmd, timeout=20)
     out = (resp.get("stdout") or "") + (resp.get("stderr") or "")
     m = re.search(r"WT_SSH_RC:(\d+)", out)
     rc = int(m.group(1)) if m else 1
@@ -6716,7 +6163,7 @@ async def deploy_key_ssh_config(host_id: int, body: DeployKeyIn, request: Reques
            "command awk -v b=%s -v e=%s 'BEGIN{s=0} $0==b{s=1;next} $0==e{s=0;next} !s' \"$c\" > \"$t\" || exit 1; "
            "printf '%%s\\n' %s >> \"$t\"; chmod 600 \"$t\" && mv \"$t\" \"$c\""
            % (shlex.quote(beg), shlex.quote(end), shlex.quote(block)))
-    resp = await _host_run(host_id, cmd, timeout=20)
+    resp = await hostcmd.host_run(host_id, cmd, timeout=20)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.configFailed",
                        ("could not write ~/.ssh/config: " + (resp.get("stderr") or ""))[:300])
@@ -6750,7 +6197,7 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
     old_fp = key["fingerprint"]
     new_path = _DK_PATH[:-1] + '.new"'          # "$HOME/.ssh/webterm_ed25519.new" (ghilimelele rămân)
     # keygen ALĂTURI (rm întâi doar temporarele — ssh-keygen refuză să suprascrie fără prompt)
-    resp = await _host_run(host_id,
+    resp = await hostcmd.host_run(host_id,
                            "umask 077; rm -f %s %s.pub && command ssh-keygen -q -t ed25519 -N '' "
                            "-C webterm-deploy -f %s" % (new_path, new_path, new_path), timeout=30)
     if resp.get("exit_code") != 0:
@@ -6793,7 +6240,7 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
                 key["id"], tid)
     # abia ACUM sursa trece pe noua cheie: mv atomic, pub-ul după privată. Dacă pică, vechea
     # pereche e intactă pe sursă şi ţintele poartă AMBELE linii — nimic pierdut, raportăm.
-    resp = await _host_run(host_id, "umask 077; mv -f %s %s && mv -f %s.pub %s.pub"
+    resp = await hostcmd.host_run(host_id, "umask 077; mv -f %s %s && mv -f %s.pub %s.pub"
                            % (new_path, _DK_PATH, new_path, _DK_PATH), timeout=20)
     if resp.get("exit_code") != 0:
         raise ApiError(502, "sshkey.rotateSwapFailed",
@@ -6806,7 +6253,7 @@ async def deploy_key_rotate(host_id: int, body: DeployKeyIn, request: Request,
         if not entry["ok"]:
             continue
         try:
-            await _host_run(entry["target_host_id"], _dk_revoke_recipe(old_blob), timeout=20)
+            await hostcmd.host_run(entry["target_host_id"], _dk_revoke_recipe(old_blob), timeout=20)
             entry["old_removed"] = True
         except HTTPException as e:
             entry["old_removed"] = False
@@ -6872,9 +6319,9 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # Doar host-uri de agent (docker e local pe host). Id-ul de container e validat strict.
         if ctype != "agent":
             raise ApiError(400, "session.containerAgentOnly", "container shells are only available on agent hosts")
-        if not _DOCKER_ID.match(body.docker_container):
+        if not hostcmd.DOCKER_ID.match(body.docker_container):
             raise ApiError(400, "docker.badContainer", "invalid container id")
-        cmd = _docker_exec_cmd(body.docker_container)
+        cmd = hostcmd.docker_exec_cmd(body.docker_container)
         if not title.strip() or title.startswith("Session "):
             title = "docker: " + body.docker_container[:24]
     elif body.docker_logs:
@@ -6884,9 +6331,9 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # docs/GUARDRAIL.md, „read-only panel calls"). Step-up-ul pe host 2FA s-a cerut mai sus.
         if ctype != "agent":
             raise ApiError(400, "session.containerAgentOnly", "container shells are only available on agent hosts")
-        if not _DOCKER_ID.match(body.docker_logs):
+        if not hostcmd.DOCKER_ID.match(body.docker_logs):
             raise ApiError(400, "docker.badContainer", "invalid container id")
-        cmd = _docker_logs_cmd(body.docker_logs)
+        cmd = hostcmd.docker_logs_cmd(body.docker_logs)
         if not title.strip() or title.startswith("Session "):
             title = "logs: " + body.docker_logs[:24]
     elif body.os_upgrade:
@@ -6945,7 +6392,7 @@ async def create_session(host_id: int, body: SessionIn, request: Request,
         # Fără root journalctl arată doar ce poate — acceptabil, e un terminal, userul vede.
         if ctype != "agent":
             raise ApiError(400, "session.journalAgentOnly", "journal follow is only available on agent hosts")
-        if not _UNIT_RE.match(body.journal_unit):
+        if not hostcmd.UNIT_RE.match(body.journal_unit):
             raise ApiError(400, "services.badUnit", "invalid unit name")
         u = shlex.quote(body.journal_unit)
         cmd = "journalctl -u %s -n 200 -f --no-pager" % u
@@ -7339,7 +6786,7 @@ async def _security_checks(user, grants=None) -> list:
                              "replay": replay_n, "replay_unmasked": replay_raw}})
 
     # 3. guardrail-ul de comenzi
-    g = await _load_command_guard()
+    g = await cmdguard.load_command_guard()
     rules = len(g.get("rules") or [])
     checks.append({"id": "guardrail",
                    "status": "ok" if g.get("enabled") and rules else "warn",

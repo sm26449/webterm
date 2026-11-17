@@ -14,9 +14,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, email_alerts,
-               forward_api, fwddomain, health, hosts_api, oidc_api, scim, security, signing, ssomap, syshealth,
-               webauthn_api)
+from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db,
+               docker_api, email_alerts, forward_api, fwddomain, health, hosts_api, oidc_api, scim,
+               security, services_api, signing, ssomap, syshealth, webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -563,6 +563,8 @@ app.include_router(api.router)
 app.include_router(hosts_api.router)
 app.include_router(forward_api.router)
 app.include_router(backup_api.router)
+app.include_router(docker_api.router)
+app.include_router(services_api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 app.include_router(scim.router)

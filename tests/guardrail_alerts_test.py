@@ -19,7 +19,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, email_alerts, security  # noqa: E402
+from app import api, config, core, db, email_alerts, security, cmdguard  # noqa: E402
 
 # Middleware-ul `csrf_guard` cere `Origin` pe metodele care schimbă ceva şi refuză
 # lipsa lui (ca `_origin_ok` pentru WebSocket). Testele imită un BROWSER, deci trimit
@@ -50,29 +50,29 @@ async def main():
                          {"pattern": r"rm\s+-rf\s+/", "action": "block"},
                          {"pattern": r"^reboot\b", "action": "confirm"}]}))
     check("regula `block` se potriveşte",
-          (await api._match_guard_rule("rm -rf /var"))["action"] == "block")
+          (await cmdguard.match_guard_rule("rm -rf /var"))["action"] == "block")
     check("regula `confirm` se potriveşte",
-          (await api._match_guard_rule("reboot now"))["action"] == "confirm")
-    check("comandă inofensivă → nicio regulă", await api._match_guard_rule("ls -la") is None)
+          (await cmdguard.match_guard_rule("reboot now"))["action"] == "confirm")
+    check("comandă inofensivă → nicio regulă", await cmdguard.match_guard_rule("ls -la") is None)
     # 3.5.1: un `confirm` larg DEASUPRA unui `block` nu mai face blocarea ocolibilă cu confirmed:true
     await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
                      json.dumps({"enabled": True, "rules": [
                          {"pattern": r"^rm\b", "action": "confirm"},
                          {"pattern": r"rm\s+-rf\s+/", "action": "block"}]}))
     check("`block` câştigă chiar dacă un `confirm` e mai sus în listă",
-          (await api._match_guard_rule("rm -rf /"))["action"] == "block")
-    check("…iar `confirm` se aplică în rest", (await api._match_guard_rule("rm x"))["action"] == "confirm")
+          (await cmdguard.match_guard_rule("rm -rf /"))["action"] == "block")
+    check("…iar `confirm` se aplică în rest", (await cmdguard.match_guard_rule("rm x"))["action"] == "confirm")
     await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
                      json.dumps({"enabled": False, "rules": [
                          {"pattern": r"rm\s+-rf\s+/", "action": "block"}]}))
     check("guardrail dezactivat → nu blochează nimic",
-          await api._match_guard_rule("rm -rf /") is None)
+          await cmdguard.match_guard_rule("rm -rf /") is None)
     await db.execute("UPDATE app_settings SET value=? WHERE key='command_guard'",
                      json.dumps({"enabled": True, "rules": [
                          {"pattern": "[nevalid(", "action": "block"},
                          {"pattern": r"mkfs", "action": "block"}]}))
     check("regex invalid e sărit, nu opreşte evaluarea",
-          (await api._match_guard_rule("mkfs.ext4 /dev/sda"))["action"] == "block")
+          (await cmdguard.match_guard_rule("mkfs.ext4 /dev/sda"))["action"] == "block")
 
     # ── F-09: bugetul de timp per regulă chiar limitează ──
     # Cazul auditului (2026-10-04): `^(a+)+$` pe "a"*28+"!" (backtracking catastrofal).
@@ -86,7 +86,7 @@ async def main():
                          {"pattern": r"^(a+)+$", "action": "block"},
                          {"pattern": r"a+!$", "action": "confirm"}]}))
     t0 = time.monotonic()
-    hit = await api._match_guard_rule("a" * 28 + "!")
+    hit = await cmdguard.match_guard_rule("a" * 28 + "!")
     dt = time.monotonic() - t0
     check("regulă patologică: revine în buget (%.2fs < 1.5s), nu după ~13 s" % dt, dt < 1.5)
     check("…regula patologică e SĂRITĂ, iar următoarea se potriveşte (worker refăcut)",
@@ -148,7 +148,7 @@ async def main():
         check("save: regulă cu backtracking catastrofal → 400 (%.2fs)" % (time.monotonic() - t0),
               r.status_code == 400 and "too slow" in r.text, f"{r.status_code} {r.text[:80]}")
         r = await c.post("/api/settings/command-guard", json={
-            "enabled": True, "rules": api.COMMAND_GUARD_DEFAULT["rules"]
+            "enabled": True, "rules": cmdguard.COMMAND_GUARD_DEFAULT["rules"]
             + [{"pattern": r".*.*=.*", "action": "confirm"}]})
         check("save: regulile implicite + una polinomială trec (200)", r.status_code == 200, r.text[:80])
         r = await c.post("/api/settings/command-guard", json={"enabled": True, "rules": [

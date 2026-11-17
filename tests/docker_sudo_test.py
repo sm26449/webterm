@@ -14,7 +14,7 @@ os.environ.setdefault("WEBTERM_SETUP_TOKEN", "test-setup")
 os.environ.setdefault("WEBTERM_PUBLIC_URL", "http://localhost:8000")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app import api, stepup, core  # noqa: E402
+from app import api, stepup, core, docker_api  # noqa: E402
 
 ok = 0
 total = 0
@@ -51,12 +51,12 @@ OK_OUT = {"ok": True, "exit_code": 0, "stdout": '{"Names":"web","Image":"nginx",
 async def main():
     # 1) comandă normală reuşită — fără sudo
     core.sources[1] = FakeAgent(1, [("docker ps", OK_OUT)])
-    resp = await api._docker_run(1, ["ps", "-a"])
+    resp = await docker_api._docker_run(1, ["ps", "-a"])
     check("succes direct → fără sudo", resp["exit_code"] == 0 and not any("sudo" in c for c in core.sources[1].calls))
 
     # 2) permission denied → retry cu sudo -n, care reuşeşte → întoarce răspunsul sudo
     core.sources[2] = FakeAgent(2, [("sudo -n docker", OK_OUT), ("docker", DENIED)])
-    resp = await api._docker_run(2, ["ps", "-a"])
+    resp = await docker_api._docker_run(2, ["ps", "-a"])
     check("denied → retry `sudo -n docker` reuşeşte", resp["exit_code"] == 0)
     check("a doua chemare chiar e cu sudo -n", any(c.startswith("sudo -n docker") for c in core.sources[2].calls))
 
@@ -70,7 +70,7 @@ async def main():
     stepup.require_host_stepup = _no_stepup
     raised = None
     try:
-        await api.docker_list(3, "containers", user={"id": 1, "email": "a@b.co"})
+        await docker_api.docker_list(3, "containers", user={"id": 1, "email": "a@b.co"})
     except api.ApiError as e:
         raised = e.code
     except Exception as e:  # noqa: BLE001
@@ -80,9 +80,9 @@ async def main():
     check("denied + sudo pică → ApiError docker.denied", raised == "docker.denied", str(raised))
 
     # 4) _docker_denied recunoaşte ambele forme
-    check("_docker_denied prinde 'permission denied'", api._docker_denied("Permission denied ..."))
-    check("_docker_denied prinde '/var/run/docker.sock'", api._docker_denied("dial unix /var/run/docker.sock"))
-    check("_docker_denied NU dă fals pozitiv", not api._docker_denied("no such container"))
+    check("_docker_denied prinde 'permission denied'", docker_api._docker_denied("Permission denied ..."))
+    check("_docker_denied prinde '/var/run/docker.sock'", docker_api._docker_denied("dial unix /var/run/docker.sock"))
+    check("_docker_denied NU dă fals pozitiv", not docker_api._docker_denied("no such container"))
 
     print(f"\n{ok}/{total} checks passed")
     if ok != total:

@@ -68,6 +68,13 @@ back.
   mappers that turn their errors into codes. The settings reader they shared with the security
   summary moved to `db.get_json_setting`. Same routes, same permissions, same matching order; the
   function bodies are unchanged.
+- **The Docker and Services panels have their own modules** (`docker_api.py`, `services_api.py`;
+  ~500 lines out of `api.py`, now ~8,700). What they share with the rest of the API moved one layer
+  down into two small modules: `cmdguard.py`, the server-side command guardrail that `/run`, the
+  git panel and both panels check before sending a command, and `hostcmd.py`, which runs a
+  command through the agent and validates Docker container and systemd unit names (also used by
+  deploy keys and the Docker Logs / Shell sessions). Same routes, same permissions, same matching
+  order; the function bodies are unchanged.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

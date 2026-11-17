@@ -397,7 +397,7 @@ async def main():
             check("rotate: results per ţintă (3 intrări: 2 ok, offline-ul cu eroare)",
                   len(res) == 3 and res[ids["b1"]]["ok"] and res[ids["b2"]]["ok"]
                   and res[ids["third"]]["ok"] is False
-                  # offline-ul vine ca `host.offline` (ApiError din _host_run) sau, pe calea HTTPException,
+                  # offline-ul vine ca `host.offline` (ApiError din hostcmd.host_run) sau, pe calea HTTPException,
                   # ca `sshkey.targetOffline` — ambele înseamnă „nu s-a scris nimic acolo"
                   and res[ids["third"]].get("code") in ("host.offline", "sshkey.targetOffline"), r.text)
             check("rotate: left_with_old_key numeşte ţinta offline",

@@ -193,9 +193,10 @@ Empty patterns are dropped silently. Patterns are trimmed and cut to 300 charact
 
 ## Maintenance notes
 
-- Backend: `gateway/app/api.py` — `COMMAND_GUARD_DEFAULT`, `_load_command_guard`,
-  `_match_guard_rule`, `_enforce_guard` (used by `host_run`, `host_git` writes, `docker_action`,
-  `service_action`), `GET`/`POST /api/settings/command-guard`;
+- Backend: `gateway/app/cmdguard.py` — `COMMAND_GUARD_DEFAULT`, `load_command_guard`,
+  `match_guard_rule`, `enforce_guard` (used by `host_run` and `host_git` writes in `api.py`,
+  `docker_action` in `docker_api.py`, `service_action` in `services_api.py`); the settings
+  routes `GET`/`POST /api/settings/command-guard` are in `api.py` `[settings]`;
   the time-budgeted matcher is `security.regex_search_budget` (`REGEX_BUDGET = 0.25`) in
   `gateway/app/security.py`. Stored in the `command_guard` setting as JSON.
 - Output scan: `gateway/app/osc133.py` scans the PTY output for the OSC 133 prompt markers and
