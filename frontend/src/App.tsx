@@ -55,7 +55,7 @@ import { markBooted } from './lib/failsafe'
 import { useMetricsTick } from './lib/metrics'
 import { matchShortcut, shortcutFor, ShortcutId } from './lib/shortcuts'
 import { focusedTerminalRunsProgram } from './lib/transfers'
-import { menuNav } from './lib/tablist'
+import { closedTabToastKey, menuNav } from './lib/tablist'
 import { createPortal } from 'react-dom'
 import { setWalkthroughUser, shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
@@ -1387,7 +1387,7 @@ function MainApp() {
   }
 
   // închiderea unui tab DE CĂTRE OM (X pe tab, meniul de tab-uri, Alt+W). Nu şterge nimic — sesiunea
-  // rulează mai departe — dar tab-ul dispărea fără niciun semn, iar drumul înapoi (Alt+T, bara
+  // rulează mai departe (sau, dacă s-a încheiat, înregistrarea rămâne; textul spune care) — dar tab-ul dispărea fără niciun semn, iar drumul înapoi (Alt+T, bara
   // laterală) nu era evident: părea pierdută. Un toast spune că trăieşte şi o redeschide într-un
   // click. NU şi la ştergerea sesiunii (deleteSession / onDeleted): acolo chiar nu mai există.
   // Cheie unică: închideri repetate înlocuiesc toast-ul (Alt+T le redeschide şi pe cele dinainte).
@@ -1395,7 +1395,7 @@ function MainApp() {
     closeTab(sid)
     const s = sessions.find((x) => x.id === sid)
     const name = (s && sessionTitle(s.title, t)) || t('tabbar.session')
-    notifyToast(t('tabbar.closedToast', { name }), 'info', 'wt-tab-closed', () => {
+    notifyToast(t(closedTabToastKey(s?.state), { name }), 'info', 'wt-tab-closed', () => {
       closedTabsRef.current = closedTabsRef.current.filter((x) => x !== sid)
       if (sessionsRef.current.some((x) => x.id === sid)) selectSession(sid)
       else notifyToast(t('tabbar.reopenGone'), 'warn', 'wt-tab-closed')

@@ -190,7 +190,6 @@ async def main():
           "%s != %s" % (webauthn_api._rp_id(), _up(config.PUBLIC_URL).hostname))
     # …şi un IP nu califică drept RP-ID: WebAuthn cere un domeniu, iar pe IP passkey-urile
     # trebuie să fie indisponibile, nu subtil rupte.
-    from app import api as _api
     host = _up(config.PUBLIC_URL).hostname or ""
     is_ip = all(part.isdigit() for part in host.split(".")) and host.count(".") == 3
     if is_ip:

@@ -216,7 +216,6 @@ async def main():
               and abs(j_raw["expires"] - (time.time() + 7 * 86400)) < 5 and j_raw["redact"] is False)
         r = await a.post(f"/api/sessions/{S_OK}/replay-links", json={"expires_hours": 1})
         j_1h = r.json()
-        tok_1h = j_1h["url"].rsplit("/", 1)[1]
         check("1 oră → acceptat", r.status_code == 200 and abs(j_1h["expires"] - (time.time() + 3600)) < 5)
         audit_rows = await db.fetchall("SELECT path, detail FROM audit_log WHERE method='POST'"
                                        " AND path LIKE '%/replay-links'")

@@ -17,7 +17,7 @@ import asyncio
 import time
 
 import rbac_util as U
-from app import api, stepup, authz, db
+from app import stepup, authz, db
 
 check = U.Checker()
 PW = "parolabuna1"

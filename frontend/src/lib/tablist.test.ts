@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOverflowing, menuNav, showAllTabsButton, tabState } from './tablist'
+import { closedTabToastKey, isOverflowing, menuNav, showAllTabsButton, tabState } from './tablist'
 
 describe('isOverflowing', () => {
   it('conţinut mai lat decât zona = overflow; rotunjirea sub-pixel nu contează', () => {
@@ -43,5 +43,18 @@ describe('menuNav (WAI-ARIA menu)', () => {
     expect(menuNav('ArrowDown', -1, 4)).toBe(0)
     expect(menuNav('ArrowUp', -1, 4)).toBe(3)
     expect(menuNav('ArrowDown', 0, 0)).toBeNull()
+  })
+})
+
+describe('closedTabToastKey (audit 2026-11-18): toastul nu spune „rulează" despre o sesiune încheiată', () => {
+  it('rulează doar pentru live / creating', () => {
+    expect(closedTabToastKey('live')).toBe('tabbar.closedToast')
+    expect(closedTabToastKey('creating')).toBe('tabbar.closedToast')
+  })
+  it('încheiată → textul cu înregistrarea', () => {
+    expect(closedTabToastKey('closed')).toBe('tabbar.closedToastEnded')
+  })
+  it('pierdută sau necunoscută → neutru', () => {
+    for (const s of ['lost', undefined, null, 'ceva']) expect(closedTabToastKey(s)).toBe('tabbar.closedToastNeutral')
   })
 })

@@ -10,6 +10,11 @@ back.
 ## [Unreleased]
 
 ### Fixed
+- **Closing a tab no longer says an ended session is "still running".** The message after you
+  close a tab was the same for every session. Now it says the session is still running only when
+  it is; for a session that had ended it says its recording stays available, and for a session
+  whose host dropped off (or whose state is unknown) it only says the tab closed. Reopen works as
+  before.
 - **A replay link stops working as soon as the person who made it loses access.** Opening a
   replay link checked only the link's own expiry; losing the right to share recordings on that
   host (an expired time-bound role, a narrowed scope, a disabled account) removed the link only

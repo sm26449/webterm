@@ -42,3 +42,12 @@ export function tabListNav(key: string, i: number, n: number): number | null {
   if (key === 'End') return n - 1
   return null
 }
+
+/** Textul toastului de după închiderea unui tab de către om (audit 2026-11-18): „rulează în
+    continuare" doar pentru o sesiune care chiar rulează. O sesiune încheiată are doar
+    înregistrarea; una pierdută (agent căzut) sau necunoscută primeşte un text neutru. */
+export function closedTabToastKey(state: string | null | undefined): string {
+  if (state === 'live' || state === 'creating') return 'tabbar.closedToast'
+  if (state === 'closed') return 'tabbar.closedToastEnded'
+  return 'tabbar.closedToastNeutral'
+}

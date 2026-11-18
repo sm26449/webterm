@@ -24,7 +24,8 @@ describe('Toasts: acţiunea cu etichetă (3.6.30 — „Redeschide" după închi
   })
   it('textele există în ambele limbi şi păstrează {name}', () => {
     for (const d of [en.strings, ro.strings]) {
-      expect(d['tabbar.closedToast']).toContain('{name}')
+      for (const k of ['tabbar.closedToast', 'tabbar.closedToastEnded', 'tabbar.closedToastNeutral'])
+        expect(d[k as keyof typeof d]).toContain('{name}')
       expect(d['tabbar.reopen']).toBeTruthy()
       expect(d['tabbar.reopenGone']).toBeTruthy()
     }

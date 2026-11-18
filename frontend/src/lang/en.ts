@@ -2528,6 +2528,8 @@ const en: Lang = {
     'tabbar.closeTabTitle': "Close the tab (the session stays active)",
     'tabbar.closeTab': "Close the tab",
     'tabbar.closedToast': "Tab \"{name}\" closed — the session is still running.",
+    'tabbar.closedToastEnded': "Tab \"{name}\" closed — the session had ended; its recording stays available.",
+    'tabbar.closedToastNeutral': "Tab \"{name}\" closed.",
     'tabbar.reopen': "Reopen",
     'tabbar.reopenGone': "That session no longer exists.",
     // reordonare din tastatură (alternativa la drag & drop) + numele rolului pentru cititoare

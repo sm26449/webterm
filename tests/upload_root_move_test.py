@@ -32,7 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (sets the env before `app` is imported)
-from app import api, core, db, rootmove, syshealth, files_api, fserrors  # noqa: E402
+from app import core, db, rootmove, syshealth, files_api, fserrors  # noqa: E402
 
 check = U.Checker()
 INBOX = "/home/webterm/.webterm/inbox"

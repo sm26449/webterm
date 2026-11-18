@@ -262,4 +262,3 @@ describe('CommandTracker: instantaneul nu poate pune promptul în mijlocul linie
     expect(verdict(tr).kind).toBe('unknown')
   })
 })
-

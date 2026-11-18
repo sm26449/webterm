@@ -258,7 +258,6 @@ async def main():
         check("import cu erori → 200 (rezultat per rând)", r.status_code == 200, r.text[:200])
         res = r.json()
         got = [x.get("code") for x in res["results"]]
-        want = [code for _, code in cases]
         for (x, code), g in zip(cases, got):
             nm = x["name"] if isinstance(x, dict) else x
             check(f"import: rândul „{nm}” → {code}", g == code, str(g))
