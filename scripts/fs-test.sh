@@ -83,9 +83,12 @@ echo "$R" | grep -q "\"offset\":$L1" && ok "resumable: first chunk landed" || no
 # /status = punctul de resume (sursa de adevăr: statul pe host)
 R=$(j "$FS/upload/status?path=$(enc '~/wtfstest/big.bin')&upload_id=$UPID")
 echo "$R" | grep -q "\"offset\":$L1" && ok "resumable: status returns the resume offset" || no "resumable status" "$R"
-# offset greşit → 409, temp-ul NU e corupt (guard)
-R=$(j -o /dev/null -w '%{http_code}' -X POST "$UP&offset=999" --data-binary @/tmp/wtc2)
-[ "$R" = "409" ] && ok "resumable: wrong offset refused (409)" || no "resumable offset guard" "cod $R"
+# felie SUPRAPUSĂ parţial (începe înainte de offset-ul aterizat) → 409 pe loc, temp-ul NU e corupt.
+# Nu un offset din VIITOR: acela e o felie dezordonată legitimă (pipelining), pe care gateway-ul o ţine
+# până la WINDOW_WAIT (300 s) — testul aştepta 5 minute un 409 (audit 2026-11-18). Expirarea ferestrei
+# e acoperită cu timer controlat în tests/upload_window_test.py.
+R=$(j -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$UP&offset=$((L1 - 3))" --data-binary @/tmp/wtc2)
+[ "$R" = "409" ] && ok "resumable: overlapping chunk refused at once (409)" || no "resumable offset guard" "cod $R"
 # al doilea chunk la offset-ul corect = reluare
 R=$(j -X POST "$UP&offset=$L1" --data-binary @/tmp/wtc2)
 echo "$R" | grep -q '"offset":' && ok "resumable: second chunk appended" || no "resumable chunk2" "$R"

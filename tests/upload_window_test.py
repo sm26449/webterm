@@ -7,7 +7,9 @@ la offset != dimensiunea curentă (constrângerea care obligă gateway-ul să ap
 
 Acoperă: aplicarea ÎN ORDINE a feliilor secvenţiale, o felie DEZORDONATĂ ţinută în buffer apoi
 flush-uită când se umple gap-ul, CRC-ul incremental corect după reordonare, bufferul MĂRGINIT
-(peste plafon → UploadBusy/429), şi idempotenţa unui retry al unei felii deja aterizate.
+(peste plafon → UploadBusy/429), idempotenţa unui retry al unei felii deja aterizate, refuzul IMEDIAT
+al unei felii suprapuse parţial şi expirarea ferestrei (WINDOW_WAIT) cu un timer controlat — ca
+testul de integrare (`scripts/fs-test.sh`) să nu mai aştepte 300 s după un 409 (audit 2026-11-18).
 """
 import asyncio
 import os
@@ -190,11 +192,67 @@ async def t_idempotent_dup():
         _cleanup(hid, uid, dest)
 
 
+async def t_partial_overlap():
+    """O felie care începe ÎNAINTEA offset-ului aterizat şi trece de el → FileConflict (409) pe loc,
+    fără să aştepte fereastra, iar temp-ul şi CRC-ul rămân neatinse."""
+    hid, uid, dest = 7005, "e" * 32, "/home/u/overlap.bin"
+    fake = FakeAgent(hid)
+    core.sources[hid] = fake
+    tmp = core.upload_tmp(dest, uid)
+    try:
+        await one_chunk(hid, dest, uid, 0, b"PART-ONE-")
+        crc1 = core._upload_crc.get(core._upload_key(hid, dest, uid))
+        t0 = asyncio.get_running_loop().time()
+        conflict = False
+        try:
+            await one_chunk(hid, dest, uid, 6, b"XXXXXXXXXXXX")
+        except core.FileConflict:
+            conflict = True
+        took = asyncio.get_running_loop().time() - t0
+        check("suprapunere parţială: FileConflict (409) imediat", conflict and took < 1.0, (conflict, took))
+        check("suprapunere parţială: temp-ul neatins", bytes(fake.files[tmp]) == b"PART-ONE-", fake.files[tmp])
+        check("suprapunere parţială: CRC neschimbat",
+              core._upload_crc.get(core._upload_key(hid, dest, uid)) == crc1)
+        off = await one_chunk(hid, dest, uid, 9, b"part-two-END")
+        check("suprapunere parţială: felia corectă de după continuă upload-ul",
+              off == 21 and bytes(fake.files[tmp]) == b"PART-ONE-part-two-END", fake.files[tmp])
+    finally:
+        _cleanup(hid, uid, dest)
+
+
+async def t_reorder_timeout():
+    """O felie dezordonată al cărei gap nu se umple NICIODATĂ: după WINDOW_WAIT → FileConflict (409),
+    iar bufferul e eliberat (nu rămâne rezervat). Timer controlat: WINDOW_WAIT micşorat."""
+    hid, uid, dest = 7006, "f" * 32, "/home/u/gap.bin"
+    fake = FakeAgent(hid)
+    core.sources[hid] = fake
+    saved = core.WINDOW_WAIT
+    core.WINDOW_WAIT = 0.2
+    try:
+        await one_chunk(hid, dest, uid, 0, b"abc")
+        conflict = False
+        try:
+            await one_chunk(hid, dest, uid, 999, b"z" * 40)
+        except core.FileConflict:
+            conflict = True
+        win = core._upload_windows.get(core._upload_key(hid, dest, uid))
+        check("gap neumplut: după WINDOW_WAIT → FileConflict (409)", conflict)
+        check("gap neumplut: felia a ieşit din buffer, octeţii eliberaţi",
+              win is not None and 999 not in win.pending and win.buffered == 0,
+              (win.pending.keys(), win.buffered) if win else None)
+        check("gap neumplut: nimic scris la agent", bytes(fake.files[core.upload_tmp(dest, uid)]) == b"abc")
+    finally:
+        core.WINDOW_WAIT = saved
+        _cleanup(hid, uid, dest)
+
+
 async def main():
     await t_in_order()
     await t_out_of_order()
     await t_bounded_buffer()
     await t_idempotent_dup()
+    await t_partial_overlap()
+    await t_reorder_timeout()
 
 
 asyncio.run(main())
