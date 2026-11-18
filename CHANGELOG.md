@@ -10,6 +10,21 @@ back.
 ## [Unreleased]
 
 ### Fixed
+- **A replay link stops working as soon as the person who made it loses access.** Opening a
+  replay link checked only the link's own expiry; losing the right to share recordings on that
+  host (an expired time-bound role, a narrowed scope, a disabled account) removed the link only
+  at the next scheduled cleanup, so for that window it still played. Every open now re-checks the
+  issuer's current permission and removes the link if it is gone. A link to someone else's
+  recording also needs the issuer to still be allowed to manage sessions there, the same rule as
+  when it was created. Found in the 2026-11-18 audit.
+- **The recording of a maintenance terminal cannot be shared.** Certificate-renewal and System
+  health terminals run as root on the gateway host, and their live view was already private, but
+  a replay link of the finished recording could still be made. Creating one is now refused, and
+  links made before this release no longer open.
+- **The replay-link limits hold under concurrent requests.** The 200-per-account and
+  20-per-recording limits were counted before a separate insert, so two requests at the same
+  moment could both pass. The check and the insert are now one database statement.
+
 - **A role scoped to a tag must name exactly one tag.** A tag scope with a tab or a
   non-breaking space inside (`prod<TAB>db`, easy to paste from a spreadsheet) was saved, but it
   could never match a host, because hosts split their tags on any whitespace: the role looked

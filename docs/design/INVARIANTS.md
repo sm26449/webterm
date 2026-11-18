@@ -119,13 +119,17 @@ whoever answers first receives it.
 - A link to a session that has ended is refused, and cleared.
 - Live links die when their creator logs out, changes password or loses `share.live` on that host.
 - **Replay links** show a finished recording. They survive logout, but die on a password change,
-  account deletion or loss of `share.replay`.
+  account deletion or loss of `share.replay`. Every public open re-checks the issuer's current
+  `share.replay` on the recording's host (disabled account, expired role, narrowed scope), so a
+  link stops working at once, without waiting for the scheduled cleanup.
+- A root maintenance terminal on the gateway host (certificate renewal, System health fixes) is
+  never shared: not live, and not as a replay of its recording.
 
 **The misconception.** "A share is a capability: whoever holds the link can use it." In 3.6.33 a
 link on a 2FA host stayed usable after the operator left. Two attach-order races were found in the
 same review.
 
-**Enforced in**: `core.py` `[hub]`: `has_operator`, `sync_guests`; `share_api.py` `[share]`, the
+**Enforced in**: `core.py` `[hub]`: `has_operator`, `sync_guests`; `share_api.py` `[share]` + `_replay_issuer_ok`, the
 `shared_ws` / `browser_ws` websockets (`api.py` `[ws]`); `sessctl.py`; `shares.py`.
 **Tests**: `share_presence`, `replay_links`, `share_ratelimit`.
 

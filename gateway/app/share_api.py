@@ -497,7 +497,7 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
     se întoarce o singură dată, aici."""
     if not core.valid_sid(sid):
         raise ApiError(404, "session.missing", "no such session")
-    row = await db.fetchone("SELECT id, host_id, state, title FROM sessions WHERE id=?", sid)
+    row = await db.fetchone("SELECT id, host_id, state, title, origin FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
     # 3.6: înregistrarea ALTCUIVA nu se publică fără session.manage pe host
@@ -505,6 +505,13 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
     # aceeaşi poartă ca GET /transcript: pe un host 2FA, a scoate înregistrarea din instanţă
     # (şi încă printr-un link fără cont) cere al doilea factor
     await stepup.require_host_stepup(row["host_id"], user, body.stepup_grant, body.stepup_password, body.stepup_totp)
+    # audit 2026-11-18: un terminal ROOT de pe hostul gateway-ului (reînnoire certificate, reparaţii
+    # din System health) rămâne privat şi după ce s-a închis — înregistrarea lui nu iese ca link
+    # public, la fel cum terminalul viu nu se partajează (sessctl.ROOT_TERMINAL_ORIGINS). Abia după
+    # controlul sesiunii şi step-up: cine n-are voie nu află nici ce fel de sesiune e.
+    if sessctl.session_origin(row) in sessctl.ROOT_TERMINAL_ORIGINS:
+        raise ApiError(403, "replay.privateSession",
+                       "the recording of a maintenance terminal cannot be shared")
     if row["state"] != "closed":
         raise ApiError(409, "replay.notClosed",
                        "only the recording of a closed session can be shared")
@@ -516,18 +523,24 @@ async def create_replay_link(sid: str, request: Request, body: ReplayLinkIn = Re
     label = _LABEL_BAD.sub("", body.label or "").strip()[:replay.LABEL_MAX]
     now = time.time()
     await shares.delete_replay_links(" WHERE expires <= ?", now)
-    mine = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=?", user["id"])
-    here = await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE user_id=? AND sid=?",
-                             user["id"], sid)
-    if mine["c"] >= replay.MAX_ACTIVE_PER_USER or here["c"] >= replay.MAX_ACTIVE_PER_SESSION:
-        raise ApiError(409, "replay.tooMany",
-                       "too many active replay links — revoke some first")
     token = security.new_token()
     expires = now + body.expires_hours * 3600
-    link_id = await db.execute(
+    # audit 2026-11-18: limitele se verifică în ACEEAŞI instrucţiune cu inserarea. Cu COUNT-uri
+    # separate, două cereri simultane vedeau amândouă loc sub plafon şi inserau amândouă.
+    # `expires > now`: plafonul numără doar link-uri active, oricât ar întârzia curăţarea.
+    ins = await db.execute_returning(
         "INSERT INTO replay_links(token_hash, sid, user_id, label, redact, created, expires)"
-        " VALUES(?,?,?,?,?,?,?)",
-        security.sha256_hex(token), sid, user["id"], label, 1 if body.redact else 0, now, expires)
+        " SELECT ?,?,?,?,?,?,?"
+        " WHERE (SELECT COUNT(*) FROM replay_links WHERE user_id=? AND expires > ?) < ?"
+        " AND (SELECT COUNT(*) FROM replay_links WHERE user_id=? AND sid=? AND expires > ?) < ?"
+        " RETURNING id",
+        security.sha256_hex(token), sid, user["id"], label, 1 if body.redact else 0, now, expires,
+        user["id"], now, replay.MAX_ACTIVE_PER_USER,
+        user["id"], sid, now, replay.MAX_ACTIVE_PER_SESSION)
+    if ins is None:
+        raise ApiError(409, "replay.tooMany",
+                       "too many active replay links — revoke some first")
+    link_id = ins["id"]
     audit.detail(request, "replay link #%d for %s (%dh, %s)%s" % (
         link_id, sid[:8], body.expires_hours, "masked" if body.redact else "UNMASKED",
         (" label=%r" % label) if label else ""))
@@ -591,6 +604,21 @@ async def revoke_all_replay_links(request: Request, user=Depends(security.requir
     return {"ok": True, "revoked": n}
 
 
+async def _replay_issuer_ok(row) -> bool:
+    """Emitentul are ACUM `share.replay` pe hostul înregistrării (cont activ, legături neexpirate:
+    `grants_for_user` le citeşte pe toate) şi, dacă a publicat înregistrarea ALTCUIVA, şi
+    `session.manage`, ca la creare. Sesiunea nu e un terminal root de mentenanţă (link-urile create
+    înainte de regula de la creare cad şi ele aici). Orice lipsă = refuz."""
+    if sessctl.session_origin(row) in sessctl.ROOT_TERMINAL_ORIGINS:
+        return False
+    if row["host_id"] is None or row["user_id"] is None:
+        return False
+    g = await authz.grants_for_user(row["user_id"])
+    have = await authz.perms_on(g, row["host_id"])
+    return "share.replay" in have and \
+        shares.may_publish_recording(have, row["s_created_by_id"], row["user_id"])
+
+
 async def _replay_lookup(request: Request):
     """Rezolvă tokenul din antet la (link, sesiune). ORICE eşec → acelaşi 404 (necunoscut,
     expirat, revocat, sesiune ştearsă/neînchisă, înregistrare dispărută) — şi se numără la
@@ -607,7 +635,7 @@ async def _replay_lookup(request: Request):
         h = security.sha256_hex(token)
         row = await db.fetchone(
             "SELECT r.*, s.title, s.state, s.created AS s_created, s.closed_at, s.rows, s.cols,"
-            " u.email AS owner_email"
+            " s.host_id, s.origin, s.created_by_id AS s_created_by_id, u.email AS owner_email"
             " FROM replay_links r JOIN sessions s ON s.id = r.sid"
             " LEFT JOIN users u ON u.id = r.user_id"
             " WHERE r.token_hash=? AND r.expires > ?", h, time.time())
@@ -617,6 +645,12 @@ async def _replay_lookup(request: Request):
         if row["state"] != "closed" or not core.valid_sid(row["sid"]) \
                 or not core.transcript_paths(row["sid"])[1].exists():
             row = None
+    if row is not None and not await _replay_issuer_ok(row):
+        # INV-05 (docs/design/INVARIANTS.md): link-ul de replay moare cu dreptul celui care l-a dat, verificat la fiecare citire.
+        # Curăţarea periodică (`revoke_unauthorized_derived`, expirarea rolurilor) rămâne, dar nu
+        # mai e ea bariera: cu planificatorul oprit sau întârziat, linkul tot nu mai deschide nimic.
+        await shares.delete_replay_links(" WHERE id=?", row["id"])
+        row = None
     if row is None:
         replay.record_miss(ip)
         raise ApiError(404, "link.invalid", "invalid or expired link", headers=_REPLAY_HEADERS)

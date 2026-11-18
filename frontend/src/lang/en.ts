@@ -1797,6 +1797,7 @@ const en: Lang = {
     'help.replayLinks.body': "A replay link lets someone without an account watch the recording of one closed session — nothing else in WebTerm. It expires after 1 hour, 24 hours or 7 days, and you can revoke it at any time.\n\nRecordings contain whatever the host printed, so they can contain secrets. \"Mask likely secrets\" replaces values that look like tokens, passwords and keys with asterisks, but it cannot recognise everything — watch the recording first. Every open is logged and raises an alert for you.",
     'err.replay.notClosed': "Only the recording of a closed session can be shared. Close the session first.",
     'err.replay.badExpiry': "Choose 1 hour, 24 hours or 7 days.",
+    'err.replay.privateSession': "The recording of a maintenance terminal cannot be shared.",
     'err.replay.tooMany': "Too many active replay links — revoke some first.",
     'err.replay.missing': "That replay link no longer exists.",
     'err.replay.rateLimited': "Too many requests — retry in {retry} s.",

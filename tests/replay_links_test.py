@@ -29,7 +29,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, email_alerts, replay, security  # noqa: E402
+from app import api, authz, config, core, db, email_alerts, replay, security, shares  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -403,6 +403,126 @@ async def main():
         check("panica globală acoperă şi link-urile de replay",
               r.status_code == 200 and r.json().get("revoked") == 1
               and (await db.fetchone("SELECT COUNT(*) AS c FROM replay_links"))["c"] == 0, r.text[:120])
+
+        # ── audit 2026-11-18: dreptul emitentului, verificat la FIECARE deschidere ────────
+        # (ASGITransport nu porneşte lifespan-ul: planificatorul care curăţă rolurile expirate NU rulează)
+        PW3 = "parolabuna3"
+        r = await a.post("/api/users", json={"email": "trei@x.co", "password": PW3,
+                                             "current_password": PW1 + "x",
+                                             "role": "operator", "scope_kind": "all"})
+        check("al treilea cont (Operator) creat", r.status_code == 200, r.text[:160])
+        u3 = (await db.fetchone("SELECT id FROM users WHERE email='trei@x.co'"))["id"]
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN) as c:
+            await c.post("/api/login", json={"email": "trei@x.co", "password": PW3})
+            r = await c.post(f"/api/sessions/{S_OK}/replay-links", json={})
+            check("Operatorul creează un link de replay", r.status_code == 200, r.text[:160])
+            tok_c, id_c = r.json()["url"].rsplit("/", 1)[1], r.json()["id"]
+            # rolul devine temporar şi expiră peste ~1 s — nimic nu-l mai curăţă
+            await db.execute("UPDATE role_bindings SET expires=? WHERE user_id=?", time.time() + 1.0, u3)
+            authz.bump_epoch()
+            replay.reset_limits()
+            r = await anon.get("/api/replay/meta", headers=_pub(tok_c))
+            check("cât timp rolul e valid, linkul se deschide", r.status_code == 200, r.status_code)
+            await asyncio.sleep(1.2)
+            r = await anon.get("/api/replay/meta", headers=_pub(tok_c))
+            check("rolul emitentului a expirat (fără curăţare) → 404 generic", r.status_code == 404
+                  and r.json().get("code") == "link.invalid", r.text[:160])
+            check("…şi linkul a fost şters", (await db.fetchone(
+                "SELECT COUNT(*) AS c FROM replay_links WHERE id=?", id_c))["c"] == 0)
+
+            # cont dezactivat (SCIM) → linkul nu mai deschide
+            await db.execute("UPDATE role_bindings SET expires=NULL WHERE user_id=?", u3)
+            authz.bump_epoch()
+            r = await c.post(f"/api/sessions/{S_OK}/replay-links", json={})
+            tok_d = r.json()["url"].rsplit("/", 1)[1]
+            r = await anon.get("/api/replay/meta", headers=_pub(tok_d))
+            check("rol restaurat → link nou se deschide", r.status_code == 200, r.status_code)
+            await db.execute("UPDATE users SET disabled=1 WHERE id=?", u3)
+            authz.bump_epoch()
+            r = await anon.get("/api/replay/cast", headers=_pub(tok_d))
+            check("emitent dezactivat → cast 404", r.status_code == 404, r.status_code)
+            await db.execute("UPDATE users SET disabled=0 WHERE id=?", u3)
+            authz.bump_epoch()
+
+        # ── terminal de mentenanţă (root pe gateway): nici replay ────────────────────────
+        S_CERT = "e" * 32
+        await _mk_session(S_CERT, hid, "closed", EVENTS)
+        await db.execute("UPDATE sessions SET origin='cert-renew' WHERE id=?", S_CERT)
+        r = await a.post(f"/api/sessions/{S_CERT}/replay-links", json={})
+        check("înregistrarea unui terminal cert-renew → 403 replay.privateSession",
+              r.status_code == 403 and r.json().get("code") == "replay.privateSession", r.text[:160])
+        old_tok = security.new_token()      # un link creat înainte de regulă
+        await db.execute("INSERT INTO replay_links(token_hash, sid, user_id, label, redact, created, expires)"
+                         " VALUES(?,?,?,?,?,?,?)", security.sha256_hex(old_tok), S_CERT, u1, "", 1,
+                         time.time(), time.time() + 3600)
+        replay.reset_limits()
+        r = await anon.get("/api/replay/meta", headers=_pub(old_tok))
+        check("link vechi spre un terminal de mentenanţă → 404 generic", r.status_code == 404
+              and r.json().get("code") == "link.invalid", r.text[:160])
+
+        async def _raw_link(sid, uid):
+            t = security.new_token()
+            await db.execute("INSERT INTO replay_links(token_hash, sid, user_id, label, redact, created,"
+                             " expires) VALUES(?,?,?,?,?,?,?)", security.sha256_hex(t), sid, uid, "", 1,
+                             time.time(), time.time() + 3600)
+            return t
+
+        async def _opens(t):
+            replay.reset_limits()
+            return (await anon.get("/api/replay/meta", headers=_pub(t))).status_code
+
+        S_FIX = "f" * 32
+        await _mk_session(S_FIX, hid, "closed", EVENTS)
+        await db.execute("UPDATE sessions SET origin='health-fix' WHERE id=?", S_FIX)
+        r = await a.post(f"/api/sessions/{S_FIX}/replay-links", json={})
+        check("terminal health-fix → 403 replay.privateSession",
+              r.status_code == 403 and r.json().get("code") == "replay.privateSession", r.text[:160])
+        check("link vechi spre un terminal health-fix → 404", await _opens(await _raw_link(S_FIX, u1)) == 404)
+        check("emitent şters (fără rând în users) → 404", await _opens(await _raw_link(S_OK, 987654)) == 404)
+
+        # scope restrâns: Operator doar pe ALT host → linkul spre o înregistrare de pe `srv` cade
+        t3 = await _raw_link(S_OK, u3)
+        check("Operator pe toate hosturile → se deschide", await _opens(t3) == 200)
+        await db.execute("UPDATE role_bindings SET scope_kind='host', scope_value=? WHERE user_id=?",
+                         str(hid2), u3)
+        authz.bump_epoch()
+        check("scope restrâns la alt host → 404", await _opens(t3) == 404)
+        await db.execute("UPDATE role_bindings SET scope_kind='all', scope_value='' WHERE user_id=?", u3)
+
+        # înregistrarea ALTCUIVA: rămâne publicată doar cât emitentul are session.manage (ca la creare)
+        rid = {x["key"]: x["id"] for x in await db.fetchall("SELECT id, key FROM roles WHERE builtin=1")}
+        await db.execute("UPDATE sessions SET created_by_id=? WHERE id=?", u1, S_OK)
+        await db.execute("UPDATE role_bindings SET role_id=? WHERE user_id=?", rid["admin"], u3)
+        authz.bump_epoch()
+        t_other = await _raw_link(S_OK, u3)
+        check("Admin (session.manage) publică sesiunea altcuiva → se deschide", await _opens(t_other) == 200)
+        await db.execute("UPDATE role_bindings SET role_id=? WHERE user_id=?", rid["operator"], u3)
+        authz.bump_epoch()
+        check("fără session.manage (Operator), linkul spre sesiunea altcuiva → 404",
+              await _opens(t_other) == 404)
+        t_own = await _raw_link(S_OK, u1)
+        check("…dar linkul creatorului sesiunii se deschide", await _opens(t_own) == 200)
+        await db.execute("UPDATE role_bindings SET role_id=? WHERE user_id=?", rid["admin"], u3)
+        authz.bump_epoch()
+        t_other2 = await _raw_link(S_OK, u3)
+        await db.execute("UPDATE role_bindings SET role_id=? WHERE user_id=?", rid["operator"], u3)
+        authz.bump_epoch()
+        await shares.revoke_unauthorized_derived(u3)
+        check("curăţarea periodică aplică aceeaşi regulă (session.manage)", (await db.fetchone(
+            "SELECT COUNT(*) AS c FROM replay_links WHERE token_hash=?", security.sha256_hex(t_other2)))["c"] == 0)
+        await db.execute("UPDATE sessions SET created_by_id=NULL WHERE id=?", S_OK)
+
+        # ── plafoanele ţin sub cereri SIMULTANE ──────────────────────────────────────────
+        await db.execute("DELETE FROM replay_links")
+        cap = replay.MAX_ACTIVE_PER_SESSION
+        res = await asyncio.gather(*[a.post(f"/api/sessions/{S_OK}/replay-links", json={})
+                                     for _ in range(cap + 8)])
+        codes = sorted(x.status_code for x in res)
+        n = (await db.fetchone("SELECT COUNT(*) AS c FROM replay_links WHERE sid=?", S_OK))["c"]
+        check(f"{cap + 8} creări simultane → exact {cap} rânduri, restul 409 replay.tooMany",
+              n == cap and codes.count(200) == cap
+              and all(x.json().get("code") == "replay.tooMany" for x in res if x.status_code == 409)
+              and codes.count(409) == 8, (n, codes))
 
     print(f"\n{ok}/{total} teste trecute")
     return ok == total

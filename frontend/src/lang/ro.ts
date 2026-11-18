@@ -1822,6 +1822,7 @@ const ro: Lang = {
     'help.replayLinks.body': "Un link de replay îi permite cuiva fără cont să urmărească înregistrarea unei singure sesiuni închise — nimic altceva din WebTerm. Expiră după 1 oră, 24 de ore sau 7 zile și îl poți revoca oricând.\n\nÎnregistrările conțin tot ce a afișat hostul, deci pot conține secrete. „Ascunde secretele probabile” înlocuiește cu asteriscuri valorile care arată a tokenuri, parole și chei, dar nu le poate recunoaște pe toate — urmărește întâi înregistrarea. Fiecare deschidere e jurnalizată și îți trimite o alertă.",
     'err.replay.notClosed': "Doar înregistrarea unei sesiuni închise poate fi partajată. Închide întâi sesiunea.",
     'err.replay.badExpiry': "Alege 1 oră, 24 de ore sau 7 zile.",
+    'err.replay.privateSession': "Înregistrarea unui terminal de mentenanță nu poate fi partajată.",
     'err.replay.tooMany': "Prea multe linkuri de replay active — revocă întâi câteva.",
     'err.replay.missing': "Linkul de replay nu mai există.",
     'err.replay.rateLimited': "Prea multe cereri — reîncearcă în {retry} s.",

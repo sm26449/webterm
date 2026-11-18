@@ -87,8 +87,18 @@ async def revoke_unauthorized_derived(uid: int) -> None:
             if hub:
                 await hub.revoke_shares()
     links = await db.fetchall(
-        "SELECT l.id, s.host_id FROM replay_links l LEFT JOIN sessions s ON s.id=l.sid"
+        "SELECT l.id, s.host_id, s.created_by_id FROM replay_links l LEFT JOIN sessions s ON s.id=l.sid"
         " WHERE l.user_id=?", uid)
     for ln in links:
-        if ln["host_id"] is None or "share.replay" not in await authz.perms_on(g, ln["host_id"]):
+        have = await authz.perms_on(g, ln["host_id"]) if ln["host_id"] is not None else frozenset()
+        if "share.replay" not in have or not may_publish_recording(have, ln["created_by_id"], uid):
             await delete_replay_links(" WHERE id=?", ln["id"])
+
+
+def may_publish_recording(have: frozenset, created_by_id, issuer_id) -> bool:
+    """Înregistrarea ALTCUIVA rămâne publicată doar cât emitentul are `session.manage` pe host —
+    aceeaşi regulă ca la creare (`sessctl.require_session_control`: sesiunile pre-3.6, fără
+    creator, sunt ale oricui le vede). Folosită la curăţare şi la fiecare deschidere publică."""
+    if created_by_id is None or created_by_id == issuer_id:
+        return True
+    return "session.manage" in have
