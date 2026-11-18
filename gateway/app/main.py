@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .errors import ApiError
 from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
-               hosts_api, oidc_api, scim, security, services_api, signing, ssomap, syshealth,
+               hosts_api, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
                webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -568,6 +568,7 @@ app.include_router(docker_api.router)
 app.include_router(services_api.router)
 app.include_router(deploy_keys_api.router)
 app.include_router(files_api.router)
+app.include_router(share_api.router)
 app.include_router(webauthn_api.router)
 app.include_router(oidc_api.router)
 app.include_router(scim.router)

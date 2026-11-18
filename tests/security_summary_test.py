@@ -21,7 +21,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
-from app import api, config, core, db, email_alerts, security, signing  # noqa: E402
+from app import api, config, core, db, email_alerts, security, share_api, signing  # noqa: E402
 
 _ORIGIN = {"origin": os.environ["WEBTERM_PUBLIC_URL"]}
 from app.main import app  # noqa: E402
@@ -299,7 +299,7 @@ async def main():
         check("revoke-all: share_token NULL pe toate rândurile (şi expirat)", left["c"] == 0, str(left["c"]))
         check("revoke-all: invitaţii live sunt deconectaţi (hub.revoke_shares)",
               core.hubs[sid_rw].revoked == 1 and hub_ro.revoked == 1
-              and api._share_guests(sid_rw) == 0, f"{core.hubs[sid_rw].revoked} {hub_ro.revoked}")
+              and share_api._share_guests(sid_rw) == 0, f"{core.hubs[sid_rw].revoked} {hub_ro.revoked}")
         check("revoke-all: alertă de securitate trimisă",
               any("share links were revoked" in x for x in FIRED), str(FIRED))
         await asyncio.sleep(0.05)

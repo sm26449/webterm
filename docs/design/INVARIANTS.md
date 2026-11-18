@@ -125,8 +125,8 @@ whoever answers first receives it.
 link on a 2FA host stayed usable after the operator left. Two attach-order races were found in the
 same review.
 
-**Enforced in**: `core.py` `[hub]`: `has_operator`, `sync_guests`; `api.py` `[share]` and the
-`shared_ws` / `browser_ws` websockets; `shares.py`.
+**Enforced in**: `core.py` `[hub]`: `has_operator`, `sync_guests`; `share_api.py` `[share]`, the
+`shared_ws` / `browser_ws` websockets (`api.py` `[ws]`); `sessctl.py`; `shares.py`.
 **Tests**: `share_presence`, `replay_links`, `share_ratelimit`.
 
 <a id="inv-06"></a>

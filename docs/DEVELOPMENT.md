@@ -98,6 +98,10 @@ gateway/app/
   files_api.py             files on a host: browse, download, archive, resumable upload, mkdir /
                            rename / delete, preview, upload-and-move-as-root, host→host copy
   fserrors.py              agent file errors → stable codes (Files routes + the git panel)
+  share_api.py             live share links, share inventory + security summary, guest link info,
+                           transcripts and public replay links (the guest websocket stays in api.py)
+  sessctl.py               who may control a session; private root terminals (never shared)
+  watermark.py             watermark defaults + `load_watermark`
   cmdguard.py              server-side command guardrail (admin block / confirm rules, time-budgeted
                            matching); every route that sends a command to a host calls it first
   hostcmd.py               host_run (the agent `run` op), Docker / systemd name checks, the Docker

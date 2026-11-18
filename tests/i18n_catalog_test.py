@@ -136,14 +136,14 @@ def main():
     codes = set()
     # api.py + fiecare modul cu rute proprii (`*_api.py`: hosts, passkey-uri, OIDC) + helperele
     # de hosts (hostmodel.py) + gărzile de auth din security.py + clasificatorul runtime_api_error (errors.py)
-    # + guardrail-ul (cmdguard.py), rularea pe host (hostcmd.py) şi erorile de fişiere (fserrors.py): toate ridică ApiError-uri pe care
+    # + guardrail-ul (cmdguard.py), rularea pe host (hostcmd.py), erorile de fişiere (fserrors.py) şi controlul sesiunii (sessctl.py): toate ridică ApiError-uri pe care
     # le vede UI-ul. Glob, nu listă fixă: un router nou mutat din api.py intră singur sub gardă. Codurile din tabelele/clasificatoarele de erori
     # (`code = "files.x"`, `("needle", "files.y")`) nu apar în `ApiError(...)` literal — le prindem
     # separat, altfel exact codurile cele mai frecvente (erorile de fişiere) ar scăpa de gardă.
     app_dir = os.path.join(ROOT, "gateway", "app")
     api_mods = sorted(f for f in os.listdir(app_dir) if f.endswith("_api.py"))
     check("modulele cu rute (*_api.py) chiar sunt găsite", {"hosts_api.py", "forward_api.py"} <= set(api_mods), str(api_mods))
-    for fn in ["api.py", "cmdguard.py", "errors.py", "fserrors.py", "hostcmd.py", "hostmodel.py", "security.py"] + api_mods:
+    for fn in ["api.py", "cmdguard.py", "errors.py", "fserrors.py", "hostcmd.py", "hostmodel.py", "security.py", "sessctl.py"] + api_mods:
         src = open(os.path.join(ROOT, "gateway", "app", fn), encoding="utf-8").read()
         codes |= set(_re.findall(r'ApiError\(\s*\d{3}\s*,\s*"([a-zA-Z0-9_.]+)"', src))
         codes |= set(_re.findall(r'\bcode = "([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)"', src))

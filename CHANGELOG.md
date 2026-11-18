@@ -88,6 +88,13 @@ back.
   file errors into codes (and says which user cannot write which folder) moved one layer down to
   `fserrors.py`, because the git panel uses it too. Same routes, same permissions, same matching
   order; the function bodies are unchanged.
+- **Session sharing has its own module** (`gateway/app/share_api.py`, ~690 lines out of `api.py`,
+  now ~6,500): live share links, the share inventory and the security summary, the guest-side
+  link info, transcripts and the public replay links. Two small pieces moved one layer down,
+  because the session routes use them too: `sessctl.py` (who may control a session, and the
+  private root terminals on the gateway host that nobody else types into or shares) and
+  `watermark.py` (the watermark defaults and setting). The guest websocket stays in `api.py`.
+  Same routes, same permissions, same matching order; the function bodies are unchanged.
 
 ## [3.6.36] — 2026-11-16 · agent (59)
 

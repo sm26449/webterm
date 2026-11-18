@@ -1,7 +1,7 @@
 """Link-uri de replay (3.5.12): partajarea PUBLICĂ, doar-citire, a înregistrării unei sesiuni
 ÎNCHISE — fără cont, fără restul aplicaţiei.
 
-Ce e aici (logica pură, testabilă fără HTTP); rutele stau în api.py:
+Ce e aici (logica pură, testabilă fără HTTP); rutele stau în share_api.py:
   * mascarea secretelor probabile din înregistrare (`redact_cast`, `mask_secrets`), pe aceleaşi
     tipare ca istoricul de alerte (`alert_history.SECRET_PATTERNS`);
   * limitarea ratei pe endpoint-urile publice (`gate`, `record_miss`).

@@ -1,6 +1,6 @@
 """Revocarea accesului DERIVAT: share-uri live și link-uri de replay.
 
-Folosit de rutele din api.py (logout, schimbare de parolă, „Revocă tot", ștergere de cont),
+Folosit de rutele din api.py (logout, schimbare de parolă, ștergere de cont) și share_api.py („Revocă tot"),
 de accounts.py (ștergere / dezactivare de cont) și de ssomap.py (rol pierdut din SSO). Stă în
 modul propriu ca acestea să nu importe api.py (vezi tests/import_layers_test.py).
 """

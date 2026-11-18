@@ -1640,7 +1640,7 @@ Legend:
 - **Tok**: reachable with an automation token today (`require_scope`).
 - **⚠**: the route leaks cross-host information today for a scoped user and needs filtering.
 
-The table covers every route of every router mounted in `main.py` (`api.py`, `hosts_api.py`, `forward_api.py`, `backup_api.py`, `docker_api.py`, `services_api.py`, `deploy_keys_api.py`, `files_api.py`, `webauthn_api.py`
+The table covers every route of every router mounted in `main.py` (`api.py`, `hosts_api.py`, `forward_api.py`, `backup_api.py`, `docker_api.py`, `services_api.py`, `deploy_keys_api.py`, `files_api.py`, `share_api.py`, `webauthn_api.py`
 for `/api/webauthn/*`, `oidc_api.py` for `/api/oidc/*`, `scim.py`), plus the forward proxy (an
 HTTP middleware plus ASGI WS middleware in `main.py`) and the SPA/asset catch-all. It is edited by
 hand, one row per method; `tests/route_auth_test.py` fails when a row is missing or its Perm differs
