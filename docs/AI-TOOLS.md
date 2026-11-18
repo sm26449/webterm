@@ -112,5 +112,5 @@ reviewer* → `~/src/shop/.claude/agents/code-reviewer.md`. **New skill** → `r
 
 - UI: `frontend/src/components/AiToolsPanel.tsx`; paths, name rule and templates (pure, testable):
   `frontend/src/lib/aitools.ts`.
-- Backend: the generic file routes in `gateway/app/api.py` (`/api/hosts/{id}/fs*`), agent ops
+- Backend: the generic file routes in `gateway/app/files_api.py` (`/api/hosts/{id}/fs*`), agent ops
   `fs_list`, `fs_read`, `fs_write`, `fs_mkdir`, `fs_rename`, `fs_delete` in `agent/ptyd.py`.

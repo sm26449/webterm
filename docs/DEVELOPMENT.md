@@ -79,7 +79,7 @@ agent/
 gateway/app/
   main.py                  FastAPI app, security headers, static files, periodic reapers
   api.py                   the REST routes not yet in their own module + the agent / browser /
-                           shared websockets + the installer. 7.2k lines in sections
+                           shared websockets + the installer. 6.5k lines in sections
                            `# ── [tag] Title ──`: list them with `grep -n '^# ── ' gateway/app/api.py`;
                            one feature across files: `grep -n '^# ── \[ssh\]' gateway/app/{api,*_api,core}.py`.
                            Only main.py imports it (tests/import_layers_test.py)
