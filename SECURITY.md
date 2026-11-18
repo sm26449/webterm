@@ -32,12 +32,18 @@ Bugs that break the **documented trust boundaries** (see [docs/THREAT-MODEL.md](
 - Cross-Site WebSocket Hijacking, CSRF, XSS, injection (SQL/ANSI/OSC/header);
 - path traversal, SSRF, secret leakage;
 - accepting unsigned / downgraded agent updates, cert pinning bypass;
-- forward isolation (token bound to slug), cross-host escalation.
+- forward isolation (token bound to slug), cross-host escalation;
+- **roles:** reaching a host outside your scope, getting a shell without a shell permission,
+  raising your own role, or removing the last Owner;
+- **sharing:** a live share or replay link that outlives, or reaches beyond, the access of the
+  account that created it.
 
 ## What is NOT a vulnerability (by design)
 
-WebTerm is designed for **a single trusted administrator**. The following are **deliberate decisions**,
-explained in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md), not bugs:
+WebTerm has **several accounts with roles**: the **Owners** are fully trusted, and every other
+account is trusted exactly as far as its role reaches (see [docs/ROLES.md](docs/ROLES.md)). The
+following are **deliberate decisions**, explained in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md),
+not bugs:
 
 - **The agent runs with its user's privileges** on every host and never escalates; fs/command
   operations are NOT sandboxed. Anyone who gets past login has that user's access across the whole
@@ -65,15 +71,23 @@ explained in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md), not bugs:
 - The `insecure` mode (TLS without validation) is an **opt-in**, documented footgun.
 
 If you find a way to break one of these **without** the premises above (e.g. escalation from
-unauthenticated, or from one account to another's in a future multi-user setup), **that is in scope** —
-please report it.
+unauthenticated, from one account into another's sessions, files or links, or beyond what an
+account's role grants), **that is in scope**. Please report it.
 
 ## Supported versions
 
-*Policy last reviewed: 2026-10-23 (3.6.25).*
+*Policy last reviewed: 2026-11-18 (3.6.36).*
 
-Actively developed; security fixes go into the latest version (`main` / the latest `vX.Y.Z` tag).
-Run the most recent official image or build from `main`.
+Security fixes go into the **latest release** only; older versions get no backports. Upgrade to it.
+
+| Channel | What it is | Supported |
+|---|---|---|
+| `ghcr.io/sm26449/webterm:vX.Y.Z` (latest tag) | A release: the full test gate ran on it, and the image is signed (cosign keyless, with provenance and SBOM). The default of `install.sh` and `.env.prod.example`. | **Yes**, the latest one |
+| `ghcr.io/sm26449/webterm:latest` | The tip of `main`: tested by CI, but not released. `upgrade.sh` never falls back to it unless you pass `--allow-latest`. | Best effort, for testing |
+| Building from source | Your own build of a tag or of `main`. | As the tag / `main` it came from |
+| Older `vX.Y.Z` tags | Previous releases. | No |
+
+Report against the version you run. If you run `latest` or a build, include the commit.
 
 ## Deployment best practices (read before exposing)
 
