@@ -9,12 +9,13 @@ back.
 
 ## [Unreleased]
 
-### Fixed
-- **Closing a tab no longer says an ended session is "still running".** The message after you
-  close a tab was the same for every session. Now it says the session is still running only when
-  it is; for a session that had ended it says its recording stays available, and for a session
-  whose host dropped off (or whose state is unknown) it only says the tab closed. Reopen works as
-  before.
+## [3.6.37] — 2026-11-18 · agent (59)
+
+Fixes from the 2026-11-18 audit: replay links now follow the access of the person who made
+them, the image drops pip, and the security policy describes the role model. Gateway and image
+only: the agent is unchanged (59), so the fleet does not update.
+
+### Security
 - **A replay link stops working as soon as the person who made it loses access.** Opening a
   replay link checked only the link's own expiry; losing the right to share recordings on that
   host (an expired time-bound role, a narrowed scope, a disabled account) removed the link only
@@ -30,6 +31,12 @@ back.
   20-per-recording limits were counted before a separate insert, so two requests at the same
   moment could both pass. The check and the insert are now one database statement.
 
+### Fixed
+- **Closing a tab no longer says an ended session is "still running".** The message after you
+  close a tab was the same for every session. Now it says the session is still running only when
+  it is; for a session that had ended it says its recording stays available, and for a session
+  whose host dropped off (or whose state is unknown) it only says the tab closed. Reopen works as
+  before.
 - **A role scoped to a tag must name exactly one tag.** A tag scope with a tab or a
   non-breaking space inside (`prod<TAB>db`, easy to paste from a spreadsheet) was saved, but it
   could never match a host, because hosts split their tags on any whitespace: the role looked
@@ -41,6 +48,11 @@ back.
   refused such values.)
 
 ### Changed
+- **The security policy describes WebTerm as it is now.** `SECURITY.md` still said WebTerm was
+  built for a single trusted administrator, although accounts have had roles since 3.6. It now
+  says that Owners are fully trusted and every other account only as far as its role reaches,
+  lists role bypasses and over-reaching share or replay links as in scope, and names the
+  supported release channels. The reporting path and response times are unchanged.
 - **The image no longer ships pip.** Nothing in the running container installs packages,
   but the Python base image's pip 25.0.1 showed up in image scans with six fixable advisories.
   It is now removed right after the dependencies are installed (with its `ensurepip` copy), so a
