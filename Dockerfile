@@ -33,7 +33,14 @@ RUN echo "apt refresh: $APT_REFRESH" && apt-get update && apt-get upgrade -y --n
 # wheel al cărui conținut nu se potrivește cu hash-ul pinuit oprește build-ul,
 # blocând un pachet substituit în tranzit sau un mirror compromis.
 COPY gateway/requirements.lock ./
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+# Apoi pip PLEACĂ din imagine (audit 2026-11-18): la rulare nu-l foloseşte nimic (gateway-ul,
+# entrypoint-ul şi scripturile din trusă nu instalează pachete), dar Trivy raporta pip 25.0.1 din
+# imaginea de bază cu 6 avertismente remediabile. În ACELAŞI layer, ca să nu rămână într-unul de
+# dedesubt; şi wheel-ul din `ensurepip`, ca `python -m ensurepip` să nu-l poată readuce.
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.12/ensurepip/_bundled/pip-*.whl \
+    && ! python -c "import pip" 2>/dev/null
 
 COPY gateway/app ./gateway/app
 # `.signer` declară cu CE cheie e făcută semnătura — la o rotaţie diferă de cea din ptyd.py.

@@ -41,6 +41,10 @@ back.
   refused such values.)
 
 ### Changed
+- **The image no longer ships pip.** Nothing in the running container installs packages,
+  but the Python base image's pip 25.0.1 showed up in image scans with six fixable advisories.
+  It is now removed right after the dependencies are installed (with its `ensurepip` copy), so a
+  scan of the image lists no Python findings.
 - **The "never lock out the last Owner" rule lives in one module** (`gateway/app/owners.py`), moved
   out of five files with no change in behaviour. That rule says WebTerm always keeps a permanent
   Owner, and one with a local password that can still sign in when the identity provider is down.
