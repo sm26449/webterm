@@ -19,6 +19,8 @@ webterm-agent-signing-key.pem
 .claude/
 CLAUDE.md
 AGENTS.md
+# The root guide contains shared repository instructions.
+!/AGENTS.md
 .cursor/
 .aider*
 docs/AUDIT-*.md

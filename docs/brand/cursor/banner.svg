@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title">
+<title id="title">EverShell — Close the tab. Keep the shell.</title>
+<rect width="1280" height="640" fill="#0D3640"/>
+<g transform="translate(277.3 173) scale(.78)">
+<g fill="#F6F4EE" fill-rule="evenodd"><path d="M113 104H30C31 127 45 141 65 141C80 141 91 134 96 122H112C106 142 89 156 65 156C35 156 14 134 14 101C14 68 35 45 65 45C94 45 113 67 113 98ZM31 91H97C95 72 83 60 65 60C47 60 35 72 31 91Z"/>
+<path d="M119 50H135L167 140L198 50H214L175 153H154Z"/>
+<path transform="translate(208)" d="M113 104H30C31 127 45 141 65 141C80 141 91 134 96 122H112C106 142 89 156 65 156C35 156 14 134 14 101C14 68 35 45 65 45C94 45 113 67 113 98ZM31 91H97C95 72 83 60 65 60C47 60 35 72 31 91Z"/>
+<path d="M341 50H355V71C362 56 375 48 393 48H397V64H391C369 64 357 78 357 101V153H341Z"/>
+<path transform="translate(5)" d="M493 80H465C462 71 456 67 446 67C438 67 432 70 432 76C432 82 441 85 454 88C482 94 496 103 496 122C496 143 478 156 450 156C420 156 401 142 399 118H429C431 127 438 132 451 132C461 132 467 129 467 123C467 117 460 114 446 111C419 105 402 98 402 77C402 55 420 42 447 42C474 42 490 56 493 80Z"/>
+<path transform="translate(5)" d="M508 10H541V60C548 48 559 42 574 42C596 42 610 58 610 85V153H577V92C577 78 572 72 561 72C548 72 541 81 541 96V153H508Z"/>
+<path transform="translate(5)" d="M729 109H653C656 122 663 130 678 130C686 130 692 126 697 118H727C720 143 702 156 677 156C644 156 621 133 621 99C621 66 644 42 676 42C708 42 729 65 729 99ZM654 90H697C694 77 688 70 676 70C665 70 657 77 654 90Z"/>
+<path transform="translate(5)" d="M730 10H775V153H743V36H730Z"/>
+<path transform="translate(60)" d="M730 10H775V153H743V36H730Z"/></g>
+<rect x="857" y="10" width="59" height="143" rx="3" fill="#F2A33A"/>
+</g>
+<g text-anchor="middle" font-family="Helvetica Neue, Arial, sans-serif">
+  <text x="640" y="376" font-size="38" fill="#F6F4EE">Close the tab. Keep the shell.</text>
+  <text x="640" y="574" font-size="22" fill="#BACACB">evershell.dev</text>
+</g>
+</svg>

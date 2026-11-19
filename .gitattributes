@@ -10,6 +10,8 @@
 *.jpg binary
 *.jpeg binary
 *.ico binary
+*.pdf binary
+*.zip binary
 
 # Keep docs and generated data out of GitHub's language stats
 docs/** linguist-documentation
