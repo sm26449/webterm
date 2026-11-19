@@ -2145,11 +2145,19 @@ try {
   await page.waitForTimeout(300)
   await shot('layout-picker-dark')
   await page.locator('[data-testid="split-layout-menu"] [data-layout="cols3"]').click()
-  await page.waitForTimeout(1200)
-  st3 = await splitState()
-  check('split: picker-ul de aranjare → 3 coloane egale (salvat pe server)',
-    st3.layout === 'cols3' && (await mine())?.layout === 'cols3'
-    && ((await mine())?.sizes ?? []).every((x) => Math.abs(x - 1 / 3) < 0.01))
+  // Salvarea pe server e asincronă: o aşteptare fixă de 1,2 s a picat pe tagul v3.6.37 (ambele
+  // încercări) deşi acelaşi commit trecuse pe main. Interogăm până la 8 s şi, la eşec, logăm
+  // ce au citit UI-ul şi serverul, ca data viitoare să ştim care dintre ele rămăsese în urmă.
+  const cols3Ok = (s, v) => s.layout === 'cols3' && v?.layout === 'cols3'
+    && (v?.sizes ?? []).every((x) => Math.abs(x - 1 / 3) < 0.01)
+  let srv3 = null
+  for (const t0 = Date.now(); Date.now() - t0 < 8000; await page.waitForTimeout(250)) {
+    st3 = await splitState()
+    srv3 = await mine()
+    if (cols3Ok(st3, srv3)) break
+  }
+  check('split: picker-ul de aranjare → 3 coloane egale (salvat pe server)', cols3Ok(st3, srv3),
+    JSON.stringify({ ui: st3.layout, server: srv3 && { layout: srv3.layout, sizes: srv3.sizes } }))
 
   await shot('cols3-dark')
   // „mare sus + 2 jos" doar pentru captură (dark + light), apoi înapoi la 3 coloane
