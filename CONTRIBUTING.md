@@ -4,6 +4,8 @@ Thanks for wanting to help out. WebTerm is a security tool that runs code across
 user its agent was installed as —
 so we hold a high bar for correctness and testing. Please also read [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
+For logos, product copy and branded artwork, use the [EverShell identity guide](docs/brand/cursor/README.md).
+
 ## Structure
 
 - `agent/ptyd.py` — the agent, single-file, **stdlib only** (Python 3.6+). It runs as the user that
