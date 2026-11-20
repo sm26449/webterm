@@ -10,17 +10,17 @@ back.
 ## [Unreleased]
 
 ### Security
-- **Agents also authenticate with a client certificate (mTLS, agent 60).** Until now an agent proved
+- **Agents also authenticate with a client certificate (mTLS, agent 61).** Until now an agent proved
   itself with its token alone, sent after the TLS connection was set up. Traefik could not tell an
   agent from a bot, and whoever copied the token could connect as that host.
-  - Each installation now creates its own certificate authority. Every agent from version 60 receives
+  - Each installation now creates its own certificate authority. Every agent from version 61 receives
     its own client certificate over its already authenticated connection and reconnects through
     `agents.<your domain>`.
   - Traefik checks the certificate during the TLS handshake, so a client without one never reaches
     the gateway, whatever the number of addresses.
   - Once a host has connected with its certificate, the token alone is refused for it (INV-12). A
     stolen token is useless without the key.
-  - **What hosts need for agent 60:** outbound 443 to `agents.<your domain>` as well as the main name
+  - **What hosts need for agent 61:** outbound 443 to `agents.<your domain>` as well as the main name
     (with HTTP-01 certificates, add a DNS record for it), no TLS-intercepting proxy on that path, and
     a roughly correct clock. A host that lacks one stays on its token. An agent with open sessions
     takes the update when they end, so hosts move over one by one.

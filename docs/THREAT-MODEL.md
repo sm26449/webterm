@@ -43,7 +43,7 @@ decisions follow from this.
   password and is audited; command-history writes for a 2FA host need an open window or an
   unlocked terminal of the same account. The WebSocket Origin must match `WEBTERM_PUBLIC_URL`
   on scheme + host + port.
-- **Agent authentication** (3.7.0+, agent 60): each agent holds a client certificate from the
+- **Agent authentication** (3.7.0+, agent 61): each agent holds a client certificate from the
   installation's own CA, checked by Traefik during the TLS handshake on `agents.<domain>`; the gateway
   then checks its host id and serial and still requires the token. Once a host has connected that way,
   the token alone is refused (INV-12), so a copied token is useless without the key. Not defended: a

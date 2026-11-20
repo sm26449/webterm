@@ -459,7 +459,7 @@ next boot. On a 2FA host both actions need a step-up, and each one is recorded i
 
 ## Client certificates (mTLS)
 
-From agent 60 (WebTerm 3.7.0), each agent also authenticates with a **client certificate**, checked by
+From agent 61 (WebTerm 3.7.0), each agent also authenticates with a **client certificate**, checked by
 Traefik during the TLS handshake. A client without one never reaches the gateway, and a copied token
 alone no longer opens a connection.
 
@@ -474,13 +474,13 @@ alone no longer opens a connection.
   |---|---|---|
   | Proves | to the agent, that it reached your server | to Traefik and the gateway, which host is connecting |
   | Issued by | Let's Encrypt, requested by your Traefik like the main one | the agent CA your gateway creates at its first start (key encrypted in its database) |
-  | When | as soon as the gateway writes the agents router at start. DNS-01: the wildcard already covers it. HTTP-01: issued once a DNS record points the name at the server | at an agent's first connection as version 60. One per host, valid one year, renewed automatically |
+  | When | as soon as the gateway writes the agents router at start. DNS-01: the wildcard already covers it. HTTP-01: issued once a DNS record points the name at the server | at an agent's first connection as version 61. One per host, valid one year, renewed automatically |
   | Traefik uses | it to answer on the agents name | only the CA's public part (`/edge/agent-ca.pem`), to check each client certificate |
 
   Nothing is shared between installations. A certificate issued by one installation's CA is
   refused by any other, and the project (including evershell.dev) holds no key and issues nothing.
 
-- **What agent 60 needs on the host** (on top of [the usual requirements](INSTALL.md#supported-hosts)):
+- **What agent 61 needs on the host** (on top of [the usual requirements](INSTALL.md#supported-hosts)):
   - outbound TCP 443 to **both** names: the main one and `agents.<your domain>`;
   - no TLS-intercepting proxy on the way to the agents name (it cannot pass a client certificate);
     such a host stays on its token and is never made *required* by accident;
@@ -489,12 +489,12 @@ alone no longer opens a connection.
   - a writable `~/.webterm/`: the agent stores `agent-mtls.pem` (key and certificate, 0600) and,
     during a renewal, `agent-mtls.prev.pem`.
   Python 3.5 hosts (Ubuntu 16.04) connect over mTLS too; only their known Files limitation remains.
-- **Getting to agent 60.** After the gateway upgrade, every agent is offered the signed update at its
+- **Getting to agent 61.** After the gateway upgrade, every agent is offered the signed update at its
   next connection. **An agent with open sessions defers it until they end** (the gateway logs
   "update deferred until sessions end"), so hosts move to 60, and then to mTLS, one by one. Close a
   host's sessions to move it at once.
 - **Nothing to set up.** At its first start, the gateway creates a certificate authority (CA) for this
-  installation. Its key is encrypted in the database. Each agent from version 60 receives its own
+  installation. Its key is encrypted in the database. Each agent from version 61 receives its own
   certificate over its already authenticated connection, the first time it connects. It then
   reconnects through the agents name, `agents.<your domain>` by default (`WEBTERM_AGENT_HOST`).
   The private key never appears in an install script.
@@ -538,7 +538,7 @@ agent version, source IP, how long it has been connected, its reconnects in the 
 when its client certificate expires. Summary chips count online, mTLS, token-only and offline agents
 and the versions in use; search and the route / version filters narrow the list. Click a host to
 open its connection log (Diagnostic → Logs), where each *connected* entry also records the route
-("v60 · mTLS" or "v60 · token") and a filter shows only connections, refusals, updates or mTLS
+("v61 · mTLS" or "v61 · token") and a filter shows only connections, refusals, updates or mTLS
 events.
 
 Design and threat analysis: [docs/design/AGENT-MTLS.md](design/AGENT-MTLS.md).

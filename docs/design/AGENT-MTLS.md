@@ -1,6 +1,6 @@
-# Agent mTLS (design, 3.7.0 · agent 60)
+# Agent mTLS (design, 3.7.0 · agent 61)
 
-Status: **implemented in 3.7.0 (agent 60)**. User-facing summary: [HOSTS.md → Client certificates (mTLS)](../HOSTS.md#client-certificates-mtls).
+Status: **implemented in 3.7.0 (agent 61)**. Agent 60 was the release candidate tested on the maintainer's fleet; the gateway provisions certificates from agent 60 up (`edgemtls.MTLS_MIN_AGENT`). User-facing summary: [HOSTS.md → Client certificates (mTLS)](../HOSTS.md#client-certificates-mtls).
 
 ## Why
 
@@ -34,7 +34,7 @@ What mTLS does **not** change:
 ## Overview
 
 ```
-agent (v60) ──TLS + client cert──▶ Traefik  agents.<domain>   tls.options: RequireAndVerifyClientCert(agent CA)
+agent (v61) ──TLS + client cert──▶ Traefik  agents.<domain>   tls.options: RequireAndVerifyClientCert(agent CA)
                                      │  passTLSClientCert → X-Forwarded-Tls-Client-Cert
                                      ▼
                                    gateway /agent/ws  ── checks: cert chains to the CA, serial = host's current,
@@ -49,14 +49,14 @@ agent (v60) ──TLS + client cert──▶ Traefik  agents.<domain>   tls.opti
 | Traefik | file provider (`/edge/agent-mtls.yaml`, written by the gateway) | `tls.options.webterm-agents` with the CA, `clientAuthType: RequireAndVerifyClientCert`, TLS ≥ 1.2. A router `Host(agents.<domain>) && Path(/agent/ws)` uses those options plus `passTLSClientCert` |
 | Proof of the route | the mTLS router | It sets `X-Webterm-Mtls-Router` to a secret of the installation (generated once, kept in the DB and in the file Traefik reads), overwriting any value a client sends. The gateway considers the certificate header only when that secret matches: a certificate is public, and a client could send the header on the token route, or with SNI = agents name and `Host` = the main name |
 | Gateway check | `agent_ws` | When the request came through the agents router: parse the certificate from the header, check that it chains to the CA, is within its validity, and that its serial is the host's current one and its host id is the token's host. Then the token check and the instance fence, unchanged |
-| Agent (v60) | `agent/ptyd.py` | Loads `agent-mtls.pem` with `ssl.SSLContext.load_cert_chain` (stdlib, Python 3.6+) and connects to `mtls_url`. After a failed attempt on one route it tries the other (mTLS ↔ token); the gateway decides, and a ratcheted host refuses the token route |
+| Agent (v61) | `agent/ptyd.py` | Loads `agent-mtls.pem` with `ssl.SSLContext.load_cert_chain` (stdlib, Python 3.6+) and connects to `mtls_url`. After a failed attempt on one route it tries the other (mTLS ↔ token); the gateway decides, and a ratcheted host refuses the token route |
 
 ## Getting certificates to agents
 
 The agent is stdlib-only and cannot generate keys, so **the gateway generates the key pair** and hands
 it over once, over the agent's already authenticated, encrypted WebSocket:
 
-- **Every agent from version 60, new or existing**, receives the control op `mtls_provision` after its
+- **Every agent from version 61, new or existing**, receives the control op `mtls_provision` after its
   first `hello` (`edgemtls.provision_hook`). The agent writes `agent-mtls.pem` (key and certificate in
   one file, 0600, so the swap is one atomic step), adds `mtls_url` and `mtls_serial` to `agent.json` and
   reconnects through the agents name.
@@ -170,7 +170,7 @@ does not count agents per CA. It is planned for a later release, well before the
 
 | Release | What | Risk |
 |---|---|---|
-| **3.7.0 · agent 60** | CA, issuance, agents router, gateway check, ratchet per host, `mtls_provision`, UI, docs. Old route kept | Agent update, signed by Stefan, rolling out as usual. Hosts move to mTLS one by one, as they update |
+| **3.7.0 · agent 61** | CA, issuance, agents router, gateway check, ratchet per host, `mtls_provision`, UI, docs. Old route kept | Agent update, signed by Stefan, rolling out as usual. Hosts move to mTLS one by one, as they update |
 | later | "Require mTLS for all agents", once System health shows no token-only agent | Closes the old route |
 
 ## Tests

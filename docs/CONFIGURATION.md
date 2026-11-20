@@ -113,7 +113,7 @@ these tune it. All are read by the gateway from `.env` except `WEBTERM_DNS1`/`WE
 
 | Variable | Role |
 |---|---|
-| `WEBTERM_AGENT_HOST` | the name agents use for mTLS (agent 60+). Empty = `agents.<WEBTERM_DOMAIN>`. It must resolve to this server and be a subdomain of `WEBTERM_DOMAIN`; otherwise mTLS stays off ([HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls)) |
+| `WEBTERM_AGENT_HOST` | the name agents use for mTLS (agent 61+). Empty = `agents.<WEBTERM_DOMAIN>`. It must resolve to this server and be a subdomain of `WEBTERM_DOMAIN`; otherwise mTLS stays off ([HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls)) |
 | `WEBTERM_AGENT_MTLS` | `on` (default in `docker-compose.prod.yml`) or `off`. `off` is the rollback: the mTLS router disappears and every agent, including hosts already on mTLS, connects with its token |
 | `WEBTERM_AGENT_RL_*`, `WEBTERM_AGENT_LISTS_DIR`, `WEBTERM_AGENT_ALLOW_*` | the handshake limits and allow/deny lists for `/agent/ws`: [AGENT-HANDSHAKE-LIMITS.md](AGENT-HANDSHAKE-LIMITS.md#thresholds) |
 

@@ -21,7 +21,7 @@ Close the laptop and open a phone.
 *With the agent* — a single Python file, stdlib only, that dials **out** over
 WebSocket. Nothing listens on your server, so NAT and firewalls are not obstacles
 and there is no port to expose. It authenticates with a token bound to that one
-machine and, from agent 60, a client certificate from your installation's own CA, and the gateway stores no login for it: there is nothing to steal because
+machine and, from agent 61, a client certificate from your installation's own CA, and the gateway stores no login for it: there is nothing to steal because
 there is nothing to store. Sessions live in tmux and outlive everything above them.
 
 *Direct SSH or telnet* — for a switch, a box you do not own, a machine where you
