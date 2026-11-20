@@ -2620,7 +2620,11 @@ class AgentConnection(SessionSource):
             if event == "hello" and not self._connect_logged:
                 self._connect_logged = True   # jurnal: connect cu versiunea raportată la hello
                 v = msg.get("agent_version")
-                await record_agent_event(self.host_id, "connect", detail=("v%s" % v) if v else "")
+                # 3.7.0: ruta intră în jurnal (mTLS / token), ca istoricul unui host să arate
+                # când a trecut pe certificat sau a căzut înapoi pe token, nu doar starea de acum
+                route = "mTLS" if self.via_mtls else "token"
+                await record_agent_event(self.host_id, "connect",
+                                         detail=("v%s · %s" % (v, route)) if v else route)
             self.schedule_reconcile(msg)
         elif event == "diagnostics":
             # snapshot complet pushat de agent (la connect + orar) → persistăm ultimul cunoscut,

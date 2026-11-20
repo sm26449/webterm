@@ -18,6 +18,7 @@ import FileMenu, { type MenuItem } from '../FileMenu'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 import AgentHandshakes from './AgentHandshakes'
+import ConnectedAgents from './ConnectedAgents'
 
 // System health (3.6.8): one list of everything that can fail silently — what, why it matters,
 // what to do, and the exact command. Commands come from the server (an allow-list there); this
@@ -285,6 +286,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
             </div>
           )}
           {st.edge && <AgentHandshakes edge={st.edge} />}
+          <ConnectedAgents />
         </div>
       )}
       {muteMenu && muteCheck && (

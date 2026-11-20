@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { errText, api, Host } from '../lib/api'
+import { EVENT_FILTERS, eventMatches, type EventFilter } from '../lib/agentFleet'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { fmtTs } from '../lib/tz'
@@ -110,14 +111,16 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /** Diagnostic al host-ului: conexiune + snapshot complet (sistem/CPU/memorie/storage/reţea+rute),
     pe tab-uri. Snapshot-ul e ultimul cunoscut — vizibil ŞI când hostul e down. */
-export default function DiagnosticModal(props: { host: Host; onClose: () => void }) {
+export default function DiagnosticModal(props: { host: Host; onClose: () => void; initialTab?: Tab }) {
   const { t } = useI18n()
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
   const [diag, setDiag] = useState<Diag | null>(null)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<Tab>('overview')
+  const [tab, setTab] = useState<Tab>(props.initialTab ?? 'overview')
+  // 3.7.0: filtru pe jurnalul de conexiune (o flotă cu reconectări dese îngroapă refuzurile)
+  const [evFilter, setEvFilter] = useState<EventFilter>('all')
   const [refreshing, setRefreshing] = useState(false)
   const [log, setLog] = useState<string | null>(null)
   const [logBusy, setLogBusy] = useState(false)
@@ -478,9 +481,19 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                       {loading ? t('diag.loading') : t('diag.reload')}
                     </button>
                   </div>
-                  {diag.events.length ? (
+                  {diag.events.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-1" role="group" aria-label={t('diag.evFilter')}>
+                      {EVENT_FILTERS.map((f) => (
+                        <button key={f} type="button" aria-pressed={evFilter === f} onClick={() => setEvFilter(f)}
+                          className={`rounded-full px-2.5 py-0.5 text-2xs ring-1 ${evFilter === f ? 'bg-sky-600/20 text-sky-300 ring-sky-500/50' : 'text-slate-400 ring-ink-700 hover:bg-ink-800'}`}>
+                          {t('diag.evFilter.' + f)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {diag.events.length && diag.events.some((e) => eventMatches(e, evFilter)) ? (
                     <ul className="space-y-1">
-                      {diag.events.map((e, i) => {
+                      {diag.events.filter((e) => eventMatches(e, evFilter)).map((e, i) => {
                         const m = META[e.event] || { icon: <DotIcon size={6} />, cls: 'text-slate-300', label: e.event }
                         const r = e.event === 'disconnect' ? REASON[e.reason] : undefined
                         return (
@@ -501,7 +514,7 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
                       })}
                     </ul>
                   ) : (
-                    <div className="rounded-md bg-ink-800 px-3 py-2 text-xs text-slate-500">{t('diag.noEvents')}</div>
+                    <div className="rounded-md bg-ink-800 px-3 py-2 text-xs text-slate-500">{t(diag.events.length ? 'diag.evFilter.none' : 'diag.noEvents')}</div>
                   )}
                 </div>
 

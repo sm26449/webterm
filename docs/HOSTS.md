@@ -532,6 +532,15 @@ alone no longer opens a connection.
 - **Going back to a gateway older than 3.7.0** works too: agents 60 keep their token route, and the
   older gateway has no requirement to enforce.
 
+**Seeing the whole fleet.** *Settings → System health → Connected agents* lists every agent host you
+can see, with the route its live connection came in on (*mTLS required*, *mTLS* or *token*), its
+agent version, source IP, how long it has been connected, its reconnects in the last 24 hours and
+when its client certificate expires. Summary chips count online, mTLS, token-only and offline agents
+and the versions in use; search and the route / version filters narrow the list. Click a host to
+open its connection log (Diagnostic → Logs), where each *connected* entry also records the route
+("v60 · mTLS" or "v60 · token") and a filter shows only connections, refusals, updates or mTLS
+events.
+
 Design and threat analysis: [docs/design/AGENT-MTLS.md](design/AGENT-MTLS.md).
 
 ## Diagnostics

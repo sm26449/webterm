@@ -3152,6 +3152,65 @@ async def health_status(request: Request, user=Depends(authz.perm('security.view
     return await _health_json(request)
 
 
+# 3.7.0: flota de agenţi dintr-o privire (System health → Connected agents): ruta pe care a venit
+# fiecare agent (mTLS / token), versiunea, IP-ul, de când e conectat, reconectările din 24 h.
+# Doar hosturile pe care apelantul le vede (host.view) — fail-closed: o listă de flotă nu are voie
+# să fie un oracol de existenţă pentru hosturi în afara scope-ului. Fără token, serial sau alt secret.
+_FLEET_WINDOW = 86400
+
+
+def _fleet_route(conn) -> Optional[str]:
+    # doar o AgentConnection vie are rută; orice altceva în `sources` (SSH/telnet) nu e agent
+    if not isinstance(conn, core.AgentConnection):
+        return None
+    return "mtls" if getattr(conn, "via_mtls", False) else "token"
+
+
+@router.get("/api/health/agents")
+async def health_agents(request: Request, user=Depends(authz.perm('security.view'))):
+    # cookie only, ca /api/health: lista de permisiuni pentru tokenuri de automatizare rămâne neschimbată
+    vis = await authz.visible_hosts(authz.grants_of(request), "host.view")
+    now = time.time()
+    rows = await db.fetchall(
+        "SELECT id, name, folder, agent_version, agent_ip, last_heartbeat, mtls_required, "
+        "mtls_not_after, mtls_serial FROM hosts WHERE " + conntypes.SQL_IS_AGENT
+        + " AND coalesce(ephemeral,0)=0 ORDER BY name")
+    # O singură interogare grupată pentru reconectări, nu una per host (flote de sute de agenţi)
+    counts = {r["host_id"]: r["n"] for r in await db.fetchall(
+        "SELECT host_id, COUNT(*) AS n FROM agent_events WHERE event='connect' AND ts>? "
+        "GROUP BY host_id", now - _FLEET_WINDOW)}
+    agents, versions = [], {}
+    summary = {"online": 0, "offline": 0, "mtls": 0, "token": 0}
+    for r in rows:
+        if not authz.in_visible(vis, r["id"]):
+            continue
+        route = _fleet_route(core.sources.get(r["id"]))
+        online = route is not None
+        if online:
+            summary["online"] += 1
+            summary[route] += 1
+        else:
+            summary["offline"] += 1
+        ver = r["agent_version"]
+        if ver is not None:
+            versions[str(ver)] = versions.get(str(ver), 0) + 1
+        conn = core.sources.get(r["id"]) if online else None
+        agents.append({
+            "id": r["id"], "name": r["name"], "folder": r["folder"] or "",
+            "online": online, "route": route,
+            "mtls_required": bool(r["mtls_required"]),
+            "mtls_issued": bool(r["mtls_serial"]),      # doar dacă există, nu serialul însuşi
+            "mtls_not_after": r["mtls_not_after"],
+            "agent_version": ver, "agent_ip": r["agent_ip"],
+            "connected_since": getattr(conn, "connected_at", None) if conn else None,
+            "last_heartbeat": r["last_heartbeat"],
+            "reconnects_24h": counts.get(r["id"], 0),
+        })
+    summary["versions"] = versions
+    return {"agents": agents, "summary": summary, "expected_version": core.agent_expected()["version"],
+            "now": now}
+
+
 HEALTH_RECHECK_BUDGET = 45.0
 
 

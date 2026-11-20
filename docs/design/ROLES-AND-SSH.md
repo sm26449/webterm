@@ -1779,6 +1779,7 @@ describe the pre-3.6 state this design started from.
 | `/api/backup/stored/{name}/verify` (3.6.8) | POST | `backups.manage` | G | | unpack + integrity check, nothing restored; records `restore_verified_at` |
 | `/api/backup/verify` (3.6.8) | POST | `backups.manage` | G | | an uploaded .wtbk, decrypted + checked in memory, nothing staged |
 | `/api/health` (3.6.8) | GET | `security.view` | G | | System health (cookie only); host names only for hosts with `host.view`; commands only with `settings.manage`; `can_terminal` = `certs.renew` |
+| `/api/health/agents` (3.7.0) | GET | `security.view` | G | | Agent fleet: route, version, IP; filtered to `host.view` (cookie only); no tokens or certificate serials |
 | `/api/health/check` (3.6.8) | POST | `settings.manage` | G | | "Re-check now", rate-limited instance-wide (30 s) |
 | `/api/health/{check_id}/mute` (3.6.8) | POST | `settings.manage` | G | | 7 d / 30 d / until it changes / off; audited |
 | `/api/backup/cloud` | GET | `backups.manage` | G | |
