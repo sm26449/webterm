@@ -9,6 +9,7 @@ Fără Docker, fără reţea în afara 127.0.0.1:
   * alternarea: după un eşec pe ruta mTLS, încercarea următoare merge pe ruta cu token, apoi iar mTLS.
 """
 import json
+import time
 import os
 import socket
 import ssl
@@ -46,7 +47,7 @@ def check(name, cond, detail=""):
     print("  %s %s%s" % ("PASS" if cond else "FAIL", name, "" if cond else "  --  %s" % (detail,)))
 
 
-check("AGENT_VERSION is 60", ptyd.AGENT_VERSION == 60, ptyd.AGENT_VERSION)
+check("AGENT_VERSION is at least 60 (mTLS); 61 = the fd-reuse fix", ptyd.AGENT_VERSION >= 61, ptyd.AGENT_VERSION)
 
 # certificate reale, din CA-ul gateway-ului (agentca), ca în producţie
 async def _issue():
@@ -230,6 +231,21 @@ for _ in range(10):
     b._attempt_mtls = True
     ptyd.Agent._on_connect_failed(b, "mtls failed")
 check("…up to once a day", b._mtls_retry_delay == ptyd.MTLS_RETRY_MAX)
+
+print("== closing from another thread wakes a blocked reader (prod: nfs, WRONG_VERSION_NUMBER)")
+import socket as _s
+import threading as _th
+a_end, b_end = _s.socketpair()
+wc = ptyd.WSClient("wss://wt.example.org/agent/ws", "t")
+wc.sock = a_end
+woke = []
+rt = _th.Thread(target=lambda: woke.append(a_end.recv(10)), daemon=True)
+rt.start()
+time.sleep(0.2)
+wc.close()
+rt.join(2)
+check("WSClient.close() wakes the reader at once (shutdown before close)", not rt.is_alive() and woke == [b""], woke)
+b_end.close()
 
 print("== renewal keeps the previous certificate until the new one works (Codex audit)")
 first_pem = open(ptyd.MTLS_PEM_PATH).read()

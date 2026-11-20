@@ -46,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 60
+AGENT_VERSION = 61
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -1490,9 +1490,20 @@ class WSClient:
                 return first_opcode, payload
 
     def close(self):
+        # Întâi shutdown, apoi close (3.7.0, prins în producţie pe nfs): `close()` dintr-un ALT fir nu
+        # trezeşte firul cititor blocat în recv/SSL_read. Acesta se trezea mai târziu (când gateway-ul
+        # închidea conexiunea veche) şi OpenSSL citea din nou pe NUMĂRUL de descriptor — refolosit între
+        # timp de conexiunea nouă — furând octeţi din TLS-ul ei (`WRONG_VERSION_NUMBER`). `shutdown`
+        # trezeşte imediat cititorul cu EOF, înainte ca numărul să poată fi refolosit.
+        sock = self.sock
+        if not sock:
+            return
         try:
-            if self.sock:
-                self.sock.close()
+            sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
+        try:
+            sock.close()
         except OSError:
             pass
 
