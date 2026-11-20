@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to WebTerm. Format based on [Keep a Changelog](https://keepachangelog.com/).
+All notable changes to EverShell (called WebTerm until 3.7.0). Format based on [Keep a Changelog](https://keepachangelog.com/).
 The number in parentheses after *agent* is `AGENT_VERSION` from `agent/ptyd.py` — agents refuse any
 update carrying a lower one, so it only ever moves forward.
 
@@ -8,6 +8,8 @@ Entries say **why** a change exists, not only what changed. A fix without its ca
 back.
 
 ## [Unreleased]
+
+## [3.7.0] — 2026-11-20 · agent (61)
 
 ### Security
 - **Agents also authenticate with a client certificate (mTLS, agent 61).** Until now an agent proved
@@ -31,6 +33,36 @@ back.
   - Turning mTLS off (`WEBTERM_AGENT_MTLS=off`) never locks a host out.
   - See [docs/HOSTS.md](docs/HOSTS.md#client-certificates-mtls) and
     [docs/design/AGENT-MTLS.md](docs/design/AGENT-MTLS.md).
+
+### Added
+- **WebTerm is now EverShell.** The app shows the new name, logo and tagline (*Close the tab. Keep the
+  shell.*): browser tab, installed app (PWA) name and icons, sign-in screen, sidebar and About, which
+  links to [evershell.dev](https://evershell.dev). Only the name changed: the repository, the Docker
+  image (`ghcr.io/sm26449/webterm`), the `WEBTERM_*` settings, paths and saved preferences stay as
+  they are, so nothing needs to change on an existing install.
+- **System health → Connected agents.** The whole fleet at a glance: which agents are online, whether
+  each one connected with its client certificate (mTLS) or its token, its version, the address it
+  connects from, how long it has been connected, how often it reconnected in the last 24 hours and when
+  its certificate expires. Search and filters narrow it down; clicking a host opens its connection log,
+  which can now be filtered to connections, refusals, updates or mTLS. It shows only the hosts the
+  account can see.
+
+### Fixed
+- **An agent switching to mTLS could be refused once** (agent 61). Closing the old connection from
+  another thread let its reader read from the new connection's socket, so the first mTLS attempt
+  failed and the token fallback was refused by the freshly set requirement. The agent now wakes its
+  reader before closing, and only the reader closes the socket. Agent 60 never left the maintainer's
+  fleet.
+- **A burst of agent reconnects could fail some status updates** ("cannot commit transaction"). A
+  write that returns its row stayed open between two steps, so another write's commit failed. It now
+  runs in one step.
+- **A terminal line with thousands of trailing spaces could stall the gateway** for seconds while
+  cleaning the scrollback history; the cleanup is now linear. Two similar slow patterns (the telnet
+  password prompt, an SSH test result) and the Files panel's path trimming are linear too.
+- **Background work started without being kept** (restart after a restore, share-guest sync, the
+  task-failed push, telnet autologin) could be dropped mid-run and fail silently; it is now kept until
+  it ends and its errors are logged.
+- After signing in, a failed reload of the app state left the screen unchanged; the page now reloads.
 
 ## [3.6.38] — 2026-11-20 · agent (59)
 
