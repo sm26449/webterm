@@ -1259,6 +1259,7 @@ class WSClient:
         self.peer_der = b""
         self.peer_pin = None            # amprenta observată acum (pt. TOFU la prima conectare)
         self.sock = None
+        self.reader_owned = False   # 3.7.0: un fir cititor închide descriptorul (vezi close)
         self._recv_buf = b""
         self._send_lock = threading.Lock()
 
@@ -1490,18 +1491,30 @@ class WSClient:
                 return first_opcode, payload
 
     def close(self):
-        # Întâi shutdown, apoi close (3.7.0, prins în producţie pe nfs): `close()` dintr-un ALT fir nu
-        # trezeşte firul cititor blocat în recv/SSL_read. Acesta se trezea mai târziu (când gateway-ul
-        # închidea conexiunea veche) şi OpenSSL citea din nou pe NUMĂRUL de descriptor — refolosit între
-        # timp de conexiunea nouă — furând octeţi din TLS-ul ei (`WRONG_VERSION_NUMBER`). `shutdown`
-        # trezeşte imediat cititorul cu EOF, înainte ca numărul să poată fi refolosit.
+        """Opreşte conexiunea. Dacă un fir cititor o deţine (`reader_owned`), DOAR o opreşte (shutdown),
+        iar descriptorul îl închide cititorul când iese (`release`); altfel o închide direct.
+
+        3.7.0 (prins în producţie pe nfs, apoi review): `close()` dintr-un ALT fir nu trezeşte cititorul
+        blocat în recv/SSL_read. Acesta citea mai târziu pe NUMĂRUL de descriptor, refolosit între timp
+        de conexiunea nouă, şi îi fura octeţii TLS (`WRONG_VERSION_NUMBER`). Shutdown îl trezeşte imediat
+        cu EOF, iar descriptorul rămâne al lui până iese, deci numărul nu poate fi refolosit cât încă îl
+        poate citi. Shutdown-ul e cel al socketului BRUT (`socket.socket.shutdown`): cel al SSLSocket
+        scoate întâi stratul TLS, iar un cititor aflat între două recv ar citi octeţi TLS ca text clar."""
         sock = self.sock
         if not sock:
             return
         try:
-            sock.shutdown(socket.SHUT_RDWR)
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
         except (OSError, ValueError):
             pass
+        if not self.reader_owned:
+            self.release()
+
+    def release(self):
+        """Închide descriptorul. O apelează cititorul la ieşire (sau `close`, când nu există cititor)."""
+        sock = self.sock
+        if not sock:
+            return
         try:
             sock.close()
         except OSError:
@@ -2777,6 +2790,7 @@ class Agent:
             self.outbox = queue.Queue()
             self.outbox_bytes = 0
         outbox = self.outbox
+        ws.reader_owned = True             # ÎNAINTE de start: un close() timpuriu doar opreşte
         self.reader_thread = threading.Thread(target=self._reader, args=(ws,), daemon=True)
         self.writer_thread = threading.Thread(target=self._writer, args=(ws, outbox), daemon=True)
         self.reader_thread.start()
@@ -2843,6 +2857,8 @@ class Agent:
         except (WSError, OSError) as e:
             self.inbox.put(("__disconnect__", str(e), ws))
             self._wake()
+        finally:
+            ws.release()           # cititorul închide descriptorul, abia după ce a terminat cu el
 
     def _writer(self, ws, outbox):
         # `outbox` e coada ACESTEI conexiuni (vezi _on_connected). Un writer vechi rămâne pe

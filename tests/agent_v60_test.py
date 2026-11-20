@@ -232,20 +232,48 @@ for _ in range(10):
     ptyd.Agent._on_connect_failed(b, "mtls failed")
 check("…up to once a day", b._mtls_retry_delay == ptyd.MTLS_RETRY_MAX)
 
-print("== closing from another thread wakes a blocked reader (prod: nfs, WRONG_VERSION_NUMBER)")
+print("== closing from another thread: wake the reader, let IT close the descriptor (prod: nfs)")
 import socket as _s
+import ssl as _ssl
 import threading as _th
 a_end, b_end = _s.socketpair()
 wc = ptyd.WSClient("wss://wt.example.org/agent/ws", "t")
-wc.sock = a_end
+wc.sock, wc.reader_owned = a_end, True
 woke = []
-rt = _th.Thread(target=lambda: woke.append(a_end.recv(10)), daemon=True)
+
+
+def _reader_like():
+    try:
+        woke.append(a_end.recv(10))
+    finally:
+        wc.release()
+
+
+rt = _th.Thread(target=_reader_like, daemon=True)
 rt.start()
 time.sleep(0.2)
+fd_before = a_end.fileno()
 wc.close()
 rt.join(2)
-check("WSClient.close() wakes the reader at once (shutdown before close)", not rt.is_alive() and woke == [b""], woke)
+check("close() from another thread wakes the blocked reader at once (shutdown)", not rt.is_alive() and woke == [b""], woke)
+check("…and only the reader closed the descriptor (no number to reuse while it could still read)",
+      fd_before >= 0 and a_end.fileno() == -1)
 b_end.close()
+c_end, d_end = _s.socketpair()
+wc2 = ptyd.WSClient("wss://wt.example.org/agent/ws", "t")
+wc2.sock = c_end
+wc2.close()
+check("without a reader, close() closes the descriptor itself", c_end.fileno() == -1)
+d_end.close()
+e_end, f_end = _s.socketpair()
+tls = _ssl.create_default_context().wrap_socket(e_end, server_hostname="x", do_handshake_on_connect=False)
+wc3 = ptyd.WSClient("wss://wt.example.org/agent/ws", "t")
+wc3.sock, wc3.reader_owned = tls, True
+wc3.close()
+check("the shutdown is the raw socket's: the TLS layer stays until the reader closes",
+      getattr(tls, "_sslobj", None) is not None and tls.fileno() >= 0)
+wc3.release()
+f_end.close()
 
 print("== renewal keeps the previous certificate until the new one works (Codex audit)")
 first_pem = open(ptyd.MTLS_PEM_PATH).read()
