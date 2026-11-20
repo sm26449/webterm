@@ -109,6 +109,14 @@ these tune it. All are read by the gateway from `.env` except `WEBTERM_DNS1`/`WE
 | `WEBTERM_HEARTBEAT_MINUTES` | heartbeat interval in minutes (default 5, clamped to 1–60) |
 | `WEBTERM_DNS1` / `WEBTERM_DNS2` | upstream DNS the `app` container uses for **external** names (the IdP, the SMTP relay, GitHub). Defaults `8.8.8.8` / `1.1.1.1`; point them at a resolver you control for an air-gapped or policy-restricted network. Docker's embedded resolver still does service discovery for `traefik`/`dockerproxy` — only the external hop uses these (3.6.21) |
 
+### Agent connections (3.6.38 / 3.7.0)
+
+| Variable | Role |
+|---|---|
+| `WEBTERM_AGENT_HOST` | the name agents use for mTLS (agent 60+). Empty = `agents.<WEBTERM_DOMAIN>`. It must resolve to this server and be a subdomain of `WEBTERM_DOMAIN`; otherwise mTLS stays off ([HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls)) |
+| `WEBTERM_AGENT_MTLS` | `on` (default in `docker-compose.prod.yml`) or `off`. `off` is the rollback: the mTLS router disappears and every agent, including hosts already on mTLS, connects with its token |
+| `WEBTERM_AGENT_RL_*`, `WEBTERM_AGENT_LISTS_DIR`, `WEBTERM_AGENT_ALLOW_*` | the handshake limits and allow/deny lists for `/agent/ws`: [AGENT-HANDSHAKE-LIMITS.md](AGENT-HANDSHAKE-LIMITS.md#thresholds) |
+
 **Derived, do not set.** `docker-compose.prod.yml` passes a few variables into the gateway from the
 ones you *do* set — `WEBTERM_AUTHENTIK_DOMAIN` (from `AUTHENTIK_DOMAIN`), `WEBTERM_FORWARD_DOMAIN`
 (from `FORWARD_DOMAIN`), `WEBTERM_COMPOSE_PROFILES` (from `COMPOSE_PROFILES`) and

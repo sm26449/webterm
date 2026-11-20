@@ -43,6 +43,12 @@ decisions follow from this.
   password and is audited; command-history writes for a 2FA host need an open window or an
   unlocked terminal of the same account. The WebSocket Origin must match `WEBTERM_PUBLIC_URL`
   on scheme + host + port.
+- **Agent authentication** (3.7.0+, agent 60): each agent holds a client certificate from the
+  installation's own CA, checked by Traefik during the TLS handshake on `agents.<domain>`; the gateway
+  then checks its host id and serial and still requires the token. Once a host has connected that way,
+  the token alone is refused (INV-12), so a copied token is useless without the key. Not defended: a
+  copy of the whole `~/.webterm/` directory (token + key) from a compromised host, as before; the
+  instance fence still applies. Design: [design/AGENT-MTLS.md](design/AGENT-MTLS.md).
 - **SSO / OIDC** (optional, off unless configured): authorization-code + **PKCE
   (S256)**; `id_token` validated with a **fixed RS256 allowlist** (no `alg:none`, no
   algorithm confusion), mandatory `aud`/`iss`/`exp`/`iat`, single-use server-side

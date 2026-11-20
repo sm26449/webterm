@@ -448,6 +448,8 @@ What a host needs to run the agent, and what happens when it has less:
 | C library (portable Python only) | glibc **≥ 2.17**, or musl (Alpine) | older glibc (CentOS 6) → the installer refuses with a clear message; install Python 3.6+ yourself and pass `WEBTERM_PYTHON=` |
 | CPU (portable Python only) | x86_64, aarch64 (glibc or musl), armv7 hard-float (glibc) | anything else → refused with a clear message; same way out |
 | tmux | optional, **strongly recommended** | sessions run on a plain PTY and end when the agent restarts |
+| Network | outbound TCP 443 to the gateway's domain; **from agent 60 (3.7.0) also to `agents.<domain>`** | the agents name unreachable or behind a TLS-intercepting proxy → the agent stays on its token route ([Client certificates](HOSTS.md#client-certificates-mtls)) |
+| Clock (agent 60+) | within a few minutes of the real time | the client certificate fails its validity check; the agent falls back to its token, which a host already on mTLS refuses |
 | Shell | `/bin/sh` for the installer; any login shell for sessions | shell integration (OSC 133) is wired for **bash** and **zsh** |
 | Fetching | `curl` or `wget`, `sha256sum` or `shasum`, `tar` | the installer says which one is missing |
 | Fetching the portable Python | `curl`, or GNU `wget` | BusyBox `wget` (minimal Alpine) can send the host's token only on its command line, which other users can read in `/proc` — the installer stops and asks for `apk add curl` |

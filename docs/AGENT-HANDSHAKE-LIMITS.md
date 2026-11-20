@@ -5,6 +5,11 @@ can reach it. Since 3.6.38, a client that floods it, with no token or a wrong on
 layers before it can cost the gateway a database read or write per request. Agents with a valid
 token keep connecting, even from an address shared with an attacker.
 
+**Since 3.7.0 (agent 60), agents also connect through their own name with a client certificate**
+([HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls)). There, a client without a
+certificate is refused during the TLS handshake and never reaches these limits. The limits below
+keep protecting the token route, which older agents and agents not yet on mTLS still use.
+
 ## The two layers
 
 | Layer | Where | What it does | What it costs the gateway |

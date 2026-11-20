@@ -230,6 +230,15 @@ working inside sessions**, so the **OS-upgrade button** and the **docker-sudo fa
 work — the operator opts in knowingly. Everything else (`KillMode=process`, `WatchdogSec=45`,
 session survival) is unchanged. The default install stays exactly as before.
 
+## Agents and client certificates (3.7.0+)
+
+| Symptom | What to do |
+|---|---|
+| A host stays on *token only* | Its agent is older than 60 (an update with open sessions waits for them to end), or it cannot reach `agents.<domain>`: check DNS and outbound 443 from the host, and the host's events |
+| A host on *mTLS, required* cannot connect | Its events say why (`handshake_mtls_missing`: it came without a certificate; `handshake_mtls_revoked`: an old one). Check the agents name and the host's clock. If it cannot be fixed now, set `WEBTERM_AGENT_MTLS=off` in `.env` and recreate the app container: every agent connects with its token |
+| System health: *Agent client certificates* is critical | mTLS is broken (the CA cannot be loaded, or the Traefik file cannot be written), and the requirement stays on purpose. Read `docker logs webterm-app-1 2>&1 \| grep edgemtls`; the way out is the same `WEBTERM_AGENT_MTLS=off` |
+| A lost or compromised machine | Reinstall its agent elsewhere (host ⋯ → Reinstall agent). When the new install uses the link, the host gets a new token, the old certificate is revoked and the old agent is disconnected |
+
 ## Deploy rules (so you never reach steps 1–4)
 
 1. Deploy with `cd /opt/webterm && sudo ./upgrade.sh vX.Y.Z` — it pins the **digest** the tag
@@ -325,6 +334,7 @@ it — which is fine while the host exists, and a disaster the moment you rebuil
 | `webterm.db` — accounts, hosts, sessions, forwards, snippets, audit log | **The archive's own passphrase** (`/etc/default/webterm-backup`) |
 | `secret` — the vault key that decrypts every stored credential | `/opt/webterm/.env` — domain, ACME email, `CF_DNS_API_TOKEN`, `WEBTERM_SETUP_TOKEN`, `FORWARD_DOMAIN`, image pin |
 | `agent-signing.key` / `.pub` — the fleet key | The TLS certificates (a separate `*_traefik-acme` volume) |
+| The agents' CA (3.7.0+, inside `webterm.db`, encrypted with the vault key): agents keep their certificates after a restore | The `edge-lists` volume (Traefik's allow/deny lists and mTLS file): the gateway rewrites it at start |
 | `transcripts/` — session recordings | The operator scripts in `/opt/webterm` (they come back with the image, via `upgrade.sh`) |
 
 The first row is the one that ends badly. **The passphrase lives on the machine you are

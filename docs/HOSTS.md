@@ -463,6 +463,19 @@ From agent 60 (WebTerm 3.7.0), each agent also authenticates with a **client cer
 Traefik during the TLS handshake. A client without one never reaches the gateway, and a copied token
 alone no longer opens a connection.
 
+- **What agent 60 needs on the host** (on top of [the usual requirements](INSTALL.md#supported-hosts)):
+  - outbound TCP 443 to **both** names: the main one and `agents.<your domain>`;
+  - no TLS-intercepting proxy on the way to the agents name (it cannot pass a client certificate);
+    such a host stays on its token and is never made *required* by accident;
+  - a clock within a few minutes of the real time: certificates are checked for validity on every
+    handshake;
+  - a writable `~/.webterm/`: the agent stores `agent-mtls.pem` (key and certificate, 0600) and,
+    during a renewal, `agent-mtls.prev.pem`.
+  Python 3.5 hosts (Ubuntu 16.04) connect over mTLS too; only their known Files limitation remains.
+- **Getting to agent 60.** After the gateway upgrade, every agent is offered the signed update at its
+  next connection. **An agent with open sessions defers it until they end** (the gateway logs
+  "update deferred until sessions end"), so hosts move to 60, and then to mTLS, one by one. Close a
+  host's sessions to move it at once.
 - **Nothing to set up.** At its first start, the gateway creates a certificate authority (CA) for this
   installation. Its key is encrypted in the database. Each agent from version 60 receives its own
   certificate over its already authenticated connection, the first time it connects. It then
@@ -496,9 +509,11 @@ alone no longer opens a connection.
 - **Turning it off.** Set `WEBTERM_AGENT_MTLS=off` and recreate the app container. This works even
   when the gateway cannot load its CA (for example after restoring onto a server with a different
   vault key). Agents go back to the
-  token route, including hosts that were required: the requirement only applies while the mTLS
-  route exists, so turning it off never locks a host out. Behind a CDN that terminates TLS, mTLS is
-  off by itself.
+  token route, including hosts that were required: an intentional off (this setting, a CDN in front,
+  no valid agents name) lifts the requirement, so it never locks a host out. Behind a CDN that
+  terminates TLS, mTLS is off by itself.
+- **Going back to a gateway older than 3.7.0** works too: agents 60 keep their token route, and the
+  older gateway has no requirement to enforce.
 
 Design and threat analysis: [docs/design/AGENT-MTLS.md](design/AGENT-MTLS.md).
 

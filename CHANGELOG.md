@@ -20,6 +20,10 @@ back.
     the gateway, whatever the number of addresses.
   - Once a host has connected with its certificate, the token alone is refused for it (INV-12). A
     stolen token is useless without the key.
+  - **What hosts need for agent 60:** outbound 443 to `agents.<your domain>` as well as the main name
+    (with HTTP-01 certificates, add a DNS record for it), no TLS-intercepting proxy on that path, and
+    a roughly correct clock. A host that lacks one stays on its token. An agent with open sessions
+    takes the update when they end, so hosts move over one by one.
   - **Reinstalling an agent now gives the host a new token.** When the new install uses its link, the
     previous token stops working and the previous agent is disconnected, so a lost or compromised
     machine keeps nothing that still opens the host.

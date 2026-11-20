@@ -11,7 +11,9 @@ Hardened for public exposure: argon2 passwords + passkeys, single-use setup toke
 X-Forwarded-For is believed only from the proxy named in `WEBTERM_TRUSTED_PROXY_HOSTS` /
 `WEBTERM_TRUSTED_PROXY_CIDRS` — see [CONFIGURATION.md](CONFIGURATION.md)), constant-time login (no account enumeration), `__Host-` HttpOnly/Secure cookie,
 Origin check on the WebSocket (anti-CSWSH), CSP + HSTS + anti-clickjacking,
-path-traversal blocked. On **2FA** hosts, the terminal **locks on inactivity**
+path-traversal blocked. Since 3.7.0, **agents authenticate with a client certificate** as well as
+their token (mTLS, checked by Traefik in the TLS handshake; per-installation CA; a host that has used
+it refuses the token alone): see [HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls). On **2FA** hosts, the terminal **locks on inactivity**
 (output suppressed + input refused server-side) and resuming requires a **fresh second
 factor** (passkey, TOTP code or SSO re-authentication) — protecting against unattended
 authenticated sessions (`WEBTERM_IDLE_LOCK_SECS`, default 5 min). Since 3.5.13 a terminal kept
