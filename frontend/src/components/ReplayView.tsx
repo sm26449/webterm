@@ -4,7 +4,8 @@ import { WatermarkConfig } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { replayHeaders } from '../lib/replay'
 import { fmtTs } from '../lib/tz'
-import { LogoMark, ShieldIcon } from './Icons'
+import { BrandMark } from './BrandLogo'
+import { ShieldIcon } from './Icons'
 import TranscriptPlayer from './TranscriptPlayer'
 import Watermark from './Watermark'
 
@@ -79,7 +80,7 @@ export default function ReplayView(props: { token: string }) {
     return (
       <main className="wt-workspace flex h-full flex-col items-center justify-center gap-3 bg-ink-950 px-4 text-center"
         data-testid="replay-invalid">
-        <LogoMark size={40} />
+        <BrandMark size={40} />
         <h1 className="text-lg font-semibold text-slate-100">
           {failed === 'busy' ? t('replay.busyTitle') : t('replay.invalidTitle')}
         </h1>
@@ -93,7 +94,7 @@ export default function ReplayView(props: { token: string }) {
   return (
     <div className="wt-workspace flex h-full flex-col bg-ink-950">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-ink-800 bg-ink-900 px-4 py-2">
-        <LogoMark size={20} />
+        <BrandMark size={20} />
         <h1 className="min-w-0 truncate text-sm font-medium text-slate-200">
           {meta ? (sessionTitle(meta.title, t) || t('transcript.sessionFallback')) : t('replay.loading')}
         </h1>

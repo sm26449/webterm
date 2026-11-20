@@ -830,7 +830,7 @@ function MainApp() {
     const s = sessions.find((x) => x.id === selectedSid)
     if (s) {
       const h = hosts.find((x) => x.id === s.host_id)
-      document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
+      document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · EverShell`
       // Efectul se re-execută când sesiunea trece pe `lost`, iar anunţul spunea tot
       // „is active" — un utilizator de screen reader primea exact informaţia inversă,
       // în timp ce panoul vizibil arăta „Session lost". Anunţăm starea reală.
@@ -846,7 +846,7 @@ function MainApp() {
         on: h ? t('app.srOnHost', { host: h.name }) : '',
       }))
     } else {
-      document.title = 'WebTerm'
+      document.title = 'EverShell'
       setSrAnnounce(t('app.srMainPanel'))
     }
   }, [selectedSid, sessions, hosts, t, splitPaneKey])   // eslint-disable-line react-hooks/exhaustive-deps

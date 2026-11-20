@@ -46,7 +46,7 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('push', (e) => {
   let d = {}
   try { d = e.data ? e.data.json() : {} } catch { d = {} }
-  e.waitUntil(self.registration.showNotification(d.title || 'WebTerm', {
+  e.waitUntil(self.registration.showNotification(d.title || 'EverShell', {
     body: d.body || '',
     tag: d.tag || undefined,          // dedup: un tag nou înlocuieşte notificarea veche cu acelaşi tag
     icon: '/favicon.svg',

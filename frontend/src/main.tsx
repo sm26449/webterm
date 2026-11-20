@@ -82,7 +82,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { fai
     if (this.state.failed) {
       return (
         <div style={{ padding: 24, fontFamily: 'monospace', color: '#cbd5e1' }}>
-          WebTerm hit a fatal error — reload the page.
+          EverShell hit a fatal error — reload the page.
         </div>
       )
     }

@@ -17,7 +17,8 @@ import { canWake } from '../lib/hostOffline'
 import { wakeHost as wakeShared } from '../lib/wake'
 import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
 import { AlertsBell } from './AlertsPanel'
-import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, CrownIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, LogoMark, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
+import BrandLogo, { BrandMark } from './BrandLogo'
+import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, CrownIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { Badge, Button, ErrorState, IconButton } from './ui'
@@ -763,7 +764,7 @@ export default function Sidebar(props: {
           lățimea sidebar-ului peste conținutul principal (altfel un buton acoperă
           „Acasă" din TabBar pe desktop) */}
       <div className="wt-sbhead flex items-center justify-between gap-1 overflow-hidden border-b border-ink-800 px-4 py-3">
-        {/* Sigla e mereu vizibilă; cuvântul „WebTerm" apare DOAR când încape (container query pe
+        {/* Sigla e mereu vizibilă; cuvântul „EverShell" (sigla-text, 3.7.0) apare DOAR când încape (container query pe
             antet, vezi .wt-wordmark în index.css). Înainte se trunchia la „WebT…" lângă cele şase
             butoane — pe lăţimea implicită de 288px şi mereu pe telefon (butoane de 44px). Numele
             accesibil rămâne în aria-label/title. */}
@@ -773,7 +774,7 @@ export default function Sidebar(props: {
           aria-label={t('nav.about')}
           className="wt-touch flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded-md py-1 font-semibold tracking-tight hover:underline"
         >
-          <LogoMark /><span className="wt-wordmark whitespace-nowrap">WebTerm</span>
+          <BrandMark /><span className="wt-wordmark whitespace-nowrap"><BrandLogo className="inline-block h-4 w-auto align-middle" /></span>
         </button>
         {/* `wt-touch` (44px, activ doar sub `pointer: coarse`) pe navigaţia PRINCIPALĂ.
             Auditul mobil raportează ţintele mici ca `ux`, nu ca `bug`, deci nu blochează

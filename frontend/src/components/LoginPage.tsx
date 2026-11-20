@@ -2,6 +2,7 @@ import { startAuthentication } from '@simplewebauthn/browser'
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { errText, api, getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
+import BrandLogo from './BrandLogo'
 import { KeyIcon, ShieldIcon } from './Icons'
 
 /** cheia mesajului pentru `?sso_error=<reason>` (exportată pentru test) */
@@ -159,17 +160,12 @@ export default function LoginPage(props: {
     <div className="flex h-full items-center justify-center p-5">
       <div className="login-card w-full max-w-[380px] rounded-2xl p-8 sm:p-9">
         <div className="flex flex-col items-center text-center">
-          <div className="brand-badge flex h-14 w-14 items-center justify-center rounded-2xl">
-            {/* marca „Flota": promptul se deschide spre trei noduri (hosturile) */}
-            <svg width="42" height="42" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4.5 6.4 9.4 12 4.5 17.6" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M9.4 12 14.6 7.1M9.4 12 18.4 12M9.4 12 14.6 16.9" fill="none" stroke="#fff" strokeWidth="1.35" strokeLinecap="round" opacity="0.6" />
-              <circle cx="14.6" cy="7.1" r="2.1" fill="#fff" />
-              <circle cx="18.4" cy="12" r="2.1" fill="#fff" />
-              <circle cx="14.6" cy="16.9" r="2.1" fill="#fff" />
-            </svg>
-          </div>
-          <h1 className="mt-4 text-display font-semibold tracking-tight text-slate-200">WebTerm</h1>
+          {/* 3.7.0: sigla EverShell în locul mărcii „Flota"; numele titlului vine din alt-ul imaginii,
+              deci titlul paginii rămâne „EverShell" pentru cititoarele de ecran */}
+          <h1 className="m-0">
+            <BrandLogo className="h-9 w-auto" />
+          </h1>
+          <p className="mt-3 text-sm font-medium text-slate-300">{t('brand.tagline')}</p>
           <p className="mt-1 text-compact leading-relaxed text-slate-500">
             {props.setupRequired ? t('login.subtitle.setup') : t('login.subtitle.login')}
           </p>
@@ -317,13 +313,13 @@ export default function LoginPage(props: {
         })()}
 
         <footer className="mt-7 border-t border-ink-800/70 pt-4 text-center text-2xs leading-relaxed text-slate-600">
-          <span className="font-medium text-slate-500">WebTerm</span>
+          <span className="font-medium text-slate-500">EverShell</span>
           {version && <span className="tabular-nums"> · v{version}</span>} · {t('login.footer.tagline')}
           <br />
           <a href="https://github.com/sm26449/webterm" target="_blank" rel="noopener noreferrer" className="inline-block py-1.5 hover:text-slate-400 hover:underline">
             {t('login.footer.license')}
           </a>
-          <span> · © {new Date().getFullYear()} WebTerm</span>
+          <span> · © {new Date().getFullYear()} EverShell</span>
         </footer>
       </div>
     </div>

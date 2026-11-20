@@ -1301,7 +1301,7 @@ body:has([aria-modal="true"]:not([aria-hidden="true"] [aria-modal="true"])) .wt-
   color: #bfdbfe;
 }
 
-/* Antetul sidebar-ului: cuvântul „WebTerm" lângă siglă doar când încape lângă cele şase butoane
+/* Antetul sidebar-ului: cuvântul „EverShell" (sigla-text) lângă siglă doar când încape lângă cele şase butoane
    (32px cu mouse, 44px la touch prin .wt-touch). Altfel rămâne doar sigla — nu „WebT…". */
 .wt-sbhead { container-type: inline-size; }
 .wt-wordmark { display: none; }

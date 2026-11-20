@@ -980,7 +980,7 @@ try {
     // DOAR între butoanele lui, apoi Escape = anulare (hostul rămâne; îl ştergem prin API la final)
     await step('confirmare ştergere host', async () => {
       await hostMenu(page, OFFLINE_HOST).click()
-      await page.locator('button[role="menuitem"]', { hasText: /Remove from WebTerm|Delete host/ }).first().click()
+      await page.locator('button[role="menuitem"]', { hasText: /Remove from EverShell|Delete host/ }).first().click()
       await page.waitForSelector('[role=alertdialog][aria-modal="true"]', { timeout: 5000 })
       await page.waitForTimeout(300)
       await page.screenshot({ path: `${OUT}/${theme}-18-confirm.png` })

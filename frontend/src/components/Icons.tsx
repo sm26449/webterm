@@ -437,26 +437,7 @@ export const FileIcon = ({ size = 16 }: IconProps) => (
   </svg>
 )
 
-// Marca „Flota": promptul se deschide spre trei noduri = hosturile din flotă.
-export const LogoMark = ({ size = 22 }: { size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="2" y="2" width="20" height="20" rx="5.6" fill="url(#wt-g)" />
-    <path d="M4.5 6.4 9.4 12 4.5 17.6" fill="none" stroke="#fff" strokeWidth="2.4"
-      strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M9.4 12 14.6 7.1M9.4 12 18.4 12M9.4 12 14.6 16.9" fill="none" stroke="#fff"
-      strokeWidth="1.35" strokeLinecap="round" opacity="0.6" />
-    <circle cx="14.6" cy="7.1" r="2.1" fill="#fff" />
-    <circle cx="18.4" cy="12" r="2.1" fill="#fff" />
-    <circle cx="14.6" cy="16.9" r="2.1" fill="#fff" />
-    <defs>
-      <linearGradient id="wt-g" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#6366f1" />
-        <stop offset="0.55" stopColor="#4f46e5" />
-        <stop offset="1" stopColor="#7c3aed" />
-      </linearGradient>
-    </defs>
-  </svg>
-)
+// 3.7.0: marca „Flota" (LogoMark) a fost înlocuită de sigla EverShell — vezi BrandLogo.tsx
 
 export const FilesIcon = ({ size = 16 }: IconProps) => (
   <Icon size={size}>

@@ -2550,7 +2550,7 @@ try {
   await page.click('button:has-text("Replay the welcome walkthrough")')
   const walk = page.locator('[data-testid="walkthrough"]')
   check('walkthrough: „?" → Replay deschide turul la pasul 1',
-    (await visible(walk)) && ((await walk.textContent()) ?? '').includes('Welcome to WebTerm'))
+    (await visible(walk)) && ((await walk.textContent()) ?? '').includes('Welcome to EverShell'))
   await walk.locator('button:has-text("Next")').click()
   check('walkthrough: Next avansează la pasul 2 (Add a host)',
     ((await walk.textContent()) ?? '').includes('Add a host'))

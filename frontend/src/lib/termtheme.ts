@@ -14,7 +14,7 @@ export type TermSchemeId =
 export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] = [
   {
     id: 'webterm-dark',
-    name: 'WebTerm Dark',
+    name: 'EverShell Dark', // 3.7.0: doar numele afişat; id-ul (salvat în preferinţe) rămâne webterm-dark
     theme: {
       background: '#0b0e14', foreground: '#d6dee8',
       cursor: '#7dd3fc', cursorAccent: '#0b0e14',

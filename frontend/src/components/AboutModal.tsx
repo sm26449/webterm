@@ -2,13 +2,16 @@ import { lazy, Suspense, useRef, useState } from 'react'
 import { getBootVersion } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { CloseIcon, LogoMark, StarIcon } from './Icons'
+import BrandLogo, { BrandMark } from './BrandLogo'
+import { CloseIcon, StarIcon } from './Icons'
 
 const ChangelogModal = lazy(() => import('./ChangelogModal'))
 
 // „Despre" — ce e aplicația, cine a făcut-o, sub ce licență. Deschis din logo-ul
 // sidebar-ului. Versiunea vine din headerul X-Webterm-Version (fără apel dedicat).
 const REPO = 'https://github.com/sm26449/webterm'
+// 3.7.0: produsul se numeşte EverShell; repo-ul şi imaginea rămân „webterm” (nume tehnice)
+const SITE = 'https://evershell.dev'
 
 export default function AboutModal(props: { onClose: () => void }) {
   const { t } = useI18n()
@@ -29,9 +32,11 @@ export default function AboutModal(props: { onClose: () => void }) {
       >
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-2.5">
-            <span className="text-sky-400"><LogoMark /></span>
+            <BrandMark size={28} />
             <div>
-              <h2 className="text-lg font-semibold leading-tight">WebTerm</h2>
+              <h2 className="text-lg font-semibold leading-tight">
+                <BrandLogo className="h-5 w-auto" />
+              </h2>
               <p className="flex items-center gap-2 text-xs text-slate-500">
                 {version && <span className="tabular-nums">v{version}</span>}
                 <button onClick={() => setShowChangelog(true)} className="wt-link hover:underline">
@@ -43,7 +48,9 @@ export default function AboutModal(props: { onClose: () => void }) {
           <button onClick={props.onClose} aria-label={t('common.close')} className="wt-touch grid place-items-center rounded-md px-2 py-1 text-slate-400 hover:bg-ink-800"><CloseIcon size={14} /></button>
         </div>
 
-        <p className="mt-4 text-sm leading-relaxed text-slate-300">
+        <p className="mt-4 text-sm font-medium text-slate-200">{t('brand.tagline')}</p>
+        <p className="mt-1 text-xs text-slate-500">{t('about.formerly')}</p>
+        <p className="mt-3 text-sm leading-relaxed text-slate-300">
           {t('about.description')}
         </p>
         <p className="mt-3 border-l-2 border-ink-700 pl-3 text-sm italic leading-relaxed text-slate-400">
@@ -58,6 +65,14 @@ export default function AboutModal(props: { onClose: () => void }) {
           <div className="flex justify-between gap-3">
             <dt className="shrink-0 text-slate-500">{t('about.license')}</dt>
             <dd className="text-right text-slate-300">{t('about.licenseValue')}</dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="shrink-0 text-slate-500">{t('about.website')}</dt>
+            <dd className="min-w-0 text-right">
+              <a href={SITE} target="_blank" rel="noopener noreferrer" className="wt-link break-all hover:underline">
+                evershell.dev
+              </a>
+            </dd>
           </div>
           <div className="flex justify-between gap-3">
             <dt className="shrink-0 text-slate-500">{t('about.project')}</dt>
@@ -82,7 +97,7 @@ export default function AboutModal(props: { onClose: () => void }) {
           </span>
         </a>
 
-        <p className="mt-4 text-center text-2xs text-slate-400">© {new Date().getFullYear()} WebTerm</p>
+        <p className="mt-4 text-center text-2xs text-slate-400">© {new Date().getFullYear()} EverShell</p>
       </div>
       {showChangelog && (
         <Suspense fallback={null}>

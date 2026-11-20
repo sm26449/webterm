@@ -28,7 +28,7 @@
       'font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;padding:24px'
     host.innerHTML =
       '<div style="max-width:640px;margin:0 auto">' +
-      '<h1 style="font-size:18px;color:#f8fafc;margin:0 0 4px">WebTerm nu a pornit</h1>' +
+      '<h1 style="font-size:18px;color:#f8fafc;margin:0 0 4px">EverShell nu a pornit</h1>' +
       '<p style="margin:0 0 16px;color:#94a3b8">' + esc(reason) + '</p>' +
       (errors.length
         ? '<pre style="background:#111827;border:1px solid #1f2937;border-radius:8px;padding:12px;' +
@@ -43,7 +43,7 @@
       '</div>' +
       '<div style="background:#111827;border:1px solid #1f2937;border-radius:8px;padding:12px;color:#94a3b8">' +
       'Dacă asta a apărut imediat după un update de versiune, întoarce serverul la versiunea anterioară ' +
-      '(prin SSH, nu prin WebTerm):' +
+      '(prin SSH, nu prin EverShell):' +
       '<pre style="margin:8px 0 0;color:#e2e8f0">cd /opt/webterm &amp;&amp; sudo ./rollback.sh</pre>' +
       'Sesiunile de terminal NU se pierd: ele trăiesc în tmux pe host-uri ' +
       '(<code>tmux -L webterm attach</code>). Detalii: docs/RUNBOOK.md în repo.' +

@@ -54,7 +54,7 @@ export default function PopoutView(props: { sid: string }) {
         setSession(s)
         setHost(h)
         setViaHost(h?.via_host_id ? hosts.find((x) => x.id === h.via_host_id) : undefined)
-        document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · WebTerm`
+        document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · EverShell`
       } catch {
         /* retry on next tick */
       }
