@@ -286,6 +286,7 @@ if [ -z "${CF_TOKEN:-}" ] && [ "$NONINTERACTIVE" != 1 ]; then
   say ""
   say "  Certificat TLS: fără token Cloudflare folosim HTTP-01 (Let's Encrypt), care cere doar"
   say "  ca $DOMAIN să rezolve spre acest server şi portul 80 să fie accesibil din internet."
+  say "  Adaugă şi o înregistrare DNS pentru agents.$DOMAIN (agenţii 60+ se conectează prin ea, mTLS)."
   say "  Cu token Cloudflare (DNS-01) merge şi în spatele proxy-ului CF sau prin NAT, şi"
   say "  emite un wildcard pentru subdomeniile de port forwarding."
   printf '  Cloudflare Zone:DNS:Edit token (Enter = fără, folosesc HTTP-01): '

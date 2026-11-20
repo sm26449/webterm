@@ -14,7 +14,7 @@ flowchart LR
     D["Network device<br/><i>telnet / serial</i>"]
 
     B <-->|"WebSocket<br/>cookie auth"| G
-    G <-.->|"WebSocket, outbound<br/>token + cert pin"| A1
+    G <-.->|"WebSocket, outbound<br/>token + client cert (mTLS)"| A1
     G <-.->|"outbound"| A2
     A1 --- T1
     A1 --- T2
@@ -70,7 +70,7 @@ and fails under tmux. See [SESSION-LIFECYCLE.md](SESSION-LIFECYCLE.md).
 | Boundary | What crosses it | What protects it |
 |---|---|---|
 | Browser → gateway | session cookie, typed input | `__Host-` cookie, Origin check on every WebSocket, step-up for 2FA hosts |
-| Gateway → agent | commands, signed agent updates | per-host token; in `insecure` mode (self-signed / IP) the agent pins the certificate and checks it **before** sending the token. With a public CA the pin is not used — ordinary TLS validation covers it |
+| Gateway → agent | commands, signed agent updates | per-host token, plus (agent 60, 3.7.0) a client certificate from the installation's CA, checked by Traefik on `agents.<domain>` ([AGENT-MTLS](AGENT-MTLS.md)); in `insecure` mode (self-signed / IP) the agent pins the certificate and checks it **before** sending the token. With a public CA the pin is not used — ordinary TLS validation covers it |
 | Agent → host | process execution | the agent's own user; it never escalates |
 | Gateway → forwarded service | proxied HTTP/WS | signed forward token, target read from the database, never from the URL |
 

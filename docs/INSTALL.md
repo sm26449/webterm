@@ -92,7 +92,10 @@ token is optional (see above). Pulling the public image needs no authentication;
 > **Not on Cloudflare?** You do not need it. Leave `CF_DNS_API_TOKEN` empty and Traefik
 > uses HTTP-01. The only thing you give up is TLS on port-forward subdomains (they need a
 > wildcard, and only DNS-01 can issue one); the application itself gets its certificate
-> normally.
+> normally. With HTTP-01, also point **`agents.<your domain>`** at the server: agents from
+> version 60 connect through that name with their client certificate
+> ([HOSTS.md → Client certificates](HOSTS.md#client-certificates-mtls)). DNS-01's wildcard
+> already covers it.
 
 ### Clean server? One command: `install.sh`
 

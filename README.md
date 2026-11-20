@@ -95,7 +95,8 @@ Fictional demo fleet, captured on v3.6.33 with
   tab, restart or upgrade the gateway, kill the agent, switch to a phone — it is still there,
   re-adopted by name.
 - **Nothing to expose on your servers.** The agent is one stdlib-only Python file that dials out
-  over WebSocket with a token bound to that machine; the gateway stores no login for it.
+  over WebSocket with a token bound to that machine and, from 3.7.0, its own client certificate
+  (mTLS); the gateway stores no login for it.
   It needs Linux and **Python 3.6+** — on hosts with an older or no python3 (Ubuntu 16.04,
   Debian 9) the installer adds a pinned, checksum-verified **portable Python 3.12** for the agent
   alone; tmux is recommended. [Supported hosts](docs/INSTALL.md#supported-hosts).
@@ -196,6 +197,8 @@ everything in one page.
 **Security**
 - Passkeys, TOTP, per-host step-up and idle lock, a command guardrail — [docs/GUARDRAIL.md](docs/GUARDRAIL.md)
 - A Security card on the dashboard that says what needs attention — [docs/SECURITY-SUMMARY.md](docs/SECURITY-SUMMARY.md)
+- Agents authenticated by client certificate (mTLS) from a CA that belongs to your installation —
+  [docs/HOSTS.md](docs/HOSTS.md#client-certificates-mtls)
 - Signed agent updates with your own key, audit log, scoped automation tokens —
   [docs/SECURITY-FEATURES.md](docs/SECURITY-FEATURES.md), [docs/AUTOMATION-TOKENS.md](docs/AUTOMATION-TOKENS.md)
 
@@ -209,7 +212,8 @@ everything in one page.
 
 Hardened for public exposure: argon2 passwords and passkeys, a single-use setup token,
 brute-force lockout on the real client IP, `__Host-` cookies, Origin checks on every WebSocket,
-CSP and HSTS. Hosts can require a 2FA **step-up** to connect and lock their terminals on
+CSP and HSTS. Agents connect with a client certificate checked by Traefik in the TLS handshake,
+so a copied agent token alone opens nothing. Hosts can require a 2FA **step-up** to connect and lock their terminals on
 inactivity; a command guardrail can confirm or block dangerous commands, server-side. What you
 type is never recorded — transcripts hold output only.
 
