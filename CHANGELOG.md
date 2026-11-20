@@ -9,6 +9,16 @@ back.
 
 ## [Unreleased]
 
+## [3.6.38] — 2026-11-20 · agent (59)
+
+The public route agents connect to, `/agent/ws`, is now protected against floods in two layers, and
+refused requests of every kind finally show up in System health with where they came from. No agent
+change.
+
+**Upgrading:** `upgrade.sh` brings a new volume (`edge-lists`) and new Traefik routers with the
+compose file. The default limits suit fleets of up to a few hundred agents; behind a CDN, read
+[docs/AGENT-HANDSHAKE-LIMITS.md](docs/AGENT-HANDSHAKE-LIMITS.md) first.
+
 ### Security
 - **A flood of agent handshakes no longer reaches the gateway's database.** `/agent/ws` is the one
   public route agents connect to. A client sending dozens of connections per second, with no token or
