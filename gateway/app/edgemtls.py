@@ -153,7 +153,13 @@ def write(force: bool = False) -> bool:
             edgelists.atomic_write(CA_FILE, agentca.ca_pem())     # întâi CA-ul: opţiunile îl citesc
         edgelists.atomic_write(FILE_NAME, text)
     except OSError as e:
-        status.update(error=type(e).__name__, reason="write-error", enabled=False)
+        # Oprit intenţionat (doc gol): motivul rămâne cel intenţionat, ca rollback-ul să ridice clichetul
+        # chiar dacă fişierul vechi nu poate fi înlocuit (audit 3.7.0). Doar o rută care TREBUIA scrisă
+        # devine `write-error` (clichetul rămâne, alarmă critică).
+        if doc:
+            status.update(error=type(e).__name__, reason="write-error", enabled=False)
+        else:
+            status["error"] = type(e).__name__
         return False
     _last_written = text
     status["error"] = ""
@@ -185,6 +191,19 @@ async def provision_hook(conn) -> None:
     Cheia călătoreşte pe canalul deja autentificat şi criptat; gateway-ul NU o păstrează."""
     if not enabled() or (conn.agent_version or 0) < MTLS_MIN_AGENT:
         return
+    # un singur emitent per host (hello şi sweep-ul pot coincide), şi doar pentru conexiunea CURENTĂ
+    lock = _host_locks.setdefault(conn.host_id, asyncio.Lock())
+    async with lock:
+        cur_src = core.sources.get(conn.host_id)
+        if cur_src is not None and cur_src is not conn:
+            return
+        await _provision_locked(conn)
+
+
+_host_locks: dict = {}
+
+
+async def _provision_locked(conn) -> None:
     row = await db.fetchone("SELECT mtls_serial, mtls_serial_next, mtls_not_after, mtls_last, mtls_next_at"
                             " FROM hosts WHERE id=?", conn.host_id)
     if row is None:

@@ -74,9 +74,14 @@ async def ensure_ca() -> x509.Certificate:
         return _ca_cert
     raw = await db.get_setting(K_CA, "")
     if raw:
+        # întâi în variabile locale; publicăm doar perechea completă şi potrivită (audit 3.7.0: un
+        # certificat încărcat fără cheie lăsa mTLS „pornit" cu emiterea imposibilă)
         d = json.loads(raw)
-        _ca_cert = x509.load_pem_x509_certificate(d["cert"].encode())
-        _ca_key = serialization.load_pem_private_key(security.decrypt_secret(d["key"]).encode(), password=None)
+        cert = x509.load_pem_x509_certificate(d["cert"].encode())
+        key = serialization.load_pem_private_key(security.decrypt_secret(d["key"]).encode(), password=None)
+        if cert.public_key().public_numbers() != key.public_key().public_numbers():
+            raise ValueError("agent CA certificate and key do not match")
+        _ca_cert, _ca_key = cert, key
         return _ca_cert
     cert, key = _generate_ca()
     key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
@@ -110,7 +115,7 @@ def issue(host_id: int, days: int = CERT_DAYS) -> dict:
             .issuer_name(_ca_cert.subject).public_key(key.public_key())
             .serial_number(serial)
             .not_valid_before(now - datetime.timedelta(minutes=5))
-            .not_valid_after(now + datetime.timedelta(days=days))
+            .not_valid_after(min(now + datetime.timedelta(days=days), _ca_cert.not_valid_after_utc))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False,
                                          data_encipherment=False, key_agreement=False, key_cert_sign=False,

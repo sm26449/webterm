@@ -248,7 +248,8 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - After an agent's first successful connection with its client certificate (mTLS), its host is
   marked `mtls_required`. From then on, a connection for that host with the token alone is refused.
   A stolen token is then useless without the certificate's private key.
-- Only re-enrolling the host clears the mark, as it clears the instance pin.
+- Only re-enrolling the host clears the mark, and only when the new install claims the link
+  (`api.install_script`), not when the link is generated.
 - The requirement is lifted only when mTLS is off on purpose or cannot exist here
   (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name). That
   is the rollback, and it must work even when the CA cannot be loaded. When mTLS is broken (CA error,

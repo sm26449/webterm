@@ -163,6 +163,7 @@ a = _A()
 a.config = json.load(open(ptyd.CONFIG_PATH))
 a._try_token_next = False
 a._attempt_mtls = False
+a._mtls_use_prev = a._attempt_prev = False
 a._connect_worker = lambda ws: None
 urls = []
 
@@ -204,6 +205,7 @@ b.config = {"url": "wss://wt.example.org/agent/ws", "token": "t", "mtls_url": "w
 open(ptyd.MTLS_PEM_PATH, "w").write(pem_backup)                      # fişierul înapoi
 b._mtls_retry_delay = ptyd.MTLS_RETRY
 b.connected, b._connected_via_mtls, b._try_token_next = True, False, True
+b._mtls_use_prev = b._attempt_prev = False
 b._disconnect_requested, b._mtls_retry_at = False, 0.0
 b._last_hb_ack, b.next_heartbeat = 1e18, 1e18
 b._wd_interval, b._last_wd = 0, 0
@@ -228,6 +230,52 @@ for _ in range(10):
     b._attempt_mtls = True
     ptyd.Agent._on_connect_failed(b, "mtls failed")
 check("…up to once a day", b._mtls_retry_delay == ptyd.MTLS_RETRY_MAX)
+
+print("== renewal keeps the previous certificate until the new one works (Codex audit)")
+first_pem = open(ptyd.MTLS_PEM_PATH).read()
+cfg = json.load(open(ptyd.CONFIG_PATH))
+ptyd._mtls_drop_prev(cfg)                    # = o conectare reuşită cu primul certificat: confirmat
+check("a successful connection marks the certificate as confirmed",
+      json.load(open(ptyd.CONFIG_PATH)).get("mtls_confirmed") == cert["serial"])
+e = ptyd._mtls_install(msg(cert=other["cert"], key=other["key"], serial=other["serial"]), cfg)
+data = json.load(open(ptyd.CONFIG_PATH))
+check("renewal installed; the previous pair kept as agent-mtls.prev.pem (0600) with its URL",
+      e == "" and open(ptyd.MTLS_PREV_PATH).read() == first_pem
+      and oct(os.stat(ptyd.MTLS_PREV_PATH).st_mode & 0o777) == "0o600"
+      and data["mtls_prev_url"] == "wss://agents.wt.example.org/agent/ws" and data["mtls_serial"] == other["serial"], e)
+c = _A()
+c.config = data
+c._try_token_next = c._attempt_mtls = c._mtls_use_prev = c._attempt_prev = False
+c._mtls_retry_delay, c._connecting, c.backoff, c.next_connect = ptyd.MTLS_RETRY, False, 1.0, 0.0
+c._connect_worker = lambda ws: None
+seq = []
+
+
+class _WS2:
+    def __init__(self, url, token, insecure=False, cert_pin=None, client_cert=None):
+        seq.append(os.path.basename(client_cert[0]) if client_cert else "token")
+
+
+ptyd.WSClient = _WS2
+ptyd.threading.Thread = lambda *x, **k: type("T", (), {"start": lambda self: None})()
+try:
+    for _ in range(4):
+        ptyd.Agent._start_connect(c)
+        ptyd.Agent._on_connect_failed(c, "failed")
+finally:
+    ptyd.WSClient, ptyd.threading.Thread = real_ws, real_thread
+check("routes after failures: new certificate → previous one → token → new again",
+      seq == ["agent-mtls.pem", "agent-mtls.prev.pem", "token", "agent-mtls.pem"], seq)
+third = agentca.issue(5)                     # CA-ul rămâne încărcat în memorie
+e = ptyd._mtls_install(msg(cert=third["cert"], key=third["key"], serial=third["serial"]), c.config)
+check("another renewal before the new one was ever confirmed: the backup stays the CONFIRMED one",
+      e == "" and open(ptyd.MTLS_PREV_PATH).read() == first_pem
+      and json.load(open(ptyd.CONFIG_PATH))["mtls_serial"] == third["serial"], e)
+ptyd._mtls_drop_prev(c.config)
+check("once the new one connects, the previous one is gone (file + mtls_prev_url)",
+      not os.path.exists(ptyd.MTLS_PREV_PATH) and "mtls_prev_url" not in json.load(open(ptyd.CONFIG_PATH))
+      and "mtls_prev_url" not in c.config
+      and not [f for f in os.listdir(ptyd.WEBTERM_DIR) if f.endswith(".tmp")])
 
 print("\n%d/%d passed" % (ok_n, total))
 sys.exit(0 if ok_n == total else 1)

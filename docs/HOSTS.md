@@ -309,7 +309,8 @@ any value and clamps it to **5 minutes – 30 days**.
   first connects or the link expires.
 - **New link for an existing host:** the host's **⋯** menu → **Reinstall agent**. This
   replaces any previous link, needs a step-up on a 2FA host, and is issued with the default
-  TTL of 1 hour and no password.
+  TTL of 1 hour and no password. When the new install uses the link, the host gets a **new
+  agent token**: the previous agent is disconnected and its token stops working (since 3.7.0).
 - **Install the agent (SSH)** on an SSH host creates its own 1-hour link, runs the installer
   over the SSH connection and waits up to about 40 s for the agent to connect.
 
@@ -481,11 +482,15 @@ alone no longer opens a connection.
   - *token only*: the agent is older than 60, or has not received a certificate yet;
   - *issued, not used yet*: the certificate was sent, but the agent has not connected with it;
   - *mTLS, required*: the host connected with its certificate, and from then on **refuses a
-    connection with the token alone**. Re-enrolling the host resets this, as it resets the instance pin.
+    connection with the token alone**. Re-enrolling the host resets this when the new install uses
+    its link, not when the link is generated: an unused link does not reopen the token route.
 - **Renewal.** Certificates last a year and renew themselves with a third of their life left: at the
   agent's next connection, or within 10 minutes for an agent that stays connected.
-- **Revocation.** Deleting or re-enrolling the host makes its certificate useless at once: the gateway
-  checks its serial number on every connection.
+- **Revocation.** Deleting or re-enrolling the host makes its certificate useless for every new
+  connection: the gateway checks its serial number on each one. A connection that is already open
+  stays open until it drops (deleting the host closes it).
+- **During a renewal** the agent keeps its previous certificate until it has connected with the new
+  one, so a renewal that cannot be used does not lock the host out while the old one is valid.
 - **If mTLS breaks** (System health shows a critical *Agent client certificates* alarm), required
   hosts may be unable to connect: the requirement stays on purpose.
 - **Turning it off.** Set `WEBTERM_AGENT_MTLS=off` and recreate the app container. This works even

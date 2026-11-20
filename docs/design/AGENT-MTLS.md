@@ -75,6 +75,11 @@ it over once, over the agent's already authenticated, encrypted WebSocket:
   It is stored as `mtls_serial_next`, with the time it was sent.
   - The old serial stays valid until the agent connects with the new one. That connection makes the
     new serial current and stores its expiry.
+  - The agent keeps the last **confirmed** pair (`agent-mtls.prev.pem`, with its URL; confirmed =
+    it connected with it, recorded as `mtls_confirmed`) until it has connected with the new one. A
+    second renewal that arrives before the first was ever used does not replace that backup. After a failed attempt with the new pair it tries the previous one, then the
+    token route. A renewal that cannot be used therefore never locks out a required host while the
+    old certificate is valid.
   - If the agent does not report the new serial within an hour, the gateway sends another one. A
     lost renewal therefore cannot leave a required host without a valid certificate.
   - The check runs at every `hello` and, for agents that stay connected for months, every 10
@@ -92,7 +97,17 @@ Like instance pinning, enforcement is per host and only goes one way:
 2. **After the first successful mTLS connection**, the gateway sets `mtls_required` on the host. From
    then on, a token-only connection for that host is refused (`4403`, recorded as an event). A stolen
    token can no longer be used without the key.
-3. **Re-enrolling the host** clears the flag, as it clears the instance pin today.
+3. **Re-enrolling the host** clears the flag and revokes the serials **when the new install claims
+   the link** (`api.install_script`), not when the link is generated. An unused link therefore does
+   not reopen the token route. The claim also **rotates the host's permanent token**: the installer
+   receives a new one, the old one stops working, and an agent still connected with it is
+   disconnected. The new token is accepted alone until the new agent's first mTLS connection.
+
+The final check runs **before** the WebSocket is accepted and the connection is published as the host's
+source. The promotion after an mTLS handshake is one UPDATE conditional on the presented serial (`WHERE …
+AND (mtls_serial = ? OR mtls_serial_next = ?)`): a handshake that raced with a re-enrolment is refused
+instead of switching the ratchet back on. A token-only handshake re-reads the ratchet at that point and is
+refused if another connection switched it on meanwhile.
 
 A global setting, **Require mTLS for all agents**, comes last. It is off by default and can only be
 turned on when no online agent is missing a certificate. It then closes `/agent/ws` on the main name
@@ -102,19 +117,19 @@ entirely: the main route answers `403` at Traefik, and only the agents name rema
 
 Traefik cannot check revocation lists for client certificates. The gateway is the revocation point:
 
-- **The serial is checked against the host row on every connection.** Deleting the host, re-enrolling
-  it or re-issuing its certificate makes the old one useless.
+- **The serial is checked against the host row on every new connection.** Deleting the host,
+  re-enrolling it or re-issuing its certificate makes the old one useless for new connections. An
+  already open connection is not closed by the reset.
 - **A revoked certificate still gets through Traefik's handshake**, then stops at the gateway. That
   costs one indexed read, and at most one event row per host per minute. Only someone holding a
   real, once-valid key can trigger it.
 
 ## Rotating the CA
 
-`caFiles` accepts several CAs. To rotate:
-
-1. Write the new CA next to the old one.
-2. Re-issue the certificates over the WebSocket.
-3. Remove the old CA once no online agent still uses it. System health shows how many are left.
+**Not supported in 3.7.0.** The CA lasts 10 years, client certificates never outlive it (`issue`
+caps their expiry), and System health warns before it expires. A rotation would need trust overlap:
+Traefik's `caFiles` accepts several CAs, but the gateway verifies against one CA and System health
+does not count agents per CA. It is planned for a later release, well before the first CA expires.
 
 ## What the administrator sees
 

@@ -229,20 +229,120 @@ async def main():
     check("…and System health says it is critical", res.severity == "critical" and res.key == "mtls_broken", res)
     edgemtls.write(force=True)
 
-    print("== re-enrolment resets mTLS")
+    print("== re-enrolment resets mTLS only when the new install claims the link (Codex audit)")
     from app import hostmodel
-    await db.execute("UPDATE hosts SET instance_id=NULL, " + hostmodel.MTLS_RESET + " WHERE id=?", h1)
-    rw = await row(h1)
-    check("ratchet cleared and serials revoked", not rw["mtls_required"] and rw["mtls_serial"] is None and rw["mtls_serial_next"] is None)
-    w = WS(tok1, dict(sh, **{edgemtls.CERT_HEADER: hdr(cert2)}))
-    await api.agent_ws(w)
-    check("the old machine's certificate no longer works", w.closed == 4403)
+    await db.execute("UPDATE hosts SET token_encrypted=? WHERE id=?", security.encrypt_secret(tok1), h1)
+    await db.execute("UPDATE hosts SET mtls_required=1 WHERE id=?", h1)
+    await db.execute("UPDATE hosts SET enroll_token='enr-x', enroll_expires=?, instance_id=NULL WHERE id=?",
+                     time.time() + 3600, h1)            # = ce face renew_enroll / provisionarea SSH
     w = WS(tok1)
     await api.agent_ws(w)
-    check("the new installation can connect with its token first", w.accepted)
-    src = open(os.path.join(os.path.dirname(__file__), "..", "gateway", "app", "api.py")).read() + \
-        open(os.path.join(os.path.dirname(__file__), "..", "gateway", "app", "hosts_api.py")).read()
-    check("both re-enrolment paths use MTLS_RESET", src.count("hostmodel.MTLS_RESET") >= 2)
+    check("a link generated but not used: the old token alone is still refused", w.closed == 4403)
+
+    class _Req:
+        headers = {}
+    script = str(await api.install_script("enr-x", _Req()))
+    rw = await row(h1)
+    check("claiming the link clears the ratchet and revokes the serials",
+          "TOKEN=" in script and not rw["mtls_required"] and rw["mtls_serial"] is None and rw["mtls_serial_next"] is None)
+    new_tok = [ln.split('"', 2)[1] for ln in script.splitlines() if ln.startswith('TOKEN="')][0]
+    check("…and ROTATES the permanent token (the old one is useless after the claim)",
+          new_tok != tok1 and rw["token_hash"] == security.sha256_hex(new_tok))
+    check("the installer drops the previous install's client certificate", 'rm -f "$HOME/.webterm/agent-mtls.pem"' in script)
+    w = WS(tok1)
+    await api.agent_ws(w)
+    check("the old token is refused", w.closed == 4401, w.closed)
+    w = WS(new_tok, dict(sh, **{edgemtls.CERT_HEADER: hdr(cert2)}))
+    await api.agent_ws(w)
+    check("the old machine's certificate no longer works, even with the new token", w.closed == 4403)
+    tok1 = new_tok
+    w = WS(tok1)
+    await api.agent_ws(w)
+    check("the new installation can connect with its new token first", w.accepted and w.closed is None)
+    api_src = open(os.path.join(os.path.dirname(__file__), "..", "gateway", "app", "api.py")).read()
+    hosts_src = open(os.path.join(os.path.dirname(__file__), "..", "gateway", "app", "hosts_api.py")).read()
+    check("MTLS_RESET only at the claim (api.install_script), not when a link is generated",
+          api_src.count("hostmodel.MTLS_RESET") == 1 and "MTLS_RESET" not in hosts_src
+          and api_src.index("hostmodel.MTLS_RESET") > api_src.index("async def install_script"))
+
+    print("== races between the check and the registration (Codex audit)")
+    c3 = agentca.issue(h1)
+    await db.execute("UPDATE hosts SET mtls_serial=?, mtls_serial_next=NULL, mtls_required=0 WHERE id=?", c3["serial"], h1)
+    real_er, real_fo, registered = db.execute_returning, db.fetchone, []
+    real_register = core.register_agent
+
+    async def counting_register(ws, host_id, pinned=False):
+        registered.append(host_id)
+        return FakeConn(host_id)
+    core.register_agent = counting_register
+
+    async def reset_meanwhile(sql, *args):          # re-enrolarea „câştigă" chiar înaintea promovării
+        if "mtls_required=1" in sql:
+            await db.execute("UPDATE hosts SET " + hostmodel.MTLS_RESET + " WHERE id=?", h1)
+        return await real_er(sql, *args)
+    db.execute_returning = reset_meanwhile
+    try:
+        w = WS(tok1, dict(sh, **{edgemtls.CERT_HEADER: hdr(c3["cert"])}))
+        await api.agent_ws(w)
+    finally:
+        db.execute_returning = real_er
+    rw = await row(h1)
+    check("re-enrolled while the mTLS handshake ran: refused BEFORE accept/registration, ratchet NOT switched back on",
+          w.closed == 4403 and not w.accepted and not registered and not rw["mtls_required"], (w.closed, registered))
+
+    async def ratchet_meanwhile(sql, *args):
+        if sql.startswith("SELECT mtls_required FROM hosts"):
+            await db.execute("UPDATE hosts SET mtls_required=1 WHERE id=?", h1)
+        return await real_fo(sql, *args)
+    db.fetchone = ratchet_meanwhile
+    try:
+        w = WS(tok1)
+        await api.agent_ws(w)
+    finally:
+        db.fetchone = real_fo
+    check("ratchet switched on while a token-only handshake ran: refused before registration",
+          w.closed == 4403 and not w.accepted and not registered)
+    core.register_agent = real_register
+
+    print("== rollback works even when the Traefik file cannot be written (Codex audit)")
+    from app import edgelists
+    real_aw = edgelists.atomic_write
+
+    def ro_fs(name, text):
+        raise OSError(30, "read-only file system")
+    edgelists.atomic_write = ro_fs
+    try:
+        await edgemtls._refresh(force=True)
+        check("mTLS on + file not writable → write-error, ratchet kept",
+              edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet())
+        config.AGENT_MTLS = "off"
+        await edgemtls._refresh(force=True)
+        check("off + file not writable → still 'off', ratchet lifted",
+              edgemtls.status["reason"] == "off" and not edgemtls.enforce_ratchet(), edgemtls.status)
+    finally:
+        edgelists.atomic_write = real_aw
+        config.AGENT_MTLS = "on"
+        await edgemtls._refresh(force=True)
+
+    print("== the CA loads as a matching pair or not at all (Codex audit)")
+    good = await db.get_setting(agentca.K_CA, "")
+    d = json.loads(good)
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    other = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    await db.set_setting(agentca.K_CA, json.dumps({"cert": d["cert"], "key": security.encrypt_secret(other)}))
+    agentca.reset_for_tests()
+    try:
+        await agentca.ensure_ca()
+        ok_mismatch = False
+    except ValueError:
+        ok_mismatch = True
+    check("certificate with another key → refused, nothing half-loaded", ok_mismatch and agentca._ca_cert is None)
+    await db.set_setting(agentca.K_CA, good)
+    agentca.reset_for_tests()
+    await agentca.ensure_ca()
+    check("a client certificate never outlives the CA", agentca.issue(h1, days=100000)["not_after"] <= agentca.ca_not_after())
 
     print("== an agent that stays connected still renews")
     await db.execute("UPDATE hosts SET mtls_required=1, mtls_serial='abc123', mtls_not_after=?, mtls_serial_next=NULL, mtls_next_at=NULL WHERE id=?",

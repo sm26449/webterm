@@ -2926,8 +2926,8 @@ async def renew_enroll(host_id: int, user=Depends(authz.perm('host.admin', host=
     pass_hash = await security.hash_password_async(pw) if pw else None
     exp = time.time() + ttl
     await db.execute(
-        "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL, "
-        + hostmodel.MTLS_RESET + " WHERE id=?", enroll, exp, pass_hash, host_id)
+        "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL WHERE id=?",
+        enroll, exp, pass_hash, host_id)
     return {"install_command": hostmodel.install_command(enroll, pw),
             "install_command_dedicated": hostmodel.install_command_dedicated(enroll, pw),
             "enroll_expires": exp}
@@ -5363,6 +5363,8 @@ if [ -n "$AGENT_SHA256" ]; then
   fi
 fi
 
+# o (re)instalare porneşte fără certificatul de client al instalării anterioare (îl primeşte din nou)
+rm -f "$HOME/.webterm/agent-mtls.pem" "$HOME/.webterm/agent-mtls.prev.pem"
 cat > "$HOME/.webterm/agent.json" <<EOF
 {{"url": "$WS_URL", "token": "$TOKEN", "insecure": $INSECURE}}
 EOF
@@ -5574,13 +5576,31 @@ async def install_script(enroll_token: str, request: Request):
     # single-use, atomically: claim + invalidate the token in ONE serialized write so two
     # concurrent requests can't both be handed the permanent host token (TOCTOU). Only the winner
     # gets the row back. (Password already verified above; a race loser just gets 404.)
+    # INV-12 (docs/design/INVARIANTS.md): starea mTLS (clichet + serialele) se şterge abia AICI, când noua
+    # instalare chiar revendică linkul — nu la generarea lui (audit 3.7.0: altfel, cât linkul stătea
+    # nefolosit, cine avea tokenul vechi intra fără cheie şi îşi lua propriul certificat).
+    # Tot la revendicare, tokenul permanent se ROTEŞTE (audit 3.7.0): o re-enrolare e răspunsul la o
+    # maşină pierdută sau compromisă, iar tokenul vechi nu trebuie să mai deschidă nimic. Agentul vechi,
+    # dacă e încă conectat, e deconectat; noua instalare primeşte tokenul nou în script.
+    new_token = security.new_token()
+    old = await db.fetchone("SELECT token_hash FROM hosts WHERE enroll_token=?", enroll_token)
     row = await db.execute_returning(
-        "UPDATE hosts SET enroll_token=NULL, enroll_expires=0, enroll_pass_hash=NULL "
-        "WHERE enroll_token=? AND enroll_expires>? RETURNING *",
-        enroll_token, time.time())
+        "UPDATE hosts SET enroll_token=NULL, enroll_expires=0, enroll_pass_hash=NULL, token_hash=?, token_encrypted=?, "
+        + hostmodel.MTLS_RESET + " WHERE enroll_token=? AND enroll_expires>? RETURNING *",
+        security.sha256_hex(new_token), security.encrypt_secret(new_token), enroll_token, time.time())
     if not row:
         raise ApiError(404, "enroll.invalid", "invalid or expired enroll token")
-    return _install_script_for(security.decrypt_secret(row["token_encrypted"]))
+    if old and old["token_hash"]:
+        agentgate.forget(old["token_hash"])
+    agentgate.remember(row["token_hash"])
+    src = core.sources.get(row["id"])
+    if isinstance(src, core.AgentConnection):
+        core.sources.pop(row["id"], None)
+        try:
+            await src.disconnect()
+        except Exception:                    # noqa: BLE001 — scriptul se livrează oricum
+            log.exception("re-enrol: could not disconnect the previous agent of host %s", row["id"])
+    return _install_script_for(new_token)
 
 
 @router.get("/install/group/{group_token}", response_class=PlainTextResponse)
@@ -5945,6 +5965,30 @@ async def agent_ws(ws: WebSocket):
             if not row["instance_id"]:
                 email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip, host_id=row["id"])
         await db.execute("UPDATE hosts SET agent_ip=? WHERE id=?", ip, row["id"])
+    # INV-12, verificarea FINALĂ, înainte de accept şi de publicarea sursei (audit 3.7.0: după
+    # `register_agent` o conexiune legitimă putea fi deja înlocuită de una pe care apoi o închideam).
+    #  - mTLS: clichetul + promovarea certificatului reînnoit, CONDIŢIONATE de serial într-un singur
+    #    UPDATE. Dacă între timp hostul a fost re-enrolat sau certificatul înlocuit, nu atinge nimic (nu
+    #    reactivează clichetul) şi refuzăm. Expirarea = cea a certificatului PREZENTAT (review 3.7.0: altfel
+    #    reînnoirea se relua la fiecare hello).
+    #  - token doar: recitim clichetul (o altă conexiune îl poate fi activat între timp).
+    if via_mtls:
+        promoted = await db.execute_returning(
+            "UPDATE hosts SET mtls_required=1, mtls_last=?, mtls_not_after=?,"
+            " mtls_serial=CASE WHEN mtls_serial_next=? THEN mtls_serial_next ELSE mtls_serial END,"
+            " mtls_next_at=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_next_at END,"
+            " mtls_serial_next=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_serial_next END"
+            " WHERE id=? AND (mtls_serial=? OR mtls_serial_next=?) RETURNING id",
+            time.time(), cert["not_after"], cert["serial"], cert["serial"], cert["serial"], row["id"],
+            cert["serial"], cert["serial"])
+        if not promoted:
+            await ws.close(code=4403)
+            return
+    elif edgemtls.enforce_ratchet():
+        again = await db.fetchone("SELECT mtls_required FROM hosts WHERE id=?", row["id"])
+        if again and again["mtls_required"]:
+            await ws.close(code=4403)
+            return
     await ws.accept()
     lists_mark = edgelists.note_agent_connected(row["id"], ip)   # adresa intră / rămâne în allow (3.6.38)
     # `pinned` = fence-ul anti-clonă e activ (instance_id fixat). Un supersede pe un host pinned
@@ -5956,15 +6000,6 @@ async def agent_ws(ws: WebSocket):
         raise
     if via_mtls:
         conn.via_mtls = True
-        # clichetul + promovarea certificatului reînnoit (vechiul serial încetează să fie valabil)
-        # expirarea = cea a certificatului PREZENTAT (review 3.7.0: la promovare rămânea cea veche, iar
-        # reînnoirea se relua la fiecare hello — buclă de reconectări pe toată flota)
-        await db.execute(
-            "UPDATE hosts SET mtls_required=1, mtls_last=?, mtls_not_after=?,"
-            " mtls_serial=CASE WHEN mtls_serial_next=? THEN mtls_serial_next ELSE mtls_serial END,"
-            " mtls_next_at=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_next_at END,"
-            " mtls_serial_next=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_serial_next END WHERE id=?",
-            time.time(), cert["not_after"], cert["serial"], cert["serial"], cert["serial"], row["id"])
     log.info("agent connected: host=%s(%s)", row["name"], row["id"])
     try:
         await conn.run()

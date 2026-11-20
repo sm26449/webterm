@@ -20,6 +20,9 @@ back.
     the gateway, whatever the number of addresses.
   - Once a host has connected with its certificate, the token alone is refused for it (INV-12). A
     stolen token is useless without the key.
+  - **Reinstalling an agent now gives the host a new token.** When the new install uses its link, the
+    previous token stops working and the previous agent is disconnected, so a lost or compromised
+    machine keeps nothing that still opens the host.
   - Certificates renew themselves. Deleting or re-enrolling a host revokes them.
   - Turning mTLS off (`WEBTERM_AGENT_MTLS=off`) never locks a host out.
   - See [docs/HOSTS.md](docs/HOSTS.md#client-certificates-mtls) and

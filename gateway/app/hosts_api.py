@@ -706,9 +706,10 @@ async def provision_agent(host_id: int, request: Request, user=Depends(authz.per
         raise ApiError(502, "provision.noSsh", "the SSH connection is not available")
     # 2) enroll token proaspăt + rulează installer-ul prin canalul SSH
     enroll = security.new_token()[:32]
-    # re-enrolare: pin-ul de instanţă ŞI starea mTLS (clichet + certificat revocat, INV-12) se şterg
-    await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL, " + hostmodel.MTLS_RESET +
-                     " WHERE id=?", enroll, time.time() + 3600, host_id)
+    # re-enrolare: pin-ul de instanţă se şterge aici; starea mTLS (INV-12) abia când installer-ul
+    # revendică linkul (api.install_script)
+    await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL WHERE id=?",
+                     enroll, time.time() + 3600, host_id)
     try:
         result = await asyncio.wait_for(src._conn.run(hostmodel.install_command(enroll), check=False), 150)
     except Exception as e:

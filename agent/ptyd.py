@@ -144,6 +144,10 @@ CONFIG_PATH = os.path.join(WEBTERM_DIR, "agent.json")
 # Cheia ŞI certificatul în ACELAŞI fişier: o singură înlocuire atomică (review 3.7.0: cu două fişiere,
 # o eroare între cele două `os.replace` lăsa un certificat nou cu cheia veche).
 MTLS_PEM_PATH = os.path.join(WEBTERM_DIR, "agent-mtls.pem")
+# Certificatul ANTERIOR, păstrat până când cel nou chiar a mers (audit 3.7.0): dacă reconectarea cu cel
+# nou eşuează, încercăm cu cel vechi (încă valabil la gateway până la prima folosire a celui nou),
+# abia apoi tokenul. Fără el, un host pe clichet putea rămâne fără nicio cale de intrare.
+MTLS_PREV_PATH = os.path.join(WEBTERM_DIR, "agent-mtls.prev.pem")
 MTLS_RETRY = 3600.0       # conectat pe token deşi avem certificat: prima reîncercare mTLS după o oră…
 MTLS_RETRY_MAX = 86400.0  # …dublată după fiecare eşec, cel mult o dată pe zi
 LOCK_PATH = os.path.join(WEBTERM_DIR, "ptyd.lock")
@@ -2544,6 +2548,8 @@ class Agent:
         self.backoff = BACKOFF_MIN
         self._attempt_mtls = False      # v60: încercarea în curs merge pe ruta mTLS?
         self._try_token_next = False    # v60: după un eşec mTLS, următoarea încercare pe token
+        self._mtls_use_prev = False     # v60: următoarea încercare mTLS cu certificatul ANTERIOR
+        self._attempt_prev = False      # v60: încercarea în curs foloseşte certificatul anterior
         self._connected_via_mtls = False
         self._mtls_retry_at = 0.0
         self._mtls_retry_delay = MTLS_RETRY
@@ -2652,7 +2658,10 @@ class Agent:
         # refuză ruta cu token, deci alternarea nu slăbeşte nimic.
         url, client_cert = cfg["url"], None
         self._attempt_mtls = bool(cfg.get("mtls_url")) and not self._try_token_next and _mtls_files_ok()
-        if self._attempt_mtls:
+        self._attempt_prev = bool(self._attempt_mtls and self._mtls_use_prev and _mtls_prev_ok(cfg))
+        if self._attempt_prev:
+            url, client_cert = cfg["mtls_prev_url"], (MTLS_PREV_PATH, None)
+        elif self._attempt_mtls:
             url, client_cert = cfg["mtls_url"], (MTLS_PEM_PATH, None)
         ws = WSClient(url, cfg["token"], insecure=cfg.get("insecure", False),
                       cert_pin=(cfg.get("cert_pins") or cfg.get("cert_pin")), client_cert=client_cert)
@@ -2690,8 +2699,13 @@ class Agent:
     def _on_connect_failed(self, err):
         self._connecting = False
         self._connected_since = 0.0
-        # alternare mTLS ↔ token (vezi _start_connect): după un eşec pe o rută, încercăm cealaltă
-        self._try_token_next = bool(self._attempt_mtls)
+        # alternare (vezi _start_connect): mTLS cu certificatul curent → cu cel anterior, dacă îl mai avem
+        # → token → iar mTLS
+        if self._attempt_mtls and not self._attempt_prev and _mtls_prev_ok(self.config):
+            self._mtls_use_prev, self._try_token_next = True, False
+        else:
+            self._mtls_use_prev = False
+            self._try_token_next = bool(self._attempt_mtls)
         if self._attempt_mtls:     # o reîncercare mTLS eşuată: următoarea, de două ori mai târziu (review 3.7.0)
             self._mtls_retry_delay = min(self._mtls_retry_delay * 2, MTLS_RETRY_MAX)
         self.next_connect = time.time() + self.backoff
@@ -2771,9 +2785,12 @@ class Agent:
         self.next_diag = 0.0          # anunţă ce are host-ul imediat după (re)conectare
         # v60: ruta REALĂ (mTLS sau token), nu `cfg["url"]`, care e mereu cea cu token
         self._connected_via_mtls = bool(self._attempt_mtls)
+        self._mtls_use_prev = False
         if self._connected_via_mtls:
             self._try_token_next = False
             self._mtls_retry_delay = MTLS_RETRY
+            if not self._attempt_prev:
+                _mtls_drop_prev(cfg)         # cel nou merge: cel vechi nu mai e valabil oricum
         self._mtls_retry_at = time.time() + self._mtls_retry_delay
         log("connected to %s%s" % (getattr(ws, "url", cfg["url"]), " (mTLS)" if self._connected_via_mtls else ""))
 
@@ -3599,7 +3616,7 @@ class Agent:
                 if error:
                     return err("bad_request", error)
                 self.config["mtls_url"] = msg["url"]
-                self._try_token_next = False
+                self._try_token_next = self._mtls_use_prev = False
                 self._mtls_retry_delay = MTLS_RETRY
                 ok()
                 log("mTLS client certificate installed; reconnecting through %s" % msg["url"])
@@ -4588,6 +4605,52 @@ def _mtls_files_ok():
     return os.path.isfile(MTLS_PEM_PATH)
 
 
+def _mtls_prev_ok(cfg):
+    return bool(cfg.get("mtls_prev_url")) and os.path.isfile(MTLS_PREV_PATH)
+
+
+def _rewrite_config(update):
+    """agent.json rescris atomic (fişier temporar unic, 0600, apoi rename); `update(data)` îl modifică."""
+    tmp = os.path.join(WEBTERM_DIR, ".agent-json.%d.%s.tmp" % (os.getpid(), binascii.hexlify(os.urandom(4)).decode()))
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        update(data)
+        _write_private(tmp, json.dumps(data))
+        os.replace(tmp, CONFIG_PATH)
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _mtls_drop_prev(cfg):
+    """După o conectare reuşită cu certificatul curent: e CONFIRMAT (`mtls_confirmed`), iar cel anterior
+    dispare (fişier + `mtls_prev_url`)."""
+    serial = cfg.get("mtls_serial")
+    if cfg.get("mtls_confirmed") == serial and not cfg.get("mtls_prev_url") and not os.path.exists(MTLS_PREV_PATH):
+        return
+
+    def upd(d):
+        d.pop("mtls_prev_url", None)
+        if serial and d.get("mtls_serial") == serial:
+            d["mtls_confirmed"] = serial
+    if _rewrite_config(upd):
+        cfg.pop("mtls_prev_url", None)
+        if serial:
+            cfg["mtls_confirmed"] = serial
+    try:
+        os.unlink(MTLS_PREV_PATH)
+    except OSError:
+        pass
+
+
 def _host_of(url):
     try:
         return url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0].lower()
@@ -4627,6 +4690,7 @@ def _mtls_install(msg, cfg):
         return "the mTLS url is not under this gateway's name"
     tag = "%d.%s" % (os.getpid(), binascii.hexlify(os.urandom(4)).decode())
     tmp_pem = os.path.join(WEBTERM_DIR, ".agent-mtls.%s.tmp" % tag)
+    tmp_prev = os.path.join(WEBTERM_DIR, ".agent-mtls-prev.%s.tmp" % tag)
     tmp_cfg = os.path.join(WEBTERM_DIR, ".agent-json.%s.tmp" % tag)
     try:
         with open(CONFIG_PATH) as f:
@@ -4635,19 +4699,32 @@ def _mtls_install(msg, cfg):
             return "agent.json is not an object"
         _write_private(tmp_pem, key.rstrip("\n") + "\n" + cert)
         ssl.create_default_context().load_cert_chain(tmp_pem)        # perechea chiar se potriveşte?
+        # Rezerva = ultimul certificat CONFIRMAT (cu care chiar ne-am conectat), nu ultimul primit (audit
+        # 3.7.0): un certificat nou, încă nefolosit, nu înlocuieşte o rezervă care ştim că merge.
+        keep_prev = (bool(data.get("mtls_url")) and os.path.isfile(MTLS_PEM_PATH)
+                     and bool(data.get("mtls_serial")) and data.get("mtls_confirmed") == data.get("mtls_serial"))
+        if keep_prev:
+            # certificatul curent devine „anterior" (o copie; cel curent rămâne la locul lui până la swap)
+            with open(MTLS_PEM_PATH) as f:
+                _write_private(tmp_prev, f.read())
+            data["mtls_prev_url"] = data["mtls_url"]
         data["mtls_url"], data["mtls_serial"] = url, serial
         _write_private(tmp_cfg, json.dumps(data))
+        if keep_prev:
+            os.replace(tmp_prev, MTLS_PREV_PATH)
         os.replace(tmp_pem, MTLS_PEM_PATH)
         os.replace(tmp_cfg, CONFIG_PATH)
     except (OSError, ValueError, ssl.SSLError) as e:
         return "could not install the certificate: %s" % type(e).__name__
     finally:
-        for path in (tmp_pem, tmp_cfg):
+        for path in (tmp_pem, tmp_prev, tmp_cfg):
             try:
                 os.unlink(path)
             except OSError:
                 pass
     cfg["mtls_serial"] = serial
+    if keep_prev:
+        cfg["mtls_prev_url"] = data["mtls_prev_url"]
     return ""
 
 
