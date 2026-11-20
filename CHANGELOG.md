@@ -9,6 +9,31 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **A flood of agent handshakes no longer reaches the gateway's database.** `/agent/ws` is the one
+  public route agents connect to. A client sending dozens of connections per second, with no token or
+  a wrong one, cost the gateway two database reads each, and nothing stopped it. Two layers now:
+  - Traefik limits new connections to `/agent/ws` per address and in total, before they reach the
+    gateway. Connected agents never count, so a fleet reconnecting after an outage gets through.
+  - The gateway keeps the valid token fingerprints in memory. No token is refused at once; a wrong
+    token blocks its address after 5 tries, from 10 minutes up to 24 hours on repeat. A valid token
+    always passes, even from a blocked address, so agents sharing a NAT with an attacker stay online.
+  - The gateway tells Traefik which addresses to trust. Addresses where a valid agent connected get a
+    wide limit for 24 hours after the last one. Addresses it blocked are refused by Traefik itself
+    until the block ends. The list is a file Traefik reads, written by the gateway: no new service.
+  The limits are set in `.env`; see [docs/AGENT-HANDSHAKE-LIMITS.md](docs/AGENT-HANDSHAKE-LIMITS.md).
+- **An encoded path (`/agent%2Fws`) no longer slips past the limit.** Traefik's exact match missed it
+  and uvicorn decoded it into the agent handler. The gateway now refuses any path that is not the
+  literal one, before any lookup.
+
+### Added
+- **System health → Refused connections and sign-ins.** For every episode of refused requests: when it
+  started, when it was last seen, how long it lasted, how many were refused, by which rule and from
+  which addresses. It covers agent handshakes (stopped by Traefik, before authentication, or refused
+  by the gateway), failed sign-ins, invalid API tokens and browser WebSockets refused before they
+  opened. Before this, none of these showed where they came from. Aggregated, with no database write
+  per request.
+
 ## [3.6.37] — 2026-11-18 · agent (59)
 
 Fixes from the 2026-11-18 audit: replay links now follow the access of the person who made

@@ -4,4 +4,6 @@
 # coborâm privilegiile și rulăm aplicația ca `webterm`.
 set -e
 chown -R webterm:webterm /data 2>/dev/null || true
+# 3.6.38: volumul cu listele allow/deny pentru Traefik (edgelists.py), dacă e montat
+[ -d /edge ] && chown webterm:webterm /edge 2>/dev/null || true
 exec gosu webterm "$@"

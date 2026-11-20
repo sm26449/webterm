@@ -151,10 +151,29 @@ async def record_handshake_refusal(host_id: int, reason: str, ip: str, detail: s
     return True
 
 
+HANDSHAKE_KEYS_MAX = 4096
+
+
+def _handshake_prune(now: float) -> None:
+    """Cheile sunt per IP: un flux din multe adrese le-ar înmulţi fără limită (3.6.38). Peste
+    plafon aruncăm tot ce e mai vechi de un interval: o cheie expirată nu mai blochează nimic."""
+    if len(_handshake_last) > HANDSHAKE_KEYS_MAX:
+        # DOAR cheile de log per IP: `(host_id, motiv)` (plafonul de evenimente din
+        # record_handshake_refusal) trebuie să rămână, altfel un flux din multe adrese îl golea
+        # mereu şi scria evenimente pe hosturi la fiecare golire (review 3.6.38).
+        logk = [k for k in _handshake_last if isinstance(k, tuple) and k[1:] == ("log",)]
+        for k in [k for k in logk if now - _handshake_last[k] >= HANDSHAKE_EVENT_INTERVAL]:
+            del _handshake_last[k]
+        if len(_handshake_last) > HANDSHAKE_KEYS_MAX:      # toate proaspete: un flux real
+            for k in logk:
+                _handshake_last.pop(k, None)
+
+
 def handshake_log_allowed(key: str) -> bool:
     """Acelaşi plafon (1/min) pentru LOG-ul de handshake refuzat per IP: un agent cu token
     greşit reîncearcă în buclă şi ar scrie acelaşi WARNING de sute de ori pe oră."""
     now = time.time()
+    _handshake_prune(now)
     k = (key, "log")
     if now - _handshake_last.get(k, 0) < HANDSHAKE_EVENT_INTERVAL:
         return False

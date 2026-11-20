@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import alert_history, config, conntypes, db, fwddomain, healthcmd, hoststatus, owners
+from . import alert_history, config, conntypes, db, edgeguard, fwddomain, healthcmd, hoststatus, owners
 
 log = logging.getLogger("webterm")
 
@@ -175,6 +175,12 @@ MESSAGES = {
     "agents_update_ok": "No agent refuses updates",
     "agents_clock_skew": "{count} agent(s) have a clock off by up to {skew} s",
     "agents_clock_ok": "Agent clocks agree with the gateway",
+    "edge_proxy_ip": "Traefik is refusing agent handshakes over the per-IP limit: {count} since {since} (authentication unknown)",
+    "edge_proxy_global": "Traefik is refusing agent handshakes over the global limit: {count} since {since} (authentication unknown)",
+    "edge_proxy_deny": "Traefik refused {count} agent handshake(s) from blocked addresses since {since}, before they reached the gateway",
+    "edge_auth_refused": "The gateway refused {count} agent handshake(s) for a bad token, instance or path since {since}",
+    "edge_telemetry_down": "Agent handshake telemetry from the proxy has been unavailable for {age}",
+    "edge_ok": "No agent handshake is being refused",
     "sessions_near_cap": "{count} host(s) are at {threshold}+ of {limit} sessions",
     "sessions_ok": "No host is near its session limit",
     "signing_unsigned": "Agent updates cannot be delivered: no signing key and no signature",
@@ -233,6 +239,7 @@ WHY = {
     "agents.python": "The agent needs Python 3.6+. On 3.5 it connects and runs terminals, but every file listing — and so every upload — fails with an internal error.",
     "agents.update_blocked": "A host that refuses updates stays without the fixes shipped since.",
     "agents.clock": "A wrong clock breaks TOTP codes, SSO tokens and the order of audit entries.",
+    "agents.handshake": "Agents reconnect through one public route; a flood of handshakes there is stopped at the proxy, and you should know when that happens and whether real agents were caught in it.",
     "sessions.cap": "At the limit, new terminals on that host are refused.",
     "signing.state": "Agents only accept signed updates; without a usable key the fleet stays on old code.",
     "oidc.sso": "When SSO fails, every SSO account is locked out; with WEBTERM_OIDC_SSO_ONLY=1 there is no other way in.",
@@ -259,6 +266,8 @@ RECS = {
     "promote_owner": "Make another account a permanent Owner over all hosts: Settings → Users & roles → Accounts (an Owner grants Owner with no end), or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>. You type that command; WebTerm never runs it.",
     "break_glass_password": "Make an account that signs in with a local password a permanent Owner (Settings → Users & roles → Accounts, or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>). An SSO-only Owner can get a local password with python3 -m app.admin passwd <email> — it then loses the roles its SSO groups gave. You type these commands; WebTerm never runs them.",
     "check_timer": "Look at the unit's journal, then start it once by hand to see it succeed.",
+    "edge_review": "See Refused connections and sign-ins below. A burst right after an outage settles by itself: agents back off up to a minute between tries. A steady stream from many addresses is a flood; the limits keep it away from the gateway.",
+    "edge_telemetry": "Check that the Traefik service runs and that WEBTERM_AGENT_RL_METRICS_URL points at its internal metrics entry point; the limits keep working without it, only the counts are missing.",
     "timer_pending": "Nothing is wrong: the timer has not fired since the update. To see it work now, start it once.",
     "run_upgrade": "Your host scripts predate 3.6.8 — run upgrade.sh to refresh them.",
     "cf_token": "Create a new token (Zone:DNS:Edit on the zone) in the Cloudflare dashboard, put it in secrets/cf_dns_api_token, then recreate Traefik.",
@@ -652,6 +661,35 @@ async def c_agents_clock() -> Optional[Result]:
     return Result("ok", "agents_clock_ok") if core.agent_clock else None
 
 
+async def c_agent_handshakes() -> Optional[Result]:
+    """3.6.38: an active episode of refused agent handshakes (edgeguard.py), or proxy telemetry that
+    went missing. Reads only edgeguard's in-memory state: no DB, no network."""
+    now = time.time()
+    op = edgeguard.open_episodes()
+    # global întâi: e cea care poate ţine pe dinafară şi agenţii legitimi
+    ep = op.get(("proxy", "global"))
+    if ep:
+        return Result("warning", "edge_proxy_global",
+                      {"count": ep["count"], "since": _age(now - ep["started"]) + " ago"}, rec="edge_review")
+    ep = op.get(("proxy", "ip"))
+    if ep:
+        return Result("warning", "edge_proxy_ip",
+                      {"count": ep["count"], "since": _age(now - ep["started"]) + " ago"}, rec="edge_review")
+    ep = op.get(("proxy", "deny"))
+    if ep:
+        return Result("info", "edge_proxy_deny",
+                      {"count": ep["count"], "since": _age(now - ep["started"]) + " ago"}, rec="edge_review")
+    ep = op.get(("gateway", "bad_token")) or op.get(("gateway", "instance_conflict")) or op.get(("gateway", "bad_path")) or op.get(("gateway", "blocked"))
+    if ep:
+        n = sum(e["count"] for k, e in op.items() if k[0] == "gateway")
+        return Result("info", "edge_auth_refused", {"count": n, "since": _age(now - ep["started"]) + " ago"},
+                      rec="edge_review")
+    st = edgeguard.status(now)
+    if st["configured"] and st["error_since"] and now - st["error_since"] > 120:
+        return Result("info", "edge_telemetry_down", {"age": _age(now - st["error_since"])}, rec="edge_telemetry")
+    return Result("ok", "edge_ok")
+
+
 async def c_sessions_cap() -> Optional[Result]:
     from . import core
     limit = core.MAX_SESSIONS_HINT
@@ -1034,6 +1072,7 @@ CHECKS: list = [
     Check("agents.python", "fast", c_agents_python, critical=True),
     Check("agents.update_blocked", "fast", c_agents_blocked, alert="none"),   # update_refused alerts
     Check("agents.clock", "fast", c_agents_clock),
+    Check("agents.handshake", "fast", c_agent_handshakes),
     Check("sessions.cap", "fast", c_sessions_cap),
     Check("signing.state", "fast", c_signing, alert="none", critical=True),  # signing_locked alerts
     Check("oidc.sso", "fast", c_sso, critical=True),

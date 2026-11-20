@@ -285,6 +285,22 @@ CERT_CHECK = _str("WEBTERM_CERT_CHECK", "1") != "0"
 # where Traefik answers inside the compose network (service name:port); when it does not resolve
 # or refuses (dev stack with Caddy, a proxy outside compose) the check falls back to the public name
 CERT_CHECK_TARGET = _str("WEBTERM_CERT_CHECK_TARGET", "traefik:443")
+# 3.6.38 — protecţia handshake-ului de agent (edgeguard.py). Limitele le aplică TRAEFIK (routerul
+# `webterm-agent` din docker-compose.prod.yml), înainte ca o cerere să ajungă aici. Gateway-ul doar
+# CITEŞTE contoarele lui Traefik (endpoint Prometheus pe o intrare internă, nepublicată) ca să arate
+# administratorului episoadele. Gol = fără telemetrie de proxy (stack cu Caddy, proxy în afara
+# compose); refuzurile de autentificare înregistrate de gateway se văd oricum.
+AGENT_RL_METRICS_URL = _str("WEBTERM_AGENT_RL_METRICS_URL", "http://traefik:8082/metrics")
+# routerele lui /agent/ws în metrici (`<router>@<provider>`), cele din etichetele docker-compose.prod.yml
+AGENT_RL_ROUTERS = ("webterm-agent@docker", "webterm-agent-allow@file", "webterm-agent-deny@file")
+# Listele allow/deny pentru /agent/ws, scrise de gateway pentru Traefik (edgelists.py). Directorul e un
+# volum comun: scris aici, montat read-only în Traefik ca director al providerului `file`. `off` = fără.
+AGENT_LISTS_DIR = _str("WEBTERM_AGENT_LISTS_DIR", "/edge")
+AGENT_ALLOW_TTL = _num("WEBTERM_AGENT_ALLOW_TTL", 86400, float)   # după ultima conexiune validă
+AGENT_ALLOW_AVERAGE = _num("WEBTERM_AGENT_ALLOW_AVERAGE", 600)     # pe minut, per adresă din allow
+AGENT_ALLOW_BURST = _num("WEBTERM_AGENT_ALLOW_BURST", 300)
+# aceeaşi valoare ca în etichetele compose (sursa adresei în spatele unui CDN de încredere)
+AGENT_RL_IP_DEPTH = _num("WEBTERM_AGENT_RL_IP_DEPTH", 0)
 # `le` (HTTP-01) / `ledns` (DNS-01): written to .env by install.sh/deploy.sh. Forwards on
 # subdomains only get a certificate with DNS-01, so the forward name is checked only there
 # (WEBTERM_CERT_CHECK_FORWARD=1/0 overrides that guess).

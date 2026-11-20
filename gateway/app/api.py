@@ -26,7 +26,7 @@ from .errors import ApiError, rate_limited
 from . import gitpanel, owners
 from . import webauthn_api
 from . import (accounts, alert_history, audit, authz, backup, certmon, cmdguard, config,
-               core, db, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, push,
+               agentgate, core, db, edgeguard, edgelists, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, push,
                pyruntime, replay, scim, security, sessctl, shares, conntypes, fwddomain, signing, ssomap,
                stepup, syshealth, totp, updatecheck, watermark)
 
@@ -222,6 +222,7 @@ async def setup(creds: Credentials, request: Request, response: Response):
     await security.apply_global_tarpit(retry)   # F-02: frână, nu poartă
     if not _setup_token or not security.tokens_equal(creds.setup_token, _setup_token):
         locked, fails = security.record_login_failure(ip)
+        edgeguard.note_web_refusal("login_locked" if locked else "login_failed", ip)
         # Spune CÂTE mai ai. Fără asta, omul greşeşte tokenul de câteva ori (32 de caractere
         # copiate dintr-un log, la două minute după clonare), iar a şasea încercare îl blochează
         # 15 minute — inclusiv cu tokenul CORECT, fiindcă lockout-ul e pe IP, nu pe token. Din
@@ -342,6 +343,7 @@ async def login(request: Request, response: Response):
     ip = security.client_ip(request)
     allowed, retry = security.login_allowed(ip)
     if not allowed:
+        edgeguard.note_web_refusal("login_locked", ip)     # încercare în timpul lockout-ului (3.6.38)
         # Lockout: NU marcăm actorul şi NU scriem rând de audit (429 fără actor e picat în
         # audit.record). Altfel un neautentificat putea, cu `email` arbitrar, (a) injecta atribuire
         # falsă şi (b) inunda jurnalul până roteşte afară intrările reale de incident — exact
@@ -366,6 +368,7 @@ async def login(request: Request, response: Response):
         ok = False      # 3.6.2: contul n-are parolă locală (SSO-only) — nicio parolă nu-l deschide
     if not ok:
         security.record_login_failure(ip)
+        edgeguard.note_web_refusal("login_failed", ip)
         raise ApiError(401, "auth.badCredentials", "wrong email or password")
     # 3.6.11: contul dezactivat (SCIM) — spus DOAR după parola corectă (altfel ar fi un oracol
     # de existenţă), auditat; nicio sesiune, niciun al doilea factor cerut
@@ -380,6 +383,7 @@ async def login(request: Request, response: Response):
             return {"ok": False, "totp_required": True}
         if not await security.verify_second_factor(user, creds.totp_code):
             security.record_login_failure(ip)
+            edgeguard.note_web_refusal("login_failed", ip)
             raise ApiError(401, "auth.bad2fa", "wrong 2FA code")
     security.record_login_success(ip)
     new_device = await security.note_new_login(user, ip, request.headers.get("user-agent", ""))
@@ -3132,7 +3136,12 @@ async def _health_json(request: Request) -> dict:
             if row:
                 host = {"id": row["id"], "name": row["name"]}
     last = syshealth.last_run()   # PF-02: in-memory, not a DB read (the DB copy lags ≤10 min)
-    return {"checks": checks, "attention": syshealth.attention(rows, now),
+    # 3.6.38: episoade de handshake de agent refuzat (proxy / gateway) + starea telemetriei de proxy
+    edge = {"episodes": await edgeguard.episodes(), "telemetry": edgeguard.status(now),
+            "blocked_now": agentgate.blocked_count(now),
+            "lists": dict(edgelists.status),
+            "quiet": edgeguard.QUIET, "interval": edgeguard.SCRAPE_INTERVAL}
+    return {"edge": edge, "checks": checks, "attention": syshealth.attention(rows, now),
             "checked_at": last or None, "can_manage": can_manage, "can_terminal": can_terminal,
             "can_mute_critical": can_manage and can_terminal, "terminal_host": host, "retry_after": syshealth.manual_retry_after()}
 
@@ -5792,11 +5801,45 @@ async def shell_integration_command(user=Depends(security.require_user)):
 
 @router.websocket("/agent/ws")
 async def agent_ws(ws: WebSocket):
+    # 3.6.38: limitele de handshake le aplică Traefik pe ruta EXACTĂ `/agent/ws`. O cale codată
+    # (`/agent%2Fws`) nu se potriveşte acolo, dar uvicorn o decodează şi ajungea tot aici — adică
+    # ocolea limita şi costa o citire SQLite. Verificat în staging (3.7.10 şi 3.7.19). Agentul
+    # foloseşte mereu calea literală, deci refuzăm orice altă formă ÎNAINTE de orice citire.
+    ip = security.client_ip_ws(ws)
+    if ((getattr(ws, "scope", None) or {}).get("raw_path") or b"/agent/ws") != b"/agent/ws":
+        edgeguard.note_gateway_refusal("bad_path", ip)
+        agentgate.strike(ip)
+        await ws.close(code=4400)
+        return
     auth = ws.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    row = await db.fetchone("SELECT * FROM hosts WHERE token_hash=?",
-                            security.sha256_hex(token)) if token else None
-    ip = security.client_ip_ws(ws)
+    # 3.6.38 (agentgate.py): fără token → refuz pe loc; adresă blocată + token necunoscut → refuz fără
+    # nicio citire. Un token CUNOSCUT trece mereu (NAT împărţit cu un atacator). Totul în memorie.
+    if not token:
+        edgeguard.note_gateway_refusal("blocked" if agentgate.blocked(ip) else "bad_token", ip)
+        agentgate.strike(ip)
+        await ws.close(code=4401)
+        return
+    th = security.sha256_hex(token)
+    await agentgate.refresh_known()                 # un SELECT pe minut, oricât trafic
+    known = agentgate.is_known(th)
+    if not known and agentgate.blocked(ip):
+        agentgate.note_blocked_refusal()
+        edgeguard.note_gateway_refusal("blocked", ip)
+        await ws.close(code=4429)
+        return
+    # Strike PROVIZORIU înainte de citire (niciun await între verificare şi numărare): sub cereri
+    # simultane, un IP produce cel mult STRIKES citiri pe fereastră. Anulat dacă tokenul e bun.
+    triggered = False if known else agentgate.strike(ip)
+    row = await db.fetchone("SELECT * FROM hosts WHERE token_hash=?", th)
+    if row:
+        agentgate.remember(th)
+        if not known:
+            agentgate.forgive(ip, triggered)
+    else:
+        agentgate.forget(th)
+        if triggered:
+            log.warning("agent handshake: %s blocked for repeated unknown tokens", ip)
     if not row:
         # Un `close()` înainte de `accept()` iese la agent ca „HTTP 403" — identic cu refuzul de
         # instanţă — iar aici nu rămânea NIMIC: nici log, nici eveniment. Omul vedea „Waiting for
@@ -5805,6 +5848,7 @@ async def agent_ws(ws: WebSocket):
         if core.handshake_log_allowed("ip:" + ip):
             log.warning("agent handshake refused: unknown token from %s "
                         "(reinstall the agent with a fresh install link)", ip)
+        edgeguard.note_gateway_refusal("bad_token", ip)   # doar un contor în memorie (episoade, 3.6.38)
         for h in await core.hosts_awaiting_first_agent():
             await core.record_handshake_refusal(h["id"], "handshake_bad_token", ip)
         await ws.close(code=4401)
@@ -5835,6 +5879,7 @@ async def agent_ws(ws: WebSocket):
         await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
                                             detail="instance %s ≠ pinned %s"
                                                    % ((instance or "<none>")[:8], pinned[:8]))
+        edgeguard.note_gateway_refusal("instance_conflict", ip)
         email_alerts.notify_agent_relocation(row["name"], (instance or "<none>")[:8], host_id=row["id"])
         await ws.close(code=4409)
         return
@@ -5855,6 +5900,7 @@ async def agent_ws(ws: WebSocket):
                                           detail="pinning race: another instance won")
             await core.record_handshake_refusal(row["id"], "handshake_instance_conflict", ip,
                                                 detail="pinning race: another instance won")
+            edgeguard.note_gateway_refusal("instance_conflict", ip)
             email_alerts.notify_agent_relocation(row["name"], instance[:8], host_id=row["id"])
             await ws.close(code=4409)
             return
@@ -5874,9 +5920,14 @@ async def agent_ws(ws: WebSocket):
                 email_alerts.notify_agent_ip_change(row["name"], row["agent_ip"], ip, host_id=row["id"])
         await db.execute("UPDATE hosts SET agent_ip=? WHERE id=?", ip, row["id"])
     await ws.accept()
+    lists_mark = edgelists.note_agent_connected(row["id"], ip)   # adresa intră / rămâne în allow (3.6.38)
     # `pinned` = fence-ul anti-clonă e activ (instance_id fixat). Un supersede pe un host pinned
     # e garantat aceeaşi mașină (alta ar fi fost refuzată mai sus) → dual-WAN, nu token partajat.
-    conn = await core.register_agent(ws, row["id"], pinned=bool(row["instance_id"]))
+    try:
+        conn = await core.register_agent(ws, row["id"], pinned=bool(row["instance_id"]))
+    except BaseException:
+        edgelists.note_agent_disconnected(row["id"], lists_mark)
+        raise
     log.info("agent connected: host=%s(%s)", row["name"], row["id"])
     try:
         await conn.run()
@@ -5886,6 +5937,7 @@ async def agent_ws(ws: WebSocket):
         conn._stop_reason = conn._stop_reason or "ws_error"
         log.warning("agent ws error host=%s: %s", row["id"], e)
     finally:
+        edgelists.note_agent_disconnected(row["id"], lists_mark)
         reason = conn._stop_reason or "closed"
         await core.record_agent_event(row["id"], "disconnect", reason=reason,
                                       detail=("v%s" % conn.agent_version) if conn.agent_version else "")

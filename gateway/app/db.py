@@ -160,6 +160,20 @@ CREATE TABLE IF NOT EXISTS agent_events (
     detail TEXT DEFAULT ''        -- ex. versiune agent, instanţă scurtă
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_host ON agent_events(host_id, ts);
+-- 3.6.38: episoade de refuz la handshake-ul agentului (edgeguard.py). UN rând pe episod, nu pe cerere:
+-- `source` = 'proxy' (limită aplicată de Traefik, autentificare necunoscută) 'web' (login, token API sau WebSocket refuzat) sau 'gateway' (refuz de
+-- autentificare înregistrat aici); `rule` = 'ip' / 'global' / 'bad_token' / 'instance_conflict'.
+CREATE TABLE IF NOT EXISTS edge_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    started REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    ended REAL,                   -- NULL = episod în curs
+    count INTEGER NOT NULL DEFAULT 0,
+    sources TEXT DEFAULT ''        -- JSON {adresă[ /cale]: număr}, cele mai frecvente TOP_SOURCES + „other"
+);
+CREATE INDEX IF NOT EXISTS idx_edge_episodes_seen ON edge_episodes(last_seen);
 
 -- jurnal de audit: o linie per cerere care schimbă ceva (POST/PATCH/PUT/DELETE pe /api).
 -- Umplut automat din middleware (vezi audit.py) — nu din apeluri manuale, ca să nu rămână

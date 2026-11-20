@@ -100,6 +100,19 @@ services:
       - --entrypoints.websecure.address=:443
       # sesiunile de terminal pot fi inactive mult timp — nu tăia WebSocket-ul
       - --entrypoints.websecure.transport.respondingTimeouts.idleTimeout=3600s
+      # 3.6.38: metrici Prometheus pe o intrare INTERNĂ (:8082, fără `ports:` → nepublicată), doar ca
+      # gateway-ul să poată număra handshake-urile de agent refuzate la proxy (edgeguard.py). Conţin
+      # nume de routere şi numărători, nimic din cereri; `addRoutersLabels` are cardinalitate fixă
+      # (routerele din etichetele de mai jos, plus cele ale Authentik dacă e pornit).
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entryPoint=metrics
+      - --metrics.prometheus.addRoutersLabels=true
+      # 3.6.38: listele allow/deny pentru /agent/ws, scrise de gateway (edgelists.py) într-un volum comun,
+      # montat aici READ-ONLY. Fişierul conţine doar routere pe calea exactă /agent/ws; lipsă sau
+      # invalid = rămâne limita strictă din etichete. Recitit automat la schimbare.
+      - --providers.file.directory=/edge
+      - --providers.file.watch=true
       # DOUĂ căi spre Let's Encrypt. Amândouă sunt definite mereu; routerele aleg una prin
       # WEBTERM_CERT_RESOLVER. Traefik instanţiază providerul DNS abia când chiar cere un
       # certificat, deci `ledns` definit fără token nu deranjează (verificat, porneşte curat).
@@ -134,6 +147,7 @@ services:
       - "443:443"
     volumes:
       - traefik-acme:/letsencrypt
+      - edge-lists:/edge:ro
     networks: [webterm, internal]
 
   app:
@@ -246,6 +260,13 @@ services:
       WEBTERM_CERT_CHECK: ${WEBTERM_CERT_CHECK:-1}
       WEBTERM_CERT_CHECK_TARGET: ${WEBTERM_CERT_CHECK_TARGET:-traefik:443}
       WEBTERM_CERT_CHECK_FORWARD: ${WEBTERM_CERT_CHECK_FORWARD:-}
+      # 3.6.38: de unde citeşte gateway-ul contoarele lui Traefik pentru /agent/ws; `off` = fără
+      WEBTERM_AGENT_RL_METRICS_URL: ${WEBTERM_AGENT_RL_METRICS_URL:-http://traefik:8082/metrics}
+      WEBTERM_AGENT_LISTS_DIR: ${WEBTERM_AGENT_LISTS_DIR:-/edge}
+      WEBTERM_AGENT_ALLOW_TTL: ${WEBTERM_AGENT_ALLOW_TTL:-}
+      WEBTERM_AGENT_ALLOW_AVERAGE: ${WEBTERM_AGENT_ALLOW_AVERAGE:-}
+      WEBTERM_AGENT_ALLOW_BURST: ${WEBTERM_AGENT_ALLOW_BURST:-}
+      WEBTERM_AGENT_RL_IP_DEPTH: ${WEBTERM_AGENT_RL_IP_DEPTH:-0}
       # which resolver the routers use (le = HTTP-01, ledns = DNS-01): decides whether the forward
       # wildcard exists at all, so whether it is checked
       WEBTERM_CERT_RESOLVER: ${WEBTERM_CERT_RESOLVER:-le}
@@ -271,6 +292,7 @@ services:
       - webterm_smtp_password
     volumes:
       - webterm-data:/data
+      - edge-lists:/edge
     networks: [webterm]
     labels:
       - traefik.enable=true
@@ -316,6 +338,48 @@ services:
       - ${WEBTERM_CERT_LABEL_FWD_SANS:-traefik.enable=true}
       - traefik.http.routers.webterm-fwd.service=webterm
       - traefik.http.routers.webterm-fwd.middlewares=webterm-hsts@docker
+      # 3.6.38 — handshake-ul agentului, pe un router DEDICAT (potrivire exactă a căii), ca să-l
+      # putem limita fără să atingem login-ul, terminalele, SSO sau forward-urile. O cerere peste
+      # prag e refuzată de Traefik ÎNAINTE să ajungă la gateway (nici handshake, nici SQLite).
+      # Docs: docs/AGENT-HANDSHAKE-LIMITS.md (praguri, verificare, rollback).
+      #   rateLimit, nu inFlightReq: verificat pe 3.7.10 şi 3.7.19, inFlightReq ţine locul ocupat
+      #   cât trăieşte WebSocket-ul, deci agenţii conectaţi ar bloca reconectările. rateLimit
+      #   numără doar handshake-urile NOI; conexiunile deschise nu consumă din buget.
+      #   Sursa = adresa TCP văzută de Traefik (`depth` 0). În spatele unui CDN de încredere:
+      #   pune IP-urile lui în forwardedHeaders.trustedIPs pe intrarea websecure şi
+      #   WEBTERM_AGENT_RL_IP_DEPTH=1; o cerere fără sursă stabilită cade atunci într-un singur
+      #   bucket comun (un antet trimis de client nu deschide buget nou). IPv6: pe /64.
+      #   Limita GLOBALĂ răspunde 529 (nu 429), ca metricile să separe cele două reguli; cheia ei e un
+      #   antet fix (webterm-agent-bucket), nu Host-ul.
+      # UN SINGUR router pentru ambele nume (cel principal şi cele de forward): în Traefik starea unui
+      # rateLimit e PER ROUTER (verificat pe 3.7.19: acelaşi middleware pe două routere = bucket-uri
+      # separate), deci două routere dublau bugetul, per adresă şi global, pentru cine alterna Host-ul.
+      # Numele de forward trebuie acoperite: routerul `webterm-fwd` le trimite la aplicaţie, iar dacă
+      # domeniul de forward din Settings diferă de cel din .env, /agent/ws ajungea la handler fără limită.
+      - traefik.http.routers.webterm-agent.rule=(Host(`${WEBTERM_DOMAIN}`) || HostRegexp(`^[a-z0-9-]+\.${FORWARD_DOMAIN:-${WEBTERM_DOMAIN}}$`)) && Path(`/agent/ws`)
+      - traefik.http.routers.webterm-agent.priority=1000
+      - traefik.http.routers.webterm-agent.entrypoints=websecure
+      - traefik.http.routers.webterm-agent.tls.certresolver=${WEBTERM_CERT_RESOLVER:-le}
+      - traefik.http.routers.webterm-agent.service=webterm
+      - traefik.http.routers.webterm-agent.middlewares=webterm-agent-ip@docker,webterm-agent-mark@docker,webterm-agent-bucket@docker,webterm-agent-all@docker
+      - traefik.http.middlewares.webterm-agent-ip.ratelimit.period=1m
+      - traefik.http.middlewares.webterm-agent-ip.ratelimit.average=${WEBTERM_AGENT_RL_IP_AVERAGE:-60}
+      - traefik.http.middlewares.webterm-agent-ip.ratelimit.burst=${WEBTERM_AGENT_RL_IP_BURST:-60}
+      - traefik.http.middlewares.webterm-agent-ip.ratelimit.sourcecriterion.ipstrategy.depth=${WEBTERM_AGENT_RL_IP_DEPTH:-0}
+      - traefik.http.middlewares.webterm-agent-ip.ratelimit.sourcecriterion.ipstrategy.ipv6subnet=64
+      - traefik.http.middlewares.webterm-agent-mark.errors.status=429
+      - traefik.http.middlewares.webterm-agent-mark.errors.statusrewrites.429=529
+      - traefik.http.middlewares.webterm-agent-mark.errors.service=noop@internal
+      - traefik.http.middlewares.webterm-agent-mark.errors.query=/
+      - traefik.http.middlewares.webterm-agent-all.ratelimit.period=1m
+      - traefik.http.middlewares.webterm-agent-all.ratelimit.average=${WEBTERM_AGENT_RL_GLOBAL_AVERAGE:-600}
+      - traefik.http.middlewares.webterm-agent-all.ratelimit.burst=${WEBTERM_AGENT_RL_GLOBAL_BURST:-300}
+      # Cheia limitei GLOBALE e un antet FIX pus de Traefik, nu `requestHost`: cu Host-ul drept cheie,
+      # fiecare valoare (alt slug de forward, alt Host pe routerele din fişier) primea propriul bucket
+      # „global" — verificat: 10 Host-uri diferite = 10 bucket-uri (review 3.6.38). Antetul trimis de
+      # client cu acelaşi nume e suprascris (verificat).
+      - traefik.http.middlewares.webterm-agent-bucket.headers.customrequestheaders.X-Webterm-Agent-Bucket=all
+      - traefik.http.middlewares.webterm-agent-all.ratelimit.sourcecriterion.requestheadername=X-Webterm-Agent-Bucket
 
   # ─── Authentik (SSO) — OPŢIONAL ──────────────────────────────────────────────
   # Porneşte DOAR cu profilul `authentik` activ: pune `COMPOSE_PROFILES=authentik` în .env
@@ -452,6 +516,8 @@ services:
 volumes:
   webterm-data:
   traefik-acme:
+  # 3.6.38: listele allow/deny pentru /agent/ws (scrise de app, citite read-only de Traefik)
+  edge-lists:
   authentik-pg:
   authentik-redis:
 

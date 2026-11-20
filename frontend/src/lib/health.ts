@@ -50,6 +50,59 @@ export interface HealthStatus {
   can_mute_critical?: boolean
   terminal_host: { id: number; name: string } | null
   retry_after: number
+  /** 3.6.38: refused agent handshakes (edgeguard.py) */
+  edge?: EdgeState
+}
+
+/** One episode of refused agent handshakes. `proxy` = a Traefik limit (authentication never ran:
+    result unknown); `gateway` = an authentication refusal recorded by the gateway. */
+export interface EdgeEpisode {
+  id: number
+  source: 'proxy' | 'gateway' | 'web'
+  rule: 'ip' | 'global' | 'deny' | 'bad_token' | 'instance_conflict' | 'bad_path' | 'blocked'
+    | 'login_failed' | 'login_locked' | 'api_token_bad' | 'ws_refused'
+  started: number
+  last_seen: number
+  ended: number | null
+  active: boolean
+  duration: number
+  count: number
+  auth: 'unknown' | 'refused'
+  /** most frequent sources: address (IPv6 per /64), for WebSockets with the first two path segments */
+  sources?: [string, number][]
+}
+
+export interface EdgeState {
+  episodes: EdgeEpisode[]
+  telemetry: { configured: boolean; available: boolean; last_ok: number; error: string; error_since: number }
+  quiet: number
+  interval: number
+  /** addresses blocked right now by the gateway's in-memory gate (agentgate.py) */
+  blocked_now?: number
+  /** the allow/deny lists the gateway writes for Traefik (edgelists.py) */
+  lists?: { enabled: boolean; supported?: boolean; off_reason?: string; allow: number; deny: number; last_write: number; error: string }
+}
+
+/** i18n key of the rule that refused (health.edge.rule.*). */
+export function edgeRuleKey(e: Pick<EdgeEpisode, 'rule'>): string {
+  return 'health.edge.rule.' + e.rule
+}
+
+/** "1 h 5 min", "3 min", "40 s": an episode's length, rounded to what the scrape interval can tell. */
+export function edgeDuration(seconds: number, t: (k: string, v?: Record<string, string | number>) => string): string {
+  const s = Math.max(0, Math.round(seconds))
+  if (s < 60) return t('health.edge.dur.s', { n: s })
+  const m = Math.round(s / 60)
+  if (m < 60) return t('health.edge.dur.m', { n: m })
+  return t('health.edge.dur.hm', { h: Math.floor(m / 60), m: m % 60 })
+}
+
+/** Which telemetry line to show: the proxy counts can be missing without the limits being off. */
+export function edgeTelemetryKey(tm: EdgeState['telemetry']): string {
+  if (!tm.configured) return 'health.edge.telemetry.off'
+  if (tm.error_since) return 'health.edge.telemetry.down'
+  if (!tm.last_ok) return 'health.edge.telemetry.pending'
+  return 'health.edge.telemetry.ok'
 }
 
 export const RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
@@ -143,3 +196,13 @@ export function docUrl(doc: string): string | null {
 /** Mute choices offered in the UI (the server validates the same set). */
 export const MUTE_MODES = ['7d', '30d', 'change'] as const
 export type MuteMode = typeof MUTE_MODES[number] | 'off'
+
+/** "203.0.113.5 ×40, 198.51.100.0/24 ×3, +2 more": the top sources of an episode, short. */
+export function edgeSources(src: [string, number][] | undefined, max = 3,
+  t?: (k: string, v?: Record<string, string | number>) => string): string {
+  if (!src || src.length === 0) return ''
+  const named = src.filter(([k]) => k !== 'other')
+  const shown = named.slice(0, max).map(([k, n]) => `${k} ×${n}`)
+  const rest = named.length - shown.length + (src.some(([k]) => k === 'other') ? 1 : 0)
+  return shown.join(', ') + (rest > 0 ? (t ? ' ' + t('health.edge.more', { count: rest }) : ` +${rest}`) : '')
+}

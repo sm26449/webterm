@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  actionTarget, canMute, checkText, docUrl, fixMode, needsAttention, optText, severityTone, sortChecks, splitChecks,
-  type HealthCheck,
+  actionTarget, canMute, checkText, docUrl, edgeDuration, edgeRuleKey, edgeSources, edgeTelemetryKey, fixMode, needsAttention,
+  optText, severityTone, sortChecks, splitChecks, type HealthCheck,
 } from './health'
 import en from '../lang/en'
 import ro from '../lang/ro'
@@ -109,5 +109,34 @@ describe('health: actions', () => {
     expect(docUrl('https://evil.example/docs/x.md')).toBeNull()
     expect(docUrl('docs/../../etc/passwd')).toBeNull()
     expect(docUrl('')).toBeNull()
+  })
+})
+
+describe('agent handshake episodes (3.6.38)', () => {
+  const t = (k: string, v?: Record<string, string | number>) => k + (v ? JSON.stringify(v) : '')
+  it('names the rule through a fixed key', () => {
+    expect(edgeRuleKey({ rule: 'ip' })).toBe('health.edge.rule.ip')
+    expect(edgeRuleKey({ rule: 'bad_token' })).toBe('health.edge.rule.bad_token')
+  })
+  it('formats durations in seconds, minutes, hours', () => {
+    expect(edgeDuration(40, t)).toBe('health.edge.dur.s{"n":40}')
+    expect(edgeDuration(-5, t)).toBe('health.edge.dur.s{"n":0}')
+    expect(edgeDuration(185, t)).toBe('health.edge.dur.m{"n":3}')
+    expect(edgeDuration(3900, t)).toBe('health.edge.dur.hm{"h":1,"m":5}')
+  })
+  it('says why the proxy counts are missing, without implying the limits are off', () => {
+    const base = { configured: true, available: true, last_ok: 1, error: '', error_since: 0 }
+    expect(edgeTelemetryKey({ ...base, configured: false })).toBe('health.edge.telemetry.off')
+    expect(edgeTelemetryKey({ ...base, error_since: 5, error: 'ConnectionRefusedError' })).toBe('health.edge.telemetry.down')
+    expect(edgeTelemetryKey({ ...base, last_ok: 0 })).toBe('health.edge.telemetry.pending')
+    expect(edgeTelemetryKey(base)).toBe('health.edge.telemetry.ok')
+  })
+})
+
+describe('episode sources (3.6.38)', () => {
+  it('shows the top three, then how many more', () => {
+    expect(edgeSources(undefined)).toBe('')
+    expect(edgeSources([['203.0.113.5', 40]])).toBe('203.0.113.5 ×40')
+    expect(edgeSources([['a', 5], ['b', 4], ['c', 3], ['d', 2], ['other', 9]])).toBe('a ×5, b ×4, c ×3 +2')
   })
 })

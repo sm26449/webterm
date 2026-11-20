@@ -529,6 +529,28 @@ async def require_user(request: Request):
 TOKEN_PREFIX = "wt_"
 
 
+# 3.6.38: cine vrea să afle de tokenurile API respinse (edgeguard îl setează la import). Un cârlig, nu
+# un import: security stă sub edgeguard în straturi (tests/import_layers_test.py).
+on_bad_api_token = None
+
+
+def _bad_api_token(request) -> None:
+    if on_bad_api_token is None:
+        return
+    st = getattr(request, "state", None)
+    if st is not None:
+        if getattr(st, "_bad_api_token_noted", False):   # authz + auditul o citesc pe aceeaşi cerere
+            return
+        try:
+            st._bad_api_token_noted = True
+        except Exception:                  # noqa: BLE001
+            pass
+    try:
+        on_bad_api_token(client_ip(request))
+    except Exception:                      # noqa: BLE001 — numărătoarea nu strică autentificarea
+        pass
+
+
 async def api_token_principal(request: Request):
     """Întoarce dict-ul token-ului dacă cererea poartă un Bearer valid, altfel None."""
     auth = request.headers.get("authorization") or ""
@@ -536,9 +558,11 @@ async def api_token_principal(request: Request):
         return None
     raw = auth[7:].strip()
     if not raw.startswith(TOKEN_PREFIX):
+        _bad_api_token(request)
         return None
     row = await db.fetchone("SELECT * FROM api_tokens WHERE token_hash=?", sha256_hex(raw))
     if not row or row["expires"] < time.time():
+        _bad_api_token(request)
         return None
     # 3.6.11: tokenul unui cont dezactivat nu mai e un principal (authz îl golea oricum de drepturi;
     # aici nici nu mai trece de autentificare — şi nu-i mai actualizăm `last_used`)

@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db,
+from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, edgeguard, edgelists,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
                hosts_api, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
                webauthn_api)
@@ -301,7 +301,13 @@ async def lifespan(app: FastAPI):
     # 3.6.8: System health (every check, alerting on transitions) + the optional dead-man switch
     healtht = asyncio.create_task(syshealth.loop())
     heartbeatt = asyncio.create_task(syshealth.heartbeat_loop())
+    # 3.6.38: episoadele de handshake de agent refuzat (contoarele lui Traefik + refuzurile gateway-ului)
+    edget = asyncio.create_task(edgeguard.loop())
+    # 3.6.38: listele allow/deny pentru Traefik
+    listst = asyncio.create_task(edgelists.loop())
     yield
+    listst.cancel()
+    edget.cancel()
     healtht.cancel()
     heartbeatt.cancel()
     certt.cancel()
@@ -557,7 +563,44 @@ class ForwardWSMiddleware:
 # forward, nu doar bundle-ul SPA pentru care a fost măsurat câştigul. Nivelul 9 pe un fişier de
 # sute de MB ar consuma bucla care multiplexează toate terminalele. La 6, raportul pe bundle
 # rămâne practic acelaşi (măsurat: 3,5x vs 3,55x) pentru o fracţiune din CPU.
+class WsRefusalMiddleware:
+    """3.6.38: un WebSocket închis ÎNAINTE de accept (fără sesiune, Origin greşit, rută inexistentă)
+    nu lăsa nicio urmă: nici în audit (anonim, omis intenţionat), nici cu adresa clientului (linia
+    uvicorn arată IP-ul lui Traefik). Pe 2026-11-19, 498 de reîncercări pe `/api/live/ws` (o rută care
+    nici nu e a noastră) au trecut nevăzute. Numărăm doar în memorie (edgeguard, episoade agregate,
+    primele două segmente ale căii, niciodată un token). /agent/ws îşi are numărătoarea lui."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "websocket" or scope.get("path") == "/agent/ws":
+            await self.app(scope, receive, send)
+            return
+        state = {"accepted": False, "noted": False}
+
+        async def watch(message):
+            t = message.get("type")
+            if t == "websocket.accept":
+                state["accepted"] = True
+            elif t in ("websocket.close", "websocket.http.response.start") and not state["accepted"] \
+                    and not state["noted"]:
+                state["noted"] = True
+                try:
+                    from starlette.websockets import WebSocket
+                    edgeguard.note_web_refusal("ws_refused", security.client_ip_ws(WebSocket(scope, receive, send)),
+                                               scope.get("path", ""))
+                except Exception:          # noqa: BLE001 — numărătoarea nu strică niciodată răspunsul
+                    pass
+            await send(message)
+
+        await self.app(scope, receive, watch)
+
+
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+# ForwardWS rămâne cel mai din afară: un WebSocket de forward nu trece prin WsRefusal, deci căile
+# aplicaţiilor din forward (care pot conţine nume sau identificatori) nu ajung în System health.
+app.add_middleware(WsRefusalMiddleware)
 app.add_middleware(ForwardWSMiddleware)
 
 app.include_router(api.router)
