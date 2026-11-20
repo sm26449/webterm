@@ -1,10 +1,34 @@
-# WebTerm
+<p align="center">
+  <a href="https://evershell.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/cursor/logo-pe-petrol.svg">
+      <img alt="EverShell" src="docs/brand/cursor/logo-pe-crem.svg" width="420">
+    </picture>
+  </a>
+</p>
 
-[![CI](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v3.6.38-blue)](https://github.com/sm26449/webterm/tags)
+<p align="center"><b>Close the tab. Keep the shell.</b></p>
 
-**Persistent terminals for your whole infrastructure, in the browser.**
+<p align="center">
+  <a href="https://evershell.dev"><b>evershell.dev</b></a> ·
+  <a href="https://evershell.dev/install.html">Install</a> ·
+  <a href="https://evershell.dev/security.html">Security</a> ·
+  <a href="docs/README.md">Docs</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml"><img alt="CI" src="https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/sm26449/webterm/tags"><img alt="Version" src="https://img.shields.io/badge/version-v3.6.38-blue"></a>
+</p>
+
+# EverShell
+
+**Self-hosted terminal sessions that keep running on your machines.**
+
+> EverShell was called **WebTerm** until 3.7.0. Only the name changed: the repository, the Docker
+> image (`ghcr.io/sm26449/webterm`), the `WEBTERM_*` settings and the paths stay the same, so
+> existing installs upgrade as usual.
 
 Open a shell on any of your machines from a browser — including a phone — and come back hours
 later with the process still running and the scrollback intact: the session lives in tmux **on
@@ -89,7 +113,7 @@ Fictional demo fleet, captured on v3.6.33 with
 
 <a id="why"></a>
 
-## Why WebTerm
+## Why EverShell
 
 - **The session outlives everything above it.** It is a tmux session on your machine: close the
   tab, restart or upgrade the gateway, kill the agent, switch to a phone — it is still there,
@@ -131,7 +155,7 @@ less install.sh             # it is meant to be read: it runs as root
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
 
-The installer sets up Docker, the Traefik + WebTerm stack in `/opt/webterm`, a Let's Encrypt
+The installer sets up Docker, the Traefik + EverShell stack in `/opt/webterm`, a Let's Encrypt
 certificate (HTTP-01 by default; add `--cf-token` for Cloudflare DNS-01 and a wildcard for
 port-forward subdomains), the firewall and a daily encrypted backup — then prints the URL and a
 **setup token**. Open the URL, create the first account with that token, and add a passkey in
@@ -270,7 +294,7 @@ cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo .
 `upgrade.sh` takes a backup, pulls the image and pins it **by digest**, syncs the scripts that run
 on the host, and hands off to `deploy.sh`, which rolls back by itself if the new container does
 not become healthy. With `cosign` installed and `WEBTERM_COSIGN_IDENTITY` set, it verifies the
-image signature first. WebTerm never updates itself; the UI only tells you a release exists.
+image signature first. EverShell never updates itself; the UI only tells you a release exists.
 Details: [docs/INSTALL.md](docs/INSTALL.md#upgrading); when things go wrong:
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
@@ -299,9 +323,9 @@ and regenerating these screenshots — is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <a id="acknowledgments"></a>
 
-## How WebTerm is built
+## How EverShell is built
 
-WebTerm is designed, owned and maintained by [sm26449](https://github.com/sm26449). A large share
+EverShell is designed, owned and maintained by [sm26449](https://github.com/sm26449). A large share
 of the code, the tests and the documentation is written together with **Claude Code**
 (Anthropic's Claude) as a development partner. Credit where it is due, both ways: the direction,
 the priorities and the responsibility are the maintainer's; much of the typing, testing and
