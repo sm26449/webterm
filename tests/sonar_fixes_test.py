@@ -84,6 +84,22 @@ def regex_part():
     check("long whitespace output is handled in linear time", time.monotonic() - t0 < 0.5)
 
 
+def history_part():
+    print("== history trailing spaces (linear, same result as the old regex)")
+    import random
+    import re
+    old = re.compile(r"[ ]+((?:\x1b\[[0-9;:]*m)*)\Z")
+    alpha = [" ", "a", "m", "\x1b[0m", "\x1b[1;31m", "\x1b[", ";", "\x1b[x"]
+    rnd = random.Random(7)
+    diff = [s for s in ("".join(rnd.choice(alpha) for _ in range(rnd.randint(0, 12))) for _ in range(50000))
+            if old.sub(r"\1", s) != core._strip_trailing_spaces(s)]
+    check("50 000 random lines: identical to the old regex", not diff, diff[:3])
+    check("spaces then SGR: spaces go, SGR stays", core._strip_trailing_spaces("ab   \x1b[0m") == "ab\x1b[0m")
+    t0 = time.monotonic()
+    core.sanitize_history_line(" " * 200000 + "X")
+    check("200 000 spaces then a character: linear (was 0.36 s for 4 000)", time.monotonic() - t0 < 0.2, time.monotonic() - t0)
+
+
 def bidi_part():
     print("== bidi and separators are filtered (escapes in source, same runtime set)")
     for ch in "‪‮⁦⁩  \x1b\x00":
@@ -97,6 +113,7 @@ def bidi_part():
 
 asyncio.run(tasks_part())
 regex_part()
+history_part()
 bidi_part()
 print("\n%d/%d passed" % (ok_n, total))
 sys.exit(0 if ok_n == total else 1)

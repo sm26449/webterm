@@ -1301,7 +1301,12 @@ function MainApp() {
         <LoginPage
           setupRequired={appState.setup_required}
           webauthnAvailable={appState.webauthn_available}
-          onLogin={() => { setAuthExpired(false); api<AppState>('/api/state').then(setAppState) }}
+          onLogin={() => {
+            setAuthExpired(false)
+            // fără catch, o eroare aici rămânea o promisiune respinsă netratată, iar ecranul nu se schimba;
+            // o reîncărcare reia pornirea normală (audit Codex pe raportul SonarQube, 2026-11-20)
+            api<AppState>('/api/state').then(setAppState).catch(() => { window.location.reload() })
+          }}
         />
       </>
     )

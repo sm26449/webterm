@@ -35,9 +35,17 @@ export function crumbs(path: string): Crumb[] {
   return out
 }
 
+/** `/a/b///` → `/a/b`, fără regex: `/\/+$/` reîncerca de la fiecare `/`, deci o cale cu multe `/`
+ *  urmate de alt caracter costa O(n²) (audit Codex pe raportul SonarQube, 2026-11-20). */
+export function trimSlashes(path: string): string {
+  let end = path.length
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end--
+  return end === path.length ? path : path.slice(0, end)
+}
+
 /** Directorul-părinte al unei căi absolute (`/a/b` → `/a`, `/a` → `/`, `/` → `/`). */
 export function parentOf(path: string): string {
-  const p = path.replace(/\/+$/, '')
+  const p = trimSlashes(path)
   if (!p) return '/'
   const i = p.lastIndexOf('/')
   return i <= 0 ? '/' : p.slice(0, i)
@@ -45,7 +53,7 @@ export function parentOf(path: string): string {
 
 /** Numele ultimului segment (`/a/b/` → `b`); `/` → ''. */
 export function baseName(path: string): string {
-  const p = path.replace(/\/+$/, '')
+  const p = trimSlashes(path)
   return p.slice(p.lastIndexOf('/') + 1)
 }
 

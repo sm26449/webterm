@@ -623,7 +623,25 @@ _HIST_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m\Z")
 # C0 (fără TAB) + DEL + C1. C1 contează: xterm.js tratează U+009B ca CSI, deci un „\u009b?1049h"
 # în text ar comuta ecranul alternativ ocolind ALT_SCREEN_RE (care vede doar forma ESC [).
 _HIST_CTRL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
-_HIST_TRAIL_RE = re.compile(r"[ ]+((?:\x1b\[[0-9;:]*m)*)\Z")   # `-J` păstrează spaţiile de la coadă
+_SGR_BODY = frozenset("0123456789;:")
+
+
+def _strip_trailing_spaces(text: str) -> str:
+    r"""Spaţiile de la coada rândului (`-J` le păstrează), urmate eventual DOAR de SGR-uri, ies; SGR-urile
+    rămân. Acelaşi rezultat ca vechiul `re.sub(r"[ ]+((?:\x1b\[[0-9;:]*m)*)\Z", r"\1")`, dar liniar: regex-ul
+    reîncerca de la fiecare spaţiu, deci un rând de N spaţii urmat de un caracter costa O(N²)
+    (4 000 → 0,36 s, 8 000 → 1,4 s; audit Codex pe raportul SonarQube, 2026-11-20). Rândul vine din
+    terminal, deci orice program de pe host îl poate produce."""
+    i = len(text)
+    while i and text[i - 1] == "m":              # dezlipim SGR-urile de la coadă
+        j = text.rfind("\x1b[", 0, i)
+        if j < 0 or not all(c in _SGR_BODY for c in text[j + 2:i - 1]):
+            break
+        i = j
+    k = i
+    while k and text[k - 1] == " ":
+        k -= 1
+    return text if k == i else text[:k] + text[i:]
 
 
 def sanitize_history_line(line: str) -> str:
@@ -638,7 +656,7 @@ def sanitize_history_line(line: str) -> str:
             out.append(m.group(0))
         pos = m.end()
     out.append(_HIST_CTRL_RE.sub("", line[pos:]))
-    return _HIST_TRAIL_RE.sub(r"\1", "".join(out))
+    return _strip_trailing_spaces("".join(out))
 
 
 def history_lines(raw: bytes, max_lines: int) -> list:

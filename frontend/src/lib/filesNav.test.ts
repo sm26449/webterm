@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   EMPTY_HISTORY, HISTORY_MAX, baseName, canBack, canForward, cdCommand, commonPrefix, completePath, crumbs,
-  filesGate, gateMenuItems, histPush, histStep, mkdirRefusal, parentOf, physicalPathHint, splitForCompletion,
+  filesGate, gateMenuItems, trimSlashes, histPush, histStep, mkdirRefusal, parentOf, physicalPathHint, splitForCompletion,
   targetPath, typeJump, underRefused,
 } from './filesNav'
 import { ApiError } from './api'
@@ -45,6 +45,16 @@ describe('crumbs (firimiturile căii)', () => {
   it('nume cu spaţii / diacritice rămân un singur segment', () => {
     expect(crumbs('/tmp/raport ședință (2)').map((c) => c.label)).toEqual(['/', 'tmp', 'raport ședință (2)'])
   })
+  it('trimSlashes: same as /\\/+$/ and linear on many slashes', () => {
+    for (const p of ['', '/', '//', '/a', '/a/', '/a///', 'a/b/', '/a/b//c', '///x///']) {
+      expect(trimSlashes(p)).toBe(p.replace(/\/+$/, ''))
+    }
+    const hostile = '/'.repeat(200000) + 'x'
+    const t0 = performance.now()
+    expect(trimSlashes(hostile)).toBe(hostile)
+    expect(performance.now() - t0).toBeLessThan(200)
+  })
+
   it('parentOf / baseName', () => {
     expect(parentOf('/a/b')).toBe('/a')
     expect(parentOf('/a')).toBe('/')
