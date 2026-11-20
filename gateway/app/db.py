@@ -792,10 +792,14 @@ async def execute_returning(sql: str, *args):
     """Run a write with a RETURNING clause and return the row (or None). The
     UPDATE + read is a single serialized statement, so concurrent callers can't
     both claim the same row (used for single-use enroll tokens)."""
-    async with _conn.execute(sql, args) as cur:
-        row = await cur.fetchone()
+    # Execuţie + citire într-UN SINGUR pas pe firul bazei (`execute_fetchall`): cu `execute` urmat de
+    # `fetchone`, instrucţiunea de scriere rămânea deschisă între cele două await-uri, iar commit-ul
+    # oricărei alte corutine din acel interval eşua cu „cannot commit transaction - SQL statements in
+    # progress" (văzut în producţie pe 3.7.0-rc2: reconciliere eşuată la reconectarea în masă a
+    # agenţilor; reprodus: 200 din 400 de scrieri concurente).
+    rows = await _conn.execute_fetchall(sql, args)
     await _conn.commit()
-    return row
+    return rows[0] if rows else None
 
 
 # 3.6 (roluri): id-ul unui cont e cheia de proprietate pentru audit (`actor_id`), sesiuni,
