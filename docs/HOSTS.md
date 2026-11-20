@@ -463,6 +463,23 @@ From agent 60 (WebTerm 3.7.0), each agent also authenticates with a **client cer
 Traefik during the TLS handshake. A client without one never reaches the gateway, and a copied token
 alone no longer opens a connection.
 
+- **Two routes.** Agent 60 prefers the mTLS route, `agents.<your domain>`, with its certificate and
+  its token. It keeps the token route on the main name as a fallback: when the agents name cannot be
+  reached, or against a gateway older than 3.7.0. Once a host has connected through mTLS, it becomes
+  *required*, and the token route is refused for it. From then on it works only through
+  `agents.<your domain>`, until mTLS is turned off or the host is re-enrolled.
+- **Two different certificates, both belonging to this installation alone:**
+
+  | | Server certificate for `agents.<your domain>` | Agents' client certificates |
+  |---|---|---|
+  | Proves | to the agent, that it reached your server | to Traefik and the gateway, which host is connecting |
+  | Issued by | Let's Encrypt, requested by your Traefik like the main one | the agent CA your gateway creates at its first start (key encrypted in its database) |
+  | When | as soon as the gateway writes the agents router at start. DNS-01: the wildcard already covers it. HTTP-01: issued once a DNS record points the name at the server | at an agent's first connection as version 60. One per host, valid one year, renewed automatically |
+  | Traefik uses | it to answer on the agents name | only the CA's public part (`/edge/agent-ca.pem`), to check each client certificate |
+
+  Nothing is shared between installations. A certificate issued by one installation's CA is
+  refused by any other, and the project (including evershell.dev) holds no key and issues nothing.
+
 - **What agent 60 needs on the host** (on top of [the usual requirements](INSTALL.md#supported-hosts)):
   - outbound TCP 443 to **both** names: the main one and `agents.<your domain>`;
   - no TLS-intercepting proxy on the way to the agents name (it cannot pass a client certificate);
