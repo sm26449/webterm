@@ -1,3 +1,4 @@
+import type { HostMtls } from './mtls'
 import { askSecret } from './secretPrompt'
 import { ssoStepupRedirect } from './stepup'
 import type { ConnType } from './conntypes'
@@ -126,6 +127,8 @@ export interface Host {
   agent_user: string | null
   /** 3.6.9: Python-ul agentului e (probabil / sigur) sub minimul 3.6 — operaţiile pe fişiere cad */
   agent_python_old?: 'likely' | 'confirmed' | null
+  /** 3.7.0: the agent's client certificate (mTLS); null = not an agent host */
+  mtls?: HostMtls | null
   agent_version: number | null
   agent_latest: number | null
   update_pending: boolean

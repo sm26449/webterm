@@ -69,6 +69,10 @@ def _host_json(row, crown: bool = False) -> dict:
         "tags": [t for t in ((row["tags"] or "").split(",")
                              if "tags" in row.keys() and row["tags"] else [])],
         "updates": hostmodel.host_updates(row),
+        # 3.7.0 — mTLS: required = clichetul (doar certificat); last = ultima conexiune mTLS; expiră = certificatul
+        "mtls": ({"required": bool(row["mtls_required"]), "last": row["mtls_last"],
+                  "not_after": row["mtls_not_after"], "issued": bool(row["mtls_serial"])}
+                 if is_agent and "mtls_required" in row.keys() else None),
         "supervision": _host_supervision(row) if is_agent else None,
         # 3.6.9: the agent's Python is (likely / confirmed) older than its 3.6 minimum — file
         # operations fail there. None = no sign of it (the agent does not report its version).
@@ -702,8 +706,9 @@ async def provision_agent(host_id: int, request: Request, user=Depends(authz.per
         raise ApiError(502, "provision.noSsh", "the SSH connection is not available")
     # 2) enroll token proaspăt + rulează installer-ul prin canalul SSH
     enroll = security.new_token()[:32]
-    await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL WHERE id=?",
-                     enroll, time.time() + 3600, host_id)
+    # re-enrolare: pin-ul de instanţă ŞI starea mTLS (clichet + certificat revocat, INV-12) se şterg
+    await db.execute("UPDATE hosts SET enroll_token=?, enroll_expires=?, instance_id=NULL, " + hostmodel.MTLS_RESET +
+                     " WHERE id=?", enroll, time.time() + 3600, host_id)
     try:
         result = await asyncio.wait_for(src._conn.run(hostmodel.install_command(enroll), check=False), 150)
     except Exception as e:

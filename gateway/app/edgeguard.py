@@ -49,7 +49,7 @@ MAX_BODY = 4 * 1024 * 1024    # endpointul de metrici e intern, dar nu citim nel
 # middleware-ul `errors` rescrie 429-ul limitei GLOBALE în 529, ca metricile să le poată separa)
 # „418" e o etichetă internă: TOT ce trece prin routerul de deny (edgelists.py), oricare ar fi codul HTTP
 PROXY_CODES = {"429": "ip", "529": "global", "418": "deny"}
-GATEWAY_RULES = ("bad_token", "instance_conflict", "bad_path", "blocked")
+GATEWAY_RULES = ("bad_token", "instance_conflict", "bad_path", "blocked", "mtls_missing", "mtls_revoked")
 # 3.6.38 (partea 2): acelaşi mecanism pentru restul refuzurilor pe care altfel nu le vedea nimeni
 WEB_RULES = ("login_failed", "login_locked", "api_token_bad", "ws_refused")
 RULES = ({("proxy", "ip"), ("proxy", "global"), ("proxy", "deny")} | {("gateway", r) for r in GATEWAY_RULES}

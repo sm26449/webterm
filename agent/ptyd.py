@@ -46,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 59
+AGENT_VERSION = 60
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -139,6 +139,13 @@ FWD_CONNECT_TIMEOUT = 10.0            # connect() non-blocant: dacă ținta nu r
 
 WEBTERM_DIR = os.path.join(os.path.expanduser("~"), ".webterm")
 CONFIG_PATH = os.path.join(WEBTERM_DIR, "agent.json")
+# v60 — certificatul de client pentru mTLS (docs/design/AGENT-MTLS.md): emis de gateway (care are CA-ul
+# instalării), primit o singură dată prin `mtls_provision` sau din scriptul de instalare.
+# Cheia ŞI certificatul în ACELAŞI fişier: o singură înlocuire atomică (review 3.7.0: cu două fişiere,
+# o eroare între cele două `os.replace` lăsa un certificat nou cu cheia veche).
+MTLS_PEM_PATH = os.path.join(WEBTERM_DIR, "agent-mtls.pem")
+MTLS_RETRY = 3600.0       # conectat pe token deşi avem certificat: prima reîncercare mTLS după o oră…
+MTLS_RETRY_MAX = 86400.0  # …dublată după fiecare eşec, cel mult o dată pe zi
 LOCK_PATH = os.path.join(WEBTERM_DIR, "ptyd.lock")
 LOG_PATH = os.path.join(WEBTERM_DIR, "ptyd.log")
 ALIVE_PATH = os.path.join(WEBTERM_DIR, "alive")   # G1: mtime atins la fiecare tick;
@@ -1229,10 +1236,12 @@ class WSClient:
     """Blocking WebSocket client. recv() runs in a reader thread, send() is
     serialized by the writer thread; close() may be called from any thread."""
 
-    def __init__(self, url, token, insecure=False, cert_pin=None):
+    def __init__(self, url, token, insecure=False, cert_pin=None, client_cert=None):
         self.url = url
         self.token = token
         self.insecure = insecure
+        # v60: (cert, cheie) pentru mTLS — prezentate în handshake-ul TLS, înaintea oricărui octet HTTP
+        self.client_cert = client_cert
         # cert pinning: amprenta SHA-256 a certificatului DER al gateway-ului (hex), fixată
         # la înrolare. Dacă e setată, se verifică la fiecare conectare — ÎNAINTE de a trimite
         # tokenul —, apărând de un gateway fals (DNS hijack / MITM) chiar în modul insecure.
@@ -1265,6 +1274,8 @@ class WSClient:
             if self.insecure:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
+            if self.client_cert:
+                ctx.load_cert_chain(self.client_cert[0], self.client_cert[1])   # (fişierul cu cheie + cert, None)
             self.sock = ctx.wrap_socket(raw, server_hostname=host)
             # Cert pinning ÎNAINTE de a trimite tokenul (vezi _check_cert_pin): un gateway
             # fals (DNS hijack / MITM) nu primește niciodată tokenul și nu poate comanda agentul.
@@ -2531,6 +2542,11 @@ class Agent:
         self.sel.register(self.wake_r, selectors.EVENT_READ, ("wake", None))
         self.connected = False
         self.backoff = BACKOFF_MIN
+        self._attempt_mtls = False      # v60: încercarea în curs merge pe ruta mTLS?
+        self._try_token_next = False    # v60: după un eşec mTLS, următoarea încercare pe token
+        self._connected_via_mtls = False
+        self._mtls_retry_at = 0.0
+        self._mtls_retry_delay = MTLS_RETRY
         self.next_connect = 0.0
         self.next_heartbeat = 0.0
         self.next_diag = 0.0          # 0 = „pushează snapshot-ul la prima ocazie" (connect)
@@ -2630,8 +2646,16 @@ class Agent:
         self._connecting = True
         self._connect_started = time.time()
         cfg = self.config
-        ws = WSClient(cfg["url"], cfg["token"], insecure=cfg.get("insecure", False),
-                      cert_pin=(cfg.get("cert_pins") or cfg.get("cert_pin")))
+        # v60: cu certificat de client şi `mtls_url`, încercăm întâi ruta mTLS. Dacă eşuează (reţea care
+        # nu ajunge la numele de agenţi, proxy care interceptează TLS), încercarea URMĂTOARE merge pe
+        # ruta cu token, apoi iar mTLS — alternativ. Gateway-ul decide: un host trecut pe mTLS (clichet)
+        # refuză ruta cu token, deci alternarea nu slăbeşte nimic.
+        url, client_cert = cfg["url"], None
+        self._attempt_mtls = bool(cfg.get("mtls_url")) and not self._try_token_next and _mtls_files_ok()
+        if self._attempt_mtls:
+            url, client_cert = cfg["mtls_url"], (MTLS_PEM_PATH, None)
+        ws = WSClient(url, cfg["token"], insecure=cfg.get("insecure", False),
+                      cert_pin=(cfg.get("cert_pins") or cfg.get("cert_pin")), client_cert=client_cert)
         threading.Thread(target=self._connect_worker, args=(ws,), daemon=True).start()
 
     def _connect_worker(self, ws):
@@ -2666,6 +2690,10 @@ class Agent:
     def _on_connect_failed(self, err):
         self._connecting = False
         self._connected_since = 0.0
+        # alternare mTLS ↔ token (vezi _start_connect): după un eşec pe o rută, încercăm cealaltă
+        self._try_token_next = bool(self._attempt_mtls)
+        if self._attempt_mtls:     # o reîncercare mTLS eşuată: următoarea, de două ori mai târziu (review 3.7.0)
+            self._mtls_retry_delay = min(self._mtls_retry_delay * 2, MTLS_RETRY_MAX)
         self.next_connect = time.time() + self.backoff
         self.backoff = min(self.backoff * 2, BACKOFF_MAX)
         log("connect failed: %s" % err)
@@ -2735,10 +2763,19 @@ class Agent:
             "pid": os.getpid(), "metrics": self.metrics.sample(),
             "reconnects": self._reconnect_count, "uptime": 0,
             "sessions": [s.meta() for s in self.sessions.values()],
+            # v60: serialul certificatului de client instalat (sau None): gateway-ul retrimite doar
+            # dacă agentul chiar nu-l are, nu şi când îl are dar nu ajunge la numele de agenţi
+            "mtls_serial": cfg.get("mtls_serial") if _mtls_files_ok() else None,
         })
         self.next_heartbeat = time.time() + HEARTBEAT_INTERVAL
         self.next_diag = 0.0          # anunţă ce are host-ul imediat după (re)conectare
-        log("connected to %s" % cfg["url"])
+        # v60: ruta REALĂ (mTLS sau token), nu `cfg["url"]`, care e mereu cea cu token
+        self._connected_via_mtls = bool(self._attempt_mtls)
+        if self._connected_via_mtls:
+            self._try_token_next = False
+            self._mtls_retry_delay = MTLS_RETRY
+        self._mtls_retry_at = time.time() + self._mtls_retry_delay
+        log("connected to %s%s" % (getattr(ws, "url", cfg["url"]), " (mTLS)" if self._connected_via_mtls else ""))
 
     def _disconnect(self):
         if not self.connected:
@@ -3555,6 +3592,22 @@ class Agent:
                 except (ValueError, TypeError, OSError) as e:
                     err("wake_error", str(e))
 
+            elif op == "mtls_provision":
+                # v60: certificatul de client de la gateway (mTLS). Validăm tot înainte de a scrie;
+                # perechea trebuie să se încarce efectiv (load_cert_chain), altfel nu atingem nimic.
+                error = _mtls_install(msg, self.config)
+                if error:
+                    return err("bad_request", error)
+                self.config["mtls_url"] = msg["url"]
+                self._try_token_next = False
+                self._mtls_retry_delay = MTLS_RETRY
+                ok()
+                log("mTLS client certificate installed; reconnecting through %s" % msg["url"])
+                # reconectare pe ruta mTLS: închidem conexiunea curentă (reader-ul semnalează deconectarea)
+                ws = self.ws
+                if ws is not None:
+                    threading.Timer(1.0, ws.close).start()
+
             elif op == "autostart":
                 # v57: porneşte/opreşte pornirea la boot (systemd --user / cron). Pe un worker:
                 # systemctl/crontab/loginctl pot dura secunde. Cel mult o comutare în zbor.
@@ -4157,6 +4210,14 @@ class Agent:
             log("no heartbeat ack for %.0fs — connection stale, reconnecting"
                 % (now - self._last_hb_ack))
             self._disconnect_requested = True
+        # v60: conectat pe ruta cu token deşi avem certificat (mTLS a eşuat o dată: reţea, gateway
+        # repornit) → o încercare mTLS pe oră. O reconectare scurtă; sesiunile trăiesc în tmux.
+        if (self.connected and not self._connected_via_mtls and now >= self._mtls_retry_at
+                and self.config.get("mtls_url") and _mtls_files_ok()):
+            self._mtls_retry_at = now + self._mtls_retry_delay
+            self._try_token_next = False
+            log("connected without mTLS; retrying the mTLS route")
+            self._disconnect_requested = True
         if self.connected and now >= self.next_heartbeat:
             self._hb_seq += 1
             self._hb_sent_at[self._hb_seq] = now
@@ -4521,6 +4582,73 @@ class Agent:
 def ensure_dir():
     os.makedirs(WEBTERM_DIR, mode=0o700, exist_ok=True)
     os.chmod(WEBTERM_DIR, 0o700)
+
+
+def _mtls_files_ok():
+    return os.path.isfile(MTLS_PEM_PATH)
+
+
+def _host_of(url):
+    try:
+        return url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0].lower()
+    except (IndexError, AttributeError):
+        return ""
+
+
+_MTLS_URL_RE = re.compile(r"^wss://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/agent/ws$")
+
+
+def _write_private(path, text):
+    """Fişier nou 0600, creat EXCLUSIV (nu urmăm un fişier sau link pregătit dinainte)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def _mtls_install(msg, cfg):
+    """Instalează certificatul de client primit de la gateway: cheie + certificat într-un singur fişier
+    (o înlocuire atomică), apoi `mtls_url` şi `mtls_serial` în agent.json. Întoarce un mesaj de eroare
+    şi NU lasă nimic schimbat dacă ceva nu e cum trebuie."""
+    cert, key, url, serial = msg.get("cert"), msg.get("key"), msg.get("url"), msg.get("serial")
+    if not (isinstance(cert, str) and cert.startswith("-----BEGIN CERTIFICATE-----") and len(cert) < 8192):
+        return "bad certificate"
+    if not (isinstance(key, str) and "PRIVATE KEY-----" in key and len(key) < 8192):
+        return "bad key"
+    if not (isinstance(serial, str) and re.match(r"^[0-9a-f]{1,64}$", serial)):
+        return "bad serial"
+    m = _MTLS_URL_RE.match(url) if isinstance(url, str) else None
+    if not m:
+        return "bad url"
+    # Numele de agenţi trebuie să fie un SUBDOMENIU al numelui pe care ne-am înrolat (implicit
+    # agents.<acel nume>), fără port. Nimic din afara instalării (review 3.7.0: „frate în acelaşi
+    # domeniu-părinte" accepta şi evil.duckdns.org / evil.co.uk).
+    old = _host_of(cfg.get("url", ""))
+    if not old or not m.group(1).endswith("." + old):
+        return "the mTLS url is not under this gateway's name"
+    tag = "%d.%s" % (os.getpid(), binascii.hexlify(os.urandom(4)).decode())
+    tmp_pem = os.path.join(WEBTERM_DIR, ".agent-mtls.%s.tmp" % tag)
+    tmp_cfg = os.path.join(WEBTERM_DIR, ".agent-json.%s.tmp" % tag)
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return "agent.json is not an object"
+        _write_private(tmp_pem, key.rstrip("\n") + "\n" + cert)
+        ssl.create_default_context().load_cert_chain(tmp_pem)        # perechea chiar se potriveşte?
+        data["mtls_url"], data["mtls_serial"] = url, serial
+        _write_private(tmp_cfg, json.dumps(data))
+        os.replace(tmp_pem, MTLS_PEM_PATH)
+        os.replace(tmp_cfg, CONFIG_PATH)
+    except (OSError, ValueError, ssl.SSLError) as e:
+        return "could not install the certificate: %s" % type(e).__name__
+    finally:
+        for path in (tmp_pem, tmp_cfg):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    cfg["mtls_serial"] = serial
+    return ""
 
 
 def load_config():

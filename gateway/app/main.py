@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, edgeguard, edgelists,
+from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
                hosts_api, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
                webauthn_api)
@@ -305,8 +305,12 @@ async def lifespan(app: FastAPI):
     edget = asyncio.create_task(edgeguard.loop())
     # 3.6.38: listele allow/deny pentru Traefik
     listst = asyncio.create_task(edgelists.loop())
+    # 3.7.0: CA-ul agenţilor + configuraţia mTLS pentru Traefik
+    await edgemtls.startup()      # CA + secret + fişier ÎNAINTE să acceptăm agenţi
+    mtlst = asyncio.create_task(edgemtls.loop())
     yield
     listst.cancel()
+    mtlst.cancel()
     edget.cancel()
     healtht.cancel()
     heartbeatt.cancel()
@@ -544,7 +548,10 @@ class ForwardWSMiddleware:
             hdrs = dict(scope.get("headers", []))
             host = hdrs.get(b"host", b"").decode("latin1").split(":")[0].lower()
             main = fwddomain.forward_domain()
-            if host and host != main and host.endswith("." + main):
+            # 3.7.0: numele de agenţi (`agents.<domeniu>`, mTLS) e şi el un subdomeniu al domeniului de
+            # forward, dar NU e un forward: fără excepţia asta, WebSocket-ul agentului ajungea la un
+            # forward inexistent (403) înainte de agent_ws — prins în staging.
+            if host and host != main and host.endswith("." + main) and host != edgemtls.agent_host():
                 await forward_api.handle_forward_ws(scope, receive, send)
                 return
         await self.app(scope, receive, send)

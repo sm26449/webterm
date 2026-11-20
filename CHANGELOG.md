@@ -9,6 +9,22 @@ back.
 
 ## [Unreleased]
 
+### Security
+- **Agents also authenticate with a client certificate (mTLS, agent 60).** Until now an agent proved
+  itself with its token alone, sent after the TLS connection was set up. Traefik could not tell an
+  agent from a bot, and whoever copied the token could connect as that host.
+  - Each installation now creates its own certificate authority. Every agent from version 60 receives
+    its own client certificate over its already authenticated connection and reconnects through
+    `agents.<your domain>`.
+  - Traefik checks the certificate during the TLS handshake, so a client without one never reaches
+    the gateway, whatever the number of addresses.
+  - Once a host has connected with its certificate, the token alone is refused for it (INV-12). A
+    stolen token is useless without the key.
+  - Certificates renew themselves. Deleting or re-enrolling a host revokes them.
+  - Turning mTLS off (`WEBTERM_AGENT_MTLS=off`) never locks a host out.
+  - See [docs/HOSTS.md](docs/HOSTS.md#client-certificates-mtls) and
+    [docs/design/AGENT-MTLS.md](docs/design/AGENT-MTLS.md).
+
 ## [3.6.38] — 2026-11-20 · agent (59)
 
 The public route agents connect to, `/agent/ws`, is now protected against floods in two layers, and

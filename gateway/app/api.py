@@ -26,7 +26,7 @@ from .errors import ApiError, rate_limited
 from . import gitpanel, owners
 from . import webauthn_api
 from . import (accounts, alert_history, audit, authz, backup, certmon, cmdguard, config,
-               agentgate, core, db, edgeguard, edgelists, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, push,
+               agentca, agentgate, core, db, edgeguard, edgelists, edgemtls, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, push,
                pyruntime, replay, scim, security, sessctl, shares, conntypes, fwddomain, signing, ssomap,
                stepup, syshealth, totp, updatecheck, watermark)
 
@@ -2926,8 +2926,8 @@ async def renew_enroll(host_id: int, user=Depends(authz.perm('host.admin', host=
     pass_hash = await security.hash_password_async(pw) if pw else None
     exp = time.time() + ttl
     await db.execute(
-        "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL"
-        " WHERE id=?", enroll, exp, pass_hash, host_id)
+        "UPDATE hosts SET enroll_token=?, enroll_expires=?, enroll_pass_hash=?, instance_id=NULL, "
+        + hostmodel.MTLS_RESET + " WHERE id=?", enroll, exp, pass_hash, host_id)
     return {"install_command": hostmodel.install_command(enroll, pw),
             "install_command_dedicated": hostmodel.install_command_dedicated(enroll, pw),
             "enroll_expires": exp}
@@ -5853,6 +5853,32 @@ async def agent_ws(ws: WebSocket):
             await core.record_handshake_refusal(h["id"], "handshake_bad_token", ip)
         await ws.close(code=4401)
         return
+    # INV-12 (docs/design/INVARIANTS.md): un host trecut pe mTLS nu mai acceptă doar tokenul.
+    # 3.7.0 — mTLS (docs/design/AGENT-MTLS.md). Certificatul din antet contează DOAR dacă cererea a trecut
+    # prin routerul mTLS al lui Traefik (antetul cu secretul instalării): altfel oricine l-ar putea
+    # trimite pe ruta cu token, iar certificatul unui agent e public. Verificăm semnătura CA-ului nostru,
+    # host-ul din certificat şi serialul curent (revocarea e aici: Traefik nu are liste de revocare).
+    # Clichet: după prima conexiune mTLS, hostul nu mai acceptă doar token.
+    via_mtls = False
+    if edgemtls.router_secret_ok(ws.headers):
+        cert = agentca.verify_client_cert(ws.headers.get(edgemtls.CERT_HEADER, ""))
+        if (not cert or cert["host_id"] != row["id"]
+                or cert["serial"] not in (row["mtls_serial"], row["mtls_serial_next"])):
+            edgeguard.note_gateway_refusal("mtls_revoked", ip)
+            await core.record_handshake_refusal(row["id"], "handshake_mtls_revoked", ip,
+                                                detail="certificate not current for this host")
+            await ws.close(code=4403)
+            return
+        via_mtls = True
+    elif row["mtls_required"] and edgemtls.enforce_ratchet():
+        # Clichetul se aplică doar cât ruta mTLS există: cu mTLS oprit (WEBTERM_AGENT_MTLS=off, CDN,
+        # fără nume de agenţi), un host trecut pe mTLS n-ar mai avea pe unde intra — ar fi o blocare,
+        # nu o protecţie. Oprirea mTLS e deci şi calea de rollback.
+        edgeguard.note_gateway_refusal("mtls_missing", ip)
+        await core.record_handshake_refusal(row["id"], "handshake_mtls_missing", ip,
+                                            detail="this host requires its client certificate")
+        await ws.close(code=4403)
+        return
     # Dacă hostul era marcat „dezinstalat" şi agentul se conectează din nou, înseamnă că a
     # fost reinstalat: marcajul dispare singur, fără ca cineva să apese ceva.
     if row["uninstalled_at"]:
@@ -5928,6 +5954,17 @@ async def agent_ws(ws: WebSocket):
     except BaseException:
         edgelists.note_agent_disconnected(row["id"], lists_mark)
         raise
+    if via_mtls:
+        conn.via_mtls = True
+        # clichetul + promovarea certificatului reînnoit (vechiul serial încetează să fie valabil)
+        # expirarea = cea a certificatului PREZENTAT (review 3.7.0: la promovare rămânea cea veche, iar
+        # reînnoirea se relua la fiecare hello — buclă de reconectări pe toată flota)
+        await db.execute(
+            "UPDATE hosts SET mtls_required=1, mtls_last=?, mtls_not_after=?,"
+            " mtls_serial=CASE WHEN mtls_serial_next=? THEN mtls_serial_next ELSE mtls_serial END,"
+            " mtls_next_at=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_next_at END,"
+            " mtls_serial_next=CASE WHEN mtls_serial_next=? THEN NULL ELSE mtls_serial_next END WHERE id=?",
+            time.time(), cert["not_after"], cert["serial"], cert["serial"], cert["serial"], row["id"])
     log.info("agent connected: host=%s(%s)", row["name"], row["id"])
     try:
         await conn.run()

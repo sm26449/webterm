@@ -197,6 +197,17 @@ def render(now: Optional[float] = None) -> dict:
     return out
 
 
+def atomic_write(name: str, text: str) -> None:
+    """Un fişier din directorul comun: temporar + rename (Traefik nu citeşte niciodată o jumătate de
+    fişier), 0644 (Traefik rulează ca alt utilizator). Un `.tmp` nu e o extensie pe care o încarcă."""
+    path = os.path.join(_dir(), name)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
 def load(now: Optional[float] = None) -> None:
     """La pornire: allow-ul din fişierul existent revine în memorie (cu TTL plin: nu ştim de când e acolo,
     iar un allow nu deschide nimic, doar lărgeşte limita). Deny-ul NU se reîncarcă: îl decide agentgate,
@@ -241,12 +252,8 @@ def write(now: Optional[float] = None, force: bool = False) -> bool:
     if text == _last_written and not force and now - _last_write_at < REWRITE:
         return False
     path = os.path.join(d, FILE_NAME)
-    tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.chmod(tmp, 0o644)              # Traefik rulează ca alt utilizator: trebuie să-l poată citi
-        os.replace(tmp, path)
+        atomic_write(FILE_NAME, text)
     except OSError as e:
         status["error"] = type(e).__name__
         _last_write_at = now                # reîncercăm la MIN_WRITE, nu la fiecare 5 s

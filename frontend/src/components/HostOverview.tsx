@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { mtlsDaysLeft, mtlsExpiringSoon, mtlsState } from '../lib/mtls'
 import { sessionTitle } from '../lib/sessionTitle'
 import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
@@ -890,6 +891,12 @@ function HostDetail({ host }: { host: Host }) {
           <Row k={t('host.version')} v={host.agent_version != null ? `v${host.agent_version}` : t('host.notInstalled')}
             badge={host.update_pending ? t('host.updateAvailable') : undefined} />
           {host.last_heartbeat != null && <Row k={t('host.lastActivity')} v={timeAgo(host.last_heartbeat, t)} />}
+          {host.mtls && (
+            <Row k={t('host.mtls')} help="mtls" v={t('host.mtls.' + mtlsState(host.mtls))}
+              tone={mtlsState(host.mtls) === 'required' ? 'good' : undefined}
+              badge={mtlsExpiringSoon(host.mtls, Date.now() / 1000)
+                ? t('host.mtls.expires', { days: Math.max(0, mtlsDaysLeft(host.mtls, Date.now() / 1000) ?? 0) }) : undefined} />
+          )}
           <Row k={t('host.autostart')} help="autostart" v={supLabel} tone={sup?.boot ? 'good' : undefined}
             badge={sup && !sup.boot ? t('host.autostartRisk') : undefined}
             action={canAutostart && sup ? (

@@ -482,3 +482,11 @@ async def claim_pending_key(user_id, pending_id: str) -> str:
         raise ApiError(400, "sshkey.pendingMissing",
                        "the generated key expired or does not exist — generate a new one")
     return row["credential_encrypted"]
+
+
+# 3.7.0 — re-enrolarea unui host şterge starea lui mTLS, ca pe pin-ul de instanţă (INV-12): clichetul cade
+# (noua instalare se conectează întâi cu tokenul) şi serialele vechi nu mai sunt valabile (certificatul
+# de pe vechea maşină e revocat). Fragment SQL comun celor două căi de re-enrolare.
+MTLS_RESET = ("mtls_required=0, mtls_serial=NULL, mtls_serial_next=NULL, mtls_not_after=NULL, "
+              "mtls_last=NULL, mtls_next_at=NULL")
+

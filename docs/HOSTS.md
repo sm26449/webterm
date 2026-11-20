@@ -456,6 +456,47 @@ install command (`useradd … && loginctl enable-linger webterm`) already does t
 Neither action restarts or stops the agent that is running now. The change takes effect at the
 next boot. On a 2FA host both actions need a step-up, and each one is recorded in the audit log.
 
+## Client certificates (mTLS)
+
+From agent 60 (WebTerm 3.7.0), each agent also authenticates with a **client certificate**, checked by
+Traefik during the TLS handshake. A client without one never reaches the gateway, and a copied token
+alone no longer opens a connection.
+
+- **Nothing to set up.** At its first start, the gateway creates a certificate authority (CA) for this
+  installation. Its key is encrypted in the database. Each agent from version 60 receives its own
+  certificate over its already authenticated connection, the first time it connects. It then
+  reconnects through the agents name, `agents.<your domain>` by default (`WEBTERM_AGENT_HOST`).
+  The private key never appears in an install script.
+- **The certificate's name must resolve.**
+  - With DNS-01 (a Cloudflare token), the wildcard certificate and DNS usually already cover it.
+  - With HTTP-01, add a DNS record for `agents.<your domain>` pointing at the server. Until it
+    resolves, agents keep connecting with their token. Once a host is *required*, the name must keep
+    resolving.
+  - A custom `WEBTERM_AGENT_HOST` must be a subdomain of `WEBTERM_DOMAIN`, and agents must have been
+    enrolled with that domain (an agent enrolled under another name, an alias or an IP refuses the
+    certificate and stays on its token).
+  - Agents in insecure mode with a pinned gateway certificate use mTLS only if the agents name
+    serves the same key; otherwise they stay on their token, and System health lists them.
+- **States on the host page:**
+  - *token only*: the agent is older than 60, or has not received a certificate yet;
+  - *issued, not used yet*: the certificate was sent, but the agent has not connected with it;
+  - *mTLS, required*: the host connected with its certificate, and from then on **refuses a
+    connection with the token alone**. Re-enrolling the host resets this, as it resets the instance pin.
+- **Renewal.** Certificates last a year and renew themselves with a third of their life left: at the
+  agent's next connection, or within 10 minutes for an agent that stays connected.
+- **Revocation.** Deleting or re-enrolling the host makes its certificate useless at once: the gateway
+  checks its serial number on every connection.
+- **If mTLS breaks** (System health shows a critical *Agent client certificates* alarm), required
+  hosts may be unable to connect: the requirement stays on purpose.
+- **Turning it off.** Set `WEBTERM_AGENT_MTLS=off` and recreate the app container. This works even
+  when the gateway cannot load its CA (for example after restoring onto a server with a different
+  vault key). Agents go back to the
+  token route, including hosts that were required: the requirement only applies while the mTLS
+  route exists, so turning it off never locks a host out. Behind a CDN that terminates TLS, mTLS is
+  off by itself.
+
+Design and threat analysis: [docs/design/AGENT-MTLS.md](design/AGENT-MTLS.md).
+
 ## Diagnostics
 
 A health and inventory view of an agent host, without SSH: the **Diagnostics** button on the

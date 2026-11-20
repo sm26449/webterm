@@ -21,7 +21,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .errors import ApiError
-from . import authz, config, core, db, errors, fwddomain, hostmodel, security, stepup
+from . import authz, config, core, db, edgemtls, errors, fwddomain, hostmodel, security, stepup
 
 log = logging.getLogger("webterm")
 # Aceeaşi gardă ca api.router (fail-closed): o rută fără permisiune declarată → 500 authz.undeclared.
@@ -463,8 +463,18 @@ def _validate_forward(host: str, port: int, scheme: str):
         raise ApiError(400, "forward.badTarget", "invalid target_host (letters, digits, . - : _ only)")
 
 
+# 3.7.0: `agents.<domeniu>` e numele pe care se conectează agenţii cu mTLS (edgemtls.py). Când domeniul de
+# forward e acelaşi cu cel principal, un forward cu slug-ul `agents` ar fi împărţit numele cu ei.
+RESERVED_SLUGS = {"agents"}
+
+
 async def _unique_slug(label: str) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40] or "fwd"
+    ah = edgemtls.agent_host()
+    reserved = RESERVED_SLUGS | ({ah[:-len(fwddomain.forward_domain()) - 1]}
+                                 if ah and ah.endswith("." + fwddomain.forward_domain()) else set())
+    if base in reserved:
+        base += "-fwd"
     slug = base
     n = 2
     while await db.fetchone("SELECT 1 FROM port_forwards WHERE slug=?", slug):

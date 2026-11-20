@@ -24,6 +24,7 @@ The rules are ordered from "a mistake leaks a secret or grants access" to "a mis
 | [INV-09](#inv-09) | The agent is a separately versioned, signed product |
 | [INV-10](#inv-10) | The gateway never gains new powers on a host |
 | [INV-11](#inv-11) | Every forwarded request is authenticated |
+| [INV-12](#inv-12) | An agent host that has connected with its client certificate never goes back to the token alone |
 
 ---
 
@@ -240,3 +241,22 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 
 **Enforced in**: `forward_api.py` `[forward]`: `_forward_authz_ok`, `_fwd_origin_for_target`.
 **Tests**: `forward_stepup`, `forward_proxy_headers`.
+
+## INV-12: a host that has used mTLS never goes back to the token alone
+
+**Rule.**
+- After an agent's first successful connection with its client certificate (mTLS), its host is
+  marked `mtls_required`. From then on, a connection for that host with the token alone is refused.
+  A stolen token is then useless without the certificate's private key.
+- Only re-enrolling the host clears the mark, as it clears the instance pin.
+- The requirement is lifted only when mTLS is off on purpose or cannot exist here
+  (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name). That
+  is the rollback, and it must work even when the CA cannot be loaded. When mTLS is broken (CA error,
+  file not writable), the requirement stays and System health raises a critical alarm.
+- A client certificate counts only when the request came through Traefik's mTLS router, which proves
+  it with the installation's secret header. A certificate is public information; the header alone
+  proves nothing.
+
+**Enforced in**: `api.py` `[ws]` `agent_ws`; `edgemtls.py` `router_secret_ok`; `agentca.py` `verify_client_cert`.
+**Tests**: `agentmtls`, `agentca`.
+

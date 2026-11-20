@@ -2201,6 +2201,8 @@ class AgentConnection(SessionSource):
         self.epoch: Optional[str] = None
         self.backend: Optional[str] = None
         self.agent_version: Optional[int] = None
+        self.via_mtls = False                  # 3.7.0: conexiunea a venit pe ruta mTLS (certificat verificat)
+        self.mtls_reported: Optional[str] = None   # 3.7.0: serialul pe care agentul spune că îl are
         self.metrics: Optional[dict] = None
         self._req_id = 0
         self._pending: Dict[int, asyncio.Future] = {}
@@ -3019,6 +3021,9 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
     conn.epoch = msg.get("epoch")
     conn.backend = msg.get("backend")
     conn.agent_version = msg.get("agent_version")
+    # 3.7.0: serialul certificatului de client pe care agentul ÎL ARE instalat (edgemtls.provision_hook)
+    ms = msg.get("mtls_serial")
+    conn.mtls_reported = ms if isinstance(ms, str) and len(ms) <= 64 else None
     if msg.get("metrics"):
         # Mărginit: agentul trimite şase numere, dar un host compromis poate trimite orice, iar
         # dicţionarul ăsta ajunge în FIECARE răspuns de host-detail către browser. Păstrăm doar
@@ -3200,6 +3205,16 @@ async def reconcile(conn: AgentConnection, msg: dict) -> None:
 
     if msg.get("event") == "hello":
         await maybe_upgrade_agent(conn)
+        # 3.7.0: alte module care vor să reacţioneze la un hello (edgemtls: certificatul de client al
+        # agentului) se înregistrează aici; core nu le importă (straturi, tests/import_layers_test.py)
+        for hook in list(post_hello_hooks):
+            try:
+                await hook(conn)
+            except Exception:                  # noqa: BLE001 — un cârlig nu strică reconcilierea
+                log.exception("post-hello hook failed for host %s", conn.host_id)
+
+
+post_hello_hooks: list = []
 
 
 # ---------------------------------------------------------------------------

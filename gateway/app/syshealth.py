@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import alert_history, config, conntypes, db, edgeguard, fwddomain, healthcmd, hoststatus, owners
+from . import agentca, alert_history, config, conntypes, db, edgeguard, edgemtls, fwddomain, healthcmd, hoststatus, owners
 
 log = logging.getLogger("webterm")
 
@@ -175,6 +175,12 @@ MESSAGES = {
     "agents_update_ok": "No agent refuses updates",
     "agents_clock_skew": "{count} agent(s) have a clock off by up to {skew} s",
     "agents_clock_ok": "Agent clocks agree with the gateway",
+    "mtls_pending": "{count} connected agent(s) still connect with their token only",
+    "mtls_expiring": "{count} agent client certificate(s) expire within 30 days and have not renewed",
+    "mtls_ca_expiring": "The agent CA expires on {date}",
+    "mtls_off": "Agent mTLS is off ({reason})",
+    "mtls_broken": "Agent mTLS is not working ({reason} {error}): hosts that require their certificate may be unable to connect",
+    "mtls_ok": "Every connected agent uses its client certificate",
     "edge_proxy_ip": "Traefik is refusing agent handshakes over the per-IP limit: {count} since {since} (authentication unknown)",
     "edge_proxy_global": "Traefik is refusing agent handshakes over the global limit: {count} since {since} (authentication unknown)",
     "edge_proxy_deny": "Traefik refused {count} agent handshake(s) from blocked addresses since {since}, before they reached the gateway",
@@ -239,6 +245,7 @@ WHY = {
     "agents.python": "The agent needs Python 3.6+. On 3.5 it connects and runs terminals, but every file listing — and so every upload — fails with an internal error.",
     "agents.update_blocked": "A host that refuses updates stays without the fixes shipped since.",
     "agents.clock": "A wrong clock breaks TOTP codes, SSO tokens and the order of audit entries.",
+    "agents.mtls": "With its client certificate, an agent is checked by Traefik during the TLS handshake: a copied token alone no longer opens a connection, and clients without a certificate never reach the gateway.",
     "agents.handshake": "Agents reconnect through one public route; a flood of handshakes there is stopped at the proxy, and you should know when that happens and whether real agents were caught in it.",
     "sessions.cap": "At the limit, new terminals on that host are refused.",
     "signing.state": "Agents only accept signed updates; without a usable key the fleet stays on old code.",
@@ -266,6 +273,9 @@ RECS = {
     "promote_owner": "Make another account a permanent Owner over all hosts: Settings → Users & roles → Accounts (an Owner grants Owner with no end), or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>. You type that command; WebTerm never runs it.",
     "break_glass_password": "Make an account that signs in with a local password a permanent Owner (Settings → Users & roles → Accounts, or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>). An SSO-only Owner can get a local password with python3 -m app.admin passwd <email> — it then loses the roles its SSO groups gave. You type these commands; WebTerm never runs them.",
     "check_timer": "Look at the unit's journal, then start it once by hand to see it succeed.",
+    "mtls_pending": "Agents from version 60 get their certificate by themselves on their next connection; older ones need the agent update. If one stays on its token, look at its events: a network that cannot reach the agents name, or a TLS-intercepting proxy, keeps it there.",
+    "mtls_broken": "Look at the gateway log for \"edgemtls\". If it cannot be fixed now, set WEBTERM_AGENT_MTLS=off and recreate the app container: agents fall back to their token until it is fixed.",
+    "mtls_renew": "An agent renews its certificate while connected. One that stays offline past the expiry connects with its token again (if it was never required) or needs re-enrolling.",
     "edge_review": "See Refused connections and sign-ins below. A burst right after an outage settles by itself: agents back off up to a minute between tries. A steady stream from many addresses is a flood; the limits keep it away from the gateway.",
     "edge_telemetry": "Check that the Traefik service runs and that WEBTERM_AGENT_RL_METRICS_URL points at its internal metrics entry point; the limits keep working without it, only the counts are missing.",
     "timer_pending": "Nothing is wrong: the timer has not fired since the update. To see it work now, start it once.",
@@ -690,6 +700,38 @@ async def c_agent_handshakes() -> Optional[Result]:
     return Result("ok", "edge_ok")
 
 
+async def c_agents_mtls() -> Optional[Result]:
+    """3.7.0: agenţii conectaţi fără certificat de client, certificate care n-au reînnoit, CA-ul care
+    expiră. Doar memoria (conexiunile) şi o citire a hosturilor cu certificat."""
+    if not edgemtls.enabled():
+        reason = edgemtls.status.get("reason") or "off"
+        if reason not in edgemtls.LIFTS_RATCHET:
+            # CA care nu se încarcă / fişier care nu se poate scrie / pornire blocată: clichetul rămâne
+            # (eşec închis), deci hosturile pe mTLS pot rămâne fără acces → critic, nu „oprit"
+            return Result("critical", "mtls_broken", {"reason": reason, "error": edgemtls.status.get("error") or ""},
+                          rec="mtls_broken")
+        return Result("ok" if reason == "off" else "info", "mtls_off", {"reason": reason})
+    now = time.time()
+    ca_end = agentca.ca_not_after()
+    if ca_end and ca_end - now < 365 * 86400:
+        return Result("warning", "mtls_ca_expiring", {"date": time.strftime("%Y-%m-%d", time.gmtime(ca_end))})
+    # inclusiv cele cu o reînnoire trimisă dar nefolosită (review 3.7.0: altfel tocmai blocajul nu se vedea)
+    rows = await db.fetchall("SELECT id FROM hosts WHERE mtls_not_after IS NOT NULL AND mtls_not_after < ?",
+                             now + 30 * 86400)
+    if rows:
+        return Result("warning", "mtls_expiring", {"count": len(rows)}, rec="mtls_renew", hosts=[r["id"] for r in rows])
+    pending = [hid for hid, src in list(core_sources().items())
+               if getattr(src, "agent_version", None) is not None and not getattr(src, "via_mtls", False)]
+    if pending:
+        return Result("info", "mtls_pending", {"count": len(pending)}, rec="mtls_pending", hosts=pending[:MAX_HOSTS_IN_RESULT])
+    return Result("ok", "mtls_ok")
+
+
+def core_sources() -> dict:
+    from . import core           # noqa: PLC0415 — syshealth nu importă core la nivel de modul (straturi)
+    return core.sources
+
+
 async def c_sessions_cap() -> Optional[Result]:
     from . import core
     limit = core.MAX_SESSIONS_HINT
@@ -1073,6 +1115,7 @@ CHECKS: list = [
     Check("agents.update_blocked", "fast", c_agents_blocked, alert="none"),   # update_refused alerts
     Check("agents.clock", "fast", c_agents_clock),
     Check("agents.handshake", "fast", c_agent_handshakes),
+    Check("agents.mtls", "fast", c_agents_mtls, critical=True),
     Check("sessions.cap", "fast", c_sessions_cap),
     Check("signing.state", "fast", c_signing, alert="none", critical=True),  # signing_locked alerts
     Check("oidc.sso", "fast", c_sso, critical=True),

@@ -675,6 +675,14 @@ MIGRATIONS = [
     # limba aleasă la abonare — textul push-ului e generat server-side (app închisă), deci nu poate
     # folosi catalogul din browser; vezi push._STRINGS (en/ro).
     "ALTER TABLE users ADD COLUMN push_lang TEXT DEFAULT 'en'",
+    # 3.7.0 — mTLS pentru agenţi (agentca.py): serialul certificatului curent (hex) şi, în timpul unei
+    # reînnoiri, cel nou; expirarea; clichetul (după prima conexiune mTLS, hostul nu mai acceptă doar token)
+    "ALTER TABLE hosts ADD COLUMN mtls_serial TEXT",
+    "ALTER TABLE hosts ADD COLUMN mtls_serial_next TEXT",
+    "ALTER TABLE hosts ADD COLUMN mtls_not_after REAL",
+    "ALTER TABLE hosts ADD COLUMN mtls_required INTEGER DEFAULT 0",
+    "ALTER TABLE hosts ADD COLUMN mtls_last REAL",
+    "ALTER TABLE hosts ADD COLUMN mtls_next_at REAL",          # când s-a trimis certificatul reînnoit
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

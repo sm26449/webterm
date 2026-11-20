@@ -292,7 +292,8 @@ CERT_CHECK_TARGET = _str("WEBTERM_CERT_CHECK_TARGET", "traefik:443")
 # compose); refuzurile de autentificare înregistrate de gateway se văd oricum.
 AGENT_RL_METRICS_URL = _str("WEBTERM_AGENT_RL_METRICS_URL", "http://traefik:8082/metrics")
 # routerele lui /agent/ws în metrici (`<router>@<provider>`), cele din etichetele docker-compose.prod.yml
-AGENT_RL_ROUTERS = ("webterm-agent@docker", "webterm-agent-allow@file", "webterm-agent-deny@file")
+AGENT_RL_ROUTERS = ("webterm-agent@docker", "webterm-agent-allow@file", "webterm-agent-deny@file",
+                    "webterm-agent-mtls@file")
 # Listele allow/deny pentru /agent/ws, scrise de gateway pentru Traefik (edgelists.py). Directorul e un
 # volum comun: scris aici, montat read-only în Traefik ca director al providerului `file`. `off` = fără.
 AGENT_LISTS_DIR = _str("WEBTERM_AGENT_LISTS_DIR", "/edge")
@@ -301,6 +302,11 @@ AGENT_ALLOW_AVERAGE = _num("WEBTERM_AGENT_ALLOW_AVERAGE", 600)     # pe minut, p
 AGENT_ALLOW_BURST = _num("WEBTERM_AGENT_ALLOW_BURST", 300)
 # aceeaşi valoare ca în etichetele compose (sursa adresei în spatele unui CDN de încredere)
 AGENT_RL_IP_DEPTH = _num("WEBTERM_AGENT_RL_IP_DEPTH", 0)
+# 3.7.0 — mTLS pentru agenţi (agentca.py, edgemtls.py, docs/design/AGENT-MTLS.md). Numele dedicat pe care
+# se conectează agenţii cu certificat de client; gol = `agents.<domeniul principal>`. `off` opreşte mTLS:
+# agenţii rămân pe ruta cu token. Un host deja trecut pe mTLS (clichet) cere în continuare certificatul.
+AGENT_HOST = _str("WEBTERM_AGENT_HOST", "")
+AGENT_MTLS = _str("WEBTERM_AGENT_MTLS", "on")
 # `le` (HTTP-01) / `ledns` (DNS-01): written to .env by install.sh/deploy.sh. Forwards on
 # subdomains only get a certificate with DNS-01, so the forward name is checked only there
 # (WEBTERM_CERT_CHECK_FORWARD=1/0 overrides that guess).

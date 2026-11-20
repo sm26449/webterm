@@ -267,6 +267,9 @@ services:
       WEBTERM_AGENT_ALLOW_AVERAGE: ${WEBTERM_AGENT_ALLOW_AVERAGE:-}
       WEBTERM_AGENT_ALLOW_BURST: ${WEBTERM_AGENT_ALLOW_BURST:-}
       WEBTERM_AGENT_RL_IP_DEPTH: ${WEBTERM_AGENT_RL_IP_DEPTH:-0}
+      # 3.7.0 — mTLS pentru agenţi: numele dedicat (gol = agents.<WEBTERM_DOMAIN>) şi comutatorul (`off`)
+      WEBTERM_AGENT_HOST: ${WEBTERM_AGENT_HOST:-}
+      WEBTERM_AGENT_MTLS: ${WEBTERM_AGENT_MTLS:-on}
       # which resolver the routers use (le = HTTP-01, ledns = DNS-01): decides whether the forward
       # wildcard exists at all, so whether it is checked
       WEBTERM_CERT_RESOLVER: ${WEBTERM_CERT_RESOLVER:-le}
