@@ -543,7 +543,9 @@ async def deploy_key_test(host_id: int, body: DeployKeyIn, request: Request,
     out = (resp.get("stdout") or "") + (resp.get("stderr") or "")
     m = re.search(r"WT_SSH_RC:(\d+)", out)
     rc = int(m.group(1)) if m else 1
-    detail = re.sub(r"\s*WT_SSH_RC:\d+\s*$", "", out).strip()[:400]
+    # marcajul de la coadă, scos fără regex (SonarQube S8786: `\s*…\s*$` era pătratic pe ieşiri lungi)
+    head, sep, tail = out.rpartition("WT_SSH_RC:")
+    detail = (head if sep and tail.strip().isdigit() else out).strip()[:400]
     return {"ok": rc == 0, "rc": rc, "detail": detail, "dest": dest}
 
 

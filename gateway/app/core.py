@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import authz, config, conntypes, db, email_alerts, osc133, push, security, signing, telnet
+from . import authz, bgtasks, config, conntypes, db, email_alerts, osc133, push, security, signing, telnet
 
 log = logging.getLogger("webterm")
 
@@ -1065,7 +1065,7 @@ class BrowserClient:
                 # dacă era operatorul verificat, invitaţii prin share nu-l aşteaptă pe `finally`-ul
                 # handler-ului (care depinde de închiderea transportului): blocaţi acum
                 if self.is_owner:
-                    asyncio.ensure_future(self.hub.sync_guests())
+                    bgtasks.spawn(self.hub.sync_guests(), "sync share guests")
                 try:
                     await self.ws.close(code=4408)
                 except Exception:
@@ -1576,7 +1576,7 @@ class SessionHub:
         if now - self._last_push_at < 10:     # anti-flood
             return
         self._last_push_at = now
-        asyncio.create_task(self._push_task_failed(int(exit_code), duration))
+        bgtasks.spawn(self._push_task_failed(int(exit_code), duration), "task-failed push")
 
     async def _push_task_failed(self, exit_code: int, duration: float) -> None:
         """Trimite un push „task eșuat" proprietarului, dacă are push pornit, abonamente, și comanda
@@ -3838,7 +3838,9 @@ MAX_SERIAL_SESSIONS = 16
 # „password:" / „passcode:" / „passphrase:" fără newline după el (așteaptă input).
 # Semnal secundar posibil: device a trimis WONT ECHO (echo suprimat) — vezi
 # TelnetShim.them_will_echo — dar textul e suficient și mai robust între device-uri.
-_PW_PROMPT = re.compile(rb"(?i)(?:password|passcode|passphrase)\s*:?\s*$")
+# `\s*(?::\s*)?$`, nu `\s*:?\s*$`: două `\s*` alăturate făceau potrivirea pătratică pe un şir lung de
+# spaţii trimis de echipament (SonarQube S8786, 2026-11-20); aceleaşi prompturi se potrivesc.
+_PW_PROMPT = re.compile(rb"(?i)(?:password|passcode|passphrase)\s*(?::\s*)?$")
 
 
 # ── [telnet] Telnet + serial sources via an agent forward ─────────────────────────────────────────
@@ -4904,7 +4906,7 @@ class TelnetSource(SessionSource):
                     "msg": "direct telnet: one session per host only (use the agent for more)"}
         self._task = asyncio.create_task(self._pump(sid))
         if self._creds.get("username"):
-            asyncio.create_task(self._autologin())
+            bgtasks.spawn(self._autologin(), "telnet autologin")
         return {"ok": True}
 
     async def _autologin(self) -> None:

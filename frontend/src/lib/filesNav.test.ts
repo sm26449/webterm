@@ -185,8 +185,8 @@ describe('cdCommand („cd aici" tastat în terminal, fără Enter)', () => {
     expect(cdCommand("/tmp/a\\'x;id;#")).toBe("cd -- '/tmp/a'\\\\''\\''x;id;#'")
   })
   it('refuză (null) controale, newline, ESC, bidi, zero-width, separatori de linie', () => {
-    for (const bad of ['/tmp/a\nrm -rf /', '/tmp/a\r', '/tmp/\x1b[201~x', '/tmp/\x00', '/tmp/a‮b',
-      '/tmp/a​b', '/tmp/a b', '/tmp/a⁦b', '/tmp/\x7f', '/tmp/\x9b', '']) {
+    for (const bad of ['/tmp/a\nrm -rf /', '/tmp/a\r', '/tmp/\x1b[201~x', '/tmp/\x00', '/tmp/a\u202eb',
+      '/tmp/a​b', '/tmp/a\u2028b', '/tmp/a\u2066b', '/tmp/\x7f', '/tmp/\x9b', '']) {
       expect(cdCommand(bad)).toBeNull()
     }
   })

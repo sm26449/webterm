@@ -469,7 +469,7 @@ _REPLAY_HEADERS = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofoll
                    "Referrer-Policy": "no-referrer"}
 
 
-_LABEL_BAD = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
+_LABEL_BAD = re.compile(r"[\x00-\x1f\x7f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
 
 class ReplayLinkIn(BaseModel):

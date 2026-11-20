@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
 from .errors import ApiError
-from . import audit, authz, backup, cloudbackup, config, db, email_alerts, security, stepup, syshealth
+from . import audit, authz, backup, bgtasks, cloudbackup, config, db, email_alerts, security, stepup, syshealth
 
 log = logging.getLogger("webterm")
 # Aceeaşi gardă ca api.router (fail-closed): o rută fără permisiune declarată → 500 authz.undeclared.
@@ -227,7 +227,7 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
         await asyncio.sleep(1.0)
         log.warning("restart to apply the restore")
         os._exit(0)
-    asyncio.create_task(_restart_soon())
+    bgtasks.spawn(_restart_soon(), "restart after restore")
     return {"ok": True, "restarting": True, **info}
 
 

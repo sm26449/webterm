@@ -87,7 +87,7 @@ describe('Type into terminal after notPrompt (hotfix 3.6.13)', () => {
   it('refuses unsafe text: control characters, ESC (bracket breakout), newline, bidi, empty, oversize', () => {
     const typed: string[] = []
     registerInsertTarget('u', target(typed, { tmux: true }))
-    for (const bad of ['a\r', 'a\nid', 'x\x1b[201~; id', 'a‮b', 'a b', 'a\x00b', 'a\x9bb', '', 'a'.repeat(32769)])
+    for (const bad of ['a\r', 'a\nid', 'x\x1b[201~; id', 'a\u202eb', 'a\u2028b', 'a\x00b', 'a\x9bb', '', 'a'.repeat(32769)])
       expect(typeIntoConfirmed('u', bad)).toBe('unsafe')
     expect(typed).toEqual([])
     // a path: shellQuote strips control bytes first, so the only ESCs typed are the brackets

@@ -97,14 +97,14 @@ def test_parser():
     write_status(hs, "backup", '{"v":1,"id":"backup","status":"ok","ts":NaN,"message":"x"}')
     check("refused: NaN timestamp", hoststatus.read("backup", now, hs)["state"] == "invalid")
 
-    msg = "<script>alert(1)</script>\n\x1b[31mred\x00 ‮evil" + "y" * 500
+    msg = "<script>alert(1)</script>\n\x1b[31mred\x00 \u202eevil" + "y" * 500
     write_status(hs, "backup", status_doc("backup", status="error", message=msg))
     r = hoststatus.read("backup", now, hs)
     check("HTML in a message stays literal text (escaped by React, never rendered)",
           r["message"].startswith("<script>alert(1)</script>"), r["message"][:60])
     check("control and bidi-override characters are removed, the message is cut to 200",
           "\n" not in r["message"] and "\x1b" not in r["message"] and "\x00" not in r["message"]
-          and "‮" not in r["message"] and len(r["message"]) <= 200, repr(r["message"][:80]))
+          and "\u202e" not in r["message"] and len(r["message"]) <= 200, repr(r["message"][:80]))
     write_status(hs, "backup", status_doc("backup", data={"archive": "../../etc/shadow", "offhost": "maybe",
                                                           "encrypted": "yes"}))
     r = hoststatus.read("backup", now, hs)

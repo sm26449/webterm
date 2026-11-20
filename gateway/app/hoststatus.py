@@ -56,7 +56,7 @@ _VERSION_RE = re.compile(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,3}$")
 _PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _BASENAME_RE =re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ISO_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.]{2,15}(?:Z|[+-][0-9:]{2,5})?)?$")
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 _EARLIEST = 1577836800          # 2020-01-01: older than this is not a real status
 _FUTURE_SLACK = 300             # a host clock a little ahead is tolerated, a year ahead is not
 

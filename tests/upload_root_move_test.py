@@ -45,14 +45,14 @@ def pure_checks():
     print("── rootmove (pure)")
     check("reason: strerror without the path", rootmove.reason("/x/y: Permission denied") == "Permission denied")
     check("reason: control/bidi characters neutralised",
-          rootmove.reason("/x: bad\x1b[31m‮thing\r\n") == "bad [31m thing", repr(rootmove.reason("/x: bad\x1b[31m‮thing\r\n")))
+          rootmove.reason("/x: bad\x1b[31m\u202ething\r\n") == "bad [31m thing", repr(rootmove.reason("/x: bad\x1b[31m\u202ething\r\n")))
     long = rootmove.reason("/x: " + "a" * 500)
     check("reason: truncated", len(long) <= rootmove.REASON_MAX and long.endswith("…"))
     check("reason: non-string → ''", rootmove.reason(None) == "")
 
     good_dirs = ["/", "/srv/bin/lists", "/srv/it's $(x) `y`", "/a b/ș"]
     bad_dirs = ["", "relative/x", "//srv", "/srv/../etc", "/srv/./x", "/srv/", "/a\nb", "/a\rb",
-                "/a\x1b[201~b", "/a‮b", "/a\x00b", "/a b", "/" + "a" * 5000, None, 5]
+                "/a\x1b[201~b", "/a\u202eb", "/a\x00b", "/a\u2028b", "/" + "a" * 5000, None, 5]
     check("check_dir: accepts absolute normalised paths, odd characters included",
           all(rootmove.check_dir(d) == d for d in good_dirs))
     rejected = []
@@ -64,7 +64,7 @@ def pure_checks():
     check("check_dir: rejects relative, //, ., .., trailing /, control/bidi/NUL/separators, too long",
           len(rejected) == len(bad_dirs), [d for d in bad_dirs if d not in rejected])
 
-    bad_names = ["", ".", "..", "a/b", "a\rb", "a\nb", "\x1b[201~", "a‮b", "a\x00b",
+    bad_names = ["", ".", "..", "a/b", "a\rb", "a\nb", "\x1b[201~", "a\u202eb", "a\x00b",
                  "x" * 256, "ș" * 128, None]
     check("check_name: accepts odd but legal names", all(rootmove.check_name(n) == n for n in NASTY))
     rej = 0

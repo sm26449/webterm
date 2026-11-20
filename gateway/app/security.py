@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .errors import ApiError
 from fastapi import Request, WebSocket
 
-from . import config, db, email_alerts, totp
+from . import bgtasks, config, db, email_alerts, totp
 
 log = logging.getLogger("webterm")
 
@@ -985,7 +985,7 @@ def _re_worker_kill() -> None:
             p.kill()
         except ProcessLookupError:
             pass
-        asyncio.ensure_future(p.wait())        # secerăm zombie-ul, fără să aşteptăm aici
+        bgtasks.spawn(p.wait(), "reap child")   # secerăm zombie-ul, fără să aşteptăm aici
     tr = getattr(p, "_transport", None)
     if tr is not None:                         # închis explicit cât loop-ul trăieşte: altfel GC-ul
         tr.close()                             # îl închide după `loop.close()` → traceback la ieşire

@@ -195,7 +195,7 @@ async def main():
 
         t0 = time.time()
         r = await a.post(f"/api/sessions/{S_OK}/replay-links",
-                         json={"label": "  pentru\x1b[31m echipa‮  " + "x" * 200})
+                         json={"label": "  pentru\x1b[31m echipa\u202e  " + "x" * 200})
         j = r.json()
         check("creare (implicit) → 200, URL cu fragment #/replay/", r.status_code == 200
               and "/#/replay/" in j.get("url", ""), r.text[:200])
@@ -203,7 +203,7 @@ async def main():
         check("implicit: 24 h şi mascare PORNITĂ",
               abs(j["expires"] - (t0 + 86400)) < 5 and j["redact"] is True, j)
         check("eticheta: fără caractere de control/bidi, plafonată la 80",
-              "\x1b" not in j["label"] and "‮" not in j["label"] and len(j["label"]) <= 80
+              "\x1b" not in j["label"] and "\u202e" not in j["label"] and len(j["label"]) <= 80
               and j["label"].startswith("pentru"), repr(j["label"]))
         row = await db.fetchone("SELECT token_hash FROM replay_links WHERE id=?", j["id"])
         check("în DB stă doar hash-ul tokenului", row["token_hash"] == security.sha256_hex(tok_masked)
