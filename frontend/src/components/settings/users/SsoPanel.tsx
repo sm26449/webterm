@@ -7,8 +7,8 @@ import { docsUrl } from '../../../lib/help'
 import { roleBody, roleLabel, RolesCatalogue, ScopeKind, scopeLabel } from '../../../lib/perms'
 import { fold } from '../../../lib/settingsIndex'
 import { DEFAULT_SSO_GROUPS, groupMappings, type SsoMapping } from '../../../lib/usersAdmin'
-import { field, heading } from '../ui'
-import { Badge, Button, IconButton } from '../../ui'
+import { field } from '../ui'
+import { Badge, Button, Field, IconButton, SettingsSection } from '../../ui'
 import { CloseIcon, SearchIcon } from '../../Icons'
 import HelpTip from '../../HelpTip'
 import { defaultScope, RETURN_USERS, RoleOptions, ScopePicker, shellOf, useAccessReauth, useRoleName } from './shared'
@@ -94,18 +94,14 @@ export default function SsoPanel(props: {
   }
 
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className={heading + ' !mt-0 flex flex-1 items-center gap-2'}>{t('roles.sso.title')}<HelpTip id="ssoMapping" /></h3>
-        <Button ref={addBtnRef} type="button" size="sm" variant={adding ? 'secondary' : 'primary'}
-          aria-expanded={adding} aria-controls={adding ? formId : undefined}
-          onClick={() => (adding ? closeForm() : setAdding(true))} data-sso-add>
-          {t('roles.sso.add')}
-        </Button>
-      </div>
-      <p className="mt-1 text-xs text-slate-500">{t('roles.sso.hint')}</p>
+    <SettingsSection title={t('roles.sso.title')} titleExtra={<HelpTip id="ssoMapping" />} description={t('roles.sso.hint')}>
+      <Button ref={addBtnRef} type="button" size="sm" variant={adding ? 'secondary' : 'primary'}
+        aria-expanded={adding} aria-controls={adding ? formId : undefined}
+        onClick={() => (adding ? closeForm() : setAdding(true))} data-sso-add>
+        {t('roles.sso.add')}
+      </Button>
       {props.localPwAccounts > 0 && (
-        <p className="mt-1 text-xs text-slate-400" data-sso-localpw-note>
+        <p className="mt-2 text-xs text-slate-400" data-sso-localpw-note>
           {t('roles.sso.localPwNote', { n: props.localPwAccounts })}
         </p>
       )}
@@ -116,14 +112,18 @@ export default function SsoPanel(props: {
           aria-label={t('roles.sso.add')}
           onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeForm() } }}>
           <div className="text-sm font-semibold text-slate-200">{t('roles.sso.add')}</div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input type="text" value={form.group} maxLength={256} autoComplete="off" spellCheck={false} autoFocus
-              aria-label={t('roles.sso.group')} placeholder={t('roles.sso.groupPlaceholder')} className={field}
-              onChange={(e) => setForm({ ...form, group: e.target.value })} />
-            <select value={form.role} aria-label={t('roles.role.label')} className={field + ' sm:w-48'}
-              onChange={(e) => setForm({ ...form, role: e.target.value, scope_kind: defaultScope(e.target.value), scope_value: '' })}>
-              <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
-            </select>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+            <Field label={t('roles.sso.group')} hint={t('roles.sso.groupHint')} className="min-w-0 flex-1">
+              <input type="text" value={form.group} maxLength={256} autoComplete="off" spellCheck={false} autoFocus
+                placeholder={t('roles.sso.groupPlaceholder')} className={field}
+                onChange={(e) => setForm({ ...form, group: e.target.value })} />
+            </Field>
+            <Field label={t('roles.role.label')} className="sm:w-48">
+              <select value={form.role} className={field}
+                onChange={(e) => setForm({ ...form, role: e.target.value, scope_kind: defaultScope(e.target.value), scope_value: '' })}>
+                <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
+              </select>
+            </Field>
           </div>
           <ScopePicker idPrefix="sso" kind={form.scope_kind} value={form.scope_value} hosts={props.hosts}
             onChange={(k, v) => setForm({ ...form, scope_kind: k, scope_value: v })} />
@@ -205,6 +205,6 @@ export default function SsoPanel(props: {
           </ul>
         )}
       </div>
-    </>
+    </SettingsSection>
   )
 }

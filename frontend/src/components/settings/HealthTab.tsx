@@ -24,7 +24,10 @@ import ConnectedAgents from './ConnectedAgents'
 // what to do, and the exact command. Commands come from the server (an allow-list there); this
 // panel only copies them or asks the server to TYPE one (not run it) into a terminal on the
 // gateway host — and for that it sends the check id + the command's index, never the text.
-export default function HealthTab(props: { onJump?: (cat: string, section?: string) => void }) {
+/** `onChanged`: după Mute / Unmute / Re-check, contorul de pe rail (din /api/state, al părintelui) se
+    reîncarcă ACUM — înainte rămânea pe valoarea veche până la poll-ul de 5 minute (audit UX Setări
+    Codex #14: panoul arăta 2 alarme, rail-ul 3). */
+export default function HealthTab(props: { onJump?: (cat: string, section?: string) => void; onChanged?: () => void }) {
   const { t } = useI18n()
   const vis = useSectionVisible()
   const [st, setSt] = useState<HealthStatus | null>(null)
@@ -83,6 +86,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
     try {
       setSt(await api<HealthStatus>('/api/health/check', { method: 'POST' }))
       setMsg(t('health.rechecked'))
+      props.onChanged?.()
     } catch (e) { setErr(errText(e, t)) } finally { setBusy(false) }
   }
 
@@ -93,6 +97,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
         method: 'POST', body: JSON.stringify({ mode }),
       }))
       setMsg(mode === 'off' ? t('health.unmuted') : t('health.mutedMsg'))
+      props.onChanged?.()
       // the reply may have unmounted the button that held focus (see the comment at `rows`)
       requestAnimationFrame(() => { if (!muteBtns.current.get(c.id) && document.activeElement === document.body) focusNear(c.id) })
     } catch (e) { setErr(errText(e, t)) }

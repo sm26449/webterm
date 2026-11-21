@@ -8,14 +8,11 @@ import CertificatesSection from './CertificatesSection'
 export default function NetworkTab() {
   const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   return (
-    <div>
-      <section data-setting-id="certificates" hidden={!vis('certificates')}>
-        <CertificatesSection />
-      </section>
-
-      <section data-setting-id="forwardDomain" hidden={!vis('forwardDomain')}>
-        <ForwardDomainSection />
-      </section>
+    <div className="flex flex-col gap-4">
+      {/* 3.7.1: fiecare componentă îşi randează SettingsSection-ul; `data-setting-id` stă scris aici,
+          literal, fiindcă indexul căutării (settingsIndex.test.ts) îl citeşte din *Tab.tsx */}
+      <CertificatesSection data-setting-id="certificates" hidden={!vis('certificates')} />
+      <ForwardDomainSection data-setting-id="forwardDomain" hidden={!vis('forwardDomain')} />
     </div>
   )
 }

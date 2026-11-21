@@ -8,10 +8,11 @@ import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { ArrowRightIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
-import { downloadBlob, field, heading } from './ui'
+import { downloadBlob, field } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
-import { Button, ErrorState, SegmentedControl } from '../ui'
+import { Badge, Button, ErrorState, Field, SegmentedControl, SettingsSection } from '../ui'
+import SectionLoading from './SectionLoading'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -231,22 +232,25 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
   // extins second_gate şi la operaţiile de cont (AccountTab o foloseşte şi el acum).
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
 
+  // 3.7.1 (audit UX Setări M8/Me1/Me3/Me4): secţiuni-card cu etichete vizibile; fiecare secret e
+  // numit explicit (parola cheii ≠ parola ta EverShell); motivul unui buton dezactivat stă lângă el.
+  const tokWhy = !newTok.name ? t('settings.tokens.whyName')
+    : tokPlan === 'password' && !newTok.current_password ? t('settings.tokens.whyPassword')
+    : !!newTok.role && !scopeOk(newTok.scope_kind, newTok.scope_value) ? t('settings.tokens.whyScope') : ''
   return (
-    <div>
-      <section data-setting-id="signingKey" hidden={!vis('signingKey')}>
-        {/* ── Cheie de semnare a flotei ── */}
-        <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('settings.signingKey')}<HelpTip id="signingKey" /></h3>
-        <p className="mt-1 text-xs text-slate-500">
-          {t('settings.signHintA')} <span className="text-slate-300">{t('settings.signHintYourKey')}</span>{t('settings.signHintB')} <span className="text-slate-300">{t('settings.signHintBeforeEnroll')}</span>{t('settings.signHintC')}
-        </p>
+    <div className="flex flex-col gap-4">
+      {/* ── Cheie de semnare a flotei ── */}
+      <SettingsSection data-setting-id="signingKey" hidden={!vis('signingKey')} instanceWide
+        title={t('settings.signingKey')} titleExtra={<HelpTip id="signingKey" />}
+        description={t('settings.signingKeyDesc')}>
         {sign === null && signLoadErr !== null ? (
-          <div className="mt-2 rounded-md ring-1 ring-ink-700">
+          <div className="rounded-md ring-1 ring-ink-700">
             <ErrorState compact title={t('settings.notLoaded')} message={signLoadErr} onRetry={loadSigning} />
           </div>
         ) : sign === null ? (
-          <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
+          <SectionLoading />
         ) : !sign.exists ? (
-          <div className="mt-2 flex flex-col gap-2">
+          <div className="flex flex-col gap-3">
             <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
               {t('settings.sign.noKeyYet')}
             </div>
@@ -256,67 +260,78 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
               options={[{ value: 'gen', label: t('settings.sign.genNewKey') }, { value: 'import', label: t('settings.sign.importExistingKey') }]} />
             {signMode === 'gen' ? (
               <>
-                <input type="password" value={signPass} onChange={(e) => setSignPass(e.target.value)}
-                  placeholder={t('settings.sign.keyPassPlaceholder')} aria-label={t('settings.sign.keyPass')}
-                  autoComplete="new-password" className={field} />
-                <input type="password" value={signReauth} onChange={(e) => setSignReauth(e.target.value)}
-                  placeholder={t('settings.reauthPlaceholder')} aria-label={t('settings.reauthLabel')}
-                  autoComplete="current-password" className={field} />
-                <input type="password" value={signPass2} onChange={(e) => setSignPass2(e.target.value)}
-                  placeholder={t('settings.sign.confirmPassIfSet')} aria-label={t('settings.sign.confirmKeyPass')}
-                  autoComplete="new-password" className={field} />
-                <p className="text-2xs text-slate-500">
-                  {t('settings.sign.storageHintA')} <span className="text-slate-300">{t('settings.sign.storageEncrypted')}</span> {t('settings.sign.storageHintB')} <span className="wt-warn">{t('settings.sign.storageInClear')}</span>{t('settings.sign.storageHintC')}
-                  <code className="px-1">/data</code> {t('settings.sign.storageHintD')} <span className="text-slate-300">{t('settings.sign.storageWholeFleet')}</span>.
-                </p>
+                <Field label={t('settings.sign.keyPass')} hint={t('settings.sign.keyPassHint')}>
+                  <input type="password" value={signPass} onChange={(e) => setSignPass(e.target.value)}
+                    autoComplete="new-password" className={field} />
+                </Field>
+                <Field label={t('settings.sign.confirmKeyPass')}>
+                  <input type="password" value={signPass2} onChange={(e) => setSignPass2(e.target.value)}
+                    autoComplete="new-password" className={field} />
+                </Field>
+                <Field label={t('settings.backup.yourPassword')}>
+                  <input type="password" value={signReauth} onChange={(e) => setSignReauth(e.target.value)}
+                    autoComplete="current-password" className={field} />
+                </Field>
+                <p className="text-xs text-slate-500">{t('settings.sign.storageHint')}</p>
                 <div>
-                  <Button variant="primary" disabled={signBusy} onClick={genSigningKey}>
-                    {signBusy ? t('settings.generating') : t('settings.sign.genFleetKey')}
+                  <Button variant="primary" type="button" loading={signBusy} onClick={genSigningKey}>
+                    {t('settings.sign.genFleetKey')}
                   </Button>
                 </div>
               </>
             ) : (
               <>
-                <p className="text-2xs text-slate-500">
-                  {t('settings.sign.importHintA')} <span className="text-slate-300">{t('settings.sign.importHintAlreadySigned')}</span>{t('settings.sign.importHintB')} <span className="text-slate-300">{t('settings.sign.importHintNoReenroll')}</span>.
-                </p>
+                <p className="text-xs text-slate-500">{t('settings.sign.importHint')}</p>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => signPemRef.current?.click()}
-                    className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+                  <Button type="button" variant="secondary" onClick={() => signPemRef.current?.click()}>
                     {t('settings.sign.choosePemFile')}
-                  </button>
+                  </Button>
                   <span className="min-w-0 truncate text-xs text-slate-400">{signPemName || t('settings.noFile')}</span>
                   <input ref={signPemRef} type="file" accept=".pem,.key,application/x-pem-file" className="hidden"
+                    aria-label={t('settings.sign.choosePemFile')}
                     onChange={async (e) => {
                       const f = e.target.files?.[0]
                       if (f) { setSignPem(await f.text()); setSignPemName(f.name); setSignErr('') }
                     }} />
                 </div>
-                <input type="password" value={signImpLoadPass} onChange={(e) => setSignImpLoadPass(e.target.value)}
-                  placeholder={t('settings.sign.pemPassPlaceholder')} aria-label={t('settings.sign.pemPass')} autoComplete="off" className={field} />
-                <input type="password" value={signReauth} onChange={(e) => setSignReauth(e.target.value)}
-                  placeholder={t('settings.reauthPlaceholder')} aria-label={t('settings.reauthLabel')}
-                  autoComplete="current-password" className={field} />
-                <input type="password" value={signImpStorePass} onChange={(e) => setSignImpStorePass(e.target.value)}
-                  placeholder={t('settings.sign.storePassPlaceholder')} aria-label={t('settings.sign.storePass')}
-                  autoComplete="new-password" className={field} />
-                <div>
-                  <Button variant="primary" disabled={signBusy || !signPem} onClick={importSigningKey}>
-                    {signBusy ? t('settings.importing') : t('settings.sign.importKey')}
+                <Field label={t('settings.sign.pemPass')} hint={t('settings.sign.pemPassHint')}>
+                  <input type="password" value={signImpLoadPass} onChange={(e) => setSignImpLoadPass(e.target.value)}
+                    autoComplete="off" className={field} />
+                </Field>
+                <Field label={t('settings.sign.storePass')} hint={t('settings.sign.storePassHint')}>
+                  <input type="password" value={signImpStorePass} onChange={(e) => setSignImpStorePass(e.target.value)}
+                    autoComplete="new-password" className={field} />
+                </Field>
+                <Field label={t('settings.backup.yourPassword')}>
+                  <input type="password" value={signReauth} onChange={(e) => setSignReauth(e.target.value)}
+                    autoComplete="current-password" className={field} />
+                </Field>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="primary" type="button" loading={signBusy} disabled={!signPem} onClick={importSigningKey}
+                    aria-describedby={!signPem ? 'sign-import-why' : undefined}>
+                    {t('settings.sign.importKey')}
                   </Button>
+                  {!signPem && <span id="sign-import-why" className="text-xs text-slate-500">{t('settings.sign.chooseKeyFile')}</span>}
                 </div>
               </>
             )}
           </div>
         ) : (
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="wt-good">{t('settings.sign.keyPresent')}</span>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge tone="ok" size="md">{t('settings.sign.keyPresent')}</Badge>
               {sign.encrypted && (sign.unlocked
-                ? <span className="text-slate-500">{t('settings.sign.encryptedUnlocked')}</span>
-                : <span className="wt-warn">{t('settings.sign.encryptedLocked')}</span>)}
-              {!sign.encrypted && <span className="text-slate-500">{t('settings.sign.inClearOnServer')}</span>}
+                ? <Badge tone="neutral" size="md">{t('settings.sign.encryptedUnlocked')}</Badge>
+                : <Badge tone="warn" size="md">{t('settings.sign.encryptedLocked')}</Badge>)}
             </div>
+            {/* 3.7.1 (audit UX Setări Me3): cheia în clar pe server e un RISC, nu o stare neutră — ton de
+                avertisment şi, lângă ea, ce poţi face acum (o copie criptată, offline). Criptarea pe loc a
+                cheii existente nu are rută în gateway (importul refuză cât timp există o cheie). */}
+            {!sign.encrypted && (
+              <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25" data-sign-inclear>
+                {t('settings.sign.inClearWarning')}
+              </div>
+            )}
             {sign.pubkey && (
               <div className="font-mono text-2xs text-slate-500 break-all">
                 {t('settings.sign.fingerprint')} {sign.pubkey.slice(0, 16)}…{sign.pubkey.slice(-8)}
@@ -324,59 +339,61 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
             )}
             {/* Întrebarea pe care şi-o pune oricine modifică agentul: „trebuie să semnez ceva?".
                 Răspunsul e nu, dar nicăieri nu scria — iar tăcerea aici costă timp pierdut. */}
-            <p className="text-2xs text-slate-500">{t('settings.sign.selfSigns')}</p>
+            <p className="text-xs text-slate-500">{t('settings.sign.selfSigns')}</p>
             {sign.encrypted && !sign.unlocked && (
-              <div className="flex gap-2">
-                <input type="password" value={signUnlockPass} onChange={(e) => setSignUnlockPass(e.target.value)}
-                  placeholder={t('settings.sign.keyPassword')} aria-label={t('settings.sign.keyPassword')} autoComplete="off" className={field} />
-                <Button variant="primary" disabled={signBusy} onClick={unlockSigning} className="shrink-0">
+              <div className="flex flex-wrap items-end gap-2">
+                <Field label={t('settings.sign.keyPassword')} className="min-w-0 flex-1">
+                  <input type="password" value={signUnlockPass} onChange={(e) => setSignUnlockPass(e.target.value)}
+                    autoComplete="off" className={field} />
+                </Field>
+                <Button variant="primary" type="button" loading={signBusy} onClick={unlockSigning} className="shrink-0">
                   {t('settings.sign.unlock')}
                 </Button>
               </div>
             )}
             <div className="flex flex-wrap gap-2">
-              <button onClick={downloadSigningKey} disabled={signBusy}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700 disabled:opacity-50">
-                {t('settings.downloadEncryptedBackup')}
-              </button>
+              {/* 3.7.1 (audit UX Setări M3): numele spune CE se descarcă — nu „backup criptat", ca exportul
+                  copiei de siguranţă din Backup, care e alt fişier, cu altă parolă */}
+              <Button type="button" variant="secondary" loading={signBusy} onClick={downloadSigningKey}>
+                {t('settings.sign.downloadKey')}
+              </Button>
               {sign.encrypted && sign.unlocked && (
-                <button onClick={lockSigning}
-                  className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+                <Button type="button" variant="secondary" onClick={lockSigning}>
                   {t('settings.sign.lock')}
-                </button>
+                </Button>
               )}
             </div>
             {sign.encrypted && sign.unlocked && (
-              <p className="text-2xs text-slate-500">
+              <p className="text-xs text-slate-500">
                 {t('settings.sign.unlockedWarning')}
               </p>
             )}
           </div>
         )}
-        {signMsg && <div className="mt-2 text-sm wt-good">{signMsg}</div>}
-        {signErr && <div className="mt-2 text-sm wt-danger">{signErr}</div>}
-      </section>
+        <span role="status" className={signMsg ? 'mt-2 block text-sm wt-good' : 'sr-only'}>{signMsg}</span>
+        <span role="alert" className={signErr ? 'mt-2 block text-sm wt-danger' : 'sr-only'}>{signErr}</span>
+      </SettingsSection>
 
-      <section data-setting-id="tokens" hidden={!vis('tokens')}>
-        {/* ── Token-uri de automatizare ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.tokens.title')}<HelpTip id="tokens" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.tokens.hint')}</p>
+      {/* ── Token-uri de automatizare ── */}
+      <SettingsSection data-setting-id="tokens" hidden={!vis('tokens')} instanceWide
+        title={t('settings.tokens.title')} titleExtra={<HelpTip id="tokens" />}
+        description={t('settings.tokens.hint')}>
         {tokPlain && (
-          <div role="status" aria-live="polite" className="mt-2 rounded-md bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
+          <div role="status" aria-live="polite" className="mb-2 rounded-md bg-emerald-500/10 p-3 ring-1 ring-emerald-500/30">
             <p className="wt-good text-xs">{t('settings.tokens.copyNow')}</p>
             <div className="mt-1 flex items-center gap-2">
               <code className="min-w-0 flex-1 break-all rounded-md bg-ink-900 px-2 py-1 font-mono text-xs text-slate-200">{tokPlain}</code>
-              <button type="button" onClick={() => copyText(tokPlain).then((okc) => { if (okc) { setTokCopied(true); setTimeout(() => setTokCopied(false), 1500) } })}
-                className="shrink-0 text-xs wt-link hover:underline">
+              <Button type="button" variant="secondary" size="sm" className="shrink-0"
+                onClick={() => copyText(tokPlain).then((okc) => { if (okc) { setTokCopied(true); setTimeout(() => setTokCopied(false), 1500) } })}>
                 {tokCopied ? t('settings.cloud.copied') : t('settings.cloud.copy')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
         <NotLoaded state={tokState} onRetry={loadTokens} />
-        <ul className="mt-2 flex flex-col gap-1">
+        <ul className="flex flex-col gap-1">
           {canSave(tokState) && tokens.map((tk) => (
-            <li key={tk.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+            <li key={tk.id} className="flex flex-wrap items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{tk.name}</span>
               <span className="shrink-0 font-mono text-2xs text-slate-500">{tk.scopes}</span>
               {(() => {
@@ -392,46 +409,56 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
                 {tk.expired ? t('settings.tokens.expired')
                   : t('settings.tokens.expires', { date: fmtTs(tk.expires, 'date') })}
               </span>
-              <span className="shrink-0 text-2xs text-slate-600">
+              <span className="shrink-0 text-2xs text-slate-500">
                 {tk.last_used ? t('settings.tokens.lastUsed', { when: fmtTs(tk.last_used, 'date') })
                   : t('settings.tokens.neverUsed')}
               </span>
-              <button onClick={() => revokeToken(tk)} className="shrink-0 text-xs wt-danger hover:underline">
+              <Button type="button" variant="danger" size="sm" className="shrink-0" onClick={() => revokeToken(tk)}
+                aria-label={t('settings.tokens.revokeAria', { name: tk.name })}>
                 {t('settings.tokens.revoke')}
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
-        <form onSubmit={addToken} className="mt-3 flex flex-col gap-2">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input value={newTok.name} onChange={(e) => setNewTok({ ...newTok, name: e.target.value })}
-              placeholder={t('settings.tokens.namePlaceholder')} aria-label={t('settings.tokens.name')} className={field} />
-            <label className="flex items-center gap-2 text-sm text-slate-400">
-              {t('settings.tokens.days')}
+        <form onSubmit={addToken} className="mt-4 flex flex-col gap-3 border-t border-ink-700/70 pt-3"
+          aria-label={t('settings.tokens.newTitle')}>
+          <h4 className="text-sm font-medium text-slate-200">{t('settings.tokens.newTitle')}</h4>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <Field label={t('settings.tokens.name')} hint={t('settings.tokens.nameHint')} className="min-w-0 flex-1">
+              <input value={newTok.name} onChange={(e) => setNewTok({ ...newTok, name: e.target.value })}
+                placeholder={t('settings.tokens.namePlaceholder')} className={field} />
+            </Field>
+            <Field label={t('settings.tokens.days')} className="sm:w-32">
               <input type="number" min={1} max={365} value={newTok.days}
                 onChange={(e) => setNewTok({ ...newTok, days: Number(e.target.value) })}
-                aria-label={t('settings.tokens.days')} className={field + ' w-20'} />
-            </label>
+                className={field} />
+            </Field>
           </div>
-          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={newTok.read}
-                onChange={(e) => setNewTok({ ...newTok, read: e.target.checked })} />
-              {t('settings.tokens.scopeRead')}
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={newTok.run}
-                onChange={(e) => setNewTok({ ...newTok, run: e.target.checked })} />
-              {t('settings.tokens.scopeRun')}
-            </label>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <select value={newTok.role} aria-label={t('settings.tokens.role')} className={field + ' sm:w-56'} data-token-role
-              onChange={(e) => setNewTok({ ...newTok, role: e.target.value })}>
-              {ROLE_KEYS.filter((k) => k !== 'owner').map((k) => <option key={k} value={k}>{t('roles.role.' + k)}</option>)}
-              {(tokRoles?.custom ?? []).map((r) => <option key={r.id} value={roleValue(r)}>{r.name}</option>)}
-              <option value="">{t('settings.tokens.roleNone')}</option>
-            </select>
+          {/* bife, nu comutatoare: fac parte dintr-un formular trimis cu „Create token" */}
+          <fieldset className="flex flex-col gap-1">
+            <legend className="text-sm font-medium text-slate-300">{t('settings.tokens.scopes')}</legend>
+            <div className="flex flex-wrap items-center gap-4 text-sm text-slate-300">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={newTok.read}
+                  onChange={(e) => setNewTok({ ...newTok, read: e.target.checked })} />
+                {t('settings.tokens.scopeRead')}
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={newTok.run}
+                  onChange={(e) => setNewTok({ ...newTok, run: e.target.checked })} />
+                {t('settings.tokens.scopeRun')}
+              </label>
+            </div>
+          </fieldset>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <Field label={t('settings.tokens.role')} className="sm:w-56">
+              <select value={newTok.role} className={field} data-token-role
+                onChange={(e) => setNewTok({ ...newTok, role: e.target.value })}>
+                {ROLE_KEYS.filter((k) => k !== 'owner').map((k) => <option key={k} value={k}>{t('roles.role.' + k)}</option>)}
+                {(tokRoles?.custom ?? []).map((r) => <option key={r.id} value={roleValue(r)}>{r.name}</option>)}
+                <option value="">{t('settings.tokens.roleNone')}</option>
+              </select>
+            </Field>
             {newTok.role && (
               <div className="min-w-0 flex-1">
                 <ScopePicker idPrefix="token" kind={newTok.scope_kind} value={newTok.scope_value} hosts={tokHosts}
@@ -444,35 +471,37 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
             <p className="text-xs text-warn" data-token-run-warning>{t('settings.tokens.runNeedsRole')}</p>
           )}
           {tokPlan === 'password' && (
-            <input type="password" value={newTok.current_password} autoComplete="current-password"
-              onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })}
-              placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+            <Field label={t('settings.backup.yourPassword')}>
+              <input type="password" value={newTok.current_password} autoComplete="current-password"
+                onChange={(e) => setNewTok({ ...newTok, current_password: e.target.value })} className={field} />
+            </Field>
           )}
-          <div className="flex items-center gap-3">
-            <Button variant="primary" type="submit"
-              disabled={busy || (tokPlan === 'password' && !newTok.current_password) || !newTok.name || (!!newTok.role && !scopeOk(newTok.scope_kind, newTok.scope_value))}>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="primary" type="submit" loading={busy} disabled={!!tokWhy}
+              aria-describedby={tokWhy ? 'tok-create-why' : undefined}>
               {t('settings.tokens.create')}
             </Button>
-            {tokErr && <span className="text-sm wt-danger">{tokErr}</span>}
+            {tokWhy && <span id="tok-create-why" className="text-xs text-slate-500">{tokWhy}</span>}
+            <span role="alert" className={tokErr ? 'text-sm wt-danger' : 'sr-only'}>{tokErr}</span>
           </div>
         </form>
-      </section>
+      </SettingsSection>
 
-      <section data-setting-id="enrollGroups" hidden={!vis('enrollGroups')}>
-        {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.enrollGroups.title')}<HelpTip id="enrollGroups" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.hint')}</p>
+      {/* ── Token-uri de înrolare DE GRUP (onboarding la scară) ── */}
+      <SettingsSection data-setting-id="enrollGroups" hidden={!vis('enrollGroups')} instanceWide
+        title={t('settings.enrollGroups.title')} titleExtra={<HelpTip id="enrollGroups" />}
+        description={t('settings.enrollGroups.hint')}>
         {/* crearea trăieşte în fluxul de onboarding (+ host → „Mai multe maşini"); aici e doar
             gestiunea credenţialei (listă + revocare), plus un pointer ca s-o găseşti. */}
-        <p className="mt-1 text-xs text-slate-500">{t('settings.enrollGroups.createHint')}</p>
+        <p className="text-xs text-slate-500">{t('settings.enrollGroups.createHint')}</p>
         <NotLoaded state={groupState} onRetry={loadGroups} />
         {canSave(groupState) && groups.length === 0 && (
-          <p className="mt-2 text-xs text-slate-600">{t('settings.enrollGroups.none')}</p>
+          <p className="mt-2 text-xs text-slate-500">{t('settings.enrollGroups.none')}</p>
         )}
         <p role="alert" className={groupErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{groupErr}</p>
         <ul className="mt-2 flex flex-col gap-1">
           {canSave(groupState) && groups.map((g) => (
-            <li key={g.id} className="flex items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
+            <li key={g.id} className="flex flex-wrap items-center gap-2 rounded-md bg-ink-800/60 px-3 py-2 text-sm ring-1 ring-ink-700">
               <span className="min-w-0 flex-1 truncate text-slate-200">{g.name}
                 {g.folder && <span className="ml-1 inline-flex items-center gap-0.5 text-2xs text-slate-500"><ArrowRightIcon size={10} />{g.folder}</span>}
                 {g.require_2fa ? (
@@ -495,15 +524,15 @@ export default function AccessTab(props: { onAccountChanged: () => void }) {
                     : t('settings.tokens.expires', { date: fmtTs(g.expires, 'date') })}
               </span>
               {!g.revoked && (
-                <button onClick={() => revokeGroup(g)} className="shrink-0 text-xs wt-danger hover:underline">
+                <Button type="button" variant="danger" size="sm" className="shrink-0" onClick={() => revokeGroup(g)}
+                  aria-label={t('settings.tokens.revokeAria', { name: g.name })}>
                   {t('settings.tokens.revoke')}
-                </button>
+                </Button>
               )}
             </li>
           ))}
         </ul>
-      </section>
-
+      </SettingsSection>
     </div>
   )
 }

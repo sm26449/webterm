@@ -4,8 +4,8 @@ import { useI18n } from '../../lib/i18n'
 import { loadPerms, RolesCatalogue, usePerms, can } from '../../lib/perms'
 import { effectiveSubTab, hasNoRole, loadSubTab, saveSubTab, subTabOfSection, visibleSubTabs,
   type SsoMapping, type UserRow, type UsersSubTab } from '../../lib/usersAdmin'
-import { heading } from './ui'
-import { ErrorState } from '../ui'
+import { ErrorState, SettingsSection } from '../ui'
+import HelpTip from '../HelpTip'
 import { type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 import SubTabs from './users/SubTabs'
@@ -115,16 +115,16 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
           )}
 
           <div {...panel('accounts')} data-setting-id="users">
-            {!withTabs && <h3 className={heading + ' !mt-0'}>{t('settings.users.title')}</h3>}
             {tabs.includes('accounts') && (
-              <>
+              // 3.7.1: secţiune-card, ca restul Setărilor (titlul spune ce e lista, nu doar sub-tab-ul)
+              <SettingsSection title={t('settings.users.title')} titleExtra={<HelpTip id="roles" />}>
                 <NotLoaded state={usersState} onRetry={() => { setUsersState({ status: 'loading' }); void loadUsers() }} />
                 {usersOk && (
                   <AccountsPanel users={users} catalogue={catalogue} hosts={hosts} isOwner={isOwner}
                     reload={reloadAccounts} setUsers={setUsers} done={doneAt('accounts')} fail={failAt('accounts')} />
                 )}
                 {status('accounts')}
-              </>
+              </SettingsSection>
             )}
           </div>
 
@@ -143,10 +143,9 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
             {tabs.includes('sso') && (
               <>
                 {ssoErr && (
-                  <>
-                    <h3 className={heading + ' !mt-0'}>{t('roles.sso.title')}</h3>
+                  <SettingsSection title={t('roles.sso.title')}>
                     <ErrorState compact title={t('roles.sso.loadFailed')} message={ssoErr} onRetry={() => { void loadSso() }} />
-                  </>
+                  </SettingsSection>
                 )}
                 {sso?.enabled && (
                   <SsoPanel catalogue={catalogue} hosts={hosts} isOwner={isOwner} mappings={sso.mappings}

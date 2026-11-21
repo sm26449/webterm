@@ -6,9 +6,9 @@ import { fmtTs, getTimezone } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
 import { askSecret } from '../../lib/secretPrompt'
 import { certStateText, certTone, renewMode, sortCerts, type CertItem, type CertStatus } from '../../lib/certs'
-import { field, heading } from './ui'
+import { field } from './ui'
 import HelpTip from '../HelpTip'
-import { Badge, Button, CodeLine } from '../ui'
+import { Badge, Button, CodeLine, Field, SettingsSection } from '../ui'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -19,7 +19,7 @@ import NotLoaded from './NotLoaded'
 // second factor, re-checked by the server), or shows it to copy when no host is picked.
 const TONE_BADGE = { good: 'ok', warn: 'warn', danger: 'danger', muted: 'neutral' } as const
 
-export default function CertificatesSection() {
+export default function CertificatesSection(props: { 'data-setting-id': string; hidden?: boolean }) {
   const { t } = useI18n()
   const vis = useSectionVisible()
   const [st, setSt] = useState<CertStatus | null>(null)
@@ -106,12 +106,12 @@ export default function CertificatesSection() {
 
   const items = st ? sortCerts(st.items) : []
   return (
-    <>
-      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.certs.title')}<HelpTip id="certificates" /></h3>
-      <p className="mt-1 text-xs text-slate-500">{t('settings.certs.hint', { warn: st?.warn_days ?? 14, crit: st?.crit_days ?? 3 })}</p>
+    <SettingsSection data-setting-id={props['data-setting-id']} hidden={props.hidden} instanceWide
+      title={t('settings.certs.title')} titleExtra={<HelpTip id="certificates" />}
+      description={t('settings.certs.hint', { warn: st?.warn_days ?? 14, crit: st?.crit_days ?? 3 })}>
       <NotLoaded state={load} onRetry={() => { void reload() }} />
       {st && (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="flex flex-col gap-2">
           {!st.enabled && <p className="text-xs text-slate-500">{t('settings.certs.disabled')}</p>}
           {st.enabled && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -172,20 +172,23 @@ export default function CertificatesSection() {
           </ul>
           {st.can_renew && st.enabled && (
             <div className="mt-1 flex flex-col gap-1 text-xs text-slate-400">
-              <span className="font-medium text-slate-300">{t('settings.certs.hostTitle')}</span>
-              <span className="text-slate-500">{t('settings.certs.hostHint')}</span>
               {st.renew_host ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <span>{t('settings.certs.hostPicked', { host: st.renew_host.name })}</span>
-                  <Button variant="ghost" size="sm" type="button" onClick={() => { void saveHost(0) }}>{t('settings.certs.hostChange')}</Button>
-                </div>
+                <>
+                  <span className="text-sm font-medium text-slate-300">{t('settings.certs.hostTitle')}</span>
+                  <span className="text-slate-500">{t('settings.certs.hostHint')}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span>{t('settings.certs.hostPicked', { host: st.renew_host.name })}</span>
+                    <Button variant="ghost" size="sm" type="button" onClick={() => { void saveHost(0) }}>{t('settings.certs.hostChange')}</Button>
+                  </div>
+                </>
               ) : (
-                <div className="flex flex-wrap items-center gap-2">
-                  <select value={pick} onChange={(e) => setPick(e.target.value)} aria-label={t('settings.certs.hostTitle')}
-                    className={`${field} max-w-xs`}>
-                    <option value="">{t('settings.certs.hostNone')}</option>
-                    {(hosts ?? []).map((h) => <option key={h.id} value={String(h.id)}>{h.name}</option>)}
-                  </select>
+                <div className="flex flex-wrap items-end gap-2">
+                  <Field label={t('settings.certs.hostTitle')} hint={t('settings.certs.hostHint')} className="min-w-0 max-w-xs flex-1">
+                    <select value={pick} onChange={(e) => setPick(e.target.value)} className={field}>
+                      <option value="">{t('settings.certs.hostNone')}</option>
+                      {(hosts ?? []).map((h) => <option key={h.id} value={String(h.id)}>{h.name}</option>)}
+                    </select>
+                  </Field>
                   <Button variant="secondary" size="sm" type="button" disabled={!pick}
                     onClick={() => { void saveHost(Number(pick)) }}>{t('settings.save')}</Button>
                 </div>
@@ -194,6 +197,6 @@ export default function CertificatesSection() {
           )}
         </div>
       )}
-    </>
+    </SettingsSection>
   )
 }

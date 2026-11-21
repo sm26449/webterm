@@ -3,8 +3,8 @@ import { api, withSecondFactor as withSecondFactorT, type ReauthMe } from '../..
 import { useI18n } from '../../../lib/i18n'
 import { groupPerms, heldEverywhere, ROLE_PRESETS, RoleRow, RolesCatalogue, roleValue, usePerms } from '../../../lib/perms'
 import { roleUsage, type SsoMapping, type UserRow } from '../../../lib/usersAdmin'
-import { field, heading } from '../ui'
-import { Badge, Button } from '../../ui'
+import { field } from '../ui'
+import { Badge, Button, Field, SettingsSection } from '../../ui'
 import HelpTip from '../../HelpTip'
 import { RETURN_USERS, useAccessReauth } from './shared'
 
@@ -44,13 +44,15 @@ function RoleEditor(props: {
       <div id={`${formId}-title`} className="text-sm font-semibold text-slate-200">
         {draft.id == null ? t('roles.custom.formTitleNew') : t('roles.custom.formTitleEdit', { name: draft.name })}
       </div>
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <input ref={nameRef} type="text" value={draft.name} maxLength={60} autoComplete="off" aria-label={t('roles.custom.name')}
-          placeholder={t('roles.custom.name')} className={field + ' sm:w-56'}
-          onChange={(e) => props.onChange({ ...draft, name: e.target.value })} />
-        <input type="text" value={draft.description} maxLength={300} autoComplete="off"
-          aria-label={t('roles.custom.description')} placeholder={t('roles.custom.description')} className={field}
-          onChange={(e) => props.onChange({ ...draft, description: e.target.value })} />
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <Field label={t('roles.custom.name')} className="sm:w-56">
+          <input ref={nameRef} type="text" value={draft.name} maxLength={60} autoComplete="off" className={field}
+            onChange={(e) => props.onChange({ ...draft, name: e.target.value })} />
+        </Field>
+        <Field label={t('roles.custom.description')} className="min-w-0 flex-1">
+          <input type="text" value={draft.description} maxLength={300} autoComplete="off" className={field}
+            onChange={(e) => props.onChange({ ...draft, description: e.target.value })} />
+        </Field>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
         <span>{t('roles.custom.preset')}</span>
@@ -175,9 +177,8 @@ export default function RolesPanel(props: {
   const usageKnown = props.users !== null
   return (
     <>
-      <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('roles.builtin.title')}<HelpTip id="roles" /></h3>
-      <p className="mt-1 text-xs text-slate-500">{t('roles.builtin.hint')}</p>
-      <ul className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2" data-builtin-roles>
+      <SettingsSection title={t('roles.builtin.title')} titleExtra={<HelpTip id="roles" />} description={t('roles.builtin.hint')}>
+      <ul className="grid grid-cols-1 gap-2 md:grid-cols-2" data-builtin-roles>
         {(cat?.roles ?? []).map((r) => {
           const u = usageKnown ? roleUsage(r.key, props.users ?? [], props.mappings ?? []) : null
           return (
@@ -196,18 +197,17 @@ export default function RolesPanel(props: {
           )
         })}
       </ul>
+      </SettingsSection>
 
-      <div className="mt-6 flex flex-wrap items-center gap-2">
-        <h3 className={heading + ' !mt-0 flex flex-1 items-center gap-2'}>{t('roles.custom.listTitle')}<HelpTip id="customRoles" /></h3>
-        {cat && props.canEdit && !draft && (
-          <Button ref={newBtnRef} type="button" size="sm" variant="primary" data-new-role
-            onClick={() => setDraft({ id: null, name: '', description: '', perms: new Set(['host.view']) })}>
-            {t('roles.custom.new')}
-          </Button>
-        )}
-      </div>
-      <p className="mt-1 text-xs text-slate-500">{t('roles.custom.hint')}</p>
-      {!props.canEdit && <p className="mt-1 text-xs text-slate-400">{t('roles.custom.readOnly')}</p>}
+      <SettingsSection className="mt-4" title={t('roles.custom.listTitle')} titleExtra={<HelpTip id="customRoles" />}
+        description={t('roles.custom.hint')}>
+      {cat && props.canEdit && !draft && (
+        <Button ref={newBtnRef} type="button" size="sm" variant="primary" data-new-role
+          onClick={() => setDraft({ id: null, name: '', description: '', perms: new Set(['host.view']) })}>
+          {t('roles.custom.new')}
+        </Button>
+      )}
+      {!props.canEdit && <p className="text-xs text-slate-400">{t('roles.custom.readOnly')}</p>}
       {cat && draft && (
         <RoleEditor catalogue={cat} draft={draft} held={held} busy={busy} onChange={setDraft}
           onSubmit={save} onCancel={close} />
@@ -251,6 +251,7 @@ export default function RolesPanel(props: {
           )
         })}
       </ul>
+      </SettingsSection>
     </>
   )
 }

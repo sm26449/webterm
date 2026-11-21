@@ -457,7 +457,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   return (
     <div className="space-y-4">
-      <SettingsSection title={t('settings.backup.planTitle')} description={t('settings.backup.planDesc')}
+      <SettingsSection title={t('settings.backup.planTitle')} titleExtra={<HelpTip id="backup" />} description={t('settings.backup.planDesc')}
         instanceWide hidden={!vis('backupAuto') && !vis('backupCloud')}>
         {/* starea planului: primul lucru pe care îl citeşti (audit #5) */}
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 rounded-md bg-ink-800/60 px-3 py-2 text-xs ring-1 ring-ink-700"
@@ -735,7 +735,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
       {/* export manual: fiecare secret îşi spune numele (audit M8) */}
       <SettingsSection data-setting-id="backupDownload" hidden={!vis('backupDownload')}
-        title={t('settings.backup.downloadTitle')}
+        title={t('settings.backup.downloadTitle')} titleExtra={<HelpTip id="backup" />}
         description={<>
           {t('settings.backup.downloadHintA')} <span className="text-slate-300">{t('settings.backup.encryptedWithPass')}</span> {t('settings.backup.downloadHintB')} <span className="text-slate-300">{t('settings.backup.dontLoseIt')}</span>{t('settings.backup.downloadHintC')}
         </>}
@@ -761,7 +761,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
       {/* restaurarea: ultima, în zona periculoasă, cu confirmarea ei (ConfirmModal) neschimbată (audit Me3) */}
       <SettingsSection data-setting-id="backupRestore" hidden={!vis('backupRestore')} tone="danger"
-        title={t('settings.backup.restoreTitle')}
+        title={t('settings.backup.restoreTitle')} titleExtra={<HelpTip id="backup" />}
         description={<>
           {t('settings.backup.restoreHintA')} <span className="font-mono">.wtbk</span> {t('settings.backup.restoreHintB')}
           <span className="wt-warn"> {t('settings.backup.restoreRestarts')}</span> {t('settings.backup.restoreHintC')}

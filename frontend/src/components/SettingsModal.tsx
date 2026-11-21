@@ -438,7 +438,7 @@ export default function SettingsModal(props: {
         {pane('actualizari', <UpdatesTab />)}
 
         {/* Operare. 3.6.8: un rând de System health poate trimite la secţiunea care îl rezolvă */}
-        {pane('sanatate', <HealthTab onJump={(c, section) => {
+        {pane('sanatate', <HealthTab onChanged={props.onAccountChanged} onJump={(c, section) => {
           // ţinta trece prin acelaşi normalizator ca orice link adânc (id-uri retrase, secţiuni mutate)
           const target = resolveSettingsTarget({ cat: c, section })
           if (!target) return

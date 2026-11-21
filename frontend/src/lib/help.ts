@@ -50,6 +50,16 @@ export const HELP = {
   transfers: { doc: 'docs/TRANSFERS.md#a-paste-is-a-paste-3616' },
   rootMove: { doc: 'docs/TRANSFERS.md#why-cant-i-upload-into-a-root-owned-folder-369' },
   splitViews: { doc: 'docs/SPLIT-VIEWS.md#split-views' },
+  // 3.7.1 (audit UX Setări, „? lipsă"): Account & security, Audit, Appearance, Backup, fus orar, versiune
+  account: { doc: 'docs/SECURITY-FEATURES.md#overview' },
+  devices: { doc: 'docs/SECURITY-FEATURES.md#overview' },
+  passkeys: { doc: 'docs/SECURITY-FEATURES.md#overview' },
+  totp: { doc: 'docs/RUNBOOK.md#5-locked-out-of-your-own-account' },
+  audit: { doc: 'docs/CONFIGURATION.md#sign-in-sessions-audit' },
+  appearance: { doc: 'docs/FEATURES.md#appearance--accessibility' },
+  timezone: { doc: 'docs/FEATURES.md#appearance--accessibility' },
+  versionCheck: { doc: 'docs/CONFIGURATION.md#gateway-env' },
+  backup: { doc: 'docs/RUNBOOK.md#backuprestore-from-the-application-v1061-no-shell-on-the-server' },
 } satisfies Record<string, { doc: string; example?: (origin: string) => string }>
 
 export type HelpId = keyof typeof HELP

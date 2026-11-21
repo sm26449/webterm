@@ -1,8 +1,9 @@
 import { FormEvent, useState } from 'react'
 import { api, ApiError, errText, withSecondFactor as withSecondFactorT } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { field, heading } from './ui'
-import { Button } from '../ui'
+import { field } from './ui'
+import { Button, Field, SettingsSection } from '../ui'
+import HelpTip from '../HelpTip'
 
 // 3.7.1 (audit UX Setări #6): pe ecrane tactile câmpurile contului ating 44 px (.wt-touch, index.css)
 const touchField = `${field} wt-touch`
@@ -55,40 +56,42 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
     }
   }
 
+  // 3.7.1 (audit UX Setări M8/Me1): o secţiune-card cu etichete VIZIBILE; placeholder-ul nu mai ţine
+  // loc de nume — după completare, trei câmpuri de parolă arătau la fel. Un singur Save, în subsol.
   return (
-    <div>
-      <section data-setting-id="account">
-        {/* ── Cont ── */}
-        <h3 className={heading + ' !mt-0'}>{t('settings.account')}</h3>
-        <form onSubmit={saveAccount} className="mt-2 flex flex-col gap-2">
-          <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)}
-            placeholder={t('settings.email')} aria-label={t('settings.email')}
-            autoComplete="username" className={touchField} />
-          <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
-            placeholder={t('settings.newPasswordPlaceholder')} aria-label={t('settings.newPassword')}
-            autoComplete="new-password" className={touchField} />
-          <input type="password" required value={curPw} onChange={(e) => setCurPw(e.target.value)}
-            placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')}
-            autoComplete="current-password" className={touchField} />
+    <form onSubmit={saveAccount}>
+      <SettingsSection data-setting-id="account" title={t('settings.account')} titleExtra={<HelpTip id="account" />}
+        description={t('settings.accountDesc')}
+        footer={<>
+          <Button variant="primary" type="submit" className="wt-touch" loading={busy} disabled={!curPw}
+            aria-describedby={!curPw ? 'acct-save-why' : undefined}>
+            {t('settings.saveAccount')}
+          </Button>
+          {!curPw && <span id="acct-save-why" className="text-xs text-slate-500">{t('settings.saveAccountWhy')}</span>}
+          <span role="status" className={accountMsg ? 'text-sm wt-good' : 'sr-only'}>{accountMsg}</span>
+          <span role="alert" className={accountErr ? 'text-sm wt-danger' : 'sr-only'}>{accountErr}</span>
+        </>}>
+        <div className="flex flex-col gap-3">
+          <Field label={t('settings.email')}>
+            <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)}
+              autoComplete="username" className={touchField} />
+          </Field>
+          <Field label={t('settings.newPassword')} hint={t('settings.newPasswordHint')}>
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
+              autoComplete="new-password" className={touchField} />
+          </Field>
+          <Field label={t('settings.currentPassword')} hint={t('settings.currentPasswordHint')}>
+            <input type="password" required value={curPw} onChange={(e) => setCurPw(e.target.value)}
+              autoComplete="current-password" className={touchField} />
+          </Field>
           {codeAsked && (
-            <div className="flex flex-col gap-1">
+            <Field label={t('settings.emailCodePlaceholder')} hint={t('settings.emailCodeHint')}>
               <input type="text" inputMode="numeric" autoComplete="one-time-code"
-                value={emailCode} onChange={(e) => setEmailCode(e.target.value)}
-                placeholder={t('settings.emailCodePlaceholder')} aria-label={t('settings.emailCodePlaceholder')}
-                className={touchField} />
-              <p className="text-xs text-slate-400">{t('settings.emailCodeHint')}</p>
-            </div>
+                value={emailCode} onChange={(e) => setEmailCode(e.target.value)} className={touchField} />
+            </Field>
           )}
-          <div className="flex items-center gap-3">
-            <Button variant="primary" type="submit" className="wt-touch" disabled={busy || !curPw}>
-              {t('settings.saveAccount')}
-            </Button>
-            {accountMsg && <span className="text-sm wt-good">{accountMsg}</span>}
-            {accountErr && <span className="text-sm wt-danger">{accountErr}</span>}
-          </div>
-        </form>
-      </section>
-
-    </div>
+        </div>
+      </SettingsSection>
+    </form>
   )
 }

@@ -5,6 +5,7 @@ import { useI18n } from '../../../lib/i18n'
 import { ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, SCOPE_KINDS, SHELL_ROLES } from '../../../lib/perms'
 import { EXPIRY_CHOICES, expiresIn, expiryFrom, type ExpiryChoice, type UserRow } from '../../../lib/usersAdmin'
 import { field } from '../ui'
+import { Field } from '../../ui'
 import { byText } from '../../../lib/sortText'
 
 /* Piese comune sub-tab-urilor din Users & roles (3.6.6; mutate din UsersTab.tsx fără schimbări de
@@ -25,28 +26,35 @@ export function ScopePicker(props: {
   const tags = useMemo(() => [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort(byText), [props.hosts])
   const listId = `${props.idPrefix}-scope-list`
   return (
-    <div className="flex flex-col gap-2 sm:flex-row">
-      <select value={props.kind} aria-label={t('roles.scope.label')} className={field + ' sm:w-40'}
-        onChange={(e) => props.onChange(e.target.value as ScopeKind, '')}>
-        {SCOPE_KINDS.map((k) => <option key={k} value={k}>{t('roles.scope.' + k)}</option>)}
-      </select>
-      {props.kind === 'host' && (
-        <select value={props.value} aria-label={t('roles.scope.host')} className={field}
-          onChange={(e) => props.onChange('host', e.target.value)}>
-          <option value="">{t('roles.scope.hostPlaceholder')}</option>
-          {props.hosts.filter((h) => !h.ephemeral).map((h) => <option key={h.id} value={String(h.id)}>{h.name}</option>)}
+    // 3.7.1 (audit UX Setări M8): etichete vizibile (Field) — aceleaşi nume accesibile ca înainte
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+      <Field label={t('roles.scope.label')} className="sm:w-40">
+        <select value={props.kind} className={field}
+          onChange={(e) => props.onChange(e.target.value as ScopeKind, '')}>
+          {SCOPE_KINDS.map((k) => <option key={k} value={k}>{t('roles.scope.' + k)}</option>)}
         </select>
+      </Field>
+      {props.kind === 'host' && (
+        <Field label={t('roles.scope.host')} className="min-w-0 flex-1">
+          <select value={props.value} className={field}
+            onChange={(e) => props.onChange('host', e.target.value)}>
+            <option value="">{t('roles.scope.hostPlaceholder')}</option>
+            {props.hosts.filter((h) => !h.ephemeral).map((h) => <option key={h.id} value={String(h.id)}>{h.name}</option>)}
+          </select>
+        </Field>
       )}
       {(props.kind === 'folder' || props.kind === 'tag') && (
-        <>
+        <Field label={t('roles.scope.' + props.kind)} className="min-w-0 flex-1">
           <input type="text" list={listId} value={props.value} autoComplete="off"
             onChange={(e) => props.onChange(props.kind, e.target.value)}
             placeholder={t(props.kind === 'folder' ? 'roles.scope.folderPlaceholder' : 'roles.scope.tagPlaceholder')}
-            aria-label={t('roles.scope.' + props.kind)} className={field} />
-          <datalist id={listId}>
-            {(props.kind === 'folder' ? folders : tags).map((v) => <option key={v} value={v} />)}
-          </datalist>
-        </>
+            className={field} />
+        </Field>
+      )}
+      {(props.kind === 'folder' || props.kind === 'tag') && (
+        <datalist id={listId}>
+          {(props.kind === 'folder' ? folders : tags).map((v) => <option key={v} value={v} />)}
+        </datalist>
       )}
     </div>
   )
@@ -61,18 +69,19 @@ export function ExpiryPicker(props: {
   const { t } = useI18n()
   const invalid = props.choice === 'custom' && expiryFrom('custom', props.custom, Date.now()) === 'invalid'
   return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-      <select value={props.choice} aria-label={t('roles.expiry.label')} className={field + ' sm:w-48'}
-        data-expiry-choice onChange={(e) => props.onChange(e.target.value as ExpiryChoice, props.custom)}>
-        {EXPIRY_CHOICES.map((c) => <option key={c} value={c}>{t('roles.expiry.' + c)}</option>)}
-      </select>
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+      <Field label={t('roles.expiry.label')} className="sm:w-48">
+        <select value={props.choice} className={field}
+          data-expiry-choice onChange={(e) => props.onChange(e.target.value as ExpiryChoice, props.custom)}>
+          {EXPIRY_CHOICES.map((c) => <option key={c} value={c}>{t('roles.expiry.' + c)}</option>)}
+        </select>
+      </Field>
       {props.choice === 'custom' && (
-        <input type="datetime-local" value={props.custom} aria-label={t('roles.expiry.customLabel')}
-          aria-invalid={invalid || undefined} aria-describedby={invalid ? `${props.idPrefix}-exp-err` : undefined}
-          onChange={(e) => props.onChange('custom', e.target.value)} className={field + ' sm:w-56'} />
-      )}
-      {invalid && props.custom && (
-        <span id={`${props.idPrefix}-exp-err`} className="text-xs text-warn">{t('roles.expiry.invalid')}</span>
+        <Field label={t('roles.expiry.customLabel')} className="sm:w-56"
+          error={invalid && props.custom ? t('roles.expiry.invalid') : undefined}>
+          <input type="datetime-local" value={props.custom}
+            onChange={(e) => props.onChange('custom', e.target.value)} className={field} />
+        </Field>
       )}
     </div>
   )

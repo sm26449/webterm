@@ -8,8 +8,8 @@ import {
   allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme, explicitTermScheme, FAMILY_SCHEME,
   customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
-import { heading } from './ui'
-import { SegmentedControl } from '../ui'
+import { Button, SegmentedControl, SettingsSection } from '../ui'
+import HelpTip from '../HelpTip'
 
 // Aspect: limbă, temă (light/dark/auto), schema de culori a terminalului (+ editor live şi import
 // iTerm2/VS Code). Extras din SettingsModal ca tab de sine stătător. Watermark-ul (o setare a
@@ -54,29 +54,19 @@ export default function AppearanceTab() {
   }
 
   return (
-    <div>
-      <section data-setting-id="language">
-        {/* ── Limbă ── */}
-        <h3 className={heading + ' !mt-0'}>{t('settings.language')}</h3>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {LANG_ORDER.map((code) => (
-            <button key={code} onClick={() => setLang(code)} aria-pressed={lang === code}
-              className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ring-1 transition ${
-                lang === code
-                  ? 'wt-chip-accent ring-sky-500/40'
-                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-              <span className="text-base leading-none">{LANG_META[code].flag}</span> {LANG_META[code].name}
-            </button>
-          ))}
-        </div>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.languageHint')}</p>
-      </section>
+    <div className="flex flex-col gap-4">
+      {/* ── Limbă ── 3.7.1 (audit UX Setări Mi3/M7): o alegere → SegmentedControl; doar numele limbii,
+          fără steaguri emoji (designul interzice emoji ca pictograme, iar un steag nu e o limbă) */}
+      <SettingsSection data-setting-id="language" title={t('settings.language')} titleExtra={<HelpTip id="appearance" />}
+        description={t('settings.languageHint')}>
+        <SegmentedControl label={t('settings.language')} value={lang}
+          onChange={(code) => setLang(code)}
+          options={LANG_ORDER.map((code) => ({ value: code, label: <span lang={code}>{LANG_META[code].name}</span> }))} />
+      </SettingsSection>
 
-      <section data-setting-id="theme">
-        {/* ── Temă: familia (stilul) ── */}
-        <h3 className={heading} id="theme-style-h">{t('settings.theme')}</h3>
-        <p className="mt-1 text-xs text-slate-500">{t('theme.styleHint')}</p>
-        <div role="group" aria-labelledby="theme-style-h" className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+      {/* ── Temă: familia (stilul) + modul ── cardurile de familie rămân cum erau (paleta nu se schimbă aici) */}
+      <SettingsSection data-setting-id="theme" title={t('settings.theme')} description={t('theme.styleHint')}>
+        <div role="group" aria-label={t('settings.theme')} className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
           {FAMILIES.map((f) => {
             const on = pref.family === f.id
             return (
@@ -96,27 +86,26 @@ export default function AppearanceTab() {
             )
           })}
         </div>
-      </section>
 
-      <section data-setting-id="themeMode">
-        {/* ── Temă: modul (deschis / închis / după sistem), în familia aleasă ── */}
-        <h4 id="theme-mode-h" className="mt-4 text-sm font-medium text-slate-300">{t('theme.mode')}</h4>
-        {/* 3.7.1 (audit UX Setări M7): o alegere, nu o acţiune — SegmentedControl, nu umplerea primară */}
-        <SegmentedControl labelledBy="theme-mode-h" className="mt-2" value={pref.mode}
-          onChange={(mode) => setTheme({ family: pref.family, mode })}
-          options={(['light', 'dark', 'auto'] as const satisfies readonly ThemeMode[]).map((mode) => {
-            const label = mode === 'auto' ? t('settings.themeAuto') : t(`theme.mode.${mode}`)
-            // pe WebTerm modurile au nume proprii (Aurora / Midnight) — rămân vizibile
-            const proper = pref.family === 'webterm' && mode !== 'auto' ? (mode === 'light' ? 'Aurora' : 'Midnight') : ''
-            return { value: mode, label: <>{label}{proper && <span> · {proper}</span>}</> }
-          })} />
-      </section>
+        <div data-setting-id="themeMode" className="mt-4">
+          {/* ── Temă: modul (deschis / închis / după sistem), în familia aleasă ── */}
+          <h4 id="theme-mode-h" className="text-sm font-medium text-slate-300">{t('theme.mode')}</h4>
+          {/* 3.7.1 (audit UX Setări M7): o alegere, nu o acţiune — SegmentedControl, nu umplerea primară */}
+          <SegmentedControl labelledBy="theme-mode-h" className="mt-2" value={pref.mode}
+            onChange={(mode) => setTheme({ family: pref.family, mode })}
+            options={(['light', 'dark', 'auto'] as const satisfies readonly ThemeMode[]).map((mode) => {
+              const label = mode === 'auto' ? t('settings.themeAuto') : t(`theme.mode.${mode}`)
+              // pe WebTerm modurile au nume proprii (Aurora / Midnight) — rămân vizibile
+              const proper = pref.family === 'webterm' && mode !== 'auto' ? (mode === 'light' ? 'Aurora' : 'Midnight') : ''
+              return { value: mode, label: <>{label}{proper && <span> · {proper}</span>}</> }
+            })} />
+        </div>
+      </SettingsSection>
 
-      <section data-setting-id="termColors">
-        {/* ── Schema de culori a terminalului ── */}
-        <h3 id="term-colors-h" className={heading}>{t('settings.termColors')}</h3>
+      {/* ── Schema de culori a terminalului ── */}
+      <SettingsSection data-setting-id="termColors" title={t('settings.termColors')}>
         {/* „după temă" e o opţiune a aceleiaşi alegeri (sentinela `@auto` nu poate fi id de schemă) */}
-        <SegmentedControl labelledBy="term-colors-h" className="mt-2" value={schemeAuto ? '@auto' : scheme}
+        <SegmentedControl label={t('settings.termColors')} value={schemeAuto ? '@auto' : scheme}
           onChange={(v) => { if (v === '@auto') followTheme(); else pickScheme(v) }}
           options={[
             { value: '@auto', label: <span title={t('settings.termMatchThemeTitle')}>{t('settings.termMatchTheme')}</span> },
@@ -135,22 +124,21 @@ export default function AppearanceTab() {
 
         {/* schemă proprie: editor + import iTerm2/VS Code */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button onClick={openEditor}
-            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+          <Button type="button" variant="secondary" onClick={openEditor}>
             {customTheme() ? t('settings.editMyScheme') : t('settings.customScheme')}
-          </button>
-          <button onClick={() => fileRef.current?.click()}
-            className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
+          </Button>
+          <Button type="button" variant="secondary" onClick={() => fileRef.current?.click()}
             title={t('settings.importThemeTitle')}>
             {t('settings.importTheme')}
-          </button>
+          </Button>
           <input ref={fileRef} type="file" accept=".itermcolors,.json,application/json,text/xml" className="hidden"
+            aria-label={t('settings.importTheme')}
             onChange={(e) => e.target.files?.[0] && importTheme(e.target.files[0])} />
           {customTheme() && (
-            <button onClick={() => { clearCustomTheme(); followTheme(); setEditing(false) }}
-              className="rounded-md px-2 py-1.5 text-xs wt-danger hover:bg-ink-800">
+            <Button type="button" variant="danger" size="sm"
+              onClick={() => { clearCustomTheme(); followTheme(); setEditing(false) }}>
               {t('settings.deleteMyScheme')}
-            </button>
+            </Button>
           )}
         </div>
         <p className="mt-1 text-xs text-slate-500">
@@ -162,9 +150,9 @@ export default function AppearanceTab() {
           <div className="mt-3 rounded-xl border border-ink-700 p-3">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm font-medium text-slate-300">{t('settings.mySchemeLive')}</span>
-              <button onClick={() => setEditing(false)} className="text-xs text-slate-400 hover:text-slate-200">
+              <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(false)}>
                 {t('settings.done')}
-              </button>
+              </Button>
             </div>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-3">
               {COLOR_KEYS.map((k) => (
@@ -178,7 +166,7 @@ export default function AppearanceTab() {
             </div>
           </div>
         )}
-      </section>
+      </SettingsSection>
     </div>
   )
 }

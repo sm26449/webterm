@@ -7,11 +7,13 @@ import { useConfirm } from '../../lib/confirm'
 import { fmtTs } from '../../lib/tz'
 import { KeyIcon } from '../Icons'
 import { copyText } from '../../lib/clipboard'
-import { field, heading } from './ui'
+import { field } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import LoadFailed from '../LoadFailed'
 import type { LoadState } from '../../lib/loadable'
-import { Button, ErrorState } from '../ui'
+import { Button, ErrorState, Field, SettingsSection } from '../ui'
+import HelpTip from '../HelpTip'
+import SectionLoading from './SectionLoading'
 
 interface Passkey {
   id: number
@@ -259,14 +261,27 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
     void load()
   }
 
+  const pkBlocked = !props.webauthnAvailable || !window.PublicKeyCredential
   return (
     <div>
-      <section data-setting-id="devices">
-        {/* ── Dispozitive conectate ── */}
-        <h3 className={heading + ' !mt-0'}>{t('settings.devices')}</h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.devicesHint')}</p>
+      {/* ── Dispozitive conectate ── 3.7.1 (audit UX Setări Me3): „Sign out everywhere else" stă în
+          subsolul secţiunii, despărţit de lista de dispozitive, cu tonul acţiunii periculoase */}
+      <SettingsSection data-setting-id="devices" title={t('settings.devices')} titleExtra={<HelpTip id="devices" />}
+        description={t('settings.devicesHint')}
+        footer={devices && devicesErr === null && devices.length > 1 ? (
+          <Button variant="danger" type="button"
+            loading={revoking === 'others'} disabled={revoking !== null}
+            onClick={async () => {
+              if (!(await confirm({
+                title: t('security.signOutOthersTitle'), message: t('settings.devicesRevokeOthersConfirm'),
+                danger: true, confirmLabel: t('security.signOut'),
+              }))) return
+              await revokeDevice('others')
+            }}
+          >{t('settings.devicesRevokeOthers')}</Button>
+        ) : undefined}>
         {devices === null ? (
-          <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
+          <SectionLoading />
         ) : devicesErr !== null ? (
           <div className="mt-2 rounded-md ring-1 ring-ink-700">
             <LoadFailed compact message={devicesErr} onRetry={() => { setDevices(null); void loadDevices() }} />
@@ -307,36 +322,26 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
             ))}
           </div>
         )}
-        {devices && devicesErr === null && devices.length > 1 && (
-          <Button variant="secondary" type="button" className="mt-2"
-            loading={revoking === 'others'} disabled={revoking !== null}
-            onClick={async () => {
-              if (!(await confirm({
-                title: t('security.signOutOthersTitle'), message: t('settings.devicesRevokeOthersConfirm'),
-                danger: true, confirmLabel: t('security.signOut'),
-              }))) return
-              await revokeDevice('others')
-            }}
-          >{t('settings.devicesRevokeOthers')}</Button>
-        )}
         {/* regiuni live montate permanent: confirmarea `status`, eroarea `alert` (rămâne până la
             următoarea acţiune — nu un toast care dispare înainte să-l citeşti) */}
         <p role="status" className={devMsg ? 'mt-2 text-sm wt-good' : 'sr-only'}>{devMsg}</p>
         <p role="alert" className={devErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{devErr}</p>
-      </section>
+      </SettingsSection>
 
-      <section data-setting-id="passkeys">
-        {/* ── Passkeys ── */}
-        <h3 className={heading}>{t('settings.passkeys')}</h3>
-        <p className="mt-1 text-xs text-slate-500">
-          {props.webauthnAvailable
-            ? t('settings.passkeysAvailable')
-            : t('settings.passkeysUnavailable')}
-        </p>
-        <div className="mt-2 space-y-1">
-          {pkState.status === 'loading' && passkeys.length === 0 && (
-            <div className="text-xs text-slate-500">{t('settings.loading')}</div>
-          )}
+      {/* ── Passkeys ── */}
+      <SettingsSection data-setting-id="passkeys" className="mt-4" title={t('settings.passkeys')}
+        titleExtra={<HelpTip id="passkeys" />} description={t('settings.passkeysAvailable')}
+        footer={<>
+          <Button variant="primary" type="button"
+            onClick={addPasskey} aria-describedby={pkBlocked ? 'pk-add-why' : undefined}
+            disabled={busy || pkBlocked}>
+            {t('settings.addPasskey')}
+          </Button>
+          {/* de ce e dezactivat: lângă buton (audit Me4), nu doar în descrierea de sus */}
+          {pkBlocked && <span id="pk-add-why" className="text-xs wt-warn">{t('settings.passkeysUnavailable')}</span>}
+        </>}>
+        <div className="space-y-1">
+          {pkState.status === 'loading' && passkeys.length === 0 && <SectionLoading />}
           {pkState.status === 'error' && (
             <div className="rounded-md ring-1 ring-ink-700">
               <ErrorState compact title={t('settings.passkeysLoadFailed')} message={pkState.error}
@@ -363,24 +368,14 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
             </div>
           )}
         </div>
-        <Button variant="primary"
-          onClick={addPasskey}
-          disabled={busy || !props.webauthnAvailable || !window.PublicKeyCredential} className="mt-3">
-          {t('settings.addPasskey')}
-        </Button>
         <p role="status" className={pkMsg ? 'mt-2 text-sm wt-good' : 'sr-only'}>{pkMsg}</p>
         <p role="alert" className={securityErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{securityErr}</p>
-      </section>
+      </SettingsSection>
 
-      <section data-setting-id="totp">
-        {/* ── 2FA (TOTP) ── */}
-        <h3 className={heading}>{t('settings.totp.title')}</h3>
-        <p className="mt-1 text-xs text-slate-500">
-          {t('settings.totp.hint')}
-        </p>
-        {totpState.status === 'loading' && !recoveryCodes && (
-          <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
-        )}
+      {/* ── 2FA (TOTP) ── */}
+      <SettingsSection data-setting-id="totp" className="mt-4" title={t('settings.totp.title')}
+        titleExtra={<HelpTip id="totp" />} description={t('settings.totp.hint')}>
+        {totpState.status === 'loading' && !recoveryCodes && <SectionLoading />}
         {totpState.status === 'error' && (
           <div className="mt-2 rounded-md ring-1 ring-ink-700">
             <ErrorState compact title={t('settings.totp.loadFailed')} message={totpState.error}
@@ -394,14 +389,12 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
               <span className="wt-good">{t('settings.totp.active')}</span>
               <span className="text-slate-500">{t('settings.totp.recoveryLeft', { n: recoveryLeft })}</span>
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => { setPendingAction('regen'); setActionPw('') }}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
-              >
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="secondary"
+                onClick={() => { setPendingAction('regen'); setActionPw('') }}>
                 {t('settings.totp.regen')}
-              </button>
-              <button
+              </Button>
+              <Button type="button" variant="danger"
                 onClick={async () => {
                   // consecinţa ÎNAINTE de parolă: scara de step-up e passkey → SSO → TOTP → parolă,
                   // deci fără passkey hosturile cu 2FA rămân doar pe parolă (niciun al doilea factor)
@@ -411,49 +404,43 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
                     danger: true, confirmLabel: t('settings.totp.disable'),
                   }))) return
                   setPendingAction('disable'); setActionPw('')
-                }}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm wt-danger ring-1 ring-ink-700 hover:bg-ink-700"
-              >
+                }}>
                 {t('settings.totp.disable')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
 
         {pendingAction !== null && (
           <div className="mt-2 space-y-2">
-            <p className="text-xs text-slate-400">
-              {pendingAction === 'disable' ? t('settings.confirmDisableWithPass') : t('settings.confirmWithPass')}
-            </p>
-            <input
-              type="password"
-              autoFocus
-              value={actionPw}
-              onChange={(e) => setActionPw(e.target.value)}
-              placeholder={t('settings.currentPassword')}
-              aria-label={t('settings.currentPassword')}
-              autoComplete="current-password"
-              className={field}
-            />
+            <Field label={t('settings.currentPassword')}
+              hint={pendingAction === 'disable' ? t('settings.confirmDisableWithPass') : t('settings.confirmWithPass')}>
+              <input
+                type="password"
+                autoFocus
+                value={actionPw}
+                onChange={(e) => setActionPw(e.target.value)}
+                autoComplete="current-password"
+                className={field}
+              />
+            </Field>
             <div className="flex gap-2">
-              <Button variant="primary"
+              <Button variant={pendingAction === 'disable' ? 'danger' : 'primary'} type="button"
                 disabled={busy || !actionPw}
                 onClick={runPendingAction}>
                 {t('settings.confirm')}
               </Button>
-              <button
-                onClick={() => { setPendingAction(null); setActionPw('') }}
-                className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
-              >
+              <Button type="button" variant="ghost"
+                onClick={() => { setPendingAction(null); setActionPw('') }}>
                 {t('settings.cancel')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
 
         {totpState.status === 'ok' && !totpEnabled && !enroll && !recoveryCodes && (
-          <Button variant="primary"
-            onClick={startEnroll} className="mt-2">
+          <Button variant="primary" type="button"
+            onClick={startEnroll}>
             {t('settings.totp.enable')}
           </Button>
         )}
@@ -475,28 +462,25 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
                 {enroll.secret}
               </code>
             </div>
-            <p className="text-xs text-slate-400">{t('settings.totp.step2')}</p>
-            <input
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              value={activateCode}
-              onChange={(e) => setActivateCode(e.target.value)}
-              placeholder={t('settings.totp.code6')}
-              aria-label={t('settings.totp.code6')}
-              className={field}
-            />
+            <Field label={t('settings.totp.code6')} hint={t('settings.totp.step2')}>
+              <input
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={activateCode}
+                onChange={(e) => setActivateCode(e.target.value)}
+                className={field}
+              />
+            </Field>
             <div className="flex gap-2">
-              <Button variant="primary"
+              <Button variant="primary" type="button"
                 disabled={busy || !activateCode.trim()}
                 onClick={confirmEnroll}>
                 {t('settings.totp.confirmActivate')}
               </Button>
-              <button
-                onClick={() => { setEnroll(null); setActivateCode('') }}
-                className="rounded-md px-3 py-1.5 text-sm text-slate-400 hover:bg-ink-800"
-              >
+              <Button type="button" variant="ghost"
+                onClick={() => { setEnroll(null); setActivateCode('') }}>
                 {t('settings.cancel')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -513,12 +497,11 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
             </div>
             {/* Copy + .txt: altfel singura cale era selecţia manuală, cod cu cod */}
             <div className="mt-3 flex flex-wrap gap-2">
-              <button type="button"
-                onClick={() => copyText(recoveryCodes.join('\n')).then((okc) => { if (okc) { setCodesCopied(true); setTimeout(() => setCodesCopied(false), 1500) } })}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+              <Button type="button" variant="secondary"
+                onClick={() => copyText(recoveryCodes.join('\n')).then((okc) => { if (okc) { setCodesCopied(true); setTimeout(() => setCodesCopied(false), 1500) } })}>
                 {codesCopied ? t('settings.cloud.copied') : t('settings.totp.copyCodes')}
-              </button>
-              <button type="button"
+              </Button>
+              <Button type="button" variant="secondary"
                 onClick={() => {
                   const blob = new Blob([recoveryCodes.join('\n') + '\n'], { type: 'text/plain' })
                   const url = URL.createObjectURL(blob)
@@ -526,21 +509,17 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
                   a.href = url; a.download = 'webterm-recovery-codes.txt'
                   document.body.appendChild(a); a.click(); a.remove()
                   setTimeout(() => URL.revokeObjectURL(url), 1000)
-                }}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700">
+                }}>
                 {t('settings.totp.downloadCodes')}
-              </button>
-              <button
-                onClick={() => setRecoveryCodes(null)}
-                className="rounded-md bg-ink-800 px-3 py-1.5 text-sm text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700"
-              >
+              </Button>
+              <Button type="button" variant="primary" onClick={() => setRecoveryCodes(null)}>
                 {t('settings.totp.savedThem')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
         <p role="alert" className={totpErr ? 'mt-2 text-sm wt-danger' : 'sr-only'}>{totpErr}</p>
-      </section>
+      </SettingsSection>
     </div>
   )
 }

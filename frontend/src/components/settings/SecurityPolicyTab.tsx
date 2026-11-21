@@ -3,9 +3,9 @@ import { errText, api, CommandGuard, DeployKeyPolicy, WatermarkConfig } from '..
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { CloseIcon } from '../Icons'
-import { heading } from './ui'
+import { field } from './ui'
 import HelpTip from '../HelpTip'
-import { Button } from '../ui'
+import { Button, Field, IconButton, SettingsSection, Switch } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -20,6 +20,7 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
   // Guardrail de comenzi — verificat client-side la Enter (via OSC 133)
   const [guard, setGuard] = useState<CommandGuard>({ enabled: true, rules: [] })
   const [guardMsg, setGuardMsg] = useState('')
+  const [guardBase, setGuardBase] = useState('')   // ultima stare de pe server (pentru „Unsaved changes")
   // U04 — controale de SECURITATE: pe un fetch picat, formularul arăta „nicio regulă" şi un Save
   // ŞTERGEA toate regulile guardrail-ului de pe server (la fel, o bifă a politicii cheilor de
   // deploy trimitea celălalt câmp ca `false`). Formularele apar doar peste valorile încărcate.
@@ -27,7 +28,7 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
   const loadGuard = () => {
     setGuardState({ status: 'loading' })
     api<CommandGuard>('/api/settings/command-guard')
-      .then((g) => { setGuard(g); setGuardState({ status: 'ok' }) })
+      .then((g) => { setGuard(g); setGuardBase(JSON.stringify(g)); setGuardState({ status: 'ok' }) })
       .catch((e) => setGuardState({ status: 'error', error: errText(e, t) }))
   }
   const saveGuard = async () => {
@@ -44,7 +45,7 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     try {
       const saved = await api<CommandGuard>('/api/settings/command-guard',
         { method: 'POST', body: JSON.stringify(guard) })
-      setGuard(saved)
+      setGuard(saved); setGuardBase(JSON.stringify(saved))
       setGuardMsg(t('settings.saved'))
       props.onAccountChanged()   // refetch /api/state → guardrail-ul live se actualizează
       setTimeout(() => setGuardMsg(''), 1500)
@@ -77,14 +78,15 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     enabled: false, content: '${email} · ${time}', opacity: 0.08, angle: -30, fontSize: 13,
   })
   const [wmMsg, setWmMsg] = useState('')
-  const [wmErr, setWmErr] = useState(false)   // acelaşi text, dar rol diferit: `alert` la eşec
+  const [wmErr, setWmErr] = useState(false)
+  const [wmBase, setWmBase] = useState('')   // acelaşi text, dar rol diferit: `alert` la eşec
   // U04: un fetch picat lăsa valorile implicite („dezactivat") afişate ca setare — iar „Salvează"
   // OPREA un watermark activ pe server. Formularul apare doar peste valorile încărcate.
   const [wmState, setWmState] = useState<LoadState>({ status: 'loading' })
   const loadWm = () => {
     setWmState({ status: 'loading' })
     api<WatermarkConfig>('/api/settings/watermark')
-      .then((r) => { setWm(r); setWmState({ status: 'ok' }) })
+      .then((r) => { setWm(r); setWmBase(JSON.stringify(r)); setWmState({ status: 'ok' }) })
       .catch((e) => setWmState({ status: 'error', error: errText(e, t) }))
   }
   const saveWatermark = async () => {
@@ -92,7 +94,7 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     try {
       const saved = await api<WatermarkConfig>('/api/settings/watermark',
         { method: 'POST', body: JSON.stringify(wm) })
-      setWm(saved)
+      setWm(saved); setWmBase(JSON.stringify(saved))
       setWmErr(false); setWmMsg(t('settings.saved'))
       props.onAccountChanged()   // refetch /api/state → overlay-ul live se actualizează
       setTimeout(() => setWmMsg(''), 1500)
@@ -109,14 +111,22 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 3.7.1 (audit UX Setări M6): formularele salvate cu un buton arată „Unsaved changes" până la Save
+  const guardDirty = canSave(guardState) && guardBase !== '' && JSON.stringify(guard) !== guardBase
+  const wmDirty = canSave(wmState) && wmBase !== '' && JSON.stringify(wm) !== wmBase
   return (
-    <div>
-      <section data-setting-id="guardrail" hidden={!vis('guardrail')}>
-        {/* ── Guardrail de comenzi ── */}
-        <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('settings.guardrail')}<HelpTip id="guardrail" /></h3>
+    <div className="flex flex-col gap-4">
+      {/* ── Guardrail de comenzi ── bifa (nu comutator): face parte din formularul salvat cu „Save guardrail" */}
+      <SettingsSection data-setting-id="guardrail" hidden={!vis('guardrail')} instanceWide
+        title={t('settings.guardrail')} titleExtra={<HelpTip id="guardrail" />}
+        description={t('settings.guardrailDesc')} dirty={guardDirty}
+        footer={canSave(guardState) ? <>
+          <Button variant="primary" type="button" onClick={saveGuard}>{t('settings.saveGuardrail')}</Button>
+          {guardMsg && <span role="status" className="text-xs text-slate-400">{guardMsg}</span>}
+        </> : undefined}>
         <NotLoaded state={guardState} onRetry={loadGuard} />
         {canSave(guardState) && (<>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
           <input
             type="checkbox"
             checked={guard.enabled}
@@ -132,6 +142,14 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
         </label>
         {guard.enabled && (
           <div className="mt-3 space-y-2">
+            {/* rânduri repetate: un antet vizibil pe coloane + nume accesibil pe fiecare câmp */}
+            {guard.rules.length > 0 && (
+              <div aria-hidden="true" className="flex gap-2 text-xs font-medium text-slate-400">
+                <span className="min-w-0 flex-1">{t('settings.guardrailPattern')}</span>
+                <span className="w-28 shrink-0">{t('settings.guardrailAction')}</span>
+                <span className="w-8 shrink-0" />
+              </div>
+            )}
             {guard.rules.map((r, i) => (
               <div key={i} className="flex items-center gap-2">
                 <input
@@ -139,119 +157,100 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
                   value={r.pattern}
                   spellCheck={false}
                   placeholder={t('settings.guardrailRegexPlaceholder')}
+                  aria-label={t('settings.guardrailPatternN', { n: i + 1 })}
                   onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, pattern: e.target.value } : x) })}
-                  className="min-w-0 flex-1 rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+                  className={field + ' min-w-0 flex-1 font-mono'}
                 />
                 <select
                   value={r.action}
                   aria-label={t('settings.guardrailActionFor', { pattern: r.pattern || String(i + 1) })}
                   onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, action: e.target.value as 'confirm' | 'block' } : x) })}
-                  className="shrink-0 rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs text-slate-200"
+                  className={field + ' w-28 shrink-0'}
                 >
                   <option value="confirm">{t('settings.guardrailConfirm')}</option>
                   <option value="block">{t('settings.guardrailBlock')}</option>
                 </select>
-                <button
-                  onClick={() => setGuard({ ...guard, rules: guard.rules.filter((_, j) => j !== i) })}
-                  aria-label={t('settings.deleteRule')}
-                  className="shrink-0 rounded-md px-2 py-1 text-slate-500 hover:bg-ink-800 hover:text-danger"
-                ><CloseIcon size={14} /></button>
+                <IconButton type="button" variant="ghost" size="md" label={t('settings.deleteRule')}
+                  onClick={() => setGuard({ ...guard, rules: guard.rules.filter((_, j) => j !== i) })}>
+                  <CloseIcon size={14} />
+                </IconButton>
               </div>
             ))}
-            <button
+            <Button type="button" variant="secondary" size="sm"
               onClick={() => setGuard({ ...guard, rules: [...guard.rules, { pattern: '', action: 'confirm' }] })}
-              className="text-xs wt-link hover:underline"
-            >{t('settings.addRule')}</button>
+            >{t('settings.addRule')}</Button>
           </div>
         )}
-        <div className="mt-3 flex items-center gap-3">
-          <Button variant="primary"
-            onClick={saveGuard}>{t('settings.saveGuardrail')}</Button>
-          {guardMsg && <span className="text-xs text-slate-400">{guardMsg}</span>}
-        </div>
         </>)}
-      </section>
+      </SettingsSection>
 
-      <section data-setting-id="deployKeyPolicy" hidden={!vis('deployKeyPolicy')}>
-        {/* ── Politica cheilor de deploy ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.dkpolicy.title')}<HelpTip id="deployKeyPolicy" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.dkpolicy.hint')}</p>
+      {/* ── Politica cheilor de deploy ── comutatoare: fiecare se salvează imediat (ca înainte) */}
+      <SettingsSection data-setting-id="deployKeyPolicy" hidden={!vis('deployKeyPolicy')} instanceWide
+        title={t('settings.dkpolicy.title')} titleExtra={<HelpTip id="deployKeyPolicy" />}
+        description={t('settings.dkpolicy.hint')}>
         <NotLoaded state={dkState} onRetry={loadDkPolicy} />
-        {canSave(dkState) && (<>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input type="checkbox" checked={dkPolicy.require_2fa_source} className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
-            onChange={(e) => saveDkPolicy({ ...dkPolicy, require_2fa_source: e.target.checked })} />
-          <span>{t('settings.dkpolicy.require2fa')}
-            <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.require2faHint')}</span></span>
-        </label>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input type="checkbox" checked={dkPolicy.require_restrict} className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
-            onChange={(e) => saveDkPolicy({ ...dkPolicy, require_restrict: e.target.checked })} />
-          <span>{t('settings.dkpolicy.requireRestrict')}
-            <span className="mt-0.5 block text-xs text-slate-500">{t('settings.dkpolicy.requireRestrictHint')}</span></span>
-        </label>
-        {dkPolicyMsg && <div className="mt-1 text-xs text-slate-500">{dkPolicyMsg}</div>}
-        </>)}
-      </section>
+        {canSave(dkState) && (<div className="flex flex-col gap-3">
+          <Switch checked={dkPolicy.require_2fa_source} label={t('settings.dkpolicy.require2fa')}
+            hint={t('settings.dkpolicy.require2faHint')}
+            onChange={(v) => { void saveDkPolicy({ ...dkPolicy, require_2fa_source: v }) }} />
+          <Switch checked={dkPolicy.require_restrict} label={t('settings.dkpolicy.requireRestrict')}
+            hint={t('settings.dkpolicy.requireRestrictHint')}
+            onChange={(v) => { void saveDkPolicy({ ...dkPolicy, require_restrict: v }) }} />
+          <span role="status" className={dkPolicyMsg ? 'text-xs text-slate-400' : 'sr-only'}>{dkPolicyMsg}</span>
+        </div>)}
+      </SettingsSection>
 
-      <section data-setting-id="watermark" hidden={!vis('watermark')}>
-        {/* ── Watermark ── */}
-        <h3 className={heading}>{t('settings.watermark')}</h3>
-        <NotLoaded state={wmState} onRetry={loadWm} />
-        {canSave(wmState) && (<>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input type="checkbox" checked={wm.enabled}
-            onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
-            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
-          <span>
-            {t('settings.watermarkToggle')}
-            <span className="mt-0.5 block text-xs text-slate-500">
-              {t('settings.watermarkHint')} <code className="font-mono">{'${email}'}</code>{' '}
-              <code className="font-mono">{'${host}'}</code> <code className="font-mono">{'${date}'}</code>{' '}
-              <code className="font-mono">{'${time}'}</code>.
-            </span>
-          </span>
-        </label>
-        {wm.enabled && (
-          <div className="mt-3 space-y-3">
-            <label className="block text-xs text-slate-400">
-              {t('settings.text')}
-              <input type="text" value={wm.content} maxLength={200}
-                onChange={(e) => setWm({ ...wm, content: e.target.value })}
-                className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
-            </label>
-            <div className="grid grid-cols-3 gap-3">
-              <label className="block text-xs text-slate-400">
-                {t('settings.opacity')} <span className="text-slate-500">{wm.opacity.toFixed(2)}</span>
-                <input type="range" min={0.02} max={0.5} step={0.01} value={wm.opacity}
-                  onChange={(e) => setWm({ ...wm, opacity: parseFloat(e.target.value) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-              <label className="block text-xs text-slate-400">
-                {t('settings.angle')} <span className="text-slate-500">{wm.angle}°</span>
-                <input type="range" min={-90} max={90} step={5} value={wm.angle}
-                  onChange={(e) => setWm({ ...wm, angle: parseInt(e.target.value, 10) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-              <label className="block text-xs text-slate-400">
-                {t('settings.size')} <span className="text-slate-500">{wm.fontSize}px</span>
-                <input type="range" min={8} max={40} step={1} value={wm.fontSize}
-                  onChange={(e) => setWm({ ...wm, fontSize: parseInt(e.target.value, 10) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-            </div>
-          </div>
-        )}
-        <div className="mt-3 flex items-center gap-3">
-          <Button variant="primary" onClick={saveWatermark}>
+      {/* ── Filigran (watermark) ── bifa face parte din formularul salvat cu „Save watermark" */}
+      <SettingsSection data-setting-id="watermark" hidden={!vis('watermark')} instanceWide
+        title={t('settings.watermark')} description={t('settings.watermarkDesc')} dirty={wmDirty}
+        footer={canSave(wmState) ? <>
+          <Button variant="primary" type="button" onClick={saveWatermark}>
             {t('settings.saveWatermark')}
           </Button>
           {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
           <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
           <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
-        </div>
+        </> : undefined}>
+        <NotLoaded state={wmState} onRetry={loadWm} />
+        {canSave(wmState) && (<>
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
+          <input type="checkbox" checked={wm.enabled}
+            onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
+          <span>{t('settings.watermarkToggle')}</span>
+        </label>
+        {wm.enabled && (
+          <div className="mt-3 space-y-3">
+            <Field label={t('settings.text')} hint={<>
+              {t('settings.watermarkHint')} <code className="font-mono">{'${email}'}</code>{' '}
+              <code className="font-mono">{'${host}'}</code> <code className="font-mono">{'${date}'}</code>{' '}
+              <code className="font-mono">{'${time}'}</code>
+            </>}>
+              <input type="text" value={wm.content} maxLength={200}
+                onChange={(e) => setWm({ ...wm, content: e.target.value })}
+                className={field + ' font-mono'} />
+            </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Field label={<>{t('settings.opacity')} <span className="font-normal text-slate-500">{wm.opacity.toFixed(2)}</span></>}>
+                <input type="range" min={0.02} max={0.5} step={0.01} value={wm.opacity}
+                  onChange={(e) => setWm({ ...wm, opacity: parseFloat(e.target.value) })}
+                  className="w-full accent-sky-600" />
+              </Field>
+              <Field label={<>{t('settings.angle')} <span className="font-normal text-slate-500">{wm.angle}°</span></>}>
+                <input type="range" min={-90} max={90} step={5} value={wm.angle}
+                  onChange={(e) => setWm({ ...wm, angle: parseInt(e.target.value, 10) })}
+                  className="w-full accent-sky-600" />
+              </Field>
+              <Field label={<>{t('settings.size')} <span className="font-normal text-slate-500">{wm.fontSize}px</span></>}>
+                <input type="range" min={8} max={40} step={1} value={wm.fontSize}
+                  onChange={(e) => setWm({ ...wm, fontSize: parseInt(e.target.value, 10) })}
+                  className="w-full accent-sky-600" />
+              </Field>
+            </div>
+          </div>
+        )}
         </>)}
-      </section>
+      </SettingsSection>
     </div>
   )
 }

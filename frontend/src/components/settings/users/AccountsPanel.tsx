@@ -8,7 +8,7 @@ import { EMPTY_FILTER, expiryFrom, filterAccounts, filterActive, hasNoRole, last
 import { crownDialog, withCrownConfirm } from '../../../lib/crown'
 import { useConfirm } from '../../../lib/confirm'
 import { field } from '../ui'
-import { Badge, Button, IconButton } from '../../ui'
+import { Badge, Button, Field, IconButton } from '../../ui'
 import { ChevronIcon, CloseIcon, SearchIcon, WarningIcon } from '../../Icons'
 import { defaultScope, ExpiryPicker, RETURN_USERS, RoleOptions, ScopePicker, scopeOk, selfOf, shellOf, useAccessReauth, useExpiryText, useRoleName } from './shared'
 import ExplainAccess from './ExplainAccess'
@@ -76,6 +76,19 @@ function AddAccountForm(props: {
   const { plan, reauth } = useAccessReauth(props.me, { returnTo: RETURN_USERS })
   const needsPw = plan === 'password'
 
+  // 3.7.1 (audit UX Setări Codex #9): înainte de trimitere, rezumatul a CE primeşte contul — rol,
+  // scope, durată — ca „cont creat" să nu se confunde cu „acces dat" (sau invers)
+  const roleName = useRoleName(props.catalogue)
+  const { hostName } = useChip(props.hosts)
+  const expiryText = useExpiryText()
+  const until = newUser.role ? expiryFrom(newUser.expiry, newUser.custom, Date.now()) : null
+  const summary = !newUser.role ? t('settings.users.summaryNoRole')
+    : t('settings.users.summaryRole', {
+      binding: t('roles.chip', { role: roleName(newUser.role),
+        scope: scopeLabel({ scope_kind: newUser.scope_kind, scope_value: newUser.scope_value.trim() }, hostName, t) }),
+      until: until && until !== 'invalid' ? expiryText(until) : t('roles.expiry.permanent'),
+    })
+
   async function addUser(e: FormEvent) {
     e.preventDefault()
     // 3.6.10: rolul iniţial poate fi temporar (cine are el însuşi acces temporar TREBUIE să-l limiteze)
@@ -100,25 +113,33 @@ function AddAccountForm(props: {
 
   return (
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape în formular îl închide (şi nu închide tot modalul)
-    <form id={props.id} onSubmit={addUser} data-add-user-form aria-label={t('settings.users.add')}
+    <form id={props.id} onSubmit={addUser} data-add-user-form aria-label={t('settings.users.createTitle')}
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); props.onCancel() } }}
       className="mt-3 flex flex-col gap-2 rounded-xl bg-ink-800/60 p-3 ring-1 ring-ink-700">
-      <div className="text-sm font-semibold text-slate-200">{t('settings.users.add')}</div>
+      <h4 className="text-sm font-semibold text-slate-200">{t('settings.users.createTitle')}</h4>
       <p className="text-xs text-slate-400">{t('settings.users.addHint')}</p>
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <input type="email" value={newUser.email} autoComplete="off" autoFocus
-          onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-          placeholder={t('settings.users.emailPlaceholder')} aria-label={t('settings.email')} className={field} />
-        <input type="password" value={newUser.password} autoComplete="new-password"
-          onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-          placeholder={t('settings.users.passwordPlaceholder')} aria-label={t('settings.newPassword')} className={field} />
-      </div>
-      <select value={newUser.role} aria-label={t('roles.role.label')} className={field}
-        onChange={(e) => setNewUser({ ...newUser, role: e.target.value,
-          scope_kind: defaultScope(e.target.value), scope_value: '' })}>
-        <option value="">{t('roles.noRole')}</option>
-        <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
-      </select>
+      {/* 3.7.1 (audit UX Setări Codex #9): parola NOULUI cont şi parola TA sunt două câmpuri separate,
+          fiecare cu numele lui vizibil; nu mai sunt două câmpuri de parolă fără etichetă alăturate */}
+      <fieldset className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <legend className="sr-only">{t('settings.users.newAccountLegend')}</legend>
+        <Field label={t('settings.users.newEmail')} className="min-w-0 flex-1">
+          <input type="email" value={newUser.email} autoComplete="off" autoFocus
+            onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+            placeholder={t('settings.users.emailPlaceholder')} className={field} />
+        </Field>
+        <Field label={t('settings.users.initialPassword')} hint={t('settings.users.initialPasswordHint')} className="min-w-0 flex-1">
+          <input type="password" value={newUser.password} autoComplete="new-password"
+            onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} className={field} />
+        </Field>
+      </fieldset>
+      <Field label={t('roles.role.label')}>
+        <select value={newUser.role} className={field}
+          onChange={(e) => setNewUser({ ...newUser, role: e.target.value,
+            scope_kind: defaultScope(e.target.value), scope_value: '' })}>
+          <option value="">{t('roles.noRole')}</option>
+          <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
+        </select>
+      </Field>
       {newUser.role && (
         <ScopePicker idPrefix="newuser" kind={newUser.scope_kind} value={newUser.scope_value} hosts={props.hosts}
           onChange={(k, v) => setNewUser({ ...newUser, scope_kind: k, scope_value: v })} />
@@ -127,10 +148,14 @@ function AddAccountForm(props: {
         <ExpiryPicker idPrefix="newuser" choice={newUser.expiry} custom={newUser.custom}
           onChange={(expiry, custom) => setNewUser({ ...newUser, expiry, custom })} />
       )}
+      <p className="rounded-md bg-ink-900/60 px-3 py-2 text-xs text-slate-300 ring-1 ring-ink-700" data-add-user-summary>
+        {summary}
+      </p>
       {needsPw ? (
-        <input type="password" value={newUser.current_password} autoComplete="current-password"
-          onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })}
-          placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')} className={field} />
+        <Field label={t('settings.users.yourPassword')} hint={t('settings.users.yourPasswordHint')}>
+          <input type="password" value={newUser.current_password} autoComplete="current-password"
+            onChange={(e) => setNewUser({ ...newUser, current_password: e.target.value })} className={field} />
+        </Field>
       ) : (
         <p className="text-xs text-slate-500" data-reauth-hint>{t('access.reauth.noPassword')}</p>
       )}
@@ -138,7 +163,7 @@ function AddAccountForm(props: {
         <Button variant="primary" type="submit" loading={busy} className="wt-touch"
           disabled={(needsPw && !newUser.current_password) || (!!newUser.role && (!scopeOk(newUser.scope_kind, newUser.scope_value)
             || expiryFrom(newUser.expiry, newUser.custom, Date.now()) === 'invalid'))}>
-          {t('settings.users.add')}
+          {t('settings.users.createSubmit')}
         </Button>
         <Button type="button" className="wt-touch" onClick={props.onCancel}>{t('roles.custom.cancel')}</Button>
       </div>
@@ -332,11 +357,13 @@ function AccountDetails(props: {
       ) : (
         <form onSubmit={addBinding} className="flex flex-col gap-2" data-grant-form aria-label={t('roles.bindings.addFor', { email: u.email })}>
           <div className="text-xs font-semibold text-slate-400">{t('roles.bindings.addFor', { email: u.email })}</div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <select value={grant.role} aria-label={t('roles.role.label')} className={field + ' sm:w-48'}
-              onChange={(e) => setGrant({ ...grant, role: e.target.value, scope_kind: defaultScope(e.target.value), scope_value: '' })}>
-              <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
-            </select>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+            <Field label={t('roles.role.label')} className="sm:w-48">
+              <select value={grant.role} className={field}
+                onChange={(e) => setGrant({ ...grant, role: e.target.value, scope_kind: defaultScope(e.target.value), scope_value: '' })}>
+                <RoleOptions catalogue={props.catalogue} isOwner={props.isOwner} />
+              </select>
+            </Field>
             <div className="min-w-0 flex-1">
               <ScopePicker idPrefix={`grant-${u.id}`} kind={grant.scope_kind} value={grant.scope_value} hosts={props.hosts}
                 onChange={(k, v) => setGrant({ ...grant, scope_kind: k, scope_value: v })} />
@@ -425,7 +452,9 @@ export default function AccountsPanel(props: {
       )}
 
       {/* căutare + filtre: pe telefon câmpul pe un rând, filtrele două câte două dedesubt */}
-      <div role="group" aria-label={t('settings.users.searchLabel')} className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+      <div role="group" aria-label={t('settings.users.searchLabel')} className="mt-3 grid grid-cols-2 items-end gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+        {/* căutarea păstrează pictograma + numele accesibil (ca restul căutărilor din aplicaţie); filtrele
+            au etichete vizibile (3.7.1, audit UX Setări M8) */}
         <div className="relative col-span-2 sm:col-span-1">
           <span aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500">
             <SearchIcon size={14} />
@@ -434,18 +463,20 @@ export default function AccountsPanel(props: {
             autoComplete="off" spellCheck={false} data-account-search
             aria-label={t('settings.users.search')} placeholder={t('settings.users.search')} className={field + ' pl-8'} />
         </div>
-        <select value={filter.role} onChange={(e) => set({ role: e.target.value, noRole: false })}
-          aria-label={t('settings.users.filterRole')} className={field + ' sm:w-40'}>
-          <option value="">{t('settings.users.anyRole')}</option>
-          {ROLE_KEYS.map((k) => <option key={k} value={k}>{t('roles.role.' + k)}</option>)}
-          {(props.catalogue?.custom ?? []).map((r) => <option key={r.id} value={roleValue(r)}>{r.name}</option>)}
-        </select>
-        <select value={filter.signIn} onChange={(e) => set({ signIn: e.target.value as AccountFilter['signIn'] })}
-          aria-label={t('settings.users.filterSignIn')} className={field + ' sm:w-44'}>
-          <option value="">{t('settings.users.anySignIn')}</option>
-          <option value="local">{t('settings.users.filterLocal')}</option>
-          <option value="sso">{t('settings.users.filterSso')}</option>
-        </select>
+        <Field label={t('settings.users.filterRole')} className="sm:w-40">
+          <select value={filter.role} onChange={(e) => set({ role: e.target.value, noRole: false })} className={field}>
+            <option value="">{t('settings.users.anyRole')}</option>
+            {ROLE_KEYS.map((k) => <option key={k} value={k}>{t('roles.role.' + k)}</option>)}
+            {(props.catalogue?.custom ?? []).map((r) => <option key={r.id} value={roleValue(r)}>{r.name}</option>)}
+          </select>
+        </Field>
+        <Field label={t('settings.users.filterSignIn')} className="sm:w-44">
+          <select value={filter.signIn} onChange={(e) => set({ signIn: e.target.value as AccountFilter['signIn'] })} className={field}>
+            <option value="">{t('settings.users.anySignIn')}</option>
+            <option value="local">{t('settings.users.filterLocal')}</option>
+            <option value="sso">{t('settings.users.filterSso')}</option>
+          </select>
+        </Field>
         <div className="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-3">
           <label className="flex min-h-7 items-center gap-2 text-sm text-slate-300">
             <input type="checkbox" checked={filter.noRole} data-filter-norole

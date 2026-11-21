@@ -4,8 +4,7 @@ import { useConfirm } from '../../lib/confirm'
 import { useI18n } from '../../lib/i18n'
 import { Binding, can, loadPerms, ROLE_KEYS, roleLabel, scopeLabel, SHELL_ROLES, usePerms } from '../../lib/perms'
 import { type UserRow } from '../../lib/usersAdmin'
-import { heading } from './ui'
-import { Badge, Button } from '../ui'
+import { Badge, Button, SettingsSection } from '../ui'
 import HelpTip from '../HelpTip'
 import { ActionStatus, RETURN_MY_ACCESS } from './users/shared'
 import ExplainAccess from './users/ExplainAccess'
@@ -66,9 +65,9 @@ export default function MyAccessTab() {
   const seesRoles = can(perms, 'users.manage') || can(perms, 'roles.manage')
 
   return (
-    <section data-setting-id="myAccess" className="mt-6 rounded-xl bg-ink-800/40 px-3 py-3 ring-1 ring-ink-700">
-      <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('roles.myAccess')}<HelpTip id="roles" /></h3>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5" data-my-access>
+    <SettingsSection data-setting-id="myAccess" className="mt-4" title={t('roles.myAccess')}
+      titleExtra={<HelpTip id="roles" />} description={t('roles.myAccessHint')}>
+      <div className="flex flex-wrap items-center gap-1.5" data-my-access>
         {mine.length === 0
           ? <span className="text-sm text-slate-400">{t('roles.myNone')}</span>
           : mine.map((b) => (
@@ -76,7 +75,6 @@ export default function MyAccessTab() {
               title={sourceTitle(b)}>{chip(b)}</Badge>
           ))}
       </div>
-      <p className="mt-2 text-xs text-slate-500">{t('roles.myAccessHint')}</p>
       {/* 3.6.10: „de ce pot / nu pot…" pe un host anume — aceeaşi explicaţie ca pentru un admin */}
       {self && hosts.length > 0 && (
         <details className="mt-2" data-explain-self>
@@ -85,12 +83,6 @@ export default function MyAccessTab() {
             <ExplainAccess userId={self.id} email={self.email} self hosts={hosts} />
           </div>
         </details>
-      )}
-      {self?.sso && self.local_password && (
-        <div className="mt-3 flex flex-col items-start gap-2 rounded-md bg-warn/10 px-3 py-2" data-localpw-self>
-          <p className="text-xs text-warn">{t('roles.localPw.mine')}</p>
-          <Button type="button" size="sm" variant="danger" onClick={removeLocalPassword}>{t('roles.localPw.remove')}</Button>
-        </div>
       )}
       {loadErr && <p role="alert" className="mt-2 text-xs wt-danger">{loadErr}</p>}
       <ActionStatus msg={note.msg} err={note.err} />
@@ -107,6 +99,14 @@ export default function MyAccessTab() {
           ))}
         </ul>
       )}
-    </section>
+      {/* 3.7.1 (audit UX Setări Me3): acţiunea distructivă (scoate parola locală — revocă şi
+          passkey-urile) stă ULTIMA, despărţită de restul, cu confirmarea şi re-auth-ul de dinainte */}
+      {self?.sso && self.local_password && (
+        <div className="mt-4 flex flex-col items-start gap-2 rounded-md border border-rose-500/40 bg-rose-500/5 px-3 py-2" data-localpw-self>
+          <p className="text-xs text-warn">{t('roles.localPw.mine')}</p>
+          <Button type="button" size="sm" variant="danger" onClick={removeLocalPassword}>{t('roles.localPw.remove')}</Button>
+        </div>
+      )}
+    </SettingsSection>
   )
 }

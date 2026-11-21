@@ -6,9 +6,9 @@ import { useI18n } from '../../../lib/i18n'
 import { docsUrl } from '../../../lib/help'
 import { fmtTs } from '../../../lib/tz'
 import { scimState, type ScimStatus } from '../../../lib/usersAdmin'
-import { heading } from '../ui'
+import { field } from '../ui'
 import { RETURN_USERS, useAccessReauth } from './shared'
-import { Badge, Button, ErrorState } from '../../ui'
+import { Badge, Button, ErrorState, Field, SettingsSection } from '../../ui'
 import HelpTip from '../../HelpTip'
 import type { BadgeTone } from '../../ui'
 
@@ -98,24 +98,20 @@ export default function ScimPanel(props: { isOwner: boolean; me?: ReauthMe; done
 
   if (err) {
     return (
-      <section className="mt-6 border-t border-ink-700 pt-4" data-scim-panel>
-        <h3 className={heading + ' !mt-0'}>{t('scim.title')}</h3>
+      <SettingsSection className="mt-4" data-scim-panel title={t('scim.title')}>
         <ErrorState compact title={t('scim.loadFailed')} message={err} onRetry={() => { void load() }} />
-      </section>
+      </SettingsSection>
     )
   }
   if (!st) return null
   const state = scimState(st)
   return (
-    <section className="mt-6 border-t border-ink-700 pt-4" data-scim-panel aria-labelledby="scim-title">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 id="scim-title" className={heading + ' !mt-0 flex flex-1 items-center gap-2'}>{t('scim.title')}<HelpTip id="scim" /></h3>
-        <Badge tone={TONE[state]} size="md" data-scim-state={state}>{t('scim.state.' + state)}</Badge>
-      </div>
-      <p className="mt-1 text-xs text-slate-500">{t('scim.hint')}</p>
-      {state === 'noSso' && <p className="mt-2 rounded-md bg-danger/10 px-3 py-2 text-xs wt-danger">{t('scim.noSso')}</p>}
+    <SettingsSection className="mt-4" data-scim-panel title={t('scim.title')}
+      titleExtra={<><HelpTip id="scim" /><Badge tone={TONE[state]} size="md" data-scim-state={state}>{t('scim.state.' + state)}</Badge></>}
+      description={t('scim.hint')}>
+      {state === 'noSso' && <p className="mb-2 rounded-md bg-danger/10 px-3 py-2 text-xs wt-danger">{t('scim.noSso')}</p>}
 
-      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-[auto_1fr]">
+      <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-[auto_1fr]">
         <dt className="text-slate-500">{t('scim.url')}</dt>
         <dd className="flex min-w-0 flex-wrap items-center gap-2">
           <code className="min-w-0 break-all font-mono text-slate-200" data-scim-url>{st.url}</code>
@@ -148,10 +144,12 @@ export default function ScimPanel(props: { isOwner: boolean; me?: ReauthMe; done
       {fresh && (
         <div className="mt-3 flex flex-col gap-2 rounded-xl bg-warn/10 p-3 ring-1 ring-warn/40" data-scim-fresh-token>
           <p className="text-xs text-warn">{t('scim.copyNow')}</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <input type="text" readOnly value={fresh} aria-label={t('scim.token')} spellCheck={false}
-              className="min-w-0 flex-1 rounded-md bg-ink-900 px-2 py-1.5 font-mono text-xs text-slate-200 ring-1 ring-ink-700"
-              onFocus={(e) => e.currentTarget.select()} />
+          <div className="flex flex-wrap items-end gap-2">
+            <Field label={t('scim.token')} className="min-w-0 flex-1">
+              <input type="text" readOnly value={fresh} spellCheck={false}
+                className={field + ' font-mono'}
+                onFocus={(e) => e.currentTarget.select()} />
+            </Field>
             <Button type="button" size="sm" variant="primary" onClick={() => copy(fresh, 'token')}>
               {copied === 'token' ? t('scim.copied') : t('scim.copyToken')}
             </Button>
@@ -183,6 +181,6 @@ export default function ScimPanel(props: { isOwner: boolean; me?: ReauthMe; done
       </ul>
       <a href={docsUrl(SCIM_DOC)} target="_blank" rel="noopener noreferrer"
         className="wt-link mt-2 inline-block text-xs underline">{t('scim.docs')}</a>
-    </section>
+    </SettingsSection>
   )
 }

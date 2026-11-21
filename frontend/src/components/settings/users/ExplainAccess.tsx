@@ -4,7 +4,7 @@ import { useI18n } from '../../../lib/i18n'
 import { roleLabel, scopeLabel } from '../../../lib/perms'
 import { capabilities, type Explain, type ExplainBinding } from '../../../lib/usersAdmin'
 import { field } from '../ui'
-import { Badge } from '../../ui'
+import { Badge, Field } from '../../ui'
 import { CrownIcon } from '../../Icons'
 import { useExpiryText } from './shared'
 
@@ -50,11 +50,13 @@ export default function ExplainAccess(props: { userId: number; email: string; se
   return (
     <div className="flex flex-col gap-2" data-explain>
       <p className="text-xs text-slate-500">{t('explain.hint')}</p>
-      <select value={hostId} aria-label={t('explain.pickHost')} className={field + ' sm:w-64'} data-explain-host
-        onChange={(e) => setHostId(e.target.value ? Number(e.target.value) : '')}>
-        <option value="">{t('explain.pickHost')}</option>
-        {props.hosts.filter((h) => !h.ephemeral).map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-      </select>
+      <Field label={t('explain.host')} className="sm:w-64">
+        <select value={hostId} className={field} data-explain-host
+          onChange={(e) => setHostId(e.target.value ? Number(e.target.value) : '')}>
+          <option value="">{t('explain.pickHost')}</option>
+          {props.hosts.filter((h) => !h.ephemeral).map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+        </select>
+      </Field>
       <div aria-live="polite" id={`${uid}-out`}>
         {loading && <p className="text-xs text-slate-400">{t('explain.loading')}</p>}
         {err && <p role="alert" className="text-sm wt-danger">{err}</p>}

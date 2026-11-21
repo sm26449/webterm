@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { api, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
-import { field, heading } from './ui'
-import { Button } from '../ui'
+import { field } from './ui'
+import { Button, Field, SettingsSection } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import HelpTip from '../HelpTip'
 import NotLoaded from './NotLoaded'
@@ -16,7 +16,7 @@ type FwdCfg = {
   server_ip: string; dns_ip: string; dns_ok: boolean; cert_ok: boolean
 }
 
-export default function ForwardDomainSection() {
+export default function ForwardDomainSection(props: { 'data-setting-id': string; hidden?: boolean }) {
   const { t } = useI18n()
   const vis = useSectionVisible()
   // Port forwarding: domeniu configurabil
@@ -47,24 +47,23 @@ export default function ForwardDomainSection() {
   useEffect(() => { if (vis('forwardDomain')) void loadFwd() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-      // <section data-setting-id> stă în NetworkTab (indexul căutării verifică tab-urile)
-    <>
-      {/* ── Port forwarding (domeniu) ── */}
-      <h3 className={heading + ' flex items-center gap-2'}>{t('settings.forward.title')}<HelpTip id="forwardDomain" /></h3>
-      <p className="mt-1 text-xs text-slate-500">
-        {t('settings.forward.hintA')} <span className="font-mono">{t('settings.forward.subdomain')}</span>{t('settings.forward.hintB')} <span className="font-mono">{t('settings.forward.exampleDomain')}</span>{t('settings.forward.hintC')} <span className="font-mono">.env</span>{t('settings.forward.hintD')}
-      </p>
+      // data-setting-id vine din NetworkTab, scris literal acolo (indexul căutării citeşte *Tab.tsx)
+    <SettingsSection data-setting-id={props['data-setting-id']} hidden={props.hidden} instanceWide
+      title={t('settings.forward.title')} titleExtra={<HelpTip id="forwardDomain" />}
+      description={t('settings.forward.desc')}>
       <NotLoaded state={fwdState} onRetry={() => { void loadFwd() }} />
-      {canSave(fwdState) && (<div className="mt-2 flex flex-col gap-2">
-        <div className="flex gap-2">
-          <input value={fwdDomain} onChange={(e) => setFwdDomain(e.target.value)}
-            placeholder={t('settings.forward.inputPlaceholder')} aria-label={t('settings.forward.ariaLabel')} spellCheck={false}
-            aria-invalid={fwdErr ? true : undefined} aria-describedby={fwdErr ? 'fwd-error' : undefined}
-            className={`${field} font-mono`} />
-          <Button variant="primary" disabled={fwdBusy} onClick={saveFwd} className="shrink-0">
+      {canSave(fwdState) && (<div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label={t('settings.forward.ariaLabel')} className="min-w-0 flex-1">
+            <input value={fwdDomain} onChange={(e) => setFwdDomain(e.target.value)}
+              placeholder={t('settings.forward.inputPlaceholder')} spellCheck={false}
+              aria-invalid={fwdErr ? true : undefined} aria-describedby={fwdErr ? 'fwd-error' : undefined}
+              className={`${field} font-mono`} />
+          </Field>
+          <Button variant="primary" type="button" loading={fwdBusy} onClick={saveFwd} className="shrink-0">
             {t('settings.save')}
           </Button>
-          <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); void loadFwd(true) }} className="shrink-0">
+          <Button variant="secondary" type="button" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); void loadFwd(true) }} className="shrink-0">
             {t('settings.recheck')}
           </Button>
         </div>
@@ -96,6 +95,6 @@ export default function ForwardDomainSection() {
           </div>
         )}
       </div>)}
-    </>
+    </SettingsSection>
   )
 }

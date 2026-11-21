@@ -136,7 +136,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     perm: 'users.manage', requires: 'sso' },
   // ── Acces şi automatizare ──
   { id: 'signingKey', cat: 'acces', titleKey: 'settings.signingKey',
-    keywords: 'signing key ed25519 agent update signature pem semnare cheie semnatura', perm: 'signing.manage' },
+    keywords: 'signing key ed25519 agent update signature pem encrypted download export semnare cheie semnatura criptata descarca', perm: 'signing.manage' },
   { id: 'tokens', cat: 'acces', titleKey: 'settings.tokens.title', hintKey: 'settings.tokens.hint',
     keywords: 'token api bearer cron ci automation script monitoring tokenuri automatizare', perm: 'tokens.create' },
   { id: 'enrollGroups', cat: 'acces', titleKey: 'settings.enrollGroups.title', hintKey: 'settings.enrollGroups.hint',
@@ -167,7 +167,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   { id: 'backupAuto', cat: 'backup', titleKey: 'settings.backup.autoTitle',
     keywords: 'automatic scheduled backup snapshot retention automat programat', perm: 'backups.manage' },
   { id: 'backupCloud', cat: 'backup', titleKey: 'settings.cloud.title', hintKey: 'settings.cloud.hint',
-    keywords: 'cloud google drive dropbox offsite off-host', perm: 'backups.manage' },
+    keywords: 'cloud google drive dropbox offsite off-host external destination destinatie externa', perm: 'backups.manage' },
   { id: 'backupRestore', cat: 'backup', titleKey: 'settings.backup.restoreTitle',
     keywords: 'restore import recover restaurare recuperare', perm: 'backups.manage' },
   // ── Actualizări ──
@@ -188,7 +188,7 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
       + 'agenti conectati certificat client ruta versiune flota jurnal conexiune', perm: 'security.view' },
   // ── Audit ──
   { id: 'audit', cat: 'audit', titleKey: 'settings.audit.title', hintKey: 'settings.audit.hint',
-    keywords: 'audit log history who did what jurnal istoric' },
+    keywords: 'audit log history who did what activity my actions instance jurnal istoric activitatea mea instanta' },
 ]
 
 const BY_ID = new Map(SETTINGS_INDEX.map((s) => [s.id, s]))
