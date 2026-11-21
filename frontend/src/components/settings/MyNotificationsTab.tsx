@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { field, heading } from './ui'
-import { Button, ErrorState, SettingsSection, Switch } from '../ui'
+import { field } from './ui'
+import { Button, ErrorState, Field, SettingsSection, Switch } from '../ui'
 import { AlertPref, applyPref, groupPrefs } from '../../lib/alerts'
 import { ensureNotificationPermission } from '../../lib/notify'
 import { setTaskNotifyEnabled, setTaskNotifySeconds, taskNotifyEnabled, taskNotifySeconds } from '../../lib/taskNotify'
@@ -140,60 +140,41 @@ export default function MyNotificationsTab() {
         <span role="alert" className={prefsErr ? 'text-sm wt-danger' : 'sr-only'}>{prefsErr}</span>
       </SettingsSection>
 
-      <section data-setting-id="taskNotify">
-        {/* ── Notificări de task (Faza 1, local) ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.taskNotify')}<HelpTip id="taskNotify" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.taskNotifyHint')}</p>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={taskNotif}
-            onChange={(e) => {
-              const on = e.target.checked
+      <SettingsSection data-setting-id="taskNotify" headingLevel={3}
+        title={t('settings.taskNotify')} titleExtra={<HelpTip id="taskNotify" />}
+        description={t('settings.taskNotifyHint')}>
+        <div className="flex flex-col gap-3">
+          <Switch checked={taskNotif} label={t('settings.taskNotifyEnable')} hint={t('settings.taskNotifyEnableHint')}
+            onChange={(on) => {
               setTaskNotif(on)
               setTaskNotifyEnabled(on)
               if (on) void ensureNotificationPermission()   // cere permisiunea DIN gestul de utilizator (cerut pe iOS)
-            }}
-            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
-          />
-          <span>
-            {t('settings.taskNotifyEnable')}
-            <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifyEnableHint')}</span>
-          </span>
-        </label>
-        <label className="mt-3 block text-sm text-slate-300">
-          <span className="mb-1 block text-xs text-slate-400">{t('settings.taskNotifySeconds')}</span>
-          <input type="number" min={1} max={3600} step={1} value={taskSec} disabled={!taskNotif}
-            onChange={(e) => { setTaskSec(e.target.value); const n = Number(e.target.value); if (Number.isFinite(n)) setTaskNotifySeconds(n) }}
-            onBlur={() => setTaskSec(String(taskNotifySeconds()))}
-            className={field + ' max-w-[8rem]'} />
-          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifySecondsHint')}</span>
-        </label>
-        {/* Faza 2 — push pe acest dispozitiv (telefon cu aplicația închisă); apare doar dacă e
-            suportat de browser ȘI configurat pe server (cheie VAPID). */}
-        {pushSupported() && pushSt?.available && (
-          <div className="mt-3 border-t border-ink-800 pt-3">
-            <label className="flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-              <input type="checkbox" checked={pushHere} disabled={pushBusy}
-                onChange={(e) => { void togglePush(e.target.checked) }}
-                className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
-              <span>
-                {t('settings.pushEnable')}
-                <span className="mt-0.5 block text-xs text-slate-500">{t('settings.pushEnableHint')}</span>
-              </span>
-            </label>
-            {pushHere && (
-              <div className="mt-2">
-                <Button variant="secondary" disabled={pushBusy} onClick={() => { void doPushTest() }}>
-                  {t('push.test')}
-                </Button>
-              </div>
-            )}
-            <span role="status" className={pushMsg ? 'mt-1 block text-xs wt-good' : 'sr-only'}>{pushMsg}</span>
-            <span role="alert" className={pushErr ? 'mt-1 block text-xs wt-danger' : 'sr-only'}>{pushErr}</span>
-          </div>
-        )}
-      </section>
+            }} />
+          <Field label={t('settings.taskNotifySeconds')} hint={t('settings.taskNotifySecondsHint')}>
+            <input type="number" min={1} max={3600} step={1} value={taskSec} disabled={!taskNotif}
+              onChange={(e) => { setTaskSec(e.target.value); const n = Number(e.target.value); if (Number.isFinite(n)) setTaskNotifySeconds(n) }}
+              onBlur={() => setTaskSec(String(taskNotifySeconds()))}
+              className={field + ' max-w-[8rem]'} />
+          </Field>
+          {/* Faza 2 — push pe acest dispozitiv (telefon cu aplicația închisă); apare doar dacă e
+              suportat de browser ȘI configurat pe server (cheie VAPID). */}
+          {pushSupported() && pushSt?.available && (
+            <div className="flex flex-col gap-2 border-t border-ink-800 pt-3">
+              <Switch checked={pushHere} disabled={pushBusy} label={t('settings.pushEnable')} hint={t('settings.pushEnableHint')}
+                onChange={(on) => { void togglePush(on) }} />
+              {pushHere && (
+                <div>
+                  <Button variant="secondary" disabled={pushBusy} onClick={() => { void doPushTest() }}>
+                    {t('push.test')}
+                  </Button>
+                </div>
+              )}
+              <span role="status" className={pushMsg ? 'block text-xs wt-good' : 'sr-only'}>{pushMsg}</span>
+              <span role="alert" className={pushErr ? 'block text-xs wt-danger' : 'sr-only'}>{pushErr}</span>
+            </div>
+          )}
+        </div>
+      </SettingsSection>
     </div>
   )
 }

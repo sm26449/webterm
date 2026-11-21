@@ -36,8 +36,10 @@ export default function Switch(props: {
           <span aria-hidden="true"
             className={`relative inline-block h-5 w-9 rounded-full ring-1 transition-colors ${
               props.checked ? 'bg-sky-700 ring-sky-500' : 'bg-ink-700 ring-[rgb(var(--field-border))]'}`}>
-            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-              props.checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            {/* `left-0.5` explicit: fără el, butonul absolut îşi lua poziţia statică şi ieşea din pistă
+                (3.7.1-rc2, raportat pe ecran). Pista 36 px, butonul 16 px: 2 px oprit, 18 px pornit. */}
+            <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+              props.checked ? 'translate-x-4' : 'translate-x-0'}`} />
           </span>
         </button>
         <label htmlFor={id}
