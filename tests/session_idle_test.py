@@ -849,6 +849,11 @@ async def agent62_fixes(hid, src, owner, alice):
           hB.activity_at() >= t1 and (rB["last_active"] or 0) >= t1, (hB.activity_at(), rB["last_active"]))
     await sweep_at(t1 + 3 * DAY + 60)
     check("v62: …nicio notificare nouă imediat după refuz", (await srow(sB))["idle_notified_at"] is None)
+    # review agent 62: după un refuz nu mai promitem închiderea (altfel un email „se închide” la fiecare ciclu)
+    await sweep_at(t1 + 3 * DAY + 30 * DAY)
+    rB2 = await srow(sB)
+    check("v62: după un refuz, notificarea următoare NU mai are termen de închidere",
+          rB2["idle_notified_at"] is not None and rB2["idle_close_after"] is None, dict(rB2))
     await close_all_live()
 
     # agent 62 care răspunde ok → închisă pe calea confirmată (on_exit)

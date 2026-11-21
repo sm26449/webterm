@@ -278,6 +278,12 @@ def closing_source(row):
     """Sursa prin care sesiunea poate fi închisă CONDIŢIONAT (AgentConnection, agent ≥ 62), sau None.
     SINCRON (folosită şi în ultima verificare dinaintea kill-ului). Orice altă sursă — agent mai vechi,
     SSH, telnet, serial, host offline — nu poate dovedi că sesiunea e încă liniştită: doar notificare."""
+    hub = core.hubs.get(row["id"])
+    if hub is not None and getattr(hub, "close_refused", False):
+        # review agent 62: agentul a refuzat deja o dată (activitate pe care gateway-ul n-o vede: o
+        # fereastră tmux din fundal, cineva ataşat pe host). Nu mai promitem o închidere care n-ar avea
+        # loc — notificare fără dată, o singură dată, până la repornirea gateway-ului.
+        return None
     source = core.session_sources.get(row["id"]) or core.source_for(row["host_id"])
     if isinstance(source, core.AgentConnection) and source.can_kill_if_quiet():
         return source
@@ -428,6 +434,7 @@ async def _host_active(row, hub, now: float, notified, detail: str) -> None:
     hub.exit_reason = "exited"
     hub.idle_pending = False
     hub.idle_notice_seen = None
+    hub.close_refused = True
     hub.last_host_activity_at = time.time()
     await db.execute("UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL, idle_close_gen=NULL,"
                      " last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=? AND idle_notified_at=?",
