@@ -141,9 +141,9 @@ def public_key_b64() -> Optional[str]:
 # din Faza 1, cât aplicația e deschisă, SUNT localizate normal prin catalogul frontend.)
 _STRINGS = {
     "en": {"failed_title": "Task failed", "failed_body": "exit {code} · {host}",
-           "test_title": "WebTerm", "test_body": "Test notification — push works."},
+           "test_title": "EverShell", "test_body": "Test notification — push works."},
     "ro": {"failed_title": "Task eșuat", "failed_body": "exit {code} · {host}",
-           "test_title": "WebTerm", "test_body": "Notificare de test — push-ul merge."},
+           "test_title": "EverShell", "test_body": "Notificare de test — push-ul merge."},
 }
 
 

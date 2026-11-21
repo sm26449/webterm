@@ -159,8 +159,8 @@ def test_logs_cmd():
     check("fără acces la socket + sudo passwordless → rulează prin `sudo -n`",
           out.strip() == "<logs><--tail><500><--timestamps><-f><web-1.prod_x>|sudo=1", out)
     out = run(cmd)
-    check("fără niciun acces: comanda simplă (eroarea reală) + indicaţia WebTerm",
-          "<logs>" in out and "[WebTerm]" in out and "|sudo=0" in out, out)
+    check("fără niciun acces: comanda simplă (eroarea reală) + indicaţia EverShell",
+          "<logs>" in out and "[EverShell]" in out and "|sudo=0" in out, out)
     out = run(evil, DOCKER_OK="1")
     check("injecţia nu rulează: `;` ajunge ca text în argv",
           "<x; touch /tmp/pwn>" in out, out)
@@ -178,8 +178,8 @@ def test_logs_cmd():
     check("exec, fără socket + sudo passwordless → prin `sudo -n`",
           out.strip() == "<exec><-it><web-1.prod_x>" + inner_sh + "|sudo=1", out)
     out = run(ex)
-    check("exec, fără niciun acces: comanda simplă (eroarea reală) + indicaţia WebTerm",
-          "<exec>" in out and "[WebTerm]" in out and "|sudo=0" in out, out)
+    check("exec, fără niciun acces: comanda simplă (eroarea reală) + indicaţia EverShell",
+          "<exec>" in out and "[EverShell]" in out and "|sudo=0" in out, out)
     out = run(hostcmd.docker_exec_cmd("x; touch /tmp/pwn"), DOCKER_OK="1")
     check("exec: injecţia nu rulează, `;` rămâne text într-un singur argument",
           "<x; touch /tmp/pwn>" in out, out)

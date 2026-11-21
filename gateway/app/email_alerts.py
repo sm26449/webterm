@@ -74,8 +74,8 @@ def _post_webhook(url: str, subject: str, body: str) -> None:
     import json as _json
     import urllib.request
     payload = _json.dumps({
-        "text": "[WebTerm] %s\n%s" % (subject, body),      # Slack / Mattermost
-        "content": "**[WebTerm] %s**\n%s" % (subject, body),  # Discord
+        "text": "[EverShell] %s\n%s" % (subject, body),      # Slack / Mattermost
+        "content": "**[EverShell] %s**\n%s" % (subject, body),  # Discord
         "subject": subject, "body": body,                    # consumatori proprii
     }).encode()
     # doar http(s): fără asta, un webhook configurat greşit cu `file://`/`gopher://` ar lăsa
@@ -83,7 +83,7 @@ def _post_webhook(url: str, subject: str, body: str) -> None:
     if not url.lower().startswith(("https://", "http://")):
         raise ValueError("webhook URL must be http(s)")
     req = urllib.request.Request(url, data=payload, method="POST", headers={  # noqa: S310 — schemă validată mai sus
-        "Content-Type": "application/json", "User-Agent": "WebTerm"})
+        "Content-Type": "application/json", "User-Agent": "EverShell"})
     with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
         r.read(2048)
 
@@ -127,7 +127,7 @@ def _configured(cfg: dict) -> bool:
 
 def _send_blocking(cfg: dict, subject: str, body: str) -> None:
     msg = EmailMessage()
-    msg["Subject"] = f"[WebTerm] {subject}"
+    msg["Subject"] = f"[EverShell] {subject}"
     msg["From"] = cfg["from"]
     msg["To"] = cfg["to"]
     msg.set_content(body)
@@ -237,7 +237,7 @@ async def send_test() -> None:
     try:
         await asyncio.to_thread(
             _send_blocking, cfg, subject,
-            "This is a test email from WebTerm. If it arrives, security alerts "
+            "This is a test email from EverShell. If it arrives, security alerts "
             "are working.")
     except Exception as e:
         await _record(K_EMAIL_LAST_FAILED, subject, str(e))
@@ -254,7 +254,7 @@ async def send_webhook_test() -> None:
     subject = "Test de configurare"
     try:
         await asyncio.to_thread(_post_webhook, url, subject,
-                                "This is a test alert from WebTerm. If it arrives, alerts reach this channel.")
+                                "This is a test alert from EverShell. If it arrives, alerts reach this channel.")
     except Exception as e:
         await _record(K_WEBHOOK_LAST_FAILED, subject, str(e))
         raise
@@ -608,7 +608,7 @@ def notify_host_offline(host_id: int, host_name: str, silent_for: float,
               f"The agent on '{host_name}' reported that it was uninstalled, then stopped "
               f"reporting ({int(silent_for)}s ago).\n\n"
               f"If you ran `ptyd.py uninstall` here, this is expected: remove the host in "
-              f"WebTerm, or reinstall the agent and this clears itself.\n"
+              f"EverShell, or reinstall the agent and this clears itself.\n"
               f"If you did NOT: the agent was stopped by someone with shell access on the "
               f"host — the uninstall report is only authenticated by the host token. "
               f"Investigate the machine; do not assume the removal was intentional.",
@@ -645,7 +645,7 @@ def notify_disk_low(free: int, total: int, pct: float) -> None:
         return
     gb = lambda n: "%.1f GB" % (n / 1024 ** 3)          # noqa: E731
     _fire("Gateway disk is filling up (%.0f%% free)" % pct,
-          f"The WebTerm gateway has {gb(free)} free of {gb(total)} ({pct:.1f}%).\n\n"
+          f"The EverShell gateway has {gb(free)} free of {gb(total)} ({pct:.1f}%).\n\n"
           f"When it runs out, the database and the transcripts stop being writable: logins "
           f"start failing with 500 while the container still reports healthy.\n\n"
           f"Transcripts are the usual cause. Lower WEBTERM_ARCHIVE_DAYS, or "
@@ -726,7 +726,7 @@ def notify_local_backup_failed(error: str, last_ok_ts: float) -> None:
     else:
         age = "There has NEVER been a successful scheduled backup on this gateway."
     _fire("Scheduled backup is FAILING",
-          f"The scheduled backup on the WebTerm gateway failed.\n\n{age}\n\nLast error: {error}\n\n"
+          f"The scheduled backup on the EverShell gateway failed.\n\n{age}\n\nLast error: {error}\n\n"
           f"Common causes: the gateway disk is full, the database is locked by another process, or "
           f"the data volume is read-only. Until fixed, the local snapshots age out under retention "
           f"and there is no fresh copy of the vault — download a backup manually from Settings → "

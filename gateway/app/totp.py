@@ -59,7 +59,7 @@ def verify(secret_b32: str, code: str, window: int = 1, at: float = None) -> boo
     return verify_counter(secret_b32, code, window, at) is not None
 
 
-def provisioning_uri(secret_b32: str, account: str, issuer: str = "WebTerm") -> str:
+def provisioning_uri(secret_b32: str, account: str, issuer: str = "EverShell") -> str:
     """otpauth:// pe care aplicațiile de authenticator îl citesc din QR."""
     label = quote(f"{issuer}:{account}")
     return (f"otpauth://totp/{label}?secret={secret_b32}"

@@ -24,6 +24,9 @@ back.
   Disabled buttons say why.
 - **Notifications are split** into the channels the instance uses (email, webhook, each with its own
   status, save and test), the alert thresholds, and the alerts *you* receive.
+- **Alerts come from EverShell:** email subjects start with `[EverShell]`, webhook messages and push
+  tests say EverShell, and new passkeys and authenticator entries are labelled EverShell (existing ones
+  keep their old label and keep working). Mail filters on `[WebTerm]` need the new prefix.
 - The settings gear opens the last category you used instead of whatever needed attention; alarms
   keep their badge.
 - Forms have visible labels instead of placeholders, and a selected option no longer looks like the

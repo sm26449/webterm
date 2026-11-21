@@ -14,7 +14,7 @@ from . import core
 DOCKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")   # id sau nume de container
 
 
-DOCKER_ACCESS_HINT = ("[WebTerm] If docker reported a permission error: the agent user cannot reach "
+DOCKER_ACCESS_HINT = ("[EverShell] If docker reported a permission error: the agent user cannot reach "
                       "the Docker daemon. The Docker panel shows the fix options.")
 
 

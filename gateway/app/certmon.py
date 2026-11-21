@@ -107,13 +107,13 @@ def renew_command(domain: str, install_dir: Optional[str] = None) -> str:
 # Ctrl+C out. The command travels as a positional ARGUMENT ($1), never spliced into the script, so
 # even a hypothetical bad value would be data, not code (it is validated anyway, see above).
 _PROMPT_SH = r"""
-printf '\n[WebTerm] %s\n' "$2"
-printf '[WebTerm] The command below is TYPED, NOT RUN. Read it, then press Enter to run it,\n'
-printf '[WebTerm] edit it first, or press Ctrl+C to cancel (that closes this terminal).\n\n'
+printf '\n[EverShell] %s\n' "$2"
+printf '[EverShell] The command below is TYPED, NOT RUN. Read it, then press Enter to run it,\n'
+printf '[EverShell] edit it first, or press Ctrl+C to cancel (that closes this terminal).\n\n'
 if IFS= read -r -e -i "$1" -p '$ ' line; then
   rc=0
   if [ -n "$line" ]; then history -s "$line"; eval "$line"; rc=$?; fi
-  printf '\n[WebTerm] Finished (exit %s). Press Enter to close this terminal.\n' "$rc"
+  printf '\n[EverShell] Finished (exit %s). Press Enter to close this terminal.\n' "$rc"
   IFS= read -r _
 fi
 """

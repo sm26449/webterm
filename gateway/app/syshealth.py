@@ -21,7 +21,7 @@ How it works:
     Per check `alert` mode: `transition` (default), `none` (another module already alerts —
     certmon, the backup scheduler, the signing-key nag), `inapp` (the alert-delivery check: it
     must NOT go through the channel that is failing, so it writes the in-app history only — no
-    email, no webhook, no loop), `version` (once per new WebTerm version);
+    email, no webhook, no loop), `version` (once per new EverShell version);
   * mute: 7 days, 30 days or "until it changes" (the result's signature), audited.
 
 What it deliberately does NOT do: run anything privileged. The gateway gets no new privilege —
@@ -152,7 +152,7 @@ MESSAGES = {
     "cf_token_unknown": "The Cloudflare DNS token could not be checked: {message}",
     "cf_token_stale": "The Cloudflare DNS token was last checked {age} ago",
     "cf_token_ok": "The Cloudflare DNS token is active",
-    "authentik_drift": "Authentik (compose project {project}) runs {running}; WebTerm pins {pinned}",
+    "authentik_drift": "Authentik (compose project {project}) runs {running}; EverShell pins {pinned}",
     "authentik_ok": "Authentik runs the pinned version ({running})",
     # gateway
     "disk_critical": "The gateway disk has {pct}% free ({free} of {total})",
@@ -195,7 +195,7 @@ MESSAGES = {
     "sso_broken": "SSO is failing ({kind}): {count} failed sign-in(s) in the last hour",
     "sso_probe_failed": "The identity provider is unreachable ({kind}): {error}",
     "sso_ok": "SSO works",
-    "insecure_forwards": "Port forwarding is on while WebTerm runs on plain http://",
+    "insecure_forwards": "Port forwarding is on while EverShell runs on plain http://",
     "sso_ungated": "SSO is on without WEBTERM_OIDC_ALLOWED_GROUPS",
     "enroll_orphans": "{count} live group enrollment token(s) have no creator account",
     "enroll_ok": "Every live group enrollment token has a creator account",
@@ -222,8 +222,8 @@ MESSAGES = {
     "heartbeat_failing": "The dead-man switch ping is failing: {error}",
     "heartbeat_off": "No dead-man switch (WEBTERM_HEARTBEAT_URL) is configured",
     "heartbeat_ok": "The dead-man switch is pinged every {minutes} min",
-    "update_available": "WebTerm {latest} is available (running {current})",
-    "update_current": "WebTerm is up to date ({current})",
+    "update_available": "EverShell {latest} is available (running {current})",
+    "update_current": "EverShell is up to date ({current})",
     "clock_skew": "The gateway clock is off by {skew} s",
     "clock_ok": "The gateway clock is right",
     "forward_dns_missing": "No DNS record answers for *.{domain}",
@@ -231,7 +231,7 @@ MESSAGES = {
     "check_failed": "This check could not run: {error}",
 }
 WHY = {
-    "host.helper": "Host timers (backup, certificate check, Docker cleanup) and the Cloudflare token are only visible to WebTerm through this helper.",
+    "host.helper": "Host timers (backup, certificate check, Docker cleanup) and the Cloudflare token are only visible to EverShell through this helper.",
     "host.backup": "A nightly backup that fails quietly is worse than none: you believe you have one.",
     "host.cert_check": "It is the host-side second opinion on the certificate Traefik serves.",
     "host.docker_cleanup": "Without it old images and build cache fill the disk the database lives on.",
@@ -239,7 +239,7 @@ WHY = {
     "host.authentik": "Authentik must be upgraded one release line at a time; a large jump can break its database migration.",
     "gateway.disk": "When the data volume fills up, logins fail with 500 while the container still reports healthy.",
     "alerts.delivery": "If alerts cannot leave, every other alert is silent too. This one is shown in the app only, never through the failing channel.",
-    "alerts.channel": "Without email or a webhook, alerts only reach people who open WebTerm.",
+    "alerts.channel": "Without email or a webhook, alerts only reach people who open EverShell.",
     "agents.outdated": "An agent defers its update while sessions are open; a session that never closes keeps it on old code forever.",
     "agents.autostart": "After a reboot such a host stays offline until someone starts the agent by hand.",
     "agents.python": "The agent needs Python 3.6+. On 3.5 it connects and runs terminals, but every file listing — and so every upload — fails with an internal error.",
@@ -250,10 +250,10 @@ WHY = {
     "sessions.cap": "At the limit, new terminals on that host are refused.",
     "signing.state": "Agents only accept signed updates; without a usable key the fleet stays on old code.",
     "oidc.sso": "When SSO fails, every SSO account is locked out; with WEBTERM_OIDC_SSO_ONLY=1 there is no other way in.",
-    "roles.permanent_owner": "A time-bound Owner cannot grant beyond its own end: when the last one expires, nobody can administer this WebTerm from the UI.",
+    "roles.permanent_owner": "A time-bound Owner cannot grant beyond its own end: when the last one expires, nobody can administer this EverShell from the UI.",
     "roles.break_glass": "Owners who sign in only through SSO are locked out with the identity provider; one permanent Owner with a local password is the way back in.",
     "config.forwards_http": "Without https the session cookie loses its __Host- prefix, so a forwarded page can plant a session cookie (session fixation).",
-    "config.sso_ungated": "WebTerm does not re-check the group, so who gets in is decided entirely by the identity provider.",
+    "config.sso_ungated": "EverShell does not re-check the group, so who gets in is decided entirely by the identity provider.",
     "tokens.enroll_orphans": "A group enrollment token adds machines to the fleet. Offboarding revokes the tokens a person created — one whose creator account is gone (created before 3.6.11) is revoked by nobody until it expires.",
     "janitor": "It applies retention (transcripts, audit log); when it stops, the disk fills slowly and old data is kept longer than promised.",
     "db.size": "Deleted rows leave free pages; compacting returns the space.",
@@ -262,7 +262,7 @@ WHY = {
     "backup.restore": "A backup that was never restored is a hope, not a backup.",
     "backup.inapp": "Until fixed, the local snapshots age out and there is no fresh copy of the vault.",
     "certs": "Browsers refuse an expired or wrong certificate.",
-    "heartbeat": "Nothing inside WebTerm can report that WebTerm itself is down. An outside monitor that expects a regular ping can.",
+    "heartbeat": "Nothing inside EverShell can report that EverShell itself is down. An outside monitor that expects a regular ping can.",
     "update.available": "New releases carry security fixes.",
     "clock.gateway": "A wrong clock breaks TOTP codes, SSO tokens and certificate checks.",
     "forward.dns": "Port-forward links open on *.<domain>; without a wildcard DNS record they do not resolve.",
@@ -270,8 +270,8 @@ WHY = {
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
     "helper_never_ran": "Install it on the gateway host (sudo ./scripts/host-health.sh --install): it adds an hourly systemd timer and changes nothing else. If you upgraded from a version before 3.6.9 in one jump, run ./upgrade.sh a second time: the old upgrade script does not install the host kit (host-health, cert-renew, docker-cleanup).",
-    "promote_owner": "Make another account a permanent Owner over all hosts: Settings → People & roles → Accounts (an Owner grants Owner with no end), or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>. You type that command; WebTerm never runs it.",
-    "break_glass_password": "Make an account that signs in with a local password a permanent Owner (Settings → People & roles → Accounts, or on the gateway host, in the WebTerm directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>). An SSO-only Owner can get a local password with python3 -m app.admin passwd <email> — it then loses the roles its SSO groups gave. You type these commands; WebTerm never runs them.",
+    "promote_owner": "Make another account a permanent Owner over all hosts: Settings → People & roles → Accounts (an Owner grants Owner with no end), or on the gateway host, in the EverShell directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>. You type that command; EverShell never runs it.",
+    "break_glass_password": "Make an account that signs in with a local password a permanent Owner (Settings → People & roles → Accounts, or on the gateway host, in the EverShell directory: docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin promote <email>). An SSO-only Owner can get a local password with python3 -m app.admin passwd <email> — it then loses the roles its SSO groups gave. You type these commands; EverShell never runs them.",
     "check_timer": "Look at the unit's journal, then start it once by hand to see it succeed.",
     "mtls_pending": "Agents from version 61 get their certificate by themselves on their next connection; older ones need the agent update. If one stays on its token, look at its events: a network that cannot reach the agents name, or a TLS-intercepting proxy, keeps it there.",
     "mtls_broken": "Look at the gateway log for \"edgemtls\". If it cannot be fixed now, set WEBTERM_AGENT_MTLS=off and recreate the app container: agents fall back to their token until it is fixed.",
@@ -293,8 +293,8 @@ RECS = {
     "close_sessions": "Close sessions you no longer need on these hosts.",
     "signing_key": "Settings → Access & automation → Agent signing key.",
     "sso_check": "Check the IdP is up and reachable from the gateway, the client secret, and the clock; local accounts and passkeys still work.",
-    "use_https": "Serve WebTerm over https, or turn port forwarding off.",
-    "sso_groups": "Bind the WebTerm application to a group in the IdP, or set WEBTERM_OIDC_ALLOWED_GROUPS. If the IdP already gates it, mute this.",
+    "use_https": "Serve EverShell over https, or turn port forwarding off.",
+    "sso_groups": "Bind the EverShell application to a group in the IdP, or set WEBTERM_OIDC_ALLOWED_GROUPS. If the IdP already gates it, mute this.",
     "revoke_orphan_enroll": "Settings → Access & automation → Bulk enrollment marks them “creator gone”: revoke the ones nobody needs any more (machines already enrolled keep working). If one is still in use, mute this.",
     "janitor_logs": "Look at the gateway log for “janitor”; the next run retries.",
     "compact_db": "Compacting locks the database for a moment: run it in a quiet minute.",
@@ -1489,7 +1489,7 @@ async def heartbeat_loop() -> None:
 def _ping(url: str) -> None:
     import urllib.request
     req = urllib.request.Request(url, method="GET",  # noqa: S310 — scheme checked by the caller
-                                 headers={"User-Agent": "WebTerm-heartbeat"})
+                                 headers={"User-Agent": "EverShell-heartbeat"})
     with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
         r.read(1024)
 

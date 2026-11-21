@@ -77,7 +77,7 @@ check("cod curent are 6 cifre", len(totp.generate(s)) == 6)
 # provisioning URI conține secretul și issuer-ul
 uri = totp.provisioning_uri(s, "admin@example.com")
 check("otpauth URI bine format", uri.startswith("otpauth://totp/")
-      and f"secret={s}" in uri and "issuer=WebTerm" in uri)
+      and f"secret={s}" in uri and "issuer=EverShell" in uri)
 
 print(f"\n{ok}/{total} PASS")
 sys.exit(0 if ok == total else 1)
