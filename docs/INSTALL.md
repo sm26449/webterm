@@ -220,8 +220,8 @@ expires, so note that date (or create it without one).
 
 **Watching.** The gateway reads the certificate Traefik serves (a TLS handshake to Traefik
 inside the stack; the public name as a fallback) for the app domain, the forward wildcard (DNS-01
-installs) and Authentik (with the `authentik` profile). Settings → Infrastructure →
-**Certificates** shows days left, issuer and names, with **Check now**. Alerts (in-app, email,
+installs) and Authentik (with the `authentik` profile). Settings → Network &
+certificates shows days left, issuer and names, with **Check now**. Alerts (in-app, email,
 webhook) go out at under 14 days, again at under 3, and right away when a certificate has
 expired, when Traefik serves its self-signed default certificate, or when the served
 certificate does not cover the name. One alert per threshold and certificate, plus one when it
@@ -335,7 +335,7 @@ what root does.
 
 **Commands.** Every command shown comes from a fixed server-side list of templates with validated
 parameters; nothing typed by a client ever reaches it. An Owner who picked the gateway host
-(Settings → Infrastructure → Certificates) can have a command typed — not run — into a terminal
+(Settings → Network & certificates) can have a command typed — not run — into a terminal
 there, after a fresh second factor; the terminal is private to that Owner.
 
 **Verifying a backup.** Settings → Backup → *Verify* unpacks a stored snapshot and runs an
@@ -406,7 +406,7 @@ break-glass admin first. So: open `https://term.example.com`, create the local a
 setup token (printed by `install.sh`/`deploy.sh`), *then* the SSO button shows. Add the person you
 want to a **`wt-access` group** in Authentik, click **Sign in with Authentik**, authenticate — you
 land back provisioned on that instance — with **no access** until an Owner or Admin gives the
-account a role in Settings → Users & roles, or one of its Authentik groups is mapped to a role
+account a role in Settings → People & roles, or one of its Authentik groups is mapped to a role
 (SSO group mapping; with the provisioner's `WEBTERM_OIDC_ROLE_MAP`, putting the person in
 `wt-admins`, `wt-readonly`, `wt-db` or `wt-network` instead of `wt-access` is enough). If the
 button is missing, the account

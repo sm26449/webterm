@@ -1,7 +1,7 @@
 """Disabled accounts (3.6.11) — the state SCIM `active:false` / DELETE puts an account in.
 
 Disabling is NOT deleting: the row, its audit history, role bindings, passkeys and SSO link stay,
-so an Owner (Settings → Users & roles) or the IdP (SCIM `active:true`, SCIM-managed accounts only)
+so an Owner (Settings → People & roles) or the IdP (SCIM `active:true`, SCIM-managed accounts only)
 can bring it back as it was. While disabled the account can do nothing:
 
   * it cannot sign in — password, passkey or SSO (each path refuses after verifying the

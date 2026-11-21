@@ -3041,7 +3041,7 @@ async def cert_renew_session(host_id: int, body: CertRenewIn, request: Request,
     want = await certmon.cert_renew_host_id()
     if not want:
         raise ApiError(409, "certs.noRenewHost",
-                       "pick the gateway host first (Settings → Infrastructure → Certificates)")
+                       "pick the gateway host first (Settings → Network & certificates)")
     if want != host_id:
         raise ApiError(409, "certs.wrongRenewHost", "this is not the host picked for renewals")
     domain = (body.domain or "").strip()
@@ -3079,7 +3079,7 @@ async def _open_gateway_terminal(host_id: int, user, body, command: str, title: 
     # command typed here runs as root — a real second factor ALWAYS, whatever the host's
     # `require_2fa` flag says, and never a window the password alone opened (/stepup on a host
     # without 2FA). An account with no factor gets `stepup.needsFactor`, which the UI turns into
-    # the way to Settings → Sign-in & 2FA.
+    # the way to Settings → Account & security.
     await stepup.require_fresh_factor(host_id, user, body.stepup_grant, body.stepup_password,
                                 body.stepup_totp, real_factor=True)
     try:
@@ -3291,7 +3291,7 @@ async def health_terminal(host_id: int, body: HealthTerminalIn, request: Request
     want = await certmon.cert_renew_host_id()
     if not want:
         raise ApiError(409, "certs.noRenewHost",
-                       "pick the gateway host first (Settings → Infrastructure → Certificates)")
+                       "pick the gateway host first (Settings → Network & certificates)")
     if want != host_id:
         raise ApiError(409, "certs.wrongRenewHost", "this is not the host picked for renewals")
     cid = body.check_id or ""

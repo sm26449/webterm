@@ -1039,7 +1039,7 @@ async def seed(conn) -> None:
     if orphans:
         log.warning("group enrollment: %d live token(s) without a creator account (from before "
                     "3.6.11, creator gone): %s — no offboarding revokes them; revoke them in "
-                    "Settings → Infrastructure & tokens if they are not needed", len(orphans),
+                    "Settings → Access & automation if they are not needed", len(orphans),
                     ", ".join("#%d %s" % o for o in orphans[:10]))
     # 3.6.10 (review): tokens created with the Owner role before it was refused keep working as
     # before (no role cap); say so once per boot so the Owner can recreate them narrower

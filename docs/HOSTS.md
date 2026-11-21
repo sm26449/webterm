@@ -219,7 +219,7 @@ simply switch it off. Muting offline alerts on a 2FA host also needs a step-up.
 **The account password alone is not accepted** (since 3.5.13). An account with neither a
 passkey nor TOTP (nor SSO) cannot open a 2FA host: the step-up answers *"set up a passkey or
 an authenticator code (TOTP) to access hosts that require 2FA"* and the UI offers a button to
-**Settings → Sign-in & 2FA**. The password is the factor you already gave at login, so it was
+**Settings → Account & security**. The password is the factor you already gave at login, so it was
 never a second factor. Turning **Require 2FA** on is still allowed without a factor, but the UI
 warns you right away that you will not be able to open the host until you enrol one.
 
@@ -407,7 +407,7 @@ yourself in a terminal.
 
 **How loud it is** is a preference of **your browser**, not of the host:
 
-- **Settings → Preferences → OS updates badge:** **All updates (security highlighted)**
+- **Settings → Terminal & workspace → OS updates badge:** **All updates (security highlighted)**
   (default), **Only security updates**, or **Hidden**. Security counts exist only for apt, so
   *Only security updates* hides the badge on other distributions.
 - **Per host:** **Hide for this host** in the updates dialog, or the host's **⋯** menu →

@@ -26,7 +26,7 @@ step-up (`stepup_grant` / `stepup_password`) also accepts `stepup_totp`, so a TO
 can step up inline too, and the lock overlay names the factor it will ask for (passkey,
 authenticator code, SSO) instead of always saying "passkey". The WebSocket Origin check compares scheme, host and
 port (an `http://` page on the same name is not our `https://` origin). An optional **command guardrail**
-(Settings → Infrastructure & tokens): regex rules that require **confirmation** or **block**
+(Settings → Security policy): regex rules that require **confirmation** or **block**
 dangerous commands at Enter (e.g. `rm -rf`, `mkfs`) — editable, and enforced on the
 server for `/run` as well, so a command sent with Run on hosts cannot walk around the browser.
 
@@ -60,7 +60,7 @@ through SCIM), `sso-only`, `roles`, `health` and `vacuum`. Every gate above is a
 yourself out; the product can be strict in the browser because this exists, and shell on the
 server is a far higher bar than a mailbox. See RUNBOOK §5 and [ROLES.md → break-glass](ROLES.md#break-glass-promote-from-the-server).
 
-**Signed-in devices (Settings → Sign-in & 2FA).** The account lists every browser currently signed
+**Signed-in devices (Settings → Account & security).** The account lists every browser currently signed
 in — device label, when it was last seen, which one is *this* device, and a badge on any
 unfamiliar new device. Sign out one device, or **sign out everywhere else** in one click (which
 also closes any open step-up windows). It's the in-UI answer to a suspected stolen cookie, short
@@ -110,7 +110,7 @@ boundaries. Roles also bring **time-bound** bindings (access that expires to the
 - **System health (3.6.8):** standing checks for silent failures (SSO reachability, signing key, break-glass Owner, backups, disk, certs, clock) that detect, notify and recommend without taking any new privilege. Muting a check that can turn critical is Owner-only. See [System health](INSTALL.md#system-health).
 - **SCIM provisioning (3.6.11):** the IdP can create, update and **disable/delete** accounts over SCIM; a disabled account can no longer authenticate and loses every right at once. The SCIM bearer token is Owner-only and separate from automation tokens. See [SSO.md → SCIM](SSO.md).
 
-**Automation tokens (Settings → Infrastructure & tokens).** For cron, CI or monitoring: a bearer token
+**Automation tokens (Settings → Access & automation).** For cron, CI or monitoring: a bearer token
 with an explicit scope (`read` for `/api/status`, `/api/hosts` and `/api/sessions`; `run` for
 `POST /api/hosts/{id}/run`), mandatory expiry, hashed at rest, revocable in one click, and recorded in the audit log as
 `token:<name>`. Since 3.6.10 a token also carries a **role + scope ceiling**: it can never do more
@@ -180,7 +180,7 @@ to own that key:
   substitutes `UPDATE_PUBKEY` in the `ptyd.py` it serves, and re-signs at runtime, so
   your fleet trusts only *your* key. It lives on the gateway (`data/agent-signing.key`)
   and is written **without a passphrase**, because auto-updates must survive a restart
-  nobody is watching. **Settings → Infrastructure & tokens** shows its status; the *generate* and
+  nobody is watching. **Settings → Access & automation** shows its status; the *generate* and
   *import* buttons there apply only to an install that does not have a key yet (they return
   409 once one exists — so, after the first boot, practically never). To use your own or a
   passphrase-protected key, replace it **before enrolling hosts**: stop the gateway, put

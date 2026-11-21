@@ -480,7 +480,7 @@ only at a real prompt (otherwise copy-only).
 broadcast to the other panes — the file exists only on that pane's host, so the path would be wrong
 (or point at a different file) anywhere else.
 
-**Settings → Preferences → Transfers** lets you send pasted files to the **session directory**
+**Settings → Terminal & workspace → Transfers** lets you send pasted files to the **session directory**
 instead of the inbox (same naming), and sets the **inbox retention** (default **7 days**,
 `0` = keep forever). Retention is applied opportunistically and client-side: after each
 successful inbox upload, the inbox is listed and files older than N days are deleted — at

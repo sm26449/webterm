@@ -254,7 +254,7 @@ async def lifespan(app: FastAPI):
         elif not signing.should_autogenerate(has_hosts):
             log.warning("no fleet signing key, but hosts are already enrolled: "
                         "the agents use the maintainer's key. Generating one now would then require "
-                        "reinstalling every agent — see Settings → Infrastructure & tokens")
+                        "reinstalling every agent — see Settings → Access & automation")
         else:
             try:
                 pub = await asyncio.to_thread(signing.generate, None)
@@ -276,7 +276,7 @@ async def lifespan(app: FastAPI):
                         "agents will NOT be able to update")
     elif signing.key_exists():
         log.warning("the fleet signing key is ENCRYPTED and locked — agent auto-update "
-                    "is paused until you unlock it in Settings → Infrastructure & tokens")
+                    "is paused until you unlock it in Settings → Access & automation")
     await api.init_setup_token()
     await fwddomain.load_forward_domain()            # domeniul de forward configurabil din Settings
     await api.seed_default_snippets()          # snippet-uri de transfer gata făcute (o singură dată)

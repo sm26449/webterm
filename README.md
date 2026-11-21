@@ -104,7 +104,7 @@ Fictional demo fleet, captured on v3.6.33 with
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/02-terminal-light.png"><img alt="Terminal session with the Commands panel: exit code and duration of every command" src="docs/screenshots/02-terminal-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/07-run-on-hosts-light.png"><img alt="Run on hosts: one saved command on four hosts, exit code and output per host" src="docs/screenshots/07-run-on-hosts-dark.png"></picture> |
 | **The host page** | **Files, with multi-select** |
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/05-host-light.png"><img alt="Host page: metrics, live session previews, security and agent status" src="docs/screenshots/05-host-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/03-files-light.png"><img alt="Files panel next to the terminal, three files selected for a bulk action" src="docs/screenshots/03-files-dark.png"></picture> |
-| **Settings → Sign-in & 2FA** | **The editor (Monaco)** |
+| **Settings → Account & security** | **The editor (Monaco)** |
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/06-security-light.png"><img alt="Settings, Sign-in &amp; 2FA tab: connected devices, passkeys, 2FA" src="docs/screenshots/06-security-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/04-editor-light.png"><img alt="Monaco editor open on a shell script on the host" src="docs/screenshots/04-editor-dark.png"></picture> |
 | **A split view: three hosts side by side** | **OS-style themes (here: macOS style)** |
 | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/09-split-light.png"><img alt="Split view with three panes: top running on web-01 in the big left pane, a deploy dry run on web-02 and memory and disk on cache-01 stacked on the right" src="docs/screenshots/09-split-dark.png"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="docs/screenshots/10-themes-light.png"><img alt="Settings, Appearance tab with the app in the macOS-style theme: WebTerm, macOS, Windows 11, GNOME and KDE Plasma styles, light, dark or auto mode, terminal color schemes" src="docs/screenshots/10-themes-dark.png"></picture> |
@@ -159,7 +159,7 @@ The installer sets up Docker, the Traefik + EverShell stack in `/opt/webterm`, a
 certificate (HTTP-01 by default; add `--cf-token` for Cloudflare DNS-01 and a wildcard for
 port-forward subdomains), the firewall and a daily encrypted backup — then prints the URL and a
 **setup token**. Open the URL, create the first account with that token, and add a passkey in
-**Settings → Sign-in & 2FA**.
+**Settings → Account & security**.
 
 Then **+ Add host** in the sidebar gives you a one-line install command for the agent: run it on
 the server, and the host comes online. By default it creates a dedicated, unprivileged `webterm`
@@ -267,7 +267,7 @@ Everything lives in `.env` next to the compose file (`.env.prod.example` for an 
 | `WEBTERM_DOMAIN` | the domain the TLS certificate is issued for |
 | `LETSENCRYPT_EMAIL` | contact for Let's Encrypt (image deploy) |
 | `CF_DNS_API_TOKEN` | optional Cloudflare token: DNS-01 instead of HTTP-01, and a wildcard for forwards |
-| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for alerts (also in Settings → Notifications) |
+| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for alerts (also in Settings → Alert delivery) |
 | `WEBTERM_SMTP_HOST` / `WEBTERM_ALERT_TO` | email alerts; without an SMTP host they are off |
 | `WEBTERM_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | single sign-on; off until all three are set ([docs/SSO.md](docs/SSO.md)) |
 | `WEBTERM_TRUSTED_PROXY_HOSTS` | the proxy allowed to set `X-Forwarded-For` (compose sets it for you) |

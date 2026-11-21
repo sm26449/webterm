@@ -1134,7 +1134,7 @@ async def test_routes(owner_uid):
         check("the account password alone → 403 stepup.needsFactor, NOTHING created (host without 2FA)",
               r.status_code == 403 and U.code(r) == "stepup.needsFactor" and not created,
               "%s %s" % (r.status_code, U.code(r)))
-        check("…the message points to Settings → Sign-in & 2FA", "Sign-in & 2FA" in r.text, r.text[:200])
+        check("…the message points to Settings → Account & security", "Account & security" in r.text, r.text[:200])
         security._stepup_windows.clear()
         r = await owner.post("/api/hosts/%d/stepup" % hid, json={"stepup_password": U.OWNER_PW})
         check("…a window the password opened through /stepup (host without 2FA) is not accepted either",

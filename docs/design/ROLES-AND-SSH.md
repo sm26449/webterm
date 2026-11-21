@@ -539,7 +539,7 @@ which hosts exist and are 2FA.
 
 ### A.7 SSO / OIDC
 
-- **Mapping:** the `oidc_group_roles` table, edited in Settings → Users & roles → SSO mapping.
+- **Mapping:** the `oidc_group_roles` table, edited in Settings → People & roles → SSO mapping.
   Optional bootstrap: `WEBTERM_OIDC_ROLE_MAP="ops=operator@folder:prod;admins=admin@all"`, read
   only when the table is empty, so the UI stays the source of truth afterwards. `oidc.py`
   already extracts `groups` (`_claims_groups`).
@@ -583,7 +583,7 @@ which hosts exist and are 2FA.
 
 ### A.9 UI
 
-- **Settings → Users & roles** replaces the account list in `AccountTab.tsx`. Split it out as
+- **Settings → People & roles** replaces the account list in `AccountTab.tsx`. Split it out as
   `settings/UsersTab.tsx`, following the `SettingsModal` split pattern. It holds:
   - users with their bindings shown as chips ("Operator · folder prod");
   - add or remove bindings (scope picker: All / Folder / Tag / Host, with autocomplete from the
@@ -1573,7 +1573,7 @@ User guide: [docs/SSO.md → SCIM provisioning](../SSO.md#scim-provisioning-3611
   Automation tokens are revoked on disable / delete by `created_by_id` only (never by the
   `created_by` text, which may name an address another account now uses). Live group enrollment
   tokens without an existing creator account are flagged `creator_gone` in `GET
-  /api/enroll-groups` (a badge in Settings → Infrastructure & tokens) and by the System health
+  /api/enroll-groups` (a badge in Settings → Access & automation) and by the System health
   check `tokens.enroll_orphans` (warning, recommendation, jump to the list) — never revoked
   automatically.
 - **Verification fixes (before release):** a user create is **never** a 409 any more, not even

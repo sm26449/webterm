@@ -24,7 +24,7 @@ Fail-closed choices (each one documented in docs/ROLES.md):
   * an account with a usable LOCAL PASSWORD never RECEIVES roles from groups (removals still
     apply): otherwise whoever set that password (an Admin creating the account before the real
     person's first SSO sign-in adopts it by email) would inherit what the person's groups grant.
-    The person removes the local password (Settings → Users & roles) to enable group roles;
+    The person removes the local password (Settings → People & roles) to enable group roles;
   * huge claims: only the first 5000 entries are read (a truncated list can only GRANT LESS);
   * `*` = any authenticated SSO user (design §A.7, Warpgate's wildcard);
   * removing a MAPPING removes the derived bindings immediately for the users that got them
@@ -256,7 +256,7 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
         res["skipped_local_password"] = labs
         log.warning("sso.sync.skippedLocalPassword: %s has a local password, so its groups give "
                     "it no roles (would have added: %s). It can remove the local password in "
-                    "Settings → Users & roles to receive them.", email, ", ".join(labs))
+                    "Settings → People & roles to receive them.", email, ", ".join(labs))
         await audit.record(time.time(), email, ip, "GET", path, 200,
                            ("sso.sync.skippedLocalPassword (%s): not added %s" % (via, labs))[:480],
                            actor_id=uid)
@@ -394,7 +394,7 @@ def parse_role_map(raw: str) -> tuple[list, list]:
                 continue
             if grp == WILDCARD:
                 bad.append((shown, "'*' (every SSO user) cannot be mapped from the configuration "
-                                   "— an Owner can map it in Settings → Users & roles"))
+                                   "— an Owner can map it in Settings → People & roles"))
                 continue
             if normalize_group(grp) is None:
                 bad.append((shown, "the group name has surrounding spaces, is not in Unicode NFC "

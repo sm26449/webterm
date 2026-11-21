@@ -214,7 +214,7 @@ Rollback: put the old image and the old volume name back, then `docker compose u
 2. **WebTerm SSO login:** in a private window, open `https://wt.example.com`, click
    **Sign in with Authentik**, log in as a normal (non-akadmin) user and land in WebTerm.
 3. **The groups claim:** WebTerm logs `SSO roles synced for <email>: …` for that login
-   (`docker logs webterm-app-1 2>&1 | grep 'SSO roles'`). Settings → Users & roles → Your access
+   (`docker logs webterm-app-1 2>&1 | grep 'SSO roles'`). Settings → Account & security → Your access
    shows the role that comes from the group. If the log says `the id_token for … has no groups
    claim`, the profile scope mapping is broken: roll back. (WebTerm asks for `openid email profile`.
    In Authentik the `groups` claim comes from the default **profile** mapping. The rehearsal
@@ -403,7 +403,7 @@ At 10 hops of about 1–2 min of downtime each, plus a backup and checks between
 day. For a small install like ours, the faster and better-tested alternative was a **fresh
 install** of the current pin plus `provision.py`. It loses Authentik users and passkeys, so
 recreate them and add them to their `wt-*` group. Every `sub` changes with a new install, so after
-each person's first SSO login, check in WebTerm (Settings → Users & roles) that it landed on their
+each person's first SSO login, check in WebTerm (Settings → People & roles) that it landed on their
 existing account, not on a new one.
 
 ## Appendix B — rehearsal log (2026-10-13)

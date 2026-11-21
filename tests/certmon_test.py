@@ -529,7 +529,7 @@ async def test_routes():
         check("the RIGHT password alone (host without require_2fa) → 403 stepup.needsFactor, nothing created",
               r.status_code == 403 and U.code(r) == "stepup.needsFactor" and not created,
               "%s %s %s" % (r.status_code, U.code(r), r.text[:160]))
-        check("…with the way out (Settings → Sign-in & 2FA)", "Sign-in & 2FA" in r.text, r.text[:200])
+        check("…with the way out (Settings → Account & security)", "Account & security" in r.text, r.text[:200])
         security.open_stepup_window(owner_uid, hid)      # what a passkey / SSO / TOTP ceremony leaves
         r = await owner.post(url, json={"domain": "*.wt.example.com"})
         check("Owner + picked host + monitored name + fresh factor → the session", r.status_code == 200

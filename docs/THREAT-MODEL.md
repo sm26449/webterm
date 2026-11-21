@@ -294,7 +294,7 @@ its own, each with its schedule and its off switch:
 - **Update check** — `GET https://api.github.com/repos/<repo>/tags`, at most **once a day** (plus
   the explicit "check now" button), to answer "is there a newer version?". A failure is cached
   for an hour so a poll loop cannot burn GitHub's unauthenticated rate limit. Off with
-  `WEBTERM_UPDATE_CHECK=0` (env wins) or the toggle in Settings → Preferences.
+  `WEBTERM_UPDATE_CHECK=0` (env wins) or the toggle in Settings → Updates.
 - **IdP discovery probe** — only when SSO is configured: an **hourly** fetch of the OIDC discovery
   document and JWKS from your configured issuer, so System health can flag the IdP as unreachable
   before a login does. Goes only to the issuer you set. No SSO configured → never.

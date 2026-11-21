@@ -98,7 +98,7 @@ inherits the scope of the agent it goes through.
 
 ## Giving someone access
 
-Open **Settings → Users & roles → Accounts**. Since 3.6.6 the page has three sub-tabs —
+Open **Settings → People & roles → Accounts**. Since 3.6.6 the page has three sub-tabs —
 **Accounts**, **Roles** and **SSO groups** (each with a count; you only see the ones your
 permissions let you use) — under a short **Your access** summary that everyone sees. The last
 sub-tab you opened is remembered in this browser, and Settings search lands on the right one.
@@ -254,7 +254,7 @@ Accounts with a local password are never touched by SCIM anyway; this is the fai
 
 ## Custom roles
 
-Settings → Users & roles → **Roles** (editing needs **Custom roles**, `roles.manage`; with only
+Settings → People & roles → **Roles** (editing needs **Custom roles**, `roles.manage`; with only
 `users.manage` the sub-tab is read-only). The same sub-tab lists the built-in roles with what
 they allow and how many bindings / SSO mappings use each role. Role names that
 only *look* like another role's — letters from another alphabet such as a Cyrillic `О` in
@@ -299,7 +299,7 @@ role.
 
 ## SSO group mapping
 
-Settings → Users & roles → **SSO groups** (shown only when SSO is enabled; needs
+Settings → People & roles → **SSO groups** (shown only when SSO is enabled; needs
 `users.manage`). Mappings are grouped by group name; the ones from `WEBTERM_OIDC_ROLE_MAP` carry a
 **from configuration** badge and cannot be removed there. Map a group name from the id_token's `groups` claim to a role and a scope.
 
@@ -369,7 +369,7 @@ an existing local account that SSO *adopted* by email keeps its password (and it
 `sso.sync.skippedLocalPassword`. The reason: whoever set that password — for example an Admin who
 created `ceo@corp.example` before the real CEO's first SSO sign-in — could otherwise sign in with
 it and inherit what the CEO's groups grant (Owner). To receive group roles, the person removes
-the local password under Settings → Users & roles → **Your access** (after a fresh SSO
+the local password under Settings → People & roles → **Your access** (after a fresh SSO
 confirmation). That also removes the account's passkeys, 2FA and other signed-in devices, because
 anyone who knew the password could have added a passkey; they can be set up again after signing
 in with SSO. Setting a local password again removes the SSO-derived roles immediately. Accounts
@@ -469,7 +469,7 @@ Automation tokens keep their `read` / `run` scopes and are additionally capped:
 - Existing automation tokens keep working unchanged.
 - Restoring a 3.5 backup on 3.6 seeds the roles again: **every account in that backup becomes
   Owner over all hosts** — including accounts you demoted since the backup was taken. Review
-  Settings → Users & roles after such a restore.
+  Settings → People & roles after such a restore.
 - **Rolling back to 3.5 silently makes every account a full administrator again**: 3.5 ignores the
   role tables.
 
@@ -481,7 +481,7 @@ time-bound Owner expires). WebTerm keeps one around: the last such account canno
 by the account routes — it cannot remove its local password (Your access → Remove local
 password, or `python3 -m app.admin sso-only` without `--force`; `409 account.lastBreakGlass`),
 it cannot be deleted, and its Owner · all hosts binding cannot be removed or made time-bound in
-Users & roles (`409 account.lastBreakGlassTarget` — the message names the account, not the
+People & roles (`409 account.lastBreakGlassTarget` — the message names the account, not the
 Owner doing it); the IdP cannot deactivate or delete it through SCIM (`400 mutability`,
 audited, critical alert — at most one alert an hour per account, every refusal in the audit
 log). Setting a new local password — Your access → Change password, or

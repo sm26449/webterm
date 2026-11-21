@@ -169,7 +169,7 @@ def report_last_break_glass(email: str, via: str, kept: list) -> None:
 def report_last_owner(uid: int, email: str, ip: str, kept: list) -> None:
     log.error("SSO: %s is the LAST Owner and its only Owner binding comes from SSO, but its "
               "group no longer maps to Owner — the binding was KEPT so the instance is not "
-              "locked out. Make another account Owner (Settings → Users & roles, or "
+              "locked out. Make another account Owner (Settings → People & roles, or "
               "python3 -m app.admin promote), then fix the mapping.", email)
     now = time.time()
     if now - _last_owner_alerted.get(uid, 0) < 3600:

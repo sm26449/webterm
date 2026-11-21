@@ -11,7 +11,7 @@ a **break-glass** account — password + optional passkey, always able to log in
 is down. Everyone else clicks **"Sign in with <provider>"** and is provisioned on first login.
 SSO controls *who gets in*; **roles** ([ROLES.md](ROLES.md), 3.6) control *what they can do once
 in*. A newly provisioned SSO account starts with **no access** unless one of its IdP groups is
-mapped to a role (Settings → Users & roles → **SSO groups**, 3.6.2 — see
+mapped to a role (Settings → People & roles → **SSO groups**, 3.6.2 — see
 [ROLES.md](ROLES.md#sso-group-mapping)); otherwise an Owner or Admin binds it by hand. Accounts
 that already existed when you upgraded to 3.6 became Owners.
 
@@ -31,13 +31,13 @@ that already existed when you upgraded to 3.6 became Owners.
 ## Groups → roles (3.6.2)
 
 WebTerm reads the id_token's **`groups`** claim — the same claim `WEBTERM_OIDC_ALLOWED_GROUPS`
-checks. In Settings → Users & roles → **SSO groups**, map a group name to a role and a
+checks. In Settings → People & roles → **SSO groups**, map a group name to a role and a
 scope. At every SSO sign-in and every SSO step-up WebTerm re-syncs the account's SSO-derived
 roles to the groups the IdP just sent: missing ones are added, ones whose group is gone are
 removed at once. Roles given by hand are never touched. **Only SSO-only accounts
 receive group roles**: a local account that SSO adopts by email keeps its password, and with a
 local password the groups give it nothing until the person removes the password (Settings →
-Users & roles → Your access), which also removes its passkeys and 2FA. The rules, examples with
+Account & security → Your access), which also removes its passkeys and 2FA. The rules, examples with
 Authentik groups, and the edge cases (absent or unreadable claim, exact names, the last Owner) are
 in [ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping).
 
@@ -75,7 +75,7 @@ refuses `owner` (and any custom role with Owner-only permissions) in the configu
 3. Moving them to another group changes the role at their next SSO sign-in; removing them from the
    group removes it then. To revoke **now**, see *Quick revocation* below.
 
-**Extra access for one person** is given by hand in WebTerm (Settings → Users & roles) and is
+**Extra access for one person** is given by hand in WebTerm (Settings → People & roles) and is
 **independent and additive**: a role bound by hand is never removed by a group sync, and a group
 never removes it.
 
@@ -135,7 +135,7 @@ Groups are read at each **SSO** sign-in and step-up. Two settings make sure that
 | `WEBTERM_OIDC_SESSION_MAX_HOURS=12` | A web session of an account linked to SSO ends after this many hours, however active, forcing a fresh SSO sign-in (→ group re-sync). Open terminals of that session follow the usual session-expiry behaviour (they close at the next check). Applies to sessions already open when you set it. Forwarded-app tickets issued from such a session expire with it. Empty/0 = off; an invalid value means 12. |
 
 To cut someone off **immediately**, without waiting for either: remove them from the group in
-Authentik **and** remove their role bindings by hand in Settings → Users & roles (takes effect at
+Authentik **and** remove their role bindings by hand in Settings → People & roles (takes effect at
 once: open terminals go read-only or close; the next SSO sign-in does not add them back, because
 the group is gone), or run `python3 -m app.admin logout-all <email>` on the server to end their
 sessions.
@@ -220,7 +220,7 @@ repeated refusal once an hour per user and reason; the SCIM panel's *last error*
 user whose SSO identity (`externalId` = `sub`) matches a WebTerm account that SCIM did not create,
 but whose email differs, WebTerm does **not** hand that account to SCIM: it disables it where it is
 and answers 400 (without naming the account's email — the SCIM token must not learn it). Settings
-→ Users & roles shows "the identity provider deactivated a user with this account's SSO identity
+→ People & roles shows "the identity provider deactivated a user with this account's SSO identity
 but a different email"; **only an Owner can re-enable it** — SCIM `active:true` never does.
 
 **Keep break-glass and Owner accounts out of the provider's scope.** The refusals are safe, but
@@ -241,7 +241,7 @@ in it is skipped entirely — their deactivation in the IdP no longer reaches We
 
 ### Set it up with Authentik
 
-**1. Create the SCIM token in WebTerm.** As an **Owner**: Settings → Users & roles → **SSO groups**
+**1. Create the SCIM token in WebTerm.** As an **Owner**: Settings → People & roles → **SSO groups**
 → *SCIM provisioning* → **Create token** (your password, and your second factor if you have one).
 The token (`wtscim_…`) is shown **once**; WebTerm stores only its SHA-256 hash. The panel also
 shows the URL to use, the last request the IdP made, and the last error.
@@ -301,7 +301,7 @@ rotation, run it again with the new token. With `WT_GROUP_PREFIX=wt-prod` the pr
 
 **3. Check.** Authentik runs a full sync when the provider is saved, then periodically and on every
 change (*Applications → Providers → the SCIM provider* shows the sync status). In WebTerm the SCIM
-panel shows the last request; Settings → Users & roles → Accounts marks the accounts it manages
+panel shows the last request; Settings → People & roles → Accounts marks the accounts it manages
 with **SCIM**.
 
 **Group names must match the `groups` claim exactly.** The group → role mapping compares names
@@ -322,7 +322,7 @@ sign-in.
 - From the IdP: reactivate the user (SCIM-managed accounts that SCIM disabled, without an
   Owner-level role given in WebTerm). An account disabled in WebTerm stays WebTerm's: a SCIM
   `active:false` or DELETE afterwards does not make it SCIM's to re-enable.
-- In WebTerm: an **Owner** opens the account (Settings → Users & roles → Accounts, marked
+- In WebTerm: an **Owner** opens the account (Settings → People & roles → Accounts, marked
   **Disabled**) → **Re-enable** (password + second factor). If the IdP still has the person
   inactive, its next sync disables the account again — fix it there too.
 - From the server, break-glass: `python3 -m app.admin enable <email>`.
@@ -377,14 +377,14 @@ SCIM (audited).
 | Authentik: per-object warning `403 … local password` | a local (break-glass) account has that email: SCIM never manages it. Keep that IdP user out of the provider's scope (`wt-scim-exclude`, above), use another email in the IdP, or remove that account's local password (it becomes SSO-only and can then be adopted) |
 | Authentik: per-object warning `403 … Owner-level role given in WebTerm` | the person holds Owner (or an Owner-only permission) granted by hand: only an Owner manages that account. Put the IdP user in `wt-scim-exclude`, or give the role through an SSO group instead |
 | Authentik: per-object warning `400 … already provisioned` | Authentik lost its link to an account it created; keep *discovery* on in the SCIM provider (the default) and the next full sync re-links it by username or email. If that create also carried `active: false`, the account was already deactivated (the 400 says "the account was deactivated as requested"); a colliding email in the same body is ignored and audited |
-| Authentik: per-object warning `400 … already linked to another identity-provider user` | the WebTerm account matching that user (by email or SSO identity) is already managed by SCIM under another userName: two IdP users share an email, or the user was renamed after Authentik lost its link. Give each IdP user its own email, or delete the stale WebTerm account (Settings → Users & roles) so the next sync provisions it again. If that create also carried `active: false`, the account was already deactivated (the 400 says so) |
+| Authentik: per-object warning `400 … already linked to another identity-provider user` | the WebTerm account matching that user (by email or SSO identity) is already managed by SCIM under another userName: two IdP users share an email, or the user was renamed after Authentik lost its link. Give each IdP user its own email, or delete the stale WebTerm account (Settings → People & roles) so the next sync provisions it again. If that create also carried `active: false`, the account was already deactivated (the 400 says so) |
 | Authentik: per-object warning `503`, `Retry-After` | the user signed in with SSO at the very moment SCIM created them; the next sync adopts the account — nothing to do |
-| Authentik: per-object warning `400 … has a different email … WebTerm disabled that account` | the IdP deactivated a user whose SSO identity matches a WebTerm account with another email; WebTerm disabled that account without linking it to SCIM. If it is the same person, fix the email (IdP or WebTerm) and have an Owner re-enable the account in Settings → Users & roles |
+| Authentik: per-object warning `400 … has a different email … WebTerm disabled that account` | the IdP deactivated a user whose SSO identity matches a WebTerm account with another email; WebTerm disabled that account without linking it to SCIM. If it is the same person, fix the email (IdP or WebTerm) and have an Owner re-enable the account in Settings → People & roles |
 | Authentik: `403 … last permanent Owner` | make another account a permanent Owner first |
 | `429` | too many failed authentications from that IP (wait 15 min) or too many requests |
 | a user is not created | not in a WebTerm group (provision's filter), a service account, no valid email in the IdP, or inactive in the IdP (Authentik: `400 … inactive in the identity provider` — expected; it is created once activated) |
-| Authentik: `400 … email can only be changed in WebTerm` | the IdP renamed the email of an account SCIM adopted (or one that holds a role given by hand and never signed in with SSO): change it in WebTerm (Settings → Users & roles) or in the IdP back. A deactivation is never blocked by this |
-| Authentik: `400 … externalId cannot change once set`, and the user stays disabled after being reactivated in the IdP | the person was deleted and re-created in the IdP (new `externalId`) while WebTerm still has the old account. The deactivation went through (the new `externalId` was ignored), but WebTerm never re-links an account to a different identity, so it refuses the whole request — re-activation included (fail closed). Delete the old account in WebTerm (Settings → Users & roles → Accounts) and let the next sync provision the new one, or re-enable it there as an Owner if it really is the same person |
+| Authentik: `400 … email can only be changed in WebTerm` | the IdP renamed the email of an account SCIM adopted (or one that holds a role given by hand and never signed in with SSO): change it in WebTerm (Settings → People & roles) or in the IdP back. A deactivation is never blocked by this |
+| Authentik: `400 … externalId cannot change once set`, and the user stays disabled after being reactivated in the IdP | the person was deleted and re-created in the IdP (new `externalId`) while WebTerm still has the old account. The deactivation went through (the new `externalId` was ignored), but WebTerm never re-links an account to a different identity, so it refuses the whole request — re-activation included (fail closed). Delete the old account in WebTerm (Settings → People & roles → Accounts) and let the next sync provision the new one, or re-enable it there as an Owner if it really is the same person |
 | Authentik: `400 … externalId and the email belong to different WebTerm accounts` | two WebTerm accounts claim that person (one by `sub`, one by email): fix or delete the wrong one in WebTerm. A deactivation is never blocked by this: the account the `sub` links is disabled, the email ignored |
 | roles do not appear | the group name differs from the mapping (exact match), the group is not pushed (filter), the account has a local password, or the role is Owner (granted at the next SSO sign-in only) |
 | where to look | the SCIM panel (last request / last error), the audit log (`via = scim`), gateway logs (`SCIM:`), Authentik's provider sync status |
@@ -482,7 +482,7 @@ docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
 
 Then sign in with the password form (2FA still applies if the account has TOTP; `app.admin
 disable-2fa <email>` if the phone is gone). Once the IdP is back, the account can give itself up to
-SSO again with *Remove local password* (Settings → Users & roles → Your access) — but keep **one**
+SSO again with *Remove local password* (Settings → Account & security → Your access) — but keep **one**
 permanent Owner with a local password: that is the rule `app.admin sso-only` enforces, for exactly
 this day.
 

@@ -407,7 +407,7 @@ Press `?` for the cheatsheet.
   installs the agent over it — no copying an install command by hand
   (host → *Provision*; the same enrolment token, just delivered for you)
 - **Alerts by email *and* webhook** — Slack, Discord, Teams, or any endpoint that
-  accepts JSON (`WEBTERM_ALERT_WEBHOOK`, or Settings → Notifications). The webhook is
+  accepts JSON (`WEBTERM_ALERT_WEBHOOK`, or Settings → Alert delivery). The webhook is
   independent of SMTP: if chat is where you actually look, you never need a mail server.
   Covers resource thresholds **and** security events: login from a new device, a new
   account or automation token, a credential change, an agent going offline, a

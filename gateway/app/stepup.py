@@ -23,7 +23,7 @@ _NEEDS_FACTOR_MSG = ("set up a passkey or an authenticator code (TOTP) to access
 # OP-01: the root terminal on the gateway host (certificate renewal, System health fix)
 _NEEDS_FACTOR_GATEWAY_MSG = ("a root command on the gateway host always needs a second factor: "
                              "set up a passkey or an authenticator code (TOTP) in Settings → "
-                             "Sign-in & 2FA first — the account password alone is not accepted")
+                             "Account & security first — the account password alone is not accepted")
 
 
 async def method(user) -> str:

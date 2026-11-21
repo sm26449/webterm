@@ -1,4 +1,4 @@
-# Alerts — email and webhook (Settings → Notifications)
+# Alerts — email and webhook (Settings → Alert delivery)
 
 Get told when something happens that you would otherwise only find in a log: an IP locked
 out, a login from a new place, a host that stopped reporting, a disk filling up, a backup
@@ -17,7 +17,7 @@ condition stays one message, not a stream.
 
 ## Channels: email and webhook
 
-Both live in **Settings → Notifications**, under *Email alerts (SMTP)*.
+Both live in **Settings → Alert delivery**, under *Email alerts (SMTP)*.
 
 **Email.** Fields: SMTP host, port (default 587), user, password, *From*, *To*, and *Use
 STARTTLS*. An email is sent only when **host, From and To** are all set; the user is
@@ -90,7 +90,7 @@ key, so a gateway restart resets them.
 | Agent: update REFUSED (code) | An agent refused a signed update, or the gateway refused to push one because `ptyd.py.sig` is missing. | 1 per host / 6 h |
 | Off-host backup is FAILING (provider) | The scheduled upload to the off-host destination failed **2 or more times in a row**. | 1 / 12 h |
 | Scheduled backup is FAILING | The scheduled local snapshot itself failed (disk full, DB locked, read-only volume). | 1 / 12 h |
-| TLS certificate for NAME expires in N days / has EXPIRED / Traefik serves its DEFAULT certificate / does not cover that name | The certificate Traefik serves for the app domain, the forward wildcard or Authentik (checked daily and on **Check now**, Settings → Infrastructure → Certificates): under 14 days (warning), under 3 days (warning), expired, default or wrong certificate (critical). See [TLS certificates](INSTALL.md#tls-certificates-monitoring-and-renewal). | 1 per threshold per certificate (persisted across restarts), plus one "OK again" |
+| TLS certificate for NAME expires in N days / has EXPIRED / Traefik serves its DEFAULT certificate / does not cover that name | The certificate Traefik serves for the app domain, the forward wildcard or Authentik (checked daily and on **Check now**, Settings → Network & certificates): under 14 days (warning), under 3 days (warning), expired, default or wrong certificate (critical). See [TLS certificates](INSTALL.md#tls-certificates-monitoring-and-renewal). | 1 per threshold per certificate (persisted across restarts), plus one "OK again" |
 | System health: … | A [System health](INSTALL.md#system-health) check (3.6.8) crossed into warning or critical — e.g. a failing SSO probe, a stuck signing key, no break-glass Owner, a backup that stopped running — or recovered; and when an Admin mutes a check, a *muted by …* notice to the Owner. The alert carries the same text the panel shows. | per check: on the transition, a daily reminder while still critical, and once on recovery |
 
 The offline sweep runs every 60 s from the session reaper, which waits ~3 minutes after
@@ -104,7 +104,7 @@ synchronously, and never to the webhook.
 
 ## Resource thresholds
 
-Under **Settings → Notifications → Resource alerts**: three percentages, **CPU**, **RAM**
+Under **Settings → Alert delivery → Resource alerts**: three percentages, **CPU**, **RAM**
 and **Disk**, default **90** each, `0` disables that metric, accepted range 0–100. They
 apply to every agent host (there are no per-host thresholds) and are evaluated on each
 agent heartbeat (every 30 s) from the metrics the agent reports: CPU %, used/total memory,
@@ -189,7 +189,7 @@ dropped when a new one arrives. Deleting an account deletes its history and pref
 text is the same as the email, with tokens, `password=`-style values, credentials in URLs and
 private keys redacted — and so are the message parameters stored for the translated view.
 
-**Per-event preferences** (Settings → Notifications → *Alert events*). For each event type,
+**Per-event preferences** (Settings → My notifications → *Alert events*). For each event type,
 per account:
 
 | Toggle | Default | Effect |
@@ -255,7 +255,7 @@ in `.env`, the environment value comes back. Remove it from `.env` (and redeploy
 ## Task notifications
 
 Separate from the admin alerts above, **task notifications** are a **per-browser** convenience
-(Settings → Preferences → *Task notifications*, like the terminal renderer or theme). They tell you a
+(Settings → My notifications → *Task notifications*, like the terminal renderer or theme). They tell you a
 long task finished **while you weren't watching** — the tab is in the background, or another split
 pane is focused. Nothing is sent when you are looking at the pane.
 

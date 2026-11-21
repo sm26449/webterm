@@ -667,7 +667,7 @@ def notify_signing_locked(behind: int) -> None:
     _fire("The signing key is locked — agents are NOT updating",
           f"The gateway has an ENCRYPTED signing key, and it is locked since the last restart.\n"
           f"{behind} agent(s) are on an older version and cannot be updated.\n\n"
-          f"Unlock it: Settings → Infrastructure & tokens → Agent signing key.\n"
+          f"Unlock it: Settings → Access & automation → Agent signing key.\n"
           f"Agent updates are signed, and without the key the gateway refuses (correctly) to "
           f"push unsigned code to the hosts.", kind="signing_locked", severity="warning",
           key="signing_locked", params={"behind": int(behind)})
@@ -748,18 +748,18 @@ _CERT_TEXT = {
                  "certificate this close to the end means the automatic renewal is failing. Look "
                  "at `docker compose logs traefik | grep -i acme`.\n"
                  "A wildcard can only renew via DNS-01 (the `ledns` resolver, a Cloudflare token "
-                 "with DNS edit rights). Settings → Infrastructure → Certificates shows the "
+                 "with DNS edit rights). Settings → Network & certificates shows the "
                  "renewal command.")),
     "expiring_soon": dict(key="cert_expiring_soon", text=("TLS certificate for {name} expires in {days} days — renewal is failing",
                       "The certificate served for {name} expires in {days} days ({when}).\n"
                       "Issuer: {issuer}.\n\n"
                       "Automatic renewal has not happened. After expiry browsers refuse the site. "
-                      "Settings → Infrastructure → Certificates shows the renewal command "
+                      "Settings → Network & certificates shows the renewal command "
                       "(scripts/cert-renew.sh on the gateway host).")),
     "expired": dict(key="cert_expired", text=("TLS certificate for {name} has EXPIRED",
                 "The certificate served for {name} expired on {when}. Browsers refuse the site.\n"
                 "Issuer: {issuer}.\n\n"
-                "Renew it from Settings → Infrastructure → Certificates, or on the gateway host "
+                "Renew it from Settings → Network & certificates, or on the gateway host "
                 "with scripts/cert-renew.sh --domain <name>.")),
     "default": dict(key="cert_default", text=("Traefik serves its DEFAULT certificate for {name}",
                 "Traefik answers {name} with its self-signed \"TRAEFIK DEFAULT CERT\": Let's "
@@ -770,7 +770,7 @@ _CERT_TEXT = {
                  "The certificate served for {name} is for {sans}, so browsers refuse it.\n"
                  "Issuer: {issuer}; expires {when}.\n\n"
                  "Usually a stale entry in the ACME store shadows the right one. "
-                 "Settings → Infrastructure → Certificates shows the renewal command.")),
+                 "Settings → Network & certificates shows the renewal command.")),
     "ok": dict(key="cert_ok", text=("TLS certificate for {name} is OK again",
            "The certificate served for {name} is valid again: {days} days left ({when}), "
            "issuer {issuer}.")),

@@ -11,7 +11,7 @@ one, POST, PUT, PATCH, DELETE), ServiceProviderConfig, ResourceTypes, Schemas. B
 Liberal in what we accept, strict in what we grant:
 
   * AUTH — a dedicated SCIM bearer token (NOT an automation token, NOT a cookie): created, rotated
-    and revoked by an Owner only (Settings → Users & roles → SSO groups → SCIM), stored as a
+    and revoked by an Owner only (Settings → People & roles → SSO groups → SCIM), stored as a
     SHA-256 hash, shown once, compared in constant time. Failures are rate-limited per IP (10 per
     15 min → 15 min lockout), authenticated traffic is capped (1200 requests/min), bodies are
     capped (1 MiB). An Owner can switch provisioning off without revoking the token. SCIM needs
@@ -310,7 +310,7 @@ async def _audit_lockout(now: float, ip: str, path: str, configured: bool) -> No
             "the SCIM endpoint locked out %s for 15 min after %d failed authentications in 15 min. "
             "Why this matters: someone is trying a wrong, stale or leaked SCIM token — that "
             "token is worth an Admin's password. If the identity provider stopped syncing, "
-            "re-paste the current token there (Settings → Users & roles → SSO groups); if it "
+            "re-paste the current token there (Settings → People & roles → SSO groups); if it "
             "syncs fine, rotate the token" % (ip, _FAIL_MAX), ip, "SCIM (no account)",
             fleet=True, severity="warning", what_key="scim_lockout",
             what_params={"ip": ip, "fails": _FAIL_MAX})
@@ -420,7 +420,7 @@ async def require_scim(request: Request) -> dict:
     if st.get("scim_enabled") != "1":
         await _note_error(403, "a request arrived while SCIM provisioning is turned off")
         raise ScimError(403, "SCIM provisioning is turned off in WebTerm "
-                             "(Settings → Users & roles → SSO groups → SCIM)")
+                             "(Settings → People & roles → SSO groups → SCIM)")
     if not config.OIDC_ENABLED:
         await _note_error(403, "SSO (OIDC) is not configured")
         raise ScimError(403, "SSO (OIDC) is not configured in WebTerm: an account created by "
@@ -763,7 +763,7 @@ async def _guard_identity(u, f: dict) -> None:
         raise ScimError(400, "externalId cannot change once set: it links the WebTerm account to "
                              "the SSO identity. The whole request is refused, re-activation "
                              "included — if the person was re-created in the identity provider, "
-                             "delete the old WebTerm account (Settings → Users & roles) so the new "
+                             "delete the old WebTerm account (Settings → People & roles) so the new "
                              "one can be provisioned", "mutability")
     if f.get("email") and f["email"] != u["email"]:
         # review 3.6.11: SCIM changes the email only of accounts it CREATED — never of an
@@ -789,7 +789,7 @@ async def _guard_identity(u, f: dict) -> None:
 
 
 _OWNER_LEVEL_DETAIL = ("this account holds an Owner-level role given in WebTerm (not by an SSO "
-                       "group): only an Owner can %s it, in WebTerm (Settings → Users & roles)")
+                       "group): only an Owner can %s it, in WebTerm (Settings → People & roles)")
 
 
 async def _owner_level_refused(uid: int, what: str, ip: str) -> ScimError:
@@ -857,7 +857,7 @@ async def _enable_check(uid: int, ip: str) -> None:
         return
     if (row["disabled_by"] or "") not in ("scim", "scim-delete"):
         raise ScimError(403, "this account was disabled in WebTerm, not by the identity provider: "
-                             "only an Owner can re-enable it (Settings → Users & roles)")
+                             "only an Owner can re-enable it (Settings → People & roles)")
     if await authz.owner_level_given_in_webterm(uid):
         raise await _owner_level_refused(uid, "re-enable", ip)
 
@@ -949,7 +949,7 @@ async def _apply_user(p: dict, u, f: dict, path: str, method: str) -> bool:
 _UNLINKED_DETAIL = ("an existing WebTerm account matches this user's SSO identity (externalId) but "
                     "has a different email: SCIM does not take it over. Because the user is "
                     "inactive, WebTerm disabled that account without linking it to SCIM; only an "
-                    "Owner can re-enable it (Settings → Users & roles)")
+                    "Owner can re-enable it (Settings → People & roles)")
 
 
 async def _disable_unlinked(p: dict, target, path: str) -> ScimError:
@@ -1804,7 +1804,7 @@ async def service_provider_config(_p=Depends(require_scim)):
         "etag": {"supported": False},
         "authenticationSchemes": [{
             "type": "oauthbearertoken", "name": "SCIM bearer token", "primary": True,
-            "description": "The token an Owner creates in Settings → Users & roles → SSO groups "
+            "description": "The token an Owner creates in Settings → People & roles → SSO groups "
                            "→ SCIM (shown once)."}],
         "meta": {"resourceType": "ServiceProviderConfig",
                  "location": config.PUBLIC_URL.rstrip("/") + PREFIX + "/ServiceProviderConfig"}})

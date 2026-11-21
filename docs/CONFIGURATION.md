@@ -24,14 +24,14 @@ is the full reference.
 | `WEBTERM_ARCHIVE_DAYS` | days an archived transcript is kept before it is deleted for good (default 120) |
 | `WEBTERM_CLOSED_ARCHIVE_DAYS` | days after which a **closed** session's transcript moves to the archive (default 30; `0` = off) |
 | `WEBTERM_TRANSCRIPT_MAX_BYTES` / `WEBTERM_TRANSCRIPT_KEEP_BYTES` | per-session transcript cap: past MAX (default 64 MiB) only the last KEEP bytes (default 16 MiB) are kept, with a gap marker |
-| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for security alerts. Independent of SMTP — with chat configured you never need a mail server. Also settable in Settings → Notifications |
+| `WEBTERM_ALERT_WEBHOOK` | Slack/Discord/Teams or any JSON endpoint for security alerts. Independent of SMTP — with chat configured you never need a mail server. Also settable in Settings → Alert delivery |
 | `WEBTERM_UPDATE_CHECK` | `0` disables the "a newer version exists" check entirely (it overrides the UI switch). WebTerm never updates itself; the check only tells you |
 | `WEBTERM_UPDATE_COMMAND` | the upgrade command the UI **displays** when a new version exists. It is never executed |
 | `WEBTERM_UPDATE_REPO` | the GitHub `owner/repo` the version check asks (default `sm26449/webterm`) — set it on a fork |
 | `WEBTERM_SIGNING_AUTOGEN` | `1` (default) \| `0` = don't generate an agent signing key on the first boot of a new install — for an offline, build-time key (see [Signed agent updates](SECURITY-FEATURES.md#signed-agent-updates)) |
 | `WEBTERM_CERT_MIN_DAYS` | how many days before expiry the `webterm-cert-check` timer starts warning (default 15). **Not read from `.env`** — the timer reads `/etc/default/webterm-cert-check`, which `install.sh` writes |
 | `WEBTERM_CERT_RESOLVER` | `le` (HTTP-01, needs port 80 reachable) or `ledns` (DNS-01 via Cloudflare). Written by `install.sh`/`deploy.sh` from whether you gave a Cloudflare token — see the note under `CF_DNS_API_TOKEN`. The app reads it too (3.6.7): only on `ledns` is the forward wildcard checked |
-| `WEBTERM_CERT_CHECK` | `1` (default) \| `0` = turn off the gateway's TLS certificate check (Settings → Infrastructure → Certificates; alerts at < 14 and < 3 days, critical when expired or when Traefik serves its default certificate) |
+| `WEBTERM_CERT_CHECK` | `1` (default) \| `0` = turn off the gateway's TLS certificate check (Settings → Network & certificates; alerts at < 14 and < 3 days, critical when expired or when Traefik serves its default certificate) |
 | `WEBTERM_CERT_CHECK_TARGET` | where the check reaches Traefik inside the compose network (default `traefik:443`); when it is unreachable the public name is used |
 | `WEBTERM_CERT_CHECK_FORWARD` | `1` / `0` forces checking the forward wildcard (`cert-check.<forward domain>`) on or off; empty = only with `WEBTERM_CERT_RESOLVER=ledns` |
 | `WEBTERM_INSTALL_DIR` | the install directory on the host (default `/opt/webterm`, written by `install.sh`); the app only uses it to **print** `sudo <dir>/scripts/cert-renew.sh --domain …` |
@@ -45,7 +45,7 @@ is the full reference.
 See [SSO.md](SSO.md) for the full single-sign-on model (break-glass, per-instance access, 2FA step-up).
 
 Roles (3.6) have **no environment variables**: they live in the database and are managed in
-Settings → Users & roles, or with `python3 -m app.admin roles|promote` from the server
+Settings → People & roles, or with `python3 -m app.admin roles|promote` from the server
 ([ROLES.md](ROLES.md)). SSO group → role mappings (3.6.2) live in the database too and are edited
 in the UI ([ROLES.md → SSO group mapping](ROLES.md#sso-group-mapping)); a new SSO account with no
 mapped group starts with no access. Since 3.6.5 three optional variables add to that
@@ -74,7 +74,7 @@ mapped group starts with no access. Since 3.6.5 three optional variables add to 
 With no SMTP host the email alerts are off; everything else works, and the webhook above is
 independent of it. Details and the list of events: [ALERTS.md](ALERTS.md).
 Alerts are recorded in the app either way (the bell in the sidebar); which event types are
-emailed or kept in the history is a per-account choice in Settings → Notifications → *Alert
+emailed or kept in the history is a per-account choice in Settings → My notifications → *Alert
 events*, not an environment variable — see
 [ALERTS.md](ALERTS.md#in-app-history-and-per-event-preferences). There is nothing to
 configure for the history itself: last 500 alerts per account, 30 days.
