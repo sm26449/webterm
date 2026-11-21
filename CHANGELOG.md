@@ -9,6 +9,19 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **"New session" first shows the sessions you already have open on that host.** Closing a tab leaves
+  the session running, so people ended up with six or eight forgotten shells per host. Now, when you
+  have at least one live session of your own on the host that is not already open in a tab here, New
+  session opens a launcher tab instead of a shell: **New session** is selected (Enter does what the
+  click did before), and below it your sessions, most recently active first, with when they were last
+  active and whether they are open on another device, shared or kept open. Picking one switches to it;
+  nothing new is created. *Close idle…* stops the ones idle for over a day (not those kept open,
+  shared or open elsewhere). Shift+click or Shift+Enter skips the launcher, a checkbox turns it off
+  per host, and *Settings → Terminal & workspace → New sessions* turns it off everywhere (per
+  browser). Other people's sessions never appear there. On a phone it is a full-screen sheet. The
+  command palette follows the same rule: Enter on a host no longer always opens a new shell.
+
 ### Changed
 - **A new default look in the brand colours: EverShell.** Petrol surfaces, cream text and the
   phosphor cursor as the accent, in light and dark, with a matching terminal scheme. It is what a

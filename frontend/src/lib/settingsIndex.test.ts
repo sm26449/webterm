@@ -324,7 +324,7 @@ describe('settings index: roluri (3.6) — ce vede un cont fără permisiuni glo
   })
   it('Viewer: aceleaşi secţiuni personale ca înainte de regrupare', () => {
     expect(visibleSections(asRole('viewer'))).toEqual(SETTINGS_INDEX.filter((s) => !s.perm).map((s) => s.id).sort())
-    expect(visibleSections(asRole('viewer'))).toEqual(['accessibility', 'account', 'alertPrefs', 'audit', 'devices', 'language',
+    expect(visibleSections(asRole('viewer'))).toEqual(['accessibility', 'account', 'alertPrefs', 'askNewSession', 'audit', 'devices', 'language',
       'myAccess', 'passkeys', 'taskNotify', 'termColors', 'terminal', 'theme', 'themeMode', 'timezone', 'tips', 'totp',
       'transfers', 'updatesBadge', 'walkthrough'])
   })

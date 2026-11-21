@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { mtlsDaysLeft, mtlsExpiringSoon, mtlsState } from '../lib/mtls'
 import { sessionTitle } from '../lib/sessionTitle'
+import { newSessionOpts, type NewSessionOpts } from '../lib/sessionChooser'
 import { errText, isSessionLive, api, AppLink, Host, HostSupervision, Session, timeAgo, withStepup } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -44,7 +45,7 @@ export default function HostOverview(props: {
   host: Host
   sessions: Session[]
   onOpenSession: (sid: string) => void
-  onNewSession: (host: Host) => void
+  onNewSession: (host: Host, opts?: NewSessionOpts) => void
   onSplit: (sid: string) => void
   onPopout: (sid: string) => void
   /** respinge la eşec — apelantul arată eroarea şi readuce rândul (3.6.3) */
@@ -280,7 +281,7 @@ export default function HostOverview(props: {
             title={may('host.edit') ? t('host.editHost') : denied('host.edit')} className="wt-touch">
             <PencilIcon /> <span className="hidden sm:inline">{t('host.editHost')}</span>
           </Button>
-          <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)} className="wt-touch"
+          <Button variant="primary" size="lg" disabled={!canConnect} onClick={(e) => props.onNewSession(host, newSessionOpts(e))} className="wt-touch"
             title={mayOpen ? undefined : denied('session.open')}>
             <PlusIcon /> {t('host.newSession')}
           </Button>
@@ -384,7 +385,7 @@ export default function HostOverview(props: {
                   title={t('host.noActiveSessions')}
                   action={(
                     <div className="flex items-center gap-2">
-                      <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)}>
+                      <Button variant="primary" size="lg" disabled={!canConnect} onClick={(e) => props.onNewSession(host, newSessionOpts(e))}>
                         <PlusIcon /> {t('host.newSession')}
                       </Button>
                       {closed.length > 0 && (
@@ -491,7 +492,7 @@ export default function HostOverview(props: {
               ) : (
                 <EmptyState className="h-full" title={t('host.noSessionsYet')}
                   action={(
-                    <Button variant="primary" size="lg" disabled={!canConnect} onClick={() => props.onNewSession(host)}>
+                    <Button variant="primary" size="lg" disabled={!canConnect} onClick={(e) => props.onNewSession(host, newSessionOpts(e))}>
                       <PlusIcon /> {t('host.newSession')}
                     </Button>
                   )} />

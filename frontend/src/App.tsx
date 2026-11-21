@@ -42,7 +42,9 @@ import { useFocusTrap } from './lib/useFocusTrap'
 import { copyText } from './lib/clipboard'
 import { ArrowsLeftRightIcon, CloseIcon, CopyIcon, FullscreenIcon, LockIcon, ShieldIcon } from './components/Icons'
 import { EmptyState } from './components/ui'
-import { loadPerms, setPerms } from './lib/perms'
+import { canOn, getPerms, loadPerms, setPerms } from './lib/perms'
+import NewSessionLauncher from './components/NewSessionLauncher'
+import { launcherDecision, launcherSessions, otherClients, type NewSessionOpts } from './lib/sessionChooser'
 import { ensureNotificationPermission, notify, notifyError, notifyToast, registerToast, upsertToast } from './lib/notify'
 import { forgetSelfRow } from './components/settings/users/shared'
 import { forgetUploads, hideUploads, openFilesAt, restoreOrphans, setUploadUser } from './lib/uploads'
@@ -169,11 +171,12 @@ interface Route {
   popout: string | null
   shared: string | null
   replay: string | null       // link public de replay (3.5.12): tokenul din fragment
+  launch: number | null       // tab-ul de lansare „New session" pe un host (3.7.1); starea lui e în App
 }
 
 function parseHash(): Route {
   const h = window.location.hash
-  const base = { primary: null, host: null, popout: null, shared: null, replay: null }
+  const base = { primary: null, host: null, popout: null, shared: null, replay: null, launch: null }
   const replay = replayTokenFromHash(h)
   if (replay) return { ...base, replay }
   const shared = h.match(/^#\/shared\/([A-Za-z0-9_-]+)$/)
@@ -182,6 +185,8 @@ function parseHash(): Route {
   if (pop) return { ...base, popout: pop[1] }
   const host = h.match(/^#\/h\/(\d+)$/)
   if (host) return { ...base, host: Number(host[1]) }
+  const launch = h.match(/^#\/new\/(\d+)$/)
+  if (launch) return { ...base, launch: Number(launch[1]) }
   const m = h.match(/^#\/s\/([0-9a-f]{32})$/)
   return { ...base, primary: m ? m[1] : null }
 }
@@ -396,6 +401,34 @@ function MainApp() {
     try { window.history.replaceState(window.history.state, '', url) } catch { window.location.hash = sid ? `/s/${sid}` : ''; return }
     window.dispatchEvent(new HashChangeEvent('hashchange'))
   }, [])
+  // Starea tab-ului de lansare stă SEPARAT de `openTabs`: openTabs e persistat în `wt_tabs` şi curăţat
+  // la fiecare poll după id-urile de pe server, deci un id fals ar fi fost şters sau salvat ca sesiune.
+  // `shown` = hash-ul a ajuns deja la #/new/<id> (până atunci o rută diferită nu înseamnă „abandon").
+  // `ret` = ruta de dinainte (Escape revine acolo); `focus` = elementul care l-a deschis.
+  type Launch = { hostId: number; shown: boolean; nonce: number; ret: string; focus: HTMLElement | null }
+  const [launch, setLaunch] = useState<Launch | null>(null)
+  const launchRef = useRef<Launch | null>(null)
+  launchRef.current = launch
+  const replaceHashPath = (path: string) => {
+    const url = window.location.pathname + window.location.search + (path ? `#${path}` : '')
+    try { window.history.replaceState(window.history.state, '', url) } catch { window.location.hash = path; return }
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+  // hash ↔ stare: hash-ul a ajuns la #/new/<id> → afişat; a plecat de acolo (alt tab, host, Back) →
+  // abandon, fără toast; #/new/<id> FĂRĂ stare (reload, Înainte în istoric, link) → pagina hostului.
+  // Nu creăm niciodată o sesiune dintr-un URL.
+  useEffect(() => {
+    const cur = launchRef.current
+    if (route.launch != null) {
+      if (cur && cur.hostId === route.launch) { if (!cur.shown) setLaunch({ ...cur, shown: true }); return }
+      if (cur && !cur.shown) return            // navigarea spre lansatorul nou e încă în zbor
+      launchRef.current = null
+      setLaunch(null)
+      replaceHashPath(`/h/${route.launch}`)
+      return
+    }
+    if (cur?.shown) { launchRef.current = null; setLaunch(null) }
+  }, [route.launch, launch])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   // Plierea sidebarului e o preferinţă de spaţiu, nu o stare de sesiune: cine lucrează pe
   // un laptop mic o vrea din prima, la fiecare deschidere. Citită sincron la montare, ca
@@ -1804,8 +1837,103 @@ function MainApp() {
     }
   }
 
-  // deschide o sesiune nouă — gestionează 2FA step-up + credențiale „ask”
-  async function connectHost(host: Host) {
+  function openLauncher(host: Host) {
+    const cur = launchRef.current
+    // acelaşi host, deja afişat: doar focus înapoi pe „New session" (două clicuri rapide = un tab)
+    if (cur && cur.hostId === host.id) { setLaunch({ ...cur, nonce: cur.nonce + 1 }); return }
+    const here = window.location.hash.replace(/^#/, '')
+    const next: Launch = {
+      hostId: host.id, shown: false, nonce: 0,
+      // un lansator deschis peste altul (alt host) îl ÎNLOCUIEŞTE şi păstrează ruta de întoarcere iniţială
+      ret: cur ? cur.ret : here,
+      focus: cur ? cur.focus : (document.activeElement instanceof HTMLElement ? document.activeElement : null),
+    }
+    launchRef.current = next
+    setLaunch(next)
+    // split activ: lansatorul e un tab NORMAL, în afara split-ului (split-ul rămâne salvat, cu chip-ul lui)
+    setActiveSplitId(null)
+    setPendingSearch(null)
+    setSidebarOpen(false)
+    if (parseHash().launch != null) replaceHashPath(`/new/${host.id}`)
+    else window.location.hash = `/new/${host.id}`
+  }
+  // Escape / ← Înapoi / ✕ pe tab: revenim unde erai, fără nicio sesiune creată
+  const closeLauncher = () => {
+    const cur = launchRef.current
+    launchRef.current = null
+    setLaunch(null)
+    if (parseHash().launch != null) replaceHashPath(cur?.ret.startsWith('/new/') ? '' : (cur?.ret ?? ''))
+    requestAnimationFrame(() => {
+      const el = cur?.focus
+      if (el && el.isConnected) el.focus()
+      else document.querySelector<HTMLButtonElement>('button[data-tab][aria-current="page"]')?.focus()
+    })
+  }
+  // alegerea unui card: tab-ul de lansare DEVINE tab-ul sesiunii (înlocuim #/new/<id> în istoric)
+  const pickLaunched = (s: Session) => {
+    const live = sessionsRef.current.find((x) => x.id === s.id)
+    if (!live || (live.state !== 'live' && live.state !== 'creating')) {
+      // cursă: s-a încheiat între poll şi clic → rămânem în lansator, lista se reîmprospătează
+      notifyToast(t('launcher.gone'), 'warn', 'wt-launch-gone')
+      void refresh()
+      return
+    }
+    launchRef.current = null
+    setLaunch(null)
+    setPendingSearch(null)
+    openTab(s.id)
+    replaceRoute(s.id)
+    if (otherClients(live, false) > 0) notifyToast(t('launcher.alsoElsewhere'), 'info', 'wt-launch-elsewhere')
+  }
+  // „Close idle…": aceeaşi rută şi aceleaşi porţi ca Stop (require_session_control + step-up pe un
+  // host 2FA, o singură ceremonie pentru toate), după o confirmare care le numeşte
+  const closeIdleLaunched = async (host: Host, list: Session[]) => {
+    if (!list.length) return
+    const names = list.map((s) => `“${sessionTitle(s.title, t) || t('app.untitledSession')}”`).join(', ')
+    if (!(await confirm({
+      title: t('launcher.closeIdleTitle'),
+      message: t('launcher.closeIdleBody', { count: list.length, host: host.name, list: names }),
+      danger: true, confirmLabel: t('launcher.closeIdleConfirm'),
+    }))) return
+    let ok = 0
+    let lastErr: unknown = null
+    for (const s of list) {
+      try {
+        await withStepup(host.id, () => api(`/api/sessions/${s.id}/kill`, { method: 'POST' }))
+        ok++
+      } catch (e) {
+        lastErr = e
+        // step-up refuzat / anulat: nu mai insistăm pe restul (fiecare ar cere din nou)
+        if (e instanceof ApiError && e.status === 403) break
+      }
+    }
+    if (ok) notifyToast(t('launcher.closedIdle', { count: ok }), 'info', 'wt-launch-idle')
+    if (lastErr) notifyError(t('launcher.closeIdleFailed'), errText(lastErr, t) || t('app.error'))
+    void refresh()
+  }
+  const launchHost = launch?.shown && route.launch === launch.hostId
+    ? hosts.find((h) => h.id === launch.hostId) ?? null : null
+  const launchCards = launchHost ? launcherSessions(launchHost.id, sessions, myUserId, openTabs) : []
+
+  // ── [sessions] Tab-ul de lansare „New session" (3.7.1) ──────────────────────────────────────
+  // TOATE intrările „New session" (bara laterală, pagina hostului, Dashboard, paleta) trec pe aici.
+  // Decizia e luată ÎNAINTE de step-up / credenţialele „ask": acelea se cer doar dacă omul alege
+  // „New session"; ataşarea la o sesiune existentă merge pe drumul obişnuit (selectSession → WS),
+  // cu verificările ei de pe server. Lansatorul apare doar dacă ai ≥1 sesiune A TA, vie, pe host,
+  // care nu e deja într-un tab aici (lib/sessionChooser.launcherDecision).
+  function connectHost(host: Host, opts?: NewSessionOpts) {
+    const online = host.connection_type !== 'agent' || !!host.online
+    const decision = launcherDecision({
+      hostId: host.id, sessions: sessionsRef.current, userId: myUserId, openTabIds: openTabs,
+      canOpen: canOn(getPerms(), host.id, 'session.open'), online, direct: opts?.direct,
+    })
+    if (decision === 'launcher') openLauncher(host)
+    else void createSession(host)
+  }
+
+  // deschide o sesiune nouă — gestionează 2FA step-up + credențiale „ask”. `fromLauncher`: tab-ul de
+  // lansare DEVINE tab-ul sesiunii (înlocuim intrarea #/new/<id> din istoric, fără „închide şi deschide")
+  async function createSession(host: Host, fromLauncher = false) {
     const body: Record<string, unknown> = { title: '', tz: getTimezone() }
     if (host.require_2fa) {
       const cred = await stepupCredential(host.id)
@@ -1835,7 +1963,10 @@ function MainApp() {
       })
       await refresh()
       openTab(r.id)
-      navigate(r.id)
+      // din lansator: doar dacă tab-ul de lansare e încă cel afişat (omul n-a plecat în timpul
+      // promptului 2FA) îl înlocuim; altfel navigare normală
+      if (fromLauncher && parseHash().launch === host.id) { launchRef.current = null; setLaunch(null); replaceRoute(r.id) }
+      else navigate(r.id)
       setSidebarOpen(false)
     } catch (e) {
       void startFailed(host, e)
@@ -2021,7 +2152,7 @@ function MainApp() {
         onLogout={() => setShowLogoutConfirm(true)}
       />
       <div className="wt-workspace flex min-w-0 flex-1 flex-col">
-        {openTabs.length > 0 && (
+        {(openTabs.length > 0 || !!launchHost) && (
           <TabBar
             tabs={(() => {
               const base = openTabs.map((sid) => sessions.find((s) => s.id === sid)).filter(Boolean) as Session[]
@@ -2030,6 +2161,8 @@ function MainApp() {
                 : base
             })()}
             activeSid={selectedSid}
+            // tab-ul de lansare: punctat, fără culoarea hostului şi fără punct de stare — nu e un terminal
+            launcher={launchHost ? { hostName: launchHost.name, onSelect: () => setLaunch((l) => (l ? { ...l, nonce: l.nonce + 1 } : l)), onClose: closeLauncher } : undefined}
             activity={tabActivity}
             hosts={hosts}
             sort={tabSort}
@@ -2179,7 +2312,20 @@ function MainApp() {
             })}
           </div>
         </div>
-        {!splitActive && !primary && (<PaneErrorBoundary>{!routeHost && route.host != null && lastHostsRef.current !== '' ? (
+        {!splitActive && !primary && (<PaneErrorBoundary>{launchHost && launch ? (
+          <NewSessionLauncher
+            host={launchHost}
+            cards={launchCards}
+            loadError={fleet.sessionsErr}
+            canOpen={(launchHost.connection_type !== 'agent' || !!launchHost.online) && canOn(getPerms(), launchHost.id, 'session.open')}
+            focusNonce={launch.nonce}
+            onNew={() => createSession(launchHost, true)}
+            onPick={pickLaunched}
+            onClose={closeLauncher}
+            onCloseIdle={(list) => closeIdleLaunched(launchHost, list)}
+            onRetry={refresh}
+          />
+        ) : !routeHost && route.host != null && lastHostsRef.current !== '' ? (
           // link adânc spre un host pe care nu-l (mai) vezi: DELIBERAT ambiguu — „nu există" şi
           // „nu ai acces" arată la fel, exact ca răspunsul serverului (404, fără oracol)
           <EmptyState size="page" titleAs="h1" className="wt-canvas h-full" tone="neutral"

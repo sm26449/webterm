@@ -207,7 +207,7 @@ async function auditDevice(cfg) {
   // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt
   // OBLIGATORII — o etapă sărită e bug, ca şi celelalte din REQUIRED
   const isPhone = (cfg.device.viewport?.width ?? 1024) < 640
-  const required = isPhone ? [...REQUIRED, 'setari-telefon', 'keybar', 'selectie-text', 'foaie-panou', 'lista-taburi'] : REQUIRED
+  const required = isPhone ? [...REQUIRED, 'setari-telefon', 'keybar', 'selectie-text', 'foaie-panou', 'lista-taburi', 'lansator'] : REQUIRED
   let blocker = ''            // de ce s-a oprit fluxul, raportat o singură dată
   page.on('pageerror', (e) => errors.push(String(e).slice(0, 120)))
 
@@ -228,6 +228,39 @@ async function auditDevice(cfg) {
     for (const t of m.tinyTargets) note(cfg.name, screen, 'a11y', `țintă sub 24 px (WCAG 2.5.8): ${t.el} (${t.w}×${t.h})`)
     for (const t of m.smallTargets) note(cfg.name, screen, 'ux', `țintă tactilă mică: ${t.el} (${t.w}×${t.h})`)
     return m
+  }
+
+  /* 3.7.1: tab-ul de lansare „New session" — pe telefon o foaie pe TOT ecranul, rânduri ≥ 44 px, fără
+     scroll orizontal; „New session" din el creează sesiunea (calea pe care merge restul auditului). */
+  async function auditLauncher() {
+    const l = page.locator('[data-testid="launcher"]')
+    if (!(await l.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false))) {
+      note(cfg.name, 'lansator', 'bug', '„New session" pe un host cu o sesiune a mea (neîn tab) nu arată lansatorul')
+      return
+    }
+    await page.waitForTimeout(400)
+    await shot('04c-lansator')
+    await check('lansator')
+    reached.add('lansator')
+    const g = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="launcher"]')
+      const r = el.getBoundingClientRect()
+      const scroller = el.querySelector('.overflow-y-auto') || el
+      const rows = [...el.querySelectorAll('[data-testid="launcher-new"], button[data-card]')]
+        .map((b) => ({ t: (b.textContent || '').trim().slice(0, 30), h: Math.round(b.getBoundingClientRect().height) }))
+      return {
+        full: r.left <= 0.5 && r.top <= 0.5 && r.right >= innerWidth - 0.5 && r.bottom >= innerHeight - 0.5,
+        hScroll: scroller.scrollWidth > scroller.clientWidth + 1,
+        rows,
+        focus: document.activeElement?.getAttribute('data-testid') || '',
+      }
+    })
+    if (isPhone && !g.full) note(cfg.name, 'lansator', 'bug', 'pe telefon lansatorul nu acoperă tot ecranul')
+    if (g.hScroll) note(cfg.name, 'lansator', 'bug', 'lansatorul are scroll orizontal')
+    if (g.rows.length < 2) note(cfg.name, 'lansator', 'bug', `lansatorul n-are „New session" + cel puţin un card (${g.rows.length} rânduri)`)
+    for (const r of g.rows) if (isPhone && r.h < 44) note(cfg.name, 'lansator', 'bug', `rândul „${r.t}" are ${r.h}px (< 44px)`)
+    if (g.focus !== 'launcher-new') note(cfg.name, 'lansator', 'bug', `focusul iniţial e pe „${g.focus}", nu pe „New session"`)
+    await page.locator('[data-testid="launcher-new"]').click()
   }
 
   /* U25 (3.6.3): pe pointer grosier, fiecare serviciu are UN buton „Actions" de 44px care deschide o
@@ -533,7 +566,20 @@ async function auditDevice(cfg) {
     } else if (!(await newSession.isVisible().catch(() => false))) {
       blocker = 'butonul de sesiune nouă nu e vizibil pe pagina hostului'
     } else {
+      // o sesiune A MEA pe host, neîn tab pe acest device → „New session" arată întâi lansatorul (3.7.1);
+      // o creăm prin API ca etapa să ruleze determinist (închisă în `finally`, ca restul)
+      const hid = await page.evaluate(() => Number((location.hash.match(/^#\/h\/(\d+)/) || [])[1] || 0))
+      const pre = hid ? await page.evaluate(async (h) => {
+        const r = await fetch(`/api/hosts/${h}/sessions`, { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'mobile-launcher' }) })
+        return r.ok ? (await r.json()).id : null
+      }, hid) : null
+      if (pre) madeSids.push(pre)
+      else note(cfg.name, 'lansator', 'info', `SKIP: n-am putut crea sesiunea de pregătire (host ${hid})`)
+      await page.locator('text=mobile-launcher').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+      await page.waitForTimeout(5500)   // un ciclu de poll: lista din care decide App conţine sesiunea
       await newSession.click()
+      if (pre) await auditLauncher()
       await page.waitForSelector('.xterm-screen', { timeout: 20000 })
       await page.waitForTimeout(2500)
       // sesiunea e a acestui device: o închidem la final (vezi `finally`), altfel 11 device-uri +
@@ -968,7 +1014,8 @@ async function auditDevice(cfg) {
         await page.waitForTimeout(800)
         await cards.last().click({ timeout: 10000 })
         await page.waitForTimeout(1000)
-        await page.locator('button:has-text("New session"):visible').first().click()
+        // Shift = sesiune nouă direct (lansatorul a fost auditat mai sus)
+        await page.locator('button:has-text("New session"):visible').first().click({ modifiers: ['Shift'] })
         await page.waitForFunction(() => document.querySelectorAll('button[data-tab]').length >= 2, null, { timeout: 20000 })
         await page.waitForSelector('.xterm-screen', { timeout: 20000 })
         await page.waitForTimeout(1500)

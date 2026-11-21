@@ -53,7 +53,9 @@ const clipboardUntil = async (page, pred, ms = 5000) => {
    aceea auditul mobil nu e afectat. */
 const newSession = async (page) => {
   await page.click('button[title="Host actions"]')
-  await page.click('button[title="New session"]')
+  // Shift = sesiune nouă direct, fără tab-ul de lansare (3.7.1): fluxurile de aici vor o sesiune NOUĂ
+  // de fiecare dată; lansatorul are verificările lui („lansator: …")
+  await page.click('button[title="New session"]', { modifiers: ['Shift'] })
 }
 /* Sub încărcare (runner CI ocupat) agentul de test poate pierde scurt conexiunea şi reveni.
    Verificările care cer agentul (upload cu pauză, fs/cwd) picau atunci cu „host offline" (409),
@@ -2565,6 +2567,88 @@ try {
   check('walkthrough: turul se închide după Skip', await hidden(walk))
   check('walkthrough: „nu mai arăta" + închidere persistă wt_walkthrough_done:<uid>=1',
     (await page.evaluate((uid) => localStorage.getItem('wt_walkthrough_done:' + uid), meUid)) === '1')
+
+  // ── 3.7.1: tab-ul de lansare „New session" (sesiunile tale deschise pe host, înainte de una nouă) ──
+  // Apare doar dacă ai o sesiune A TA, vie, pe host, care NU e deja într-un tab aici; o creăm prin API
+  // (nu intră în wt_tabs). Restul testului foloseşte Shift (helper-ul newSession) = fără lansator.
+  {
+    const mkSession = (title) => page.evaluate(async ([hid, ttl]) => {
+      const r = await fetch(`/api/hosts/${hid}/sessions`, { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: ttl }) })
+      return r.ok ? (await r.json()).id : null
+    }, [host.id, title])
+    const liveCount = () => page.evaluate(async () =>
+      (await (await fetch('/api/sessions', { credentials: 'same-origin' })).json())
+        .filter((s) => s.state === 'live' || s.state === 'creating').length)
+    const launcher = page.locator('[data-testid="launcher"]')
+    const launcherTab = page.locator('[data-launcher-tab]')
+    // pagina hostului: butonul „New session" din antet trece prin aceeaşi decizie (connectHost)
+    const hostPage = async (waitTitle) => {
+      await page.evaluate((hid) => { location.hash = `/h/${hid}` }, host.id)
+      // poll-ul de 5 s aduce sesiunea creată prin API în lista din App (decizia se ia pe ea)
+      await page.locator(`text=${waitTitle}`).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {})
+      // plus un ciclu întreg de poll (5 s): textul poate veni din altă listă decât cea din care decide App
+      await page.waitForTimeout(5500)
+    }
+    const extra = await mkSession('launcher-extra')
+    await hostPage('launcher-extra')
+    const n0 = await liveCount()
+    await page.locator('button:has-text("New session"):visible').first().click()
+    const shown = await visible(launcher, 8000)
+    const diagL = await page.evaluate(() => `hash=${location.hash} tabs=${document.querySelectorAll('button[data-tab]').length} modal=${!!document.querySelector('[aria-modal="true"]')}`)
+    const focusId = await pollValue(() => page.evaluate(() => document.activeElement?.getAttribute('data-testid') ?? ''),
+      (v) => v === 'launcher-new', 3000)
+    check('lansator: New session pe un host cu o sesiune a mea neîn tab → tab de lansare, „New session" focalizat',
+      !!extra && shown && focusId === 'launcher-new' && (await launcherTab.count()) === 1
+        && (await page.evaluate(() => location.hash)) === `#/new/${host.id}`
+        && (await launcher.locator(`button[data-card="${extra}"]`).count()) === 1,
+      `extra=${extra} shown=${shown} focus=${focusId} ${diagL}`)
+    await page.keyboard.press('Enter')
+    const newHash = await pollValue(() => page.evaluate(() => location.hash), (h) => /^#\/s\/[0-9a-f]{32}$/.test(h), 15000)
+    const n1 = await pollValue(liveCount, (n) => n === n0 + 1, 8000)
+    check('lansator: Enter creează o sesiune nouă, în acelaşi tab (tab-ul de lansare dispare)',
+      /^#\/s\//.test(newHash) && n1 === n0 + 1 && (await hidden(launcher, 3000)) && (await launcherTab.count()) === 0,
+      `hash=${newHash} n0=${n0} n1=${n1}`)
+    // alegerea unui card: ataşare la sesiunea existentă, fără una nouă
+    await hostPage('launcher-extra')
+    await page.locator('button:has-text("New session"):visible').first().click()
+    await visible(launcher, 8000)
+    await launcher.locator(`button[data-card="${extra}"]`).click()
+    const pickHash = await pollValue(() => page.evaluate(() => location.hash), (h) => h === `#/s/${extra}`, 8000)
+    const n2 = await liveCount()
+    check('lansator: un card ataşează sesiunea existentă (fără sesiune nouă), tab-ul de lansare dispare',
+      pickHash === `#/s/${extra}` && n2 === n1 && (await launcherTab.count()) === 0
+        && (await page.locator(`button[data-tab="${extra}"]`).count()) === 1,
+      `hash=${pickHash} n1=${n1} n2=${n2}`)
+    // Shift+clic sare peste lansator, deşi există din nou o sesiune neîn tab
+    const extra2 = await mkSession('launcher-extra2')
+    await hostPage('launcher-extra2')
+    const n3 = await liveCount()
+    await page.locator('button:has-text("New session"):visible').first().click({ modifiers: ['Shift'] })
+    const shiftHash = await pollValue(() => page.evaluate(() => location.hash), (h) => /^#\/s\/[0-9a-f]{32}$/.test(h), 15000)
+    const n4 = await pollValue(liveCount, (n) => n === n3 + 1, 8000)
+    check('lansator: Shift+clic pe New session creează direct (fără tab de lansare)',
+      !!extra2 && /^#\/s\//.test(shiftHash) && shiftHash !== `#/s/${extra2}` && n4 === n3 + 1 && (await launcherTab.count()) === 0,
+      `hash=${shiftHash} n3=${n3} n4=${n4}`)
+    // paleta: Ctrl+K → numele hostului → Enter pe rândul hostului = ACEEAŞI decizie (înainte: sesiune nouă)
+    // Ctrl+Shift+K: portiţa universală (focusul e în terminal, unde Ctrl+K e kill-line)
+    await page.keyboard.press('Control+Shift+K')
+    const pal = page.locator('[role=dialog][aria-modal="true"] input[role=combobox]')
+    await visible(pal)
+    await pal.fill('ci-local').catch(() => {})
+    await page.waitForTimeout(300)
+    await page.keyboard.press('Enter')
+    const palShown = await visible(launcher, 8000)
+    const palFocus = await pollValue(() => page.evaluate(() => document.activeElement?.getAttribute('data-testid') ?? ''),
+      (v) => v === 'launcher-new', 3000)
+    await page.keyboard.press('Escape')
+    const escHash = await pollValue(() => page.evaluate(() => location.hash), (h) => !h.startsWith('#/new/'), 5000)
+    const n5 = await liveCount()
+    check('lansator: paleta (Enter pe host) deschide lansatorul; Escape îl închide fără sesiune nouă',
+      palShown && palFocus === 'launcher-new' && !escHash.startsWith('#/new/') && (await hidden(launcher, 3000))
+        && (await launcherTab.count()) === 0 && n5 === n4,
+      `shown=${palShown} focus=${palFocus} hash=${escHash} n4=${n4} n5=${n5}`)
+  }
 
   // ── 3.5.13: download File System Access întrerupt de un reload → „Interrupted — Resume / Discard" ──
   // Punem în IndexedDB DOAR metadatele (exact ce rămâne după un tab închis la mijlocul unui download),

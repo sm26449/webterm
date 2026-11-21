@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { sessionTitle } from '../lib/sessionTitle'
 import { api, isEphemeralHost, AppLink, Host, Session, Snippet } from '../lib/api'
+import type { NewSessionOpts } from '../lib/sessionChooser'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { applyTheme, currentTheme, themePref } from '../lib/theme'
 import { resolveVariant, toggledPref, variantName } from '../lib/themeModel'
@@ -18,7 +19,8 @@ type Item = {
   hint: string
   text: string // câmp de căutare (lowercase)
   icon?: React.ReactNode
-  run: () => void
+  /** `direct` = Shift+Enter / Shift+clic (pe un host: sesiune nouă fără lansator) */
+  run: (direct?: boolean) => void
 }
 
 /** Subsequence fuzzy scoring: potrivire contiguă > cu goluri; mai devreme = mai bine. */
@@ -47,7 +49,7 @@ export default function CommandPalette(props: {
   sessions: Session[]
   openTabs: string[]
   onOpenSession: (sid: string) => void
-  onNewSession: (host: Host) => void
+  onNewSession: (host: Host, opts?: NewSessionOpts) => void
   onSelectHost: (id: number) => void
   onAddHost: () => void
   onFiles: (host: Host) => void
@@ -132,7 +134,9 @@ export default function CommandPalette(props: {
         color: hostColor(h),
         hint: reachState(h) === 'online' ? t('palette.hostOnline') : reachState(h) === 'ondemand' ? t('palette.hostOnDemand') : t('palette.hostOffline'),
         text: `${h.name} ${h.hostname ?? ''} ${h.ssh_username ?? ''} ${h.connection_type ?? 'agent'} ${h.folder ?? ''}`.toLowerCase(),
-        run: () => props.onNewSession(h),
+        // Enter pe host trece prin ACEEAŞI decizie ca butonul „New session” (App.connectHost): lansatorul
+        // dacă ai sesiuni de reluat pe host, altfel sesiune nouă; Shift+Enter = sesiune nouă direct
+        run: (direct) => props.onNewSession(h, { direct }),
       })
     }
     // acțiuni-verb: paleta e hub de comenzi, nu doar switcher (audit iulie 2026)
@@ -231,11 +235,11 @@ export default function CommandPalette(props: {
 
   if (!props.open) return null
 
-  const pick = (i: number) => {
+  const pick = (i: number, direct = false) => {
     const it = results[i]
     if (!it) return
     props.onClose()
-    it.run()
+    it.run(direct)
   }
 
   return (
@@ -272,7 +276,7 @@ export default function CommandPalette(props: {
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(results.length - 1, s + 1)) }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setSel((s) => Math.max(0, s - 1)) }
-            else if (e.key === 'Enter') { e.preventDefault(); pick(sel) }
+            else if (e.key === 'Enter') { e.preventDefault(); if (!e.repeat) pick(sel, e.shiftKey) }
             else if (e.key === 'Escape') { e.preventDefault(); props.onClose() }
           }}
         />
@@ -296,7 +300,7 @@ export default function CommandPalette(props: {
               onMouseMove={() => setSel(i)}
               // mousedown: focusul nu pleacă din câmp până la alegere
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => pick(i)}
+              onClick={(e) => pick(i, e.shiftKey)}
               // scroll-mt: la ↑ opţiunea derulată în vedere nu ajunge sub câmpul lipit sus
               className={`flex w-full scroll-mt-16 cursor-pointer items-center gap-3 px-4 py-2 text-left ${
                 i === sel ? 'bg-sky-500/15' : ''

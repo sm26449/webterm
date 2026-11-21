@@ -51,7 +51,7 @@ try {
   await page.waitForSelector('[data-testid="dashboard"]', { timeout: 10000 })
   await page.waitForSelector('.dot-live', { timeout: 30000 })
   await page.click('button[title="Host actions"]')
-  await page.click('button[title="New session"]')
+  await page.click('button[title="New session"]', { modifiers: ['Shift'] })
   await page.waitForSelector('.xterm-screen', { timeout: 15000 })
   await page.waitForTimeout(1500)
   const theSid = await page.evaluate(() => location.hash.replace('#/s/', ''))

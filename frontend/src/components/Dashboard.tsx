@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { sessionTitle } from '../lib/sessionTitle'
+import { newSessionOpts, type NewSessionOpts } from '../lib/sessionChooser'
 import { errText, isEphemeralHost, isSessionLive, api, AppLink, Host, Session, timeAgo } from '../lib/api'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { useI18n } from '../lib/i18n'
@@ -36,7 +37,7 @@ export default function Dashboard(props: {
   sessions: Session[]
   onOpenSession: (sid: string) => void
   onSelectHost: (id: number) => void
-  onNewSession: (host: Host) => void
+  onNewSession: (host: Host, opts?: NewSessionOpts) => void
   onAddHost: () => void
   onOpenPalette: () => void
   /** redeschide lista de hosturi ŞI anulează plierea (sidebarCollapsed) — altfel,
@@ -411,7 +412,7 @@ export default function Dashboard(props: {
                           {/* pe touch NU există hover: butonul „+" era invizibil,
                               deci nu puteai porni o sesiune de pe card */}
                           <button
-                            onClick={(e) => { e.stopPropagation(); props.onNewSession(h) }}
+                            onClick={(e) => { e.stopPropagation(); props.onNewSession(h, newSessionOpts(e)) }}
                             disabled={reach === 'offline'}
                             title={t('dashboard.newSession')}
                             aria-label={t('dashboard.newSessionOn', { name: h.name })}

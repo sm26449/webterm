@@ -36,7 +36,7 @@ try{
   // 3 sesiuni → 3 taburi
   for (let i=0;i<3;i++){
     await page.click('button[title="Host actions"]')
-    await page.click('button[title="New session"]')
+    await page.click('button[title="New session"]', { modifiers: ['Shift'] })
     await page.waitForSelector('.xterm-screen',{timeout:15000})
     await page.waitForTimeout(800)
   }

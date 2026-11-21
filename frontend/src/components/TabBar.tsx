@@ -17,6 +17,9 @@ import { beginDrag, endDrag } from '../lib/dragState'
 export default function TabBar(props: {
   tabs: Session[]
   activeSid: string | null
+  /** 3.7.1: tab-ul de lansare „New session" (activ cât există). NU e o sesiune: nu se persistă, nu
+      se poate trage, Alt+cifră îl sare (nu e în openTabs), închiderea lui nu dă toast-ul „tab închis". */
+  launcher?: { hostName: string; onSelect: () => void; onClose: () => void }
   activity: Set<string>
   hosts: Host[]
   sort: 'manual' | 'activity'
@@ -150,7 +153,7 @@ export default function TabBar(props: {
         title={t('tabbar.home')}
         aria-label={t('tabbar.home')}
         className={`wt-touch wt-tabbtn mb-1.5 flex shrink-0 items-center justify-center rounded-md px-2.5 py-1.5 ${
-          props.activeSid === null ? 'is-active' : ''
+          props.activeSid === null && !props.launcher ? 'is-active' : ''
         }`}
       >
         <HomeIcon />
@@ -272,6 +275,23 @@ export default function TabBar(props: {
             </div>
           )
         })}
+        {props.launcher && (
+          // chenar punctat, fundal transparent, „+" în loc de punctul de stare, titlu italic estompat:
+          // nu trebuie să semene cu un terminal care rulează (audit 2026-11-21 §6.3)
+          <div data-launcher-tab className="wt-tab mb-1.5 flex shrink-0 items-stretch rounded-md border border-dashed border-slate-500/60 bg-transparent">
+            <button type="button" aria-current="page" title={t('launcher.tabAria', { host: props.launcher.hostName })}
+              onClick={props.launcher.onSelect}
+              className="flex min-w-0 items-center gap-1.5 py-1 pl-2 pr-1 text-left text-sm italic leading-tight text-slate-400">
+              <PlusIcon size={13} />
+              <span className="max-w-[160px] truncate">{t('launcher.tabTitle', { host: props.launcher.hostName })}</span>
+            </button>
+            <button type="button" onClick={props.launcher.onClose}
+              title={t('launcher.closeTab')} aria-label={t('launcher.closeTab')}
+              className="wt-touch wt-tabbtn mr-1 mt-0.5 grid shrink-0 place-items-center self-start rounded-md p-1.5">
+              <CloseIcon size={13} />
+            </button>
+          </div>
+        )}
       </div>
       {/* transferuri: mutat în widgetul plutitor jos-dreapta (TransfersWidget) — chip-ul de aici
           înghesuia bara de taburi şi se suprapunea peste ele când erau multe. */}

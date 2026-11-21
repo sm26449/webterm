@@ -1,5 +1,6 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, PointerEvent as ReactPointerEvent } from 'react'
 import { lsGet } from '../lib/storage'
+import { newSessionOpts, type NewSessionOpts } from '../lib/sessionChooser'
 import { errText, isSessionLive, api, ApiError, getBootVersion, Host, SearchHit, Session, timeAgo, withAccessReauth, withSecondFactor, withStepup } from '../lib/api'
 import { fetchSelfRow } from './settings/users/shared'
 import { crownDialog, withCrownConfirm } from '../lib/crown'
@@ -72,7 +73,8 @@ export default function Sidebar(props: {
   onToggleCollapse: () => void
   onSelectHost: (id: number) => void
   onSelect: (sid: string, search?: string) => void
-  onNewSession: (host: Host) => void
+  /** `opts.direct` = Shift ţinut: fără tab-ul de lansare (lib/sessionChooser) */
+  onNewSession: (host: Host, opts?: NewSessionOpts) => void
   onFiles: (host: Host) => void
   onSerial: (host: Host) => void
   onDiagnostic: (host: Host) => void
@@ -698,7 +700,7 @@ export default function Sidebar(props: {
             <HostMenu
               online={host.online}
               canConnect={canConnect}
-              onNewSession={() => props.onNewSession(host)}
+              onNewSession={(o) => props.onNewSession(host, o)}
               require2fa={!!host.require_2fa}
               connectionType={host.connection_type}
               hostId={host.id}
@@ -1248,7 +1250,7 @@ function HostMenu(props: {
   connectionType?: string
   hostId: number
   canConnect: boolean
-  onNewSession: () => void
+  onNewSession: (opts?: NewSessionOpts) => void
   onFiles: () => void
   onSerial: () => void
   onAddJump: () => void
@@ -1309,7 +1311,8 @@ function HostMenu(props: {
             <button
               role="menuitem"
               disabled={!props.canConnect}
-              onClick={act(props.onNewSession)}
+              // Shift+clic = sesiune nouă direct, fără lansator; citit ÎNAINTE ca meniul să se închidă
+              onClick={(e) => { const o = newSessionOpts(e); act(() => props.onNewSession(o))() }}
               title={props.connectionType !== 'agent' ? t('sidebar.connect')
                      : props.online ? t('sidebar.newSession') : t('sidebar.hostOffline')}
               aria-label={props.online || props.connectionType !== 'agent'

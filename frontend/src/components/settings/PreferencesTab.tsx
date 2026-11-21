@@ -6,6 +6,7 @@ import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../
 import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
+import { askGlobalEnabled, hostOptOutKeys, resetHostOptOuts, setAskGlobal } from '../../lib/sessionChooser'
 import { field } from './ui'
 import HelpTip from '../HelpTip'
 import { Button, Field, SegmentedControl, SettingsSection, Switch } from '../ui'
@@ -33,6 +34,10 @@ export default function PreferencesTab() {
   const [dest, setDest] = useState<PasteDest>(pasteDest)
   const [days, setDays] = useState<string>(() => String(inboxDays()))
   const updPref = useUpdatesPref()
+  // 3.7.1: tab-ul de lansare „New session” (lib/sessionChooser) — global + „întreabă din nou pe toate”
+  const [askNew, setAskNew] = useState(askGlobalEnabled)
+  const [optOuts, setOptOuts] = useState(() => hostOptOutKeys().length)
+  const [askReset, setAskReset] = useState(false)
 
   useEffect(() => {
     const iv = setInterval(() => setClock(timeInZone(tz)), 1000)
@@ -104,6 +109,21 @@ export default function PreferencesTab() {
         {/* `role="status"`: resetarea e anunţată, nu doar colorată în verde */}
         <span role="status" className={tipsReset ? 'mt-2 block text-xs wt-good' : 'sr-only'}>
           {tipsReset ? t('tips.resetDone') : ''}
+        </span>
+      </SettingsSection>
+
+      {/* ── Sesiuni noi: întrebarea dinaintea unei sesiuni noi pe un host cu sesiuni deschise ── */}
+      <SettingsSection data-setting-id="askNewSession" title={t('settings.askNewSessionTitle')}>
+        <Switch checked={askNew} label={t('settings.askNewSession')} hint={t('settings.askNewSessionHint')}
+          onChange={(v) => { setAskNew(v); setAskGlobal(v) }} />
+        {optOuts > 0 && (
+          <Button type="button" variant="secondary" size="sm" className="mt-3"
+            onClick={() => { resetHostOptOuts(); setOptOuts(0); setAskReset(true) }}>
+            {t('settings.askResetHosts')}
+          </Button>
+        )}
+        <span role="status" className={askReset ? 'mt-2 block text-xs wt-good' : 'sr-only'}>
+          {askReset ? t('settings.askResetDone') : ''}
         </span>
       </SettingsSection>
 

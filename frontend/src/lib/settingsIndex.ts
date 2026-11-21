@@ -112,6 +112,8 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'walkthrough tour welcome onboarding tur bun venit' },
   { id: 'tips', cat: 'preferinte', titleKey: 'tips.resetTitle', hintKey: 'tips.resetDesc',
     keywords: 'tips hints reset sfaturi indicii' },
+  { id: 'askNewSession', cat: 'preferinte', titleKey: 'settings.askNewSessionTitle', hintKey: 'settings.askNewSession',
+    keywords: 'new session ask launcher reuse continue existing open sessions sesiune noua intreaba refoloseste continua deschise' },
   { id: 'terminal', cat: 'preferinte', titleKey: 'settings.terminal',
     keywords: 'terminal unicode emoji wide characters xterm caractere late' },
   { id: 'transfers', cat: 'preferinte', titleKey: 'transfers.settingsTitle', hintKey: 'transfers.pasteDestHint',

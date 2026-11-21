@@ -166,7 +166,8 @@ const hostMenu = (page, name) =>
   page.locator('.wt-sidebar .group', { hasText: name }).last().locator('button[title="Host actions"]')
 async function openSession(page) {
   await hostMenu(page, HOST).click()
-  await page.click('button[title="New session"]')
+  // Shift = sesiune nouă direct, fără tab-ul de lansare (3.7.1; el are pasul lui mai jos)
+  await page.click('button[title="New session"]', { modifiers: ['Shift'] })
   await page.waitForSelector('.xterm-screen', { timeout: 10000 })
   await page.waitForTimeout(1500)
 }
@@ -611,12 +612,28 @@ try {
       await page.route('**/api/hosts/*/sessions', (route) => route.request().method() === 'POST'
         ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'a11y: simulated failure' }) })
         : route.continue())
-      await page.locator('button:has-text("New session"):visible').first().click()
+      await page.locator('button:has-text("New session"):visible').first().click({ modifiers: ['Shift'] })
       await page.waitForSelector('[role=alert]', { timeout: 5000 })
       await page.screenshot({ path: `${OUT}/${theme}-13-toast.png` })
       await scan(page, `${theme} error toast`)
       await page.unrouteAll({ behavior: 'ignoreErrors' })
       await page.locator('[role=alert] button').first().click().catch(() => {})
+    }, page)
+
+    // ── tab-ul de lansare „New session" (3.7.1): o sesiune a mea neîn tab pe host → ecranul de alegere ──
+    await step('tab de lansare', async () => {
+      await hostTab(page, 'Overview')
+      const c = await api(page, `/api/hosts/${hostIds[HOST]}/sessions`, { method: 'POST', body: JSON.stringify({ title: 'a11y-launcher' }) })
+      if (!c.ok) throw new Error(`POST /sessions ${c.status}`)
+      await page.locator('text=a11y-launcher').first().waitFor({ state: 'visible', timeout: 15000 })
+      await page.waitForTimeout(5500)   // un ciclu de poll: lista din care decide App conţine sesiunea
+      await page.locator('button:has-text("New session"):visible').first().click()
+      await page.waitForSelector('[data-testid="launcher"]', { timeout: 8000 })
+      await page.waitForTimeout(400)
+      await page.screenshot({ path: `${OUT}/${theme}-14-launcher.png` })
+      await scan(page, `${theme} new-session launcher`)
+      await page.keyboard.press('Escape')
+      await api(page, `/api/sessions/${c.body.id}/kill`, { method: 'POST' })
     }, page)
 
     // ── pagina hostului OFFLINE (fără agent: gauge-uri goale, CTA-uri dezactivate) ──
@@ -1156,7 +1173,7 @@ try {
   // hostul ONLINE: o reîncercare a E2E (după un eşec la prima încercare) înrolează un al doilea
   // „ci-local", iar cel vechi rămâne offline în listă — meniul lui n-are „New session"
   await m.locator('.wt-sidebar .group', { hasText: HOST, hasNotText: /offline/i }).last().locator('button[title="Host actions"] >> visible=true').last().click()
-  await m.locator('.wt-sidebar button[title="New session"] >> visible=true').last().click()
+  await m.locator('.wt-sidebar button[title="New session"] >> visible=true').last().click({ modifiers: ['Shift'] })
   await m.waitForSelector('.xterm-screen')
   await m.waitForTimeout(1500)
   await m.keyboard.type('uptime\n')

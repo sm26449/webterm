@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from './api'
 import {
-  askGlobalEnabled, askHostEnabled, chooserNavTarget, hostOptOutKeys, lastActivity, otherClients,
-  resetHostOptOuts, reusableSessions, setAskGlobal, setAskHost, shouldAskBeforeNew,
+  askGlobalEnabled, askHostEnabled, cardFacts, chooserNavTarget, durationParts, hostOptOutKeys, IDLE_SECS,
+  idleCandidates, lastActivity, launcherDecision, launcherSessions, newSessionOpts, otherClients, resetHostOptOuts,
+  reusableSessions, setAskGlobal, setAskHost, shouldAskBeforeNew,
 } from './sessionChooser'
 
 // mediul de test e `node`: stub minim de localStorage (ca în coachtips.test.ts), cu key()/length
@@ -99,5 +100,67 @@ describe('otherClients / chooserNavTarget', () => {
     expect(chooserNavTarget(3, 1, 'End')).toBe(2)
     expect(chooserNavTarget(3, 1, 'Enter')).toBeNull()
     expect(chooserNavTarget(0, 0, 'ArrowDown')).toBeNull()
+  })
+})
+
+describe('tab-ul de lansare', () => {
+  const list = [
+    ses({ id: 'a', last_output: 300 }),
+    ses({ id: 'b', last_output: 900 }),
+    ses({ id: 'theirs', created_by_id: 8 }),
+    ses({ id: 'other-host', host_id: 2 }),
+  ]
+  const base = { hostId: 1, sessions: list, userId: 7, openTabIds: [] as string[], canOpen: true, online: true }
+  it('cardurile: fără ce e deja într-un tab aici, fără ale altora, cele active întâi', () => {
+    expect(launcherSessions(1, list, 7, []).map((s) => s.id)).toEqual(['b', 'a'])
+    expect(launcherSessions(1, list, 7, ['b']).map((s) => s.id)).toEqual(['a'])
+  })
+  it('lansatorul doar cu ≥1 sesiune a mea care nu e deja deschisă aici', () => {
+    expect(launcherDecision(base)).toBe('launcher')
+    expect(launcherDecision({ ...base, openTabIds: ['a', 'b'] })).toBe('direct')
+    expect(launcherDecision({ ...base, sessions: [ses({ id: 'x', created_by_id: 8 })] })).toBe('direct')
+    expect(launcherDecision({ ...base, sessions: [] })).toBe('direct')
+  })
+  it('Shift (direct), host offline, fără drept sau întrebarea oprită → direct', () => {
+    expect(launcherDecision({ ...base, direct: true })).toBe('direct')
+    expect(launcherDecision({ ...base, online: false })).toBe('direct')
+    expect(launcherDecision({ ...base, canOpen: false })).toBe('direct')
+    expect(launcherDecision({ ...base, askGlobal: false })).toBe('direct')
+    expect(launcherDecision({ ...base, askHost: false })).toBe('direct')
+    expect(launcherDecision({ ...base, userId: null })).toBe('direct')
+  })
+  it('durationParts: acum / minute / ore / zile', () => {
+    expect(durationParts(5)).toEqual({ unit: 'now', n: 0 })
+    expect(durationParts(-5)).toEqual({ unit: 'now', n: 0 })
+    expect(durationParts(300)).toEqual({ unit: 'min', n: 5 })
+    expect(durationParts(7200)).toEqual({ unit: 'h', n: 2 })
+    expect(durationParts(3 * 86400 + 5)).toEqual({ unit: 'd', n: 3 })
+  })
+  it('cardFacts: inactivitate, vechime, insigne', () => {
+    const f = cardFacts(ses({ created: 0, last_output: 1000, connected_clients: 2, shared: true, keep_open: true }), 1000 + IDLE_SECS, true)
+    expect(f).toMatchObject({ idleSecs: IDLE_SECS, ageSecs: 1000 + IDLE_SECS, idle: true, others: 1, shared: true, keepOpen: true, starting: false, idleNotice: false })
+    expect(cardFacts(ses({ state: 'creating', created: 100 }), 160).starting).toBe(true)
+    expect(cardFacts(ses({ created: 100 }), 160).idle).toBe(false)
+  })
+  it('idleCandidates: doar vii, inactive >1 zi, fără Keep open / share / ataşate în altă parte', () => {
+    const now = 10 * IDLE_SECS
+    const old = 0
+    const cands = [
+      ses({ id: 'idle', last_output: old }),
+      ses({ id: 'fresh', last_output: now - 60 }),
+      ses({ id: 'kept', last_output: old, keep_open: true }),
+      ses({ id: 'shared', last_output: old, shared: true }),
+      ses({ id: 'attached', last_output: old, connected_clients: 1 }),
+      ses({ id: 'starting', state: 'creating', created: old }),
+    ]
+    expect(idleCandidates(cands, now).map((s) => s.id)).toEqual(['idle'])
+  })
+})
+
+describe('newSessionOpts', () => {
+  it('Shift = direct, altfel lansatorul poate apărea', () => {
+    expect(newSessionOpts({ shiftKey: true })).toEqual({ direct: true })
+    expect(newSessionOpts({ shiftKey: false })).toEqual({ direct: false })
+    expect(newSessionOpts(undefined)).toEqual({ direct: false })
   })
 })
