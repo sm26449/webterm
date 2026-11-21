@@ -104,6 +104,14 @@ export default function SettingsModal(props: {
   // 3.7.1: rotiţa redeschide ultimul tab folosit (lib/settingsLast) — orice tab ajuns activ, din rail,
   // din căutare sau dintr-un link adânc, e „ultimul folosit"
   useEffect(() => { rememberSettingsCat(cat) }, [cat])
+  // Codex 3.7.1 (#10): o categorie cerută din afară (revenirea din step-up SSO, ultima folosită, un link)
+  // poate fi una pe care contul n-o vede. După ce permisiunile s-au încărcat, ajungem pe una vizibilă —
+  // altfel panoul rămânea gol sau făcea cereri refuzate. Serverul decide oricum; asta e doar navigarea.
+  const visibleIds = groups.flatMap((g) => g.cats.map((c) => c.id))
+  const visibleKey = visibleIds.join(',')
+  useEffect(() => {
+    if (perms && !visibleIds.includes(cat)) setCat(visibleIds.includes('cont') ? 'cont' : visibleIds[0] ?? 'cont')
+  }, [perms, cat, visibleKey]) // eslint-disable-line react-hooks/exhaustive-deps
   // PWA (3.7.1-rc3, raportat): un element prea lat din Setări (sau scrollIntoView pe o secţiune) muta
   // pagina din spate pe orizontală, iar deplasarea rămânea şi după închidere. Pagina nu are niciodată
   // scroll orizontal legitim: o readucem la 0 la deschidere şi la închidere.
