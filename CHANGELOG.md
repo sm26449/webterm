@@ -9,6 +9,36 @@ back.
 
 ## [Unreleased]
 
+### Changed
+- **Settings are organised by who they are for.** Three groups instead of ten mixed tabs: *Personal*
+  (Account & security, Appearance, Terminal & workspace, My notifications), *Administration* (People &
+  roles, Access & automation, Security policy, Network & certificates, Alert delivery, Backup, Updates)
+  and *Operations* (System health, Audit log). Your password, passkeys, 2FA, devices and access are now
+  in one place; the old *Infrastructure & tokens* drawer is split by topic. Nothing changes in who sees
+  what, and links saved from older versions still open the right place.
+- **Settings work on a phone.** They open full screen with a list of categories, then the category
+  with a Back button; Connected agents shows cards instead of a wide table; controls are at least 44 px
+  on touch screens.
+- **Backup reads as a plan:** what is scheduled, where it goes and when it last worked come first;
+  manual export and restore follow, and restore sits in a danger zone with its own password field.
+  Disabled buttons say why.
+- **Notifications are split** into the channels the instance uses (email, webhook, each with its own
+  status, save and test), the alert thresholds, and the alerts *you* receive.
+- The settings gear opens the last category you used instead of whatever needed attention; alarms
+  keep their badge.
+- Forms have visible labels instead of placeholders, and a selected option no longer looks like the
+  main button.
+
+### Fixed
+- **Search in Settings** finds mTLS, client certificates, connected agents and refused connections, and
+  "email alerts" finds the per-event choices as well as the mail server; partial words match.
+- **A false critical alarm** "Agent mTLS is not working" on installs without the shared edge directory
+  (a plain `docker run`): mTLS is reported as unavailable there, not broken.
+- Lists of folders, tags and names sort by language (case and accents ignored, numbers in order).
+- Long commands in System health, certificates and updates can be reached with the keyboard on phones.
+- Every promise in the web app either reports its error or says why it can be ignored; the lint rule
+  now refuses new ones.
+
 ## [3.7.0] — 2026-11-20 · agent (61)
 
 ### Security
