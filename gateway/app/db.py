@@ -691,6 +691,9 @@ MIGRATIONS = [
     "ALTER TABLE sessions ADD COLUMN idle_notified_at REAL",
     "ALTER TABLE sessions ADD COLUMN idle_close_after REAL",
     "ALTER TABLE sessions ADD COLUMN keep_open INTEGER DEFAULT 0",
+    # 3.7.1 (auditul Codex): generaţia politicii sub care s-a fixat termenul — un termen dintr-o
+    # generaţie mai veche (închidere oprită/pornită, notificare oprită între timp) nu închide nimic
+    "ALTER TABLE sessions ADD COLUMN idle_close_gen INTEGER",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

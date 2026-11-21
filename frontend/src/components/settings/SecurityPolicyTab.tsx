@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { errText, api, CommandGuard, DeployKeyPolicy, IdleSessionsPolicy, WatermarkConfig } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, IdleSessionsPolicy, WatermarkConfig, withSecondFactor } from '../../lib/api'
 import { parseDays } from '../../lib/idleSessions'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
@@ -9,6 +9,7 @@ import HelpTip from '../HelpTip'
 import { Button, Field, IconButton, SettingsSection, Switch } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
+import { useAccessReauth, useSelfRow } from './users/shared'
 
 // Politici de securitate (3.7.1, auditul UX Setări C2/M2): regulile care se aplică TUTUROR — guardrail-ul
 // de comenzi, politica cheilor de deploy şi watermark-ul. Primele două erau în „Infrastructure &
@@ -114,13 +115,18 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
   const [idleMsg, setIdleMsg] = useState('')
   const [idleErr, setIdleErr] = useState(false)
   const [idleState, setIdleState] = useState<LoadState>({ status: 'loading' })
+  // auditul Codex 3.7.1: PORNIREA închiderii automate cere re-autentificare (parolă / passkey / SSO),
+  // ca orice schimbare de acces; `idleWasOn` = starea salvată pe server
+  const [idleWasOn, setIdleWasOn] = useState(false)
+  const idleMe = useSelfRow()
+  const { reauth: idleReauth } = useAccessReauth(idleMe, { returnTo: { cat: 'politici', section: 'idleSessions' } })
   const nb = idle.bounds?.notify_days ?? [1, 90]
   const gb = idle.bounds?.grace_days ?? [1, 30]
   const idleSnapshot = (p: IdleSessionsPolicy, d: { notify: string; grace: string }) =>
     JSON.stringify([p.notify, p.autoclose, d.notify.trim(), d.grace.trim()])
   const applyIdle = (p: IdleSessionsPolicy) => {
     const d = { notify: String(p.notify_days), grace: String(p.grace_days) }
-    setIdle(p); setIdleDays(d); setIdleBase(idleSnapshot(p, d))
+    setIdle(p); setIdleDays(d); setIdleBase(idleSnapshot(p, d)); setIdleWasOn(p.autoclose)
   }
   const loadIdle = () => {
     setIdleState({ status: 'loading' })
@@ -138,9 +144,15 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
       return
     }
     try {
-      const saved = await api<IdleSessionsPolicy>('/api/settings/idle-sessions', {
-        method: 'POST', body: JSON.stringify({ notify: idle.notify, notify_days: nd, autoclose: idle.autoclose, grace_days: gd }),
+      const body = { notify: idle.notify, notify_days: nd, autoclose: idle.autoclose, grace_days: gd }
+      const send = (cred: object) => api<IdleSessionsPolicy>('/api/settings/idle-sessions', {
+        method: 'POST', body: JSON.stringify({ ...body, ...cred }),
       })
+      const saved = idle.autoclose && !idleWasOn
+        ? await idleReauth(t('settings.idle.reauth'),
+          (cred) => withSecondFactor(t, (extra) => send({ ...cred, ...extra })))
+        : await send({})
+      if (saved === null) return
       applyIdle(saved)
       setIdleErr(false); setIdleMsg(t('settings.saved'))
       setTimeout(() => setIdleMsg(''), 1500)

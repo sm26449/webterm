@@ -2192,6 +2192,12 @@ class IdleSessionsIn(BaseModel):
     notify_days: int = 7
     autoclose: bool = False
     grace_days: int = 2
+    # re-auth la PORNIREA închiderii automate (auditul Codex 3.7.1): e o acţiune distructivă pe
+    # sesiunile tuturor, deci aceeaşi poartă ca o schimbare de acces
+    current_password: str = ""
+    totp_code: str = ""
+    email_code: str = ""
+    stepup_grant: str = ""
 
 
 class WatermarkIn(BaseModel):
@@ -2296,7 +2302,13 @@ async def save_idle_sessions(body: IdleSessionsIn, request: Request,
             raise ApiError(400, "settings.idleDaysRange", "%s must be between %d and %d" % (name, lo, hi),
                            vars={"field": name, "min": lo, "max": hi})
     old = await idlesess.load_policy(fresh=True)
-    pol = await idlesess.save_policy(body.model_dump())
+    if body.autoclose and not old["autoclose"]:
+        # Auditul Codex 3.7.1 (constatarea 7): pornirea închiderii automate cere re-autentificare
+        # proaspătă — un cookie furat nu trebuie să poată programa închiderea sesiunilor tuturor
+        await stepup.reauth_for_access_change(user, request, body,
+                                              "turn on automatic closing of idle sessions")
+    pol = await idlesess.save_policy({k: getattr(body, k) for k in ("notify", "notify_days",
+                                                                     "autoclose", "grace_days")})
     audit.detail(request, "idle sessions: notify %s after %d day(s), auto-close %s after %d more day(s)%s" % (
         "on" if pol["notify"] else "off", pol["notify_days"], "ON" if pol["autoclose"] else "off",
         pol["grace_days"], " (auto-close was off)" if pol["autoclose"] and not old["autoclose"] else ""))
@@ -4759,11 +4771,14 @@ def _last_output(row) -> float | None:
         return None
 
 
-def _session_json(row, show_share: bool = False, idle_pol: Optional[dict] = None) -> dict:
+def _session_json(row, show_share=False, idle_pol: Optional[dict] = None, token_view: bool = False) -> dict:
     # `shared` = există un link de share ACTIV. Doar pentru utilizatori de browser (nu tokenuri de
-    # automatizare), la fel ca GET /api/sessions/{sid}/share (aceeaşi permisiune session.watch);
-    # tokenul/URL-ul nu ies niciodată — doar booleanul.
-    shared = bool(show_share and row["share_token"]
+    # automatizare) şi doar pe hosturile unde contul are session.watch, la fel ca GET
+    # /api/sessions/{sid}/share (auditul Codex 3.7.1: lista se vede şi cu recording.view singur).
+    # `show_share`: False = niciunul, True = toate, set = hosturile cu session.watch.
+    # Tokenul/URL-ul nu ies niciodată — doar booleanul.
+    share_ok = show_share is True or (isinstance(show_share, set) and row["host_id"] in show_share)
+    shared = bool(share_ok and row["share_token"]
                   and (row["share_expires"] or 0) > time.time())
     return {
         "id": row["id"], "host_id": row["host_id"], "title": row["title"],
@@ -4780,10 +4795,12 @@ def _session_json(row, show_share: bool = False, idle_pol: Optional[dict] = None
         # pe tab-urile din fundal; tmux rulează cu status off, deci idle = 0 octeți
         "out_offset": core.hubs[row["id"]].agent_offset
             if row["id"] in core.hubs else (row["agent_offset"] or 0),
-        "last_output": _last_output(row),
+        # `token_view`: un token de automatizare nu primeşte metadatele noi din 3.7.1 (momentul
+        # ultimului output, Keep open, notificarea) — cheile rămân, cu valori neutre
+        "last_output": None if token_view else _last_output(row),
         "shared": shared,
         # igiena sesiunilor (3.7.1): „Păstrează deschisă" + notificarea de inactivitate în curs
-        "keep_open": bool(row["keep_open"]) if "keep_open" in row.keys() else False,
+        "keep_open": bool(row["keep_open"]) if "keep_open" in row.keys() and not token_view else False,
         "idle_notice": idlesess.notice_json(row, idle_pol) if idle_pol else None,
     }
 
@@ -4825,9 +4842,15 @@ async def list_sessions(request: Request,
         allowed = set() if is_token else {
             hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
-    show_share = not (isinstance(user, dict) and user.get("is_token"))
-    idle_pol = await idlesess.load_policy()
-    return [_session_json(r, show_share, idle_pol) for r in rows]
+    is_token = isinstance(user, dict) and user.get("is_token")
+    show_share: object = False
+    if not is_token:
+        watch = await authz.visible_hosts(authz.grants_of(request), "session.watch")
+        show_share = True if watch is None else set(watch)
+    # tokenurile de automatizare nu primesc metadatele de inactivitate (când se închide o sesiune,
+    # dacă e exceptată): nu le cere nicio automatizare (auditul Codex 3.7.1, constatarea 9)
+    idle_pol = None if is_token else await idlesess.load_policy()
+    return [_session_json(r, show_share, idle_pol, token_view=bool(is_token)) for r in rows]
 
 
 @router.get("/api/hosts/{host_id}/sessions")
@@ -6196,6 +6219,10 @@ async def _send_osc133(client, hub, span: Optional[dict]) -> None:
 
 # ── [ws] /ws/shared/{token} — share-link guest websocket ──────────────────────────────────────────
 
+# 4410: sesiunea e închisă chiar acum pentru inactivitate (idlesess); o reîncărcare o arată închisă
+IDLE_CLOSING_REASON = "session is being closed for inactivity; reload"
+
+
 @router.websocket("/ws/shared/{token}")
 async def shared_ws(ws: WebSocket, token: str):
     """Vizitator prin link de share. `share_writable` → poate și TASTA (opt-in la
@@ -6287,6 +6314,12 @@ async def shared_ws(ws: WebSocket, token: str):
         # live unui invitat încă nemarcat blocat (review lot 1, F1).
         if start_locked:
             client.lock()
+        # INV-13 (docs/design/INVARIANTS.md): un kill de inactivitate e în zbor — refuzăm SINCRON cu
+        # adăugarea (fără await între verificare şi `clients.add`), altfel invitatul s-ar ataşa la o
+        # sesiune care se închide sub el (auditul Codex 3.7.1, constatarea 3)
+        if hub.idle_closing:
+            await ws.close(code=4410, reason=IDLE_CLOSING_REASON)
+            return
         hub.clients.add(client)
         hub.note_presence()       # igiena sesiunilor (3.7.1): un client ataşat = sesiune folosită
         # re-verificat SINCRON cu adăugarea: operatorul poate pleca în timpul `send_bytes` de mai
@@ -6541,6 +6574,10 @@ async def browser_ws(ws: WebSocket, sid: str):
         # (`has_operator`) — un invitat ataşat în fereastra asta trecea de poarta lui (review lot 1, F2).
         if start_locked:
             client.lock()
+        # INV-13 (docs/design/INVARIANTS.md): kill de inactivitate în zbor → refuz, sincron cu adăugarea
+        if hub.idle_closing:
+            await ws.close(code=4410, reason=IDLE_CLOSING_REASON)
+            return
         hub.clients.add(client)
         hub.note_presence()       # igiena sesiunilor (3.7.1)
         await _send_osc133(client, hub, osc_span if replay_sent else None)

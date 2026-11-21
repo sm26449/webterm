@@ -52,7 +52,11 @@ KINDS: dict = {
     "replay_opened":    {"group": "account",  "scope": "account", "security": False},
     # 3.7.1: igiena sesiunilor inactive (idlesess.py). Implicit DOAR în aplicaţie: emailul e cutia
     # comună a instanţei, iar o sesiune uitată nu e un incident (`email: False` = implicitul de email)
-    "session_idle":        {"group": "account", "scope": "account", "security": False, "email": False},
+    # Auditul Codex 3.7.1 (INV-13): notificarea care PROGRAMEAZĂ o închidere (`session_idle_close`) se
+    # păstrează MEREU în aplicaţie, ca evenimentele de securitate — preferinţa poate opri emailul, nu şi
+    # dovada că omul a fost anunţat. Notificarea simplă (fără închidere) rămâne la preferinţa lui.
+    "session_idle":        {"group": "account", "scope": "account", "security": False, "email": False,
+                            "inapp_required_keys": ("session_idle_close",)},
     "session_idle_closed": {"group": "account", "scope": "account", "security": False, "email": False},
     # securitatea instanţei
     "admin_change":     {"group": "security", "scope": "fleet", "security": True},
@@ -258,6 +262,26 @@ async def record(kind: str, severity: str, title: str, details: str = "",
     (emailul/webhook-ul îl folosesc, iar rândurile vechi fără cheie se afişează aşa)."""
     if not db.connected():
         return True
+    _, want_email = await _record(kind, severity, title, details, host_id, user_id, user_email, key, params)
+    return want_email
+
+
+async def record_required(kind: str, severity: str, title: str, details: str = "",
+                          host_id=None, user_id=None, key=None, params=None, ts=None) -> tuple:
+    """Ca `record`, dar AŞTEPTAT şi strict (3.7.1, idlesess): întoarce (conturile din `user_id` pentru
+    care rândul a fost scris efectiv, vrea_email). Fără DB sau la o eroare de scriere ridică excepţia —
+    apelantul nu programează nimic pe o notificare pe care n-o poate dovedi. `ts` = momentul rândului
+    (dovada se caută după el)."""
+    if not db.connected():
+        raise RuntimeError("database not connected")
+    asked = {int(u) for u in (user_id if isinstance(user_id, (list, tuple)) else [user_id]) if u}
+    uids, want_email = await _record(kind, severity, title, details, host_id, user_id, None, key, params, ts)
+    return [u for u in uids if u in asked], want_email
+
+
+async def _record(kind, severity, title, details, host_id, user_id, user_email, key, params,
+                  ts=None) -> tuple:
+    """(conturile pentru care s-a scris un rând, vrea_email)."""
     meta = kind_meta(kind)
     if severity not in SEVERITIES:
         severity = "info"
@@ -266,24 +290,27 @@ async def record(kind: str, severity: str, title: str, details: str = "",
         # instanţă fără cont încă: nimic de înregistrat, emailul pleacă (ca înainte). Cu conturi
         # dar fără niciun destinatar (n-ar trebui: ultimul Owner e protejat) — tot pleacă: cutia
         # de alerte e a instanţei, iar o alertă pierdută e mai rea decât una în plus.
-        return True
+        return [], True
     prefs = await _prefs_for(uids, kind)
     dflt = _default(kind)
     want_email = any(prefs.get(u, dflt)[0] for u in uids)
-    now = time.time()
+    now = time.time() if ts is None else float(ts)
     t, d = scrub(title, 200), scrub(details)
     hid = int(host_id) if host_id else None
     mk = key if key and _KEY_RE.match(str(key)) else None
     mp = message_params(params) if mk else ""
+    always = meta["security"] or (mk is not None and mk in meta.get("inapp_required_keys", ()))
+    written = []
     for u in uids:
-        if not (meta["security"] or prefs.get(u, dflt)[1]):
+        if not (always or prefs.get(u, dflt)[1]):
             continue
         await db.execute(
             "INSERT INTO alerts(user_id, ts, kind, severity, title, details, host_id, read,"
             " msg_key, msg_params) VALUES(?,?,?,?,?,?,?,0,?,?)", u, now, kind, severity, t, d, hid,
             mk, mp or None)
+        written.append(u)
         await _prune(u, now)
-    return want_email
+    return written, want_email
 
 
 # ── citire / stare (folosite de rutele din api.py; TOATE filtrate pe user_id) ──────────────

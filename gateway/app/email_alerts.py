@@ -195,7 +195,6 @@ def _fire(subject: str, body: str, kind: str = "system", severity: str = "info",
     aplicaţie (tradus în limba UI-ului, cheile `alertmsg.<key>.title|details`). Emailul şi
     webhook-ul rămân pe textul englezesc `subject`/`body`."""
     async def _run():
-        cfg = None
         try:
             if not await alert_history.record(kind, severity, subject, body, host_id=host_id,
                                               user_id=user_id, user_email=user_email,
@@ -203,28 +202,34 @@ def _fire(subject: str, body: str, kind: str = "system", severity: str = "info",
                 return                      # toate conturile vizate au oprit emailul pentru tipul ăsta
         except Exception as e:              # noqa: BLE001 — istoricul nu rupe alerta
             log.warning("in-app alert not recorded (%s): %s", kind, e)
-        try:
-            cfg = await load_config()
-            if _configured(cfg):
-                await asyncio.to_thread(_send_blocking, cfg, subject, body)
-                await _record(K_EMAIL_LAST_SENT, subject)
-        except Exception as e:
-            log.warning("email alert failed (%s): %s", subject, e)
-            await _record(K_EMAIL_LAST_FAILED, subject, str(e))
-        # webhook-ul e independent de SMTP: cine are doar chat nu trebuie să ţină un SMTP
-        try:
-            url = (cfg or {}).get("webhook") or ""
-            if url:
-                await asyncio.to_thread(_post_webhook, url, subject, body)
-                await _record(K_WEBHOOK_LAST_SENT, subject)
-        except Exception as e:
-            log.warning("webhook alert failed (%s): %s", subject, e)
-            await _record(K_WEBHOOK_LAST_FAILED, subject, str(e))
+        await _send_external(subject, body)
 
     try:
         asyncio.get_running_loop().create_task(_run())
     except RuntimeError:
         pass  # fără event loop (ex. în teste sincrone) — ignoră
+
+
+async def _send_external(subject: str, body: str) -> None:
+    """Canalele externe (SMTP, apoi webhook), best-effort: orice eroare se înregistrează în stare."""
+    cfg = None
+    try:
+        cfg = await load_config()
+        if _configured(cfg):
+            await asyncio.to_thread(_send_blocking, cfg, subject, body)
+            await _record(K_EMAIL_LAST_SENT, subject)
+    except Exception as e:
+        log.warning("email alert failed (%s): %s", subject, e)
+        await _record(K_EMAIL_LAST_FAILED, subject, str(e))
+    # webhook-ul e independent de SMTP: cine are doar chat nu trebuie să ţină un SMTP
+    try:
+        url = (cfg or {}).get("webhook") or ""
+        if url:
+            await asyncio.to_thread(_post_webhook, url, subject, body)
+            await _record(K_WEBHOOK_LAST_SENT, subject)
+    except Exception as e:
+        log.warning("webhook alert failed (%s): %s", subject, e)
+        await _record(K_WEBHOOK_LAST_FAILED, subject, str(e))
 
 
 async def send_test() -> None:
@@ -453,24 +458,36 @@ def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: 
                   "masking": bool(redact), "ip": ip})
 
 
-def notify_session_idle(user_id, title: str, host_name: str, host_id, sid: str, days: int,
-                        grace_days: int) -> None:
+async def notify_session_idle(user_ids, title: str, host_name: str, host_id, sid: str, days: int,
+                              grace_days: int, ts=None) -> list:
     """Igiena sesiunilor (3.7.1, idlesess.py): o sesiune n-a mai fost folosită `days` zile. Doar
-    proprietarului (sau, fără proprietar, celor cu session.manage — câte un apel per cont). `grace_days`
-    > 0 = închiderea automată e pornită şi o va închide după atâtea zile dacă rămâne nefolosită.
-    `sid` merge în parametri ca UI-ul să ofere „Păstrează deschisă" / „Închide acum"."""
+    proprietarului (sau, fără proprietar, celor cu session.manage — o singură alertă pentru toţi).
+    `grace_days` > 0 = închiderea automată e pornită şi o va închide după atâtea zile dacă rămâne
+    nefolosită. `sid` merge în parametri ca UI-ul să ofere „Păstrează deschisă" / „Închide acum".
+
+    Auditul Codex 3.7.1 (INV-13): AŞTEPTATĂ, nu „fire-and-forget". Întoarce conturile pentru care
+    notificarea a fost scrisă în aplicaţie (`ts` = momentul rândului, căutat ca dovadă la închidere);
+    o eroare de scriere ridică excepţia, iar apelantul nu programează nicio închidere. Emailul şi
+    webhook-ul rămân best-effort, după preferinţe, pe un task separat."""
     closing = grace_days > 0
-    _fire("A session has not been used for %d days" % days,
-          f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
-          f"Nobody has typed in it, it has printed nothing and no browser has been attached for "
-          f"{days} days. "
-          + (f"It will be closed automatically in {grace_days} day(s) unless it is used, or kept "
-             f"open from the session menu (Keep open)." if closing else
-             "Close it if you no longer need it, or keep it open from the session menu (Keep open)."),
-          kind="session_idle", severity="warning" if closing else "info", host_id=host_id,
-          user_id=user_id, key="session_idle_close" if closing else "session_idle",
-          params={"session": title or "", "host": host_name, "days": int(days),
-                  "grace": int(grace_days), "sid": sid})
+    subject = "A session has not been used for %d days" % days
+    body = (f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
+            f"Nobody has typed in it, it has printed nothing and no browser has been attached for "
+            f"{days} days. "
+            + (f"It will be closed automatically in {grace_days} day(s) unless it is used, or kept "
+               f"open from the session menu (Keep open)." if closing else
+               "Close it if you no longer need it, or keep it open from the session menu (Keep open)."))
+    uids, want_email = await alert_history.record_required(
+        "session_idle", "warning" if closing else "info", subject, body, host_id=host_id,
+        user_id=list(user_ids), key="session_idle_close" if closing else "session_idle",
+        params={"session": title or "", "host": host_name, "days": int(days),
+                "grace": int(grace_days), "sid": sid}, ts=ts)
+    if uids and want_email:
+        try:
+            asyncio.get_running_loop().create_task(_send_external(subject, body))
+        except RuntimeError:
+            pass
+    return uids
 
 
 def notify_session_idle_closed(user_id, title: str, host_name: str, host_id, sid: str,

@@ -1180,6 +1180,18 @@ class SessionHub:
         self.idle_pending: bool = bool(row["idle_notified_at"]) if "idle_notified_at" in keys else False
         self._persisted_active: float = (row["last_active"] or 0.0) if "last_active" in keys else 0.0
         self.exit_reason = "exited"
+        # Auditul Codex 3.7.1 (INV-13): `idle_closing` = un kill de inactivitate e în zbor; setat SINCRON
+        # înainte de trimitere, iar browser_ws/shared_ws refuză ataşarea cât e setat (altfel un client
+        # ataşat cât aştepta kill-ul îşi vedea sesiunea închisă sub el). `idle_notice_seen` =
+        # (idle_notified_at, momentul MONOTON în care ACEST proces a văzut notificarea): grația trebuie
+        # să fi trecut şi pe ceasul monoton, deci un salt al ceasului de perete sau un restart nu o
+        # scurtează (după restart reîncepe). `attached_mono` = când s-a ataşat hub-ul la sursa curentă;
+        # `_replay_expected` = sursa (agentul) trimite `replay_end`, iar până atunci output-ul din
+        # întrerupere poate fi încă pe drum.
+        self.idle_closing = False
+        self.idle_notice_seen: Optional[tuple] = None
+        self.attached_mono: Optional[float] = None
+        self._replay_expected = False
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
@@ -1534,6 +1546,8 @@ class SessionHub:
             self.agent_epoch = source.epoch
             self.agent_offset = replay_start
             self.attached = True
+            self.attached_mono = time.monotonic()
+            self._replay_expected = isinstance(source, AgentConnection)
             # Drenăm replay-ul bufferat ÎNAINTE de await-ul de resize (o RTT la agent):
             # `_attach_buffer` e deja None, deci output live sosit în fereastra acelui await
             # ar merge direct în _process_output — scris în transcript ÎNAINTEA acestor chunk-uri
@@ -1559,6 +1573,11 @@ class SessionHub:
 
     def on_replay_end(self) -> None:
         self._replay_end.set()
+
+    def replay_settled(self) -> bool:
+        """Replay-ul ataşării curente s-a terminat (agentul a trimis `replay_end`)? Sursele fără ring
+        (SSH, telnet) nu trimit replay, deci pentru ele nu e nimic de aşteptat."""
+        return not getattr(self, "_replay_expected", False) or self._replay_end.is_set()
 
     def on_detached(self) -> None:
         self.attached = False
@@ -1720,9 +1739,11 @@ class SessionHub:
         at = self.activity_at()
         if at <= self._persisted_active:
             return
-        self._persisted_active = at
         await db.execute("UPDATE sessions SET last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=?",
                          at, self.sid)
+        # watermark-ul avansează DOAR după scrierea reuşită (auditul Codex 3.7.1): altfel un eşec de DB
+        # suprima reîncercarea până la următoarea activitate
+        self._persisted_active = max(self._persisted_active, at)
 
     def teardown(self) -> None:
         self.closed = True
@@ -2499,6 +2520,12 @@ class AgentConnection(SessionSource):
 
     async def kill(self, sid) -> None:
         await self.request("kill", sid=sid)
+
+    async def kill_checked(self, sid) -> dict:
+        """Ca `kill`, dar întoarce răspunsul agentului (`ok` / `code`, ex. `no_session`): închiderea
+        automată (idlesess) nu numără un refuz drept succes."""
+        r = await self.request("kill", sid=sid)
+        return r if isinstance(r, dict) else {}
 
     async def wake(self, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> dict:
         """Cere ACESTUI agent (vecin în LAN cu ţinta) să trimită un magic packet WoL."""

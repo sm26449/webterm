@@ -22,6 +22,7 @@ import hmac
 import json
 import logging
 import secrets
+import stat
 import urllib.parse
 
 import asyncio
@@ -100,12 +101,25 @@ def intent_off_reason() -> str:
     if not agent_host():
         return "host"
     d = edgelists._dir()
+    if not d:
+        return "no-dir"                          # dezactivat explicit (WEBTERM_AGENT_LISTS_DIR=off): rollback
     # Directorul lipsă (nici volum `edge-lists`, nici folder: un `docker run` simplu, un compose vechi)
     # înseamnă că Traefik nu are de unde citi ruta mTLS, deci mTLS nu poate exista aici: e o stare a
     # instalării, nu o defecţiune (3.7.1; înainte: alarmă CRITICĂ „write-error FileNotFoundError").
-    # Un director care EXISTĂ dar nu se poate scrie rămâne `write-error` (clichet păstrat, alarmă critică).
-    if not d or not os.path.isdir(d):
+    # INV-12 (docs/design/INVARIANTS.md): DOAR „nu există" ridică clichetul. Auditul Codex 3.7.1:
+    # `os.path.isdir` întoarce False şi la EACCES pe un părinte, la un fişier în locul directorului, la
+    # ENOTDIR — un mount stricat devenea „no-dir" şi lăsa un host `mtls_required` să intre cu tokenul
+    # singur. Orice altă eroare = defecţiune: `write-error`, clichet păstrat, alarmă critică.
+    try:
+        st = os.stat(d)
+    except FileNotFoundError:
         return "no-dir"
+    except (OSError, ValueError) as e:
+        status["error"] = type(e).__name__
+        return "write-error"
+    if not stat.S_ISDIR(st.st_mode):
+        status["error"] = "NotADirectoryError"
+        return "write-error"
     return ""
 
 
@@ -168,7 +182,8 @@ def write(force: bool = False) -> bool:
             status["error"] = type(e).__name__
         return False
     _last_written = text
-    status["error"] = ""
+    if status.get("reason") != "write-error":   # directorul edge inaccesibil: eroarea lui rămâne vizibilă
+        status["error"] = ""
     return True
 
 
@@ -249,9 +264,11 @@ async def _provision_locked(conn) -> None:
 async def _refresh(force: bool = False) -> None:
     """O trecere: întâi intenţia (oprit / CDN / fără nume) — fără CA, ca rollback-ul să meargă oricând;
     apoi secretul (independent de CA) şi CA-ul, apoi fişierul pentru Traefik."""
+    status["error"] = ""
     reason = intent_off_reason()
     if reason:
-        status.update(enabled=False, reason=reason, error="")
+        # `write-error` aici = directorul edge e inaccesibil (nu lipsă): eroarea rămâne pentru System health
+        status.update(enabled=False, reason=reason, error=status["error"] if reason == "write-error" else "")
         if reason != "no-dir":
             try:
                 write(force=force)               # un document gol: Traefik scoate routerul mTLS

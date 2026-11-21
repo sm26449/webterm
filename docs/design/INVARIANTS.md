@@ -252,14 +252,17 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - Only re-enrolling the host clears the mark, and only when the new install claims the link
   (`api.install_script`), not when the link is generated.
 - The requirement is lifted only when mTLS is off on purpose or cannot exist here
-  (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name, no edge directory). That
+  (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name, an
+  edge directory that is switched off (`WEBTERM_AGENT_LISTS_DIR=off`) or does not exist). That
   is the rollback, and it must work even when the CA cannot be loaded. When mTLS is broken (CA error,
-  file not writable), the requirement stays and System health raises a critical alarm.
+  file not writable, an edge directory that exists but cannot be checked: permission denied, a file
+  instead of a directory, a path through a file), the requirement stays and System health raises a
+  critical alarm. Only "does not exist" counts as missing; any other error is a failure.
 - A client certificate counts only when the request came through Traefik's mTLS router, which proves
   it with the installation's secret header. A certificate is public information; the header alone
   proves nothing.
 
-**Enforced in**: `api.py` `[ws]` `agent_ws`; `edgemtls.py` `router_secret_ok`; `agentca.py` `verify_client_cert`.
+**Enforced in**: `api.py` `[ws]` `agent_ws`; `edgemtls.py` `router_secret_ok`, `intent_off_reason`; `agentca.py` `verify_client_cert`.
 **Tests**: `agentmtls`, `agentca`.
 
 <a id="inv-13"></a>
@@ -276,8 +279,22 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - A session marked **Keep open** is never notified and never closed.
 - When anything is unknown it does nothing: no hub watching the session's output, the host offline,
   an unreadable transcript, no one to notify, an error. A missing answer is "don't close".
-- Closing goes through the same path as the Stop button (`core.kill_session`), so the recording is
+- A notice counts only once it is **recorded** in the app for an eligible recipient (awaited, not
+  fire-and-forget); the close deadline is set only after that, and at close time the recorded
+  notice must still exist for a current recipient. A notice that schedules a close is always kept
+  in the app, whatever the account's alert preferences (email stays optional).
+- Policy changes win at once: turning automatic closing or notices off takes effect in memory
+  before it is saved, and every switch bumps a policy generation; a deadline set under an older
+  generation never closes anything. Turning automatic closing on needs a fresh re-authentication.
+- The grace period must also have passed on the gateway process's monotonic clock since it saw the
+  notice: a wall-clock jump, a restart or a restore never shortens it (after a restart it starts
+  again). The hub must have finished the replay of its current attach and been attached for at
+  least 10 minutes, so output produced while the agent was away has arrived.
+- While the kill is in flight, new attaches (owner or share guest) are refused (close code 4410).
+  The close counts as done only when the session's exit arrives; an agent error or no exit within
+  30 s is audited as "not confirmed", sends no "closed" alert and is not retried for an hour.
+- Closing goes through the source's kill, like the Stop button, so the recording is
   kept, and is audited as `system:idle-sessions`.
 
-**Enforced in**: `idlesess.py` `sweep`, `_close`, `close_deadline`, `last_activity`; `core.py` `[hub]` `_idle_activity`.
+**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
 **Tests**: `session_idle`.

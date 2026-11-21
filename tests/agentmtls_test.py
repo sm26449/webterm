@@ -339,6 +339,57 @@ async def main():
         await edgemtls._refresh(force=True)
     check("directory back → enabled again", edgemtls.enabled())
 
+    print("== an edge directory we cannot see is broken, not missing (Codex audit 3.7.1, INV-12)")
+    real_stat = os.stat
+    edge_dir = config.AGENT_LISTS_DIR
+
+    def eacces_stat(p, *a, **k):
+        if str(p) == edge_dir:
+            raise PermissionError(13, "permission denied")
+        return real_stat(p, *a, **k)
+    os.stat = eacces_stat
+    try:
+        await edgemtls._refresh(force=True)
+        check("EACCES on the edge directory → write-error, ratchet kept",
+              edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet()
+              and edgemtls.status["error"] == "PermissionError", edgemtls.status)
+        from app import syshealth as _sh
+        r = await _sh.c_agents_mtls()
+        check("…System health raises a critical alarm", r.severity == "critical" and r.key == "mtls_broken",
+              (r.severity, r.key))
+    finally:
+        os.stat = real_stat
+        await edgemtls._refresh(force=True)
+    a_file = os.path.join(EDGE, "not-a-dir")
+    with open(a_file, "w") as f:
+        f.write("x")
+    config.AGENT_LISTS_DIR = a_file
+    try:
+        await edgemtls._refresh(force=True)
+        check("a file instead of the edge directory → write-error, ratchet kept",
+              edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet(), edgemtls.status)
+    finally:
+        config.AGENT_LISTS_DIR = edge_dir
+        await edgemtls._refresh(force=True)
+    config.AGENT_LISTS_DIR = os.path.join(a_file, "sub")
+    try:
+        await edgemtls._refresh(force=True)
+        check("a path through a file (ENOTDIR) → write-error, ratchet kept",
+              edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet(), edgemtls.status)
+    finally:
+        config.AGENT_LISTS_DIR = edge_dir
+        await edgemtls._refresh(force=True)
+        os.unlink(a_file)
+    config.AGENT_LISTS_DIR = "off"
+    try:
+        await edgemtls._refresh(force=True)
+        check("edge directory explicitly disabled (off) → no-dir, ratchet lifted (rollback)",
+              edgemtls.status["reason"] == "no-dir" and not edgemtls.enforce_ratchet(), edgemtls.status)
+    finally:
+        config.AGENT_LISTS_DIR = edge_dir
+        await edgemtls._refresh(force=True)
+    check("directory back again → enabled", edgemtls.enabled())
+
     print("== the CA loads as a matching pair or not at all (Codex audit)")
     good = await db.get_setting(agentca.K_CA, "")
     d = json.loads(good)
