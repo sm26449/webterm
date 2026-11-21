@@ -822,40 +822,113 @@ def encode_history(data, max_reply=HISTORY_MAX_REPLY):
 # ---------------------------------------------------------------------------
 # Închidere condiţionată (v62): `kill_if_quiet`
 # ---------------------------------------------------------------------------
+# INV-13 (docs/design/INVARIANTS.md): închiderea automată nu omoară o sesiune folosită; orice dubiu = refuz.
+# Recheck 2 Codex (1a5c079): (1) output aflat încă pe fd-ul PTY, necitit de loop, nu apărea în marcaje;
+# (2) pe tmux, interogările şi kill-ul erau comenzi separate, deci un pane putea scrie / un om se putea
+# ataşa între ele; (3) fereastra scădea marja (mai PERMISIVĂ) şi admitea zero; (4) un kill tmux eşuat
+# tot semnaliza clientul şi răspundea ok; (5) fără buget total, loop-ul putea sta ~11 s.
 
-QUIET_MARGIN = 5.0             # secunde: latenţa gateway→agent + granularitatea de o secundă a tmux
-QUIET_TMUX_TIMEOUT = 3         # per comandă tmux, pe loop
+QUIET_MARGIN = 5.0             # secunde ADĂUGATE ferestrei: latenţa gateway→agent + granularitatea tmux (1 s)
+QUIET_MIN_SECS = 60            # sub asta fereastra nu dovedeşte nimic (sweep-urile trimit zile) → bad_request
+QUIET_TMUX_TIMEOUT = 3         # plafon per comandă tmux
+QUIET_BUDGET = 6.0             # buget TOTAL al op-ului (loop-ul e single-threaded); depăşit = refuz
+QUIET_CLOCK_DRIFT_MAX = 120.0  # |Δperete − Δcontinuu| de la crearea sesiunii peste asta = epoch tmux nesigur
+# Formatele folosite de verificarea atomică: `#{e|<:…}` / `#{&&:…}` / `#{W:…}` sigure din 3.2; bucla pe
+# clienţi `#{L:…}` am verificat-o pe 3.4 — sub 3.4 ne bazăm doar pe numărul de clienţi ataşaţi.
+TMUX_ATOMIC_MIN = (3, 2)
+TMUX_CLIENT_LOOP_MIN = (3, 4)
 
 
-def session_activity_reason(s, quiet_secs, now_mono=None, now_wall=None):
-    """De ce NU e liniştită sesiunea `s` pe ultimele `quiet_secs - QUIET_MARGIN` secunde (text scurt),
-    sau "" dacă nu există nicio dovadă de activitate. Fail-closed: o întrebare la tmux care nu
-    reuşeşte pe o sesiune tmux vie = refuz. Totul e relativ la ceasurile ACESTUI agent."""
-    window = max(0.0, float(quiet_secs) - QUIET_MARGIN)
+def _steady():
+    """Ceas continuu: CLOCK_BOOTTIME dacă există (merge şi în suspend, ca ceasul de perete), altfel
+    monoton. Folosit doar ca să prindem un SALT al ceasului de perete (epoch-urile tmux sunt pe perete)."""
+    cid = getattr(time, "CLOCK_BOOTTIME", None)
+    if cid is not None:
+        try:
+            return time.clock_gettime(cid)
+        except (OSError, AttributeError):
+            pass
+    return time.monotonic()
+
+
+def _quiet_tmux(deadline, *args):
+    """tmux_cmd în bugetul op-ului: fiecare comandă primeşte min(rămas, QUIET_TMUX_TIMEOUT); fără buget
+    rămas = TimeoutExpired (tratat ca refuz de apelanţi)."""
+    left = deadline - time.monotonic()
+    if left <= 0.05:
+        raise subprocess.TimeoutExpired("tmux", 0)
+    return tmux_cmd(*args, timeout=min(left, QUIET_TMUX_TIMEOUT))
+
+
+def pty_output_pending(fd):
+    """True dacă pe master-ul PTY aşteaptă octeţi necitiţi (sau un HUP/eroare: sesiunea se schimbă),
+    False dacă nu, None dacă nu putem verifica. poll, nu select: select refuză fd-uri ≥ 1024."""
+    if fd is None:
+        return False
+    try:
+        p = select.poll()
+        p.register(fd, select.POLLIN | select.POLLPRI)
+        if p.poll(0):
+            return True
+        n = struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+        return n > 0
+    except (OSError, ValueError, AttributeError, struct.error):
+        return None
+
+
+def _clock_jumped(s, now_wall, now_steady):
+    """True (sau dacă lipsesc reperele) când ceasul de perete s-a mişcat faţă de cel continuu cu mai mult
+    de QUIET_CLOCK_DRIFT_MAX de la crearea sesiunii: marcajele tmux (epoch) nu mai pot fi comparate."""
+    cw, cs = getattr(s, "created", None), getattr(s, "created_steady", None)
+    if not isinstance(cw, (int, float)) or not isinstance(cs, (int, float)):
+        return True
+    return abs((now_wall - cw) - (now_steady - cs)) > QUIET_CLOCK_DRIFT_MAX
+
+
+def session_activity_reason(s, quiet_secs, now_mono=None, now_wall=None, deadline=None, now_steady=None):
+    """De ce NU e liniştită sesiunea `s` pe ultimele `quiet_secs + QUIET_MARGIN` secunde (text scurt),
+    sau "" dacă nu există nicio dovadă de activitate. Verificare RAPIDĂ (pre-check): pe tmux decide
+    `tmux_kill_if_quiet`, atomic. Fail-closed: orice nu putem verifica = refuz."""
+    # marja LĂRGEŞTE fereastra: gateway-ul spune „n-am văzut nimic de Q secunde", iar orice dovadă mai
+    # nouă de Q (plus latenţă / rotunjiri) e activitate pe care el n-a văzut-o
+    window = float(quiet_secs) + QUIET_MARGIN
     mono = time.monotonic() if now_mono is None else now_mono
+    if deadline is None:
+        deadline = time.monotonic() + QUIET_BUDGET
     if s.pending_input:
         return "input pending"
     if mono - s.last_out_mono < window:
         return "output"
     if mono - s.last_in_mono < window:
         return "input"
+    if s.alive:
+        # octeţi produşi de sesiune dar încă necitiţi de loop (Recheck 2, High 1): marcajul de output
+        # n-a apucat să se mute, deci întrebăm fd-ul direct
+        pend = pty_output_pending(getattr(s, "master", None))
+        if pend is None:
+            return "pty check failed"
+        if pend:
+            return "unread output"
     if s.backend != "tmux" or not s.alive:
         return ""
+    wall = time.time() if now_wall is None else now_wall
+    if _clock_jumped(s, wall, _steady() if now_steady is None else now_steady):
+        return "clock jump"
     name = "=" + TMUX_SESSION_PREFIX + s.sid
     try:
-        r = tmux_cmd("list-windows", "-t", name, "-F", "#{session_activity} #{window_activity}",
-                     timeout=QUIET_TMUX_TIMEOUT)
+        r = _quiet_tmux(deadline, "list-windows", "-t", name, "-F", "#{session_activity} #{window_activity}")
         if r.returncode != 0:
             return "tmux query failed"
         stamps = [int(v) for v in r.stdout.decode("ascii", "replace").split()]
         if not stamps:
             return "tmux query failed"
+        if max(stamps) > wall + QUIET_MARGIN:
+            return "clock skew"               # marcaj din viitor: ceasul a sărit înapoi, nu ne bazăm pe el
         # ultima activitate tmux: input (session_activity) sau output în orice fereastră
         # (window_activity) — inclusiv cât niciun client nu era ataşat
-        wall = time.time() if now_wall is None else now_wall
         if max(stamps) > wall - window:
             return "tmux activity"
-        r = tmux_cmd("list-clients", "-t", name, "-F", "#{client_pid}", timeout=QUIET_TMUX_TIMEOUT)
+        r = _quiet_tmux(deadline, "list-clients", "-t", name, "-F", "#{client_pid}")
         if r.returncode != 0:
             return "tmux query failed"
         pids = [int(v) for v in r.stdout.decode("ascii", "replace").split()]
@@ -865,6 +938,74 @@ def session_activity_reason(s, quiet_secs, now_mono=None, now_wall=None):
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return "tmux query failed"
     return ""
+
+
+def tmux_quiet_format(name, threshold, own_pid, attached, client_loop):
+    """Condiţia evaluată de serverul tmux ÎN ACEEAŞI comandă cu kill-ul („1" = liniştită): niciun input
+    (session_activity) şi niciun output în vreo fereastră (window_activity) de la `threshold` (epoch,
+    secunde) încoace, exact `attached` clienţi ataşaţi şi — unde tmux are bucla `L:` — niciun client pe
+    sesiunea asta cu alt pid decât al nostru. `name` e prefix + sid hex, numerele sunt int: nimic de escapat."""
+    t = int(threshold)
+    conds = ["#{e|<:#{session_activity},%d}" % t,
+             "#{==:#{W:#{?#{e|<:#{window_activity},%d},,x}}z,z}" % t,
+             "#{e|==:#{session_attached},%d}" % int(attached)]
+    if client_loop:
+        conds.append("#{==:#{L:#{?#{==:#{client_session},%s},#{?#{e|==:#{client_pid},%d},,x},}}z,z}"
+                     % (name, int(own_pid or 0)))
+    fmt = conds[-1]
+    for c in reversed(conds[:-1]):
+        fmt = "#{&&:%s,%s}" % (c, fmt)
+    return fmt
+
+
+def tmux_kill_if_quiet(s, quiet_secs, deadline, now_wall=None):
+    """Verificarea finală şi kill-ul într-O SINGURĂ comandă tmux (`if-shell -F`), ca nimic să nu se poată
+    intercala între ele (Recheck 2, High 1). Întoarce ("", "") dacă sesiunea tmux a dispărut, altfel
+    (cod, motiv): `active` = condiţia era falsă / tmux nu poate garanta, `kill_failed` = rezultat
+    neconfirmat. NU semnalizează clientul şi NU pune kill_requested: asta e treaba apelantului, doar la succes."""
+    if _TMUX_VER is None or _TMUX_VER < TMUX_ATOMIC_MIN:
+        return "active", "tmux too old for a conditional close"
+    name = TMUX_SESSION_PREFIX + s.sid
+    target = "=" + name + ":"
+    client_loop = _TMUX_VER >= TMUX_CLIENT_LOOP_MIN
+    try:
+        r = _quiet_tmux(deadline, "list-clients", "-t", "=" + name, "-F", "#{client_pid}")
+        if r.returncode != 0:
+            return "active", "tmux query failed"
+        pids = [int(v) for v in r.stdout.decode("ascii", "replace").split()]
+        if any(p != s.pid for p in pids) or len(pids) > 1:
+            return "active", "another tmux client attached"
+        attached = len(pids)
+        wall = time.time() if now_wall is None else now_wall
+        threshold = wall - (float(quiet_secs) + QUIET_MARGIN)
+        # sonda: acelaşi format trebuie să dea „0" pe un prag imposibil şi „1" pe cel real. Un tmux care nu
+        # înţelege vreun modificator dă gol / text literal → refuz (niciodată închidere pe acel host).
+        r0 = _quiet_tmux(deadline, "display-message", "-p", "-t", target,
+                         tmux_quiet_format(name, 0, s.pid, attached, client_loop))
+        r1 = _quiet_tmux(deadline, "display-message", "-p", "-t", target,
+                         tmux_quiet_format(name, threshold, s.pid, attached, client_loop))
+        if r0.returncode != 0 or r1.returncode != 0:
+            return "active", "tmux query failed"
+        v0, v1 = r0.stdout.strip(), r1.stdout.strip()
+        if v0 != b"0" or v1 not in (b"0", b"1"):
+            return "active", "tmux format unsupported"
+        if v1 != b"1":
+            return "active", "tmux activity"
+        # decizia: condiţia şi kill-ul în aceeaşi comandă a serverului tmux (argv, fără shell)
+        rk = _quiet_tmux(deadline, "if-shell", "-F", "-t", target,
+                         tmux_quiet_format(name, threshold, s.pid, attached, client_loop),
+                         "kill-session -t =" + name)
+        rh = _quiet_tmux(deadline, "has-session", "-t", "=" + name)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return "kill_failed", "tmux did not answer"
+    if rh.returncode == 0:
+        # sesiunea trăieşte: condiţia a fost falsă în momentul kill-ului (activitate / client nou) sau
+        # comanda a eşuat. Oricum, nimic omorât şi clientul nostru neatins.
+        return ("active", "activity at kill time") if rk.returncode == 0 else ("kill_failed", "tmux kill failed")
+    err = (rh.stderr or b"").lower()
+    if b"can't find session" in err or b"no server running" in err:
+        return "", ""
+    return "kill_failed", "tmux state unknown after kill"
 
 
 def tmux_cmdline_matches(parts, socket):
@@ -1597,6 +1738,9 @@ class Session:
             self.pw = None
         self.pw_deadline = (time.time() + 15) if self.pw else 0
         self.created = time.time()
+        # Recheck 2 (Codex): pereche perete/continuu la creare, ca `kill_if_quiet` să prindă un salt de
+        # ceas după care epoch-urile tmux nu mai pot fi comparate cu ceasul de perete
+        self.created_steady = _steady()
         self.last_output = self.created
         # v62 (kill_if_quiet): ultima ieşire citită din PTY şi ultimul input primit, pe ceasul MONOTON al
         # agentului. Pornim de la „acum": agentul nu ştie nimic dinaintea lui (fail-closed); pentru tmux
@@ -3394,19 +3538,37 @@ class Agent:
                 # spune cât timp N-A VĂZUT nicio activitate (`quiet_secs`); între ultima lui verificare şi
                 # sosirea op-ului pot trece output / input / un om ataşat direct pe host, pe care el nu
                 # le vede. Agentul închide DOAR dacă nici el nu are dovezi de activitate în fereastra aceea
-                # (auditul Codex 3.7.1, reziduul #3). Orice nu poate verifica = refuz.
+                # (auditul Codex 3.7.1, reziduul #3 + Recheck 2). Orice nu poate verifica = refuz.
                 sid = msg.get("sid")
                 s = self.sessions.get(sid) if isinstance(sid, str) else None
                 if not s:
                     return err("no_session")
                 q = msg.get("quiet_secs")
-                if isinstance(q, bool) or not isinstance(q, (int, float)) or not (0 <= q < 10 ** 9):
+                # o fereastră sub QUIET_MIN_SECS nu dovedeşte linişte (zero = „kill" deghizat): refuz
+                if isinstance(q, bool) or not isinstance(q, (int, float)) or not (QUIET_MIN_SECS <= q < 10 ** 9):
                     return err("bad_request", "quiet_secs")
-                why = session_activity_reason(s, float(q))
+                deadline = time.monotonic() + QUIET_BUDGET      # buget TOTAL: loop-ul e single-threaded
+                why = session_activity_reason(s, float(q), deadline=deadline)
                 if why:
                     return err("active", why)
-                self._kill_session(s, signal.SIGHUP)
-                ok()
+                if s.backend == "tmux" and s.alive:
+                    code, why = tmux_kill_if_quiet(s, float(q), deadline)
+                    if code:
+                        # nimic omorât (sau neconfirmat): clientul nostru rămâne neatins şi kill_requested
+                        # nepus, ca re-ataşarea normală să meargă dacă sesiunea trăieşte (Recheck 2, #4)
+                        return err(code, why)
+                    s.kill_requested = True       # sesiunea tmux a dispărut, confirmat de has-session
+                    try:
+                        if s.pid:
+                            os.kill(s.pid, signal.SIGHUP)
+                    except OSError:
+                        pass
+                    ok()
+                else:
+                    # PTY direct: fd-ul e verificat mai sus, iar între verificare şi semnal loop-ul nu
+                    # citeşte nimic (single-threaded)
+                    self._kill_session(s, signal.SIGHUP)
+                    ok()
 
             elif op == "reap":
                 s = self.sessions.get(msg["sid"])
@@ -4107,7 +4269,7 @@ class Agent:
             self._flush_input(s)          # ce a tastat utilizatorul cât eram fără client
 
     def _kill_session(self, s, sig):
-        """Corpul op-ului `kill` (comun cu `kill_if_quiet`, v62): tmux-ul omorât, clientul semnalizat."""
+        """Corpul op-ului `kill` (best-effort; `kill_if_quiet` îl foloseşte doar pe PTY direct, v62)."""
         s.kill_requested = True
         if s.alive:
             if s.backend == "tmux":

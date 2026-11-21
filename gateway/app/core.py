@@ -2539,14 +2539,40 @@ class AgentConnection(SessionSource):
     def can_kill_if_quiet(self) -> bool:
         return (self.agent_version or 0) >= KILL_IF_QUIET_MIN_AGENT
 
-    async def kill_if_quiet(self, sid, quiet_secs: float) -> dict:
+    async def kill_if_quiet(self, sid, quiet_secs: float, still_ok=None) -> dict:
         """Închidere CONDIŢIONATĂ (agent ≥ 62, INV-13): agentul omoară sesiunea doar dacă nu are dovezi de
         activitate în ultimele `quiet_secs` secunde; altfel `{"ok": False, "code": "active"}`. Un agent mai
-        vechi nu primeşte op-ul (ar răspunde `bad_op`): răspundem noi `unsupported`, fără nimic trimis."""
+        vechi nu primeşte op-ul (ar răspunde `bad_op`): răspundem noi `unsupported`, fără nimic trimis.
+
+        `still_ok` (sincron): ultima verificare a gateway-ului, făcută SUB lock-ul de trimitere, chiar înainte
+        ca frame-ul să plece (Codex Recheck 2, High 2: între rezervare şi trimitere cererea poate aştepta
+        lock-ul, timp în care un Admin opreşte închiderea). False / excepţie → nimic trimis,
+        `{"ok": False, "code": "cancelled"}`. Punctul fără întoarcere e `send_bytes`: după el, o dezactivare
+        nu mai anulează ACEA închidere (agentul tot re-verifică liniştea)."""
         if not self.can_kill_if_quiet():
             return {"ok": False, "code": "unsupported"}
-        r = await self.request("kill_if_quiet", sid=sid, quiet_secs=max(0.0, float(quiet_secs)))
-        return r if isinstance(r, dict) else {}
+        self._req_id += 1
+        rid = self._req_id
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[rid] = fut
+        frame = FRAME_CTRL + json.dumps({"sid": sid, "quiet_secs": max(0.0, float(quiet_secs)),
+                                         "op": "kill_if_quiet", "id": rid}).encode()
+        try:
+            async with self._send_lock:
+                try:
+                    go = still_ok is None or bool(still_ok())
+                except Exception:              # noqa: BLE001 — fail-closed: nu ştim → nu trimitem
+                    go = False
+                if not go:
+                    return {"ok": False, "code": "cancelled"}
+                try:
+                    await self.ws.send_bytes(frame)
+                except Exception:
+                    raise AgentGone()
+            r = await asyncio.wait_for(fut, 20.0)
+            return r if isinstance(r, dict) else {}
+        finally:
+            self._pending.pop(rid, None)
 
     async def wake(self, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> dict:
         """Cere ACESTUI agent (vecin în LAN cu ţinta) să trimită un magic packet WoL."""

@@ -34,13 +34,21 @@ class FakeSource(core.AgentConnection):
         self.agent_version = version
         self.quiet_asked = []         # `quiet_secs` primit la fiecare kill_if_quiet
         self.quiet_reply = None       # un răspuns impus (ex. {"ok": False, "code": "active"})
+        self.before_send = None       # coroutine rulată între rezervare şi trimitere (aşteptarea lock-ului)
+        self.cancelled = 0            # câte cereri a oprit `still_ok` înainte de trimitere
 
     async def request(self, op, timeout=20.0, **fields):
         raise core.AgentGone("fake source: no websocket")
 
-    async def kill_if_quiet(self, sid, quiet_secs):
+    async def kill_if_quiet(self, sid, quiet_secs, still_ok=None):
         if not self.can_kill_if_quiet():
             return {"ok": False, "code": "unsupported"}
+        if self.before_send is not None:
+            await self.before_send()
+        # ca AgentConnection.kill_if_quiet: `still_ok` decide chiar înainte de trimitere
+        if still_ok is not None and not still_ok():
+            self.cancelled += 1
+            return {"ok": False, "code": "cancelled"}
         self.quiet_asked.append(quiet_secs)
         if self.quiet_reply is not None:
             return dict(self.quiet_reply)
@@ -794,8 +802,60 @@ class SshLikeSource:
         pass
 
 
+async def still_ok_send_path():
+    """Codex Recheck 2, High 2: AgentConnection.kill_if_quiet evaluează `still_ok` SUB lock-ul de trimitere,
+    chiar înainte de frame: False / excepţie → nimic pe fir, `cancelled`; True → frame trimis."""
+    import json as _json
+
+    class WS:
+        def __init__(self, conn):
+            self.sent, self.conn = [], conn
+
+        async def send_bytes(self, b):
+            self.sent.append(b)
+            msg = _json.loads(b[len(core.FRAME_CTRL):])
+            self.conn._pending[msg["id"]].set_result({"ok": True, "id": msg["id"]})
+
+    def conn():
+        c = object.__new__(core.AgentConnection)
+        c.agent_version, c._req_id, c._pending = 62, 0, {}
+        c._send_lock = asyncio.Lock()
+        c.ws = WS(c)
+        return c
+
+    c = conn()
+    seen_locked = []
+
+    def gate():
+        seen_locked.append(c._send_lock.locked())
+        return False
+    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=gate)
+    check("Recheck 2: still_ok False → `cancelled`, nimic pe fir, evaluat SUB lock-ul de trimitere",
+          r == {"ok": False, "code": "cancelled"} and not c.ws.sent and seen_locked == [True] and not c._pending,
+          (r, c.ws.sent, seen_locked))
+
+    def boom():
+        raise RuntimeError("x")
+    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=boom)
+    check("Recheck 2: still_ok care aruncă → fail-closed, nimic trimis", r.get("code") == "cancelled" and not c.ws.sent)
+    # o cerere care aşteaptă lock-ul: politica se schimbă cât aşteaptă → decide starea de LA trimitere
+    flag = {"ok": True}
+    await c._send_lock.acquire()
+    task = asyncio.create_task(c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: flag["ok"]))
+    await asyncio.sleep(0.01)
+    flag["ok"] = False                        # Adminul opreşte închiderea cât cererea e la coadă
+    c._send_lock.release()
+    r = await task
+    check("Recheck 2: oprire cât cererea aşteaptă lock-ul → nu pleacă", r.get("code") == "cancelled" and not c.ws.sent, r)
+    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: True)
+    sent = _json.loads(c.ws.sent[0][len(core.FRAME_CTRL):]) if c.ws.sent else {}
+    check("Recheck 2: still_ok True → frame kill_if_quiet trimis, răspunsul agentului întors",
+          r.get("ok") is True and sent.get("op") == "kill_if_quiet" and sent.get("quiet_secs") == 3 * DAY, (r, sent))
+
+
 async def agent62_fixes(hid, src, owner, alice):
     """Agentul 62: închidere CONDIŢIONATĂ (`kill_if_quiet`); doar sursele care o ştiu sunt închise automat."""
+    await still_ok_send_path()
     await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
                                                          "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
     await close_all_live()
@@ -866,6 +926,34 @@ async def agent62_fixes(hid, src, owner, alice):
           sC in src.killed and st["closed"] == 1 and (await srow(sC))["state"] == "closed"
           and len(src.quiet_asked) == n_before + 1 and len(await audit_rows(sC, 200)) == 1, str(st))
     await close_all_live()
+
+    # Codex Recheck 2, High 2: Adminul opreşte închiderea cât cererea aşteaptă lock-ul de trimitere →
+    # `still_ok` (evaluat sub lock, chiar înainte de frame) o opreşte: nimic trimis, nimic închis, fără alertă
+    sE, hE = await new_session(hid, alice, days_old=20)
+    t4 = time.time()
+    await sweep_at(t4)
+    check("Recheck 2: termen fixat înainte de oprire", (await srow(sE))["idle_close_after"] is not None)
+    n_asked, closed_before = len(src.quiet_asked), len(await alerts_for(alice, "session_idle_closed"))
+
+    async def disable_now():
+        await idlesess.save_policy(dict(idlesess.current_policy(), autoclose=False))
+    src.before_send = disable_now
+    try:
+        st = await sweep_at(t4 + 3 * DAY)
+    finally:
+        src.before_send = None
+    rE = await srow(sE)
+    check("Recheck 2: oprit între rezervare şi trimitere → nimic trimis, sesiunea vie",
+          src.cancelled >= 1 and len(src.quiet_asked) == n_asked and sE not in src.killed
+          and rE["state"] == "live" and st["closed"] == 0, (src.cancelled, str(st), dict(rE)))
+    check("Recheck 2: …fără alertă „închisă”, fără audit 504/409/200, ataşările nu mai sunt refuzate",
+          len(await alerts_for(alice, "session_idle_closed")) == closed_before and hE.idle_closing is False
+          and hE.exit_reason != "idle" and not await audit_rows(sE, 504) and not await audit_rows(sE, 409)
+          and not await audit_rows(sE, 200))
+    check("Recheck 2: …fără backoff (un „skip”, nu un eşec)", not idlesess._backed_off(sE))
+    await close_all_live()
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
 
     # termen fixat sub agentul 62, apoi agentul e înlocuit cu unul vechi → nimic închis, termenul dispare
     sD, hD = await new_session(hid, alice, days_old=20)

@@ -396,7 +396,8 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
         await db.execute("UPDATE sessions SET idle_close_after=NULL, idle_close_gen=NULL"
                          " WHERE id=? AND idle_notified_at=?", sid, notified)
         return "skip"
-    if not _closable_now(fresh, hub, current_policy(), now, mono):
+    pol = current_policy()
+    if not _closable_now(fresh, hub, pol, now, mono):
         return "skip"
     # cât n-a văzut ACEST gateway nimic: ceasul de perete (ultima activitate) şi, ca plasă la un salt
     # înapoi al ceasului, timpul monoton de când procesul a văzut notificarea (orice folosire de atunci
@@ -407,12 +408,30 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
     hub.exit_reason = "idle"
     why = ""
     resp: dict = {}
+
+    def still_ok() -> bool:
+        # Codex Recheck 2, High 2: evaluată de AgentConnection SUB lock-ul de trimitere, chiar înainte ca
+        # frame-ul să plece. Tot ce putea anula închiderea între rezervare şi trimitere: politica (oprită
+        # sau altă generaţie), un client, „Păstrează deschisă", activitate, altă sursă.
+        cur = current_policy()
+        return bool(cur["autoclose"] and cur["notify"] and cur["gen"] == pol["gen"]
+                    and hub.idle_closing and hub.idle_pending and not hub.clients and not hub.closed
+                    and not getattr(hub, "keep_open", False)
+                    and hub.activity_at() <= float(notified)
+                    and closing_source(row) is source)
+
     try:
-        resp = await source.kill_if_quiet(sid, quiet)
+        resp = await source.kill_if_quiet(sid, quiet, still_ok=still_ok)
         if not resp.get("ok"):
             why = str(resp.get("code") or resp.get("msg") or "refused")[:60]
     except Exception as e:                    # noqa: BLE001 — host plecat, timeout: rezultat necunoscut
         why = type(e).__name__
+    if why == "cancelled":
+        # nimic trimis: ca un „skip" (fără alertă, fără backoff); ataşările nu mai sunt refuzate
+        hub.idle_closing = False
+        hub.exit_reason = "exited"
+        log.info("idle session %s: close cancelled before it was sent", sid)
+        return "skip"
     if why == "active":
         await _host_active(row, hub, now, notified, str(resp.get("msg") or "")[:60])
         return "active"

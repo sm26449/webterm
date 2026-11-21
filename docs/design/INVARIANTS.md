@@ -299,15 +299,30 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
   30 s is audited as "not confirmed", sends no "closed" alert and is not retried for an hour.
 - Closing goes through the source's **conditional** kill (`kill_if_quiet`, agent 62+), so the
   recording is kept like with the Stop button, and is audited as `system:idle-sessions`. The gateway
-  sends how long it has seen no activity; the agent refuses (`active`) if, within that window minus a
-  5 s margin, it read output from the session, received input for it, has input still queued, tmux
-  reports activity (`session_activity` or any `window_activity`), or a tmux client other than its own
-  is attached. A tmux query that fails on a live tmux session is a refusal. A refusal is use: the
-  notice is withdrawn, the hub's activity moves to now (a new idle period), no alert, audit 409.
+  sends how long it has seen no activity (at least 60 s, or the agent answers `bad_request`); the
+  agent refuses (`active`) if, within that window **plus** a 5 s margin, it read output from the
+  session, received input for it, has input still queued, has output waiting unread on the session's
+  PTY, tmux reports activity (`session_activity` or any `window_activity`), or a tmux client other
+  than its own is attached. It also refuses when the wall clock moved more than 120 s against the
+  continuous clock since the session started, or a tmux timestamp lies in the future (tmux epochs can
+  no longer be trusted). Anything it cannot check is a refusal, and the whole check has a 6 s budget.
+- On tmux the final check and the kill are **one** tmux command (`if-shell -F` with the condition
+  as a format, then `kill-session`), so nothing can happen between them; it needs tmux 3.2 or later
+  (3.4 or later also matches attached clients by pid), and a probe of the format must evaluate as
+  expected, or the host never closes automatically. The agent signals its own client only once
+  `has-session` confirms the session is gone; a session that still exists is `active`, an unclear
+  result is `kill_failed` (no signal either way).
+- A refusal is use: the notice is withdrawn, the hub's activity moves to now (a new idle period), no
+  alert, audit 409.
+- **Point of no return:** the gateway re-checks the policy (on, same generation), the hub (still
+  closing and pending, no client, not kept, no activity) and the source right before the request
+  leaves, under the agent connection's send lock. If any of it changed, nothing is sent and nothing
+  is recorded. Once the frame has been written, turning automatic closing off no longer cancels that
+  one close; the agent still re-checks that the session is quiet.
 - Only sessions whose source is an agent of version 62 or later are ever closed automatically. Older
   agents, SSH, telnet and serial sessions get the notice without a closing date (no deadline is
   stored, the message does not promise a close), and a deadline whose source no longer supports the
   conditional kill is dropped without closing.
 
-**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
+**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, `tmux_kill_if_quiet`, `pty_output_pending`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
 **Tests**: `session_idle`, `agent_v62`.
