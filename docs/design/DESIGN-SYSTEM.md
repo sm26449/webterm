@@ -51,7 +51,7 @@ Section titles ("eyebrows") have one treatment: `eyebrow` from `components/ui`
 
 Three steps, plus `full` for shapes that are round by nature (dots, pills, avatars) and `none`.
 
-| Class | WebTerm | macOS style | Windows 11 style | GNOME style | KDE Plasma style | Use for |
+| Class | EverShell · Classic | macOS style | Windows 11 style | GNOME style | KDE Plasma style | Use for |
 |---|---|---|---|---|---|---|
 | `rounded-md` | 6px | 8px | 4px | 6px | 3px | controls: buttons, inputs, chips, badges, menu items |
 | `rounded-xl` | 12px | 14px | 8px | 12px | 4px | cards, popovers, menus, panels |
@@ -214,13 +214,17 @@ A theme is a **family** (the look) times a **mode** (`light` / `dark` / `auto`; 
 
 | Family | Light variant | Dark variant | Character |
 |---|---|---|---|
-| WebTerm | `macos` = **Aurora** | `dark` = **Midnight** (default) | the original themes, unchanged |
+| EverShell (3.7.1) | `evershell-light` | `evershell-dark` (**default**) | the brand colours: Petrol surfaces, Cream text, the Phosphor cursor as the accent (see below) |
+| Classic (id `webterm`) | `macos` = **Aurora** | `dark` = **Midnight** | the original themes, unchanged; the default until 3.7.0 |
 | macOS style | `mac-light` | `mac-dark` | translucent ("vibrancy") sidebar, rounder corners, system blue |
 | Windows 11 style | `win-light` | `win-dark` | Mica-like tinted base, white cards, subtle 1px strokes, 4/8px corners |
 | GNOME style | `gnome-light` | `gnome-dark` | libadwaita palette, opaque sidebar, header-bar strip, accent #3584e4 |
 | KDE Plasma style (3.6.11) | `kde-light` | `kde-dark` | Breeze palette (window #eff0f1, view #fcfcfc; Breeze Dark window #202326), opaque sidebar with a 1px frame, compact 3/4/6px corners, highlight #3daee9 |
 
-The WebTerm variants keep their historical ids — `macos` is **Aurora**, not the macOS family.
+The Classic variants keep their historical ids — `macos` is **Aurora**, not the macOS family — and
+the family keeps the id `webterm` (only its display name changed in 3.7.1), so a stored choice
+still resolves to the same look. Settings lists the families in `FAMILIES` order: EverShell,
+Classic, then the system styles.
 
 The model is pure code in `lib/themeModel.ts` (tested in `themeModel.test.ts`); `lib/theme.ts`
 paints it on `<html>`:
@@ -234,10 +238,12 @@ paints it on `<html>`:
 - `data-mode` = `light` / `dark` → rules that only depend on brightness (input borders, the mobile
   drawer background, the accent chip, host-colour labels on the canvas).
 
-**Storage** (`localStorage.wt_theme`): the WebTerm family is written in the pre-3.6.4 format
+**Storage** (`localStorage.wt_theme`): the Classic family is written in the pre-3.6.4 format
 (`dark` / `macos` / `auto`), so existing values keep exactly the same look and a downgrade still
-reads them; the other families are `<family>:<mode>` (`win:dark`). Anything unknown falls back to
-Midnight. Startup paints the stored preference without rewriting it (before 3.6.4, `auto` was
+reads them; the other families are `<family>:<mode>` (`win:dark`, `evershell:light`). A missing or
+unknown value falls back to **EverShell dark** (Midnight until 3.7.0). The app never writes
+`wt_theme` on its own, so only browsers where nobody ever picked a theme move to EverShell; anyone
+who picked one — Midnight included — keeps it. Startup paints the stored preference without rewriting it (before 3.6.4, `auto` was
 replaced by the resolved theme on the first reload). The PWA `theme-color` meta follows the variant
 (`VARIANTS[v].themeColor`). Every page — login, the app, shared sessions, the public replay page —
 is the same bundle, so all of them honour the theme.
@@ -251,15 +257,44 @@ it). The watermark ink and the command-palette toggle use it. Monaco does not: t
 bundled, and the families are named as styles ("macOS style"), never with trademark logos. On a
 machine without the font the family still renders with that system's own UI font.
 
-**Accent.** Components keep using `sky-*` (it is the accent name, not the colour). Each family's
-scale is its system blue with **the same relative luminance as WebTerm's indigo on every step**, so
+**Accent.** Components keep using `sky-*` (it is the accent name, not the colour). Each system-style
+family's scale is its system blue with **the same relative luminance as WebTerm's indigo on every step**, so
 every contrast measured on indigo still holds (white on `sky-600` ≈ 6.3:1 everywhere). Breeze's
 highlight #3daee9 is too light for text or a focus ring on its light window colour (2.2:1), so
 KDE light uses the darker Breeze blue (#2980b9, the scale's lower steps) for links and focus, the
 way Breeze itself does for links; KDE dark keeps #3daee9.
 
+Text on the accent fill (`bg-sky-600`: the primary button, selected tabs and chips) is
+`text-on-accent`, never `text-white`: the `--on-accent` family token is white everywhere except
+EverShell, whose fill is Phosphor and whose text on it is Petrol (white on Phosphor would be
+2.08:1). `src/themeContrast.test.ts` checks `--on-accent` on `sky-600` and on the hover step
+`sky-700` for every variant.
+
+**EverShell** (3.7.1, `docs/brand/cursor/`). Brand colours: Petrol `#0D3640`, Cream `#F6F4EE`,
+Phosphor `#F2A33A`, Muted `#BACACB`.
+
+| Token | Dark (`evershell-dark`) | Light (`evershell-light`) |
+|---|---|---|
+| page `ink-950` | `#08272F` | `#F6F4EE` Cream |
+| panel `ink-900` | `#0D3640` Petrol | `#FFFFFF` |
+| raised `ink-800` | `#144551` | `#EFECE4` |
+| line `ink-700` | `#1E5664` | `#DFDBD0` |
+| text `tx-200` | `#F6F4EE` Cream (11.8:1 on Petrol, 9.6:1 on `ink-800`) | `#0D3640` Petrol (11.8:1 on Cream, 11.0:1 on `ink-800`) |
+| secondary `tx-400` | `#BACACB` Muted (6.2:1 on `ink-800`) | `#264D57` (7.8:1 on `ink-800`) |
+| link / accent / focus | `#F2A33A` Phosphor (5.0:1 on `ink-800`) | link/accent `#8A4F04` (5.6:1 on `ink-800`, 6.0:1 on Cream), focus `#9A5A06` (4.6:1 on `ink-800`) |
+| accent fill `sky-600` | `#F2A33A`, text Petrol 6.2:1 | same |
+| selection ring `sky-500` / `sky-400` | Phosphor / `#F5B354` | `#8A4F04` / `#9A5A06` (Phosphor on Cream is 1.9:1) |
+| warning `--warn` | `#FDE047` (yellow, so it does not read as the accent) | amber-800, as Aurora |
+
+The always-dark workspace is a very dark Petrol (`--ws-*`, `--chrome-*`, matched to Classic's
+luminance so the shared workspace text keeps ≥ 4.5:1 and the host colours on the active tab do
+not drop below Classic's), with the terminal itself on Petrol. Inside the forced-dark zones the
+accent, link and rings stay Phosphor in both modes.
+
 **Terminal colours** follow the family unless the user picked a scheme explicitly
-(`wt_term_scheme` set): WebTerm → WebTerm Dark, macOS → "macOS Terminal style", Windows → Campbell,
+(`wt_term_scheme` set): EverShell → "EverShell" (Petrol background, Cream text, Phosphor cursor;
+every ANSI colour ≥ 4.5:1 on Petrol, checked in `lib/termtheme.test.ts`), Classic → "Classic Dark"
+(id `webterm-dark`, unchanged), macOS → "macOS Terminal style", Windows → Campbell,
 GNOME → Tango, KDE Plasma → "Breeze (Konsole style)". "Match theme" in Settings → Appearance clears the explicit choice. The ANSI colours
 are each terminal's published palette; like Gruvbox and Catppuccin they are the user's content
 colours and are not bound by the UI contrast rules.
@@ -305,7 +340,7 @@ and `--viz-*` ≥ 3:1; workspace text and chrome text ≥ 4.5:1 on the family's 
 (`VITE_CONTRAST_REPORT=1` prints the weakest pair per variant), and the a11y gate
 (`tests/ui_review.mjs`) runs axe on the full surface set in Midnight and Aurora and on a
 representative subset — login, dashboard, session, Settings → Appearance, file browser, a dialog —
-in each of the eight system-style variants. Glass needs an opaque fallback: without `backdrop-filter`, or with
+in each of the ten other variants (EverShell and the system styles). Glass needs an opaque fallback: without `backdrop-filter`, or with
 `prefers-reduced-transparency: reduce`, the sidebar, dialogs and login card become solid
 `ink-900`.
 

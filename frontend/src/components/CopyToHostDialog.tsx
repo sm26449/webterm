@@ -187,7 +187,7 @@ export default function CopyToHostDialog(props: {
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={props.onClose} className={`${BTN} text-slate-300 ring-1 ring-ink-700 hover:bg-ink-800`}>{t('files.cancel')}</button>
           <button type="button" onClick={() => void submit()} disabled={busy || dst == null || !props.items.length || !!listErr}
-            className={`${BTN} bg-sky-600 font-medium text-white hover:bg-sky-700 disabled:opacity-40`}>
+            className={`${BTN} bg-sky-600 font-medium text-on-accent hover:bg-sky-700 disabled:opacity-40`}>
             {folders > 0 ? t('copy.startItems', { count: props.items.length }) : t('copy.start', { count: files.length })}
           </button>
         </div>

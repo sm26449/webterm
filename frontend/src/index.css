@@ -108,6 +108,88 @@
    şi culori de grafic ≥3:1) — verificate de src/themeContrast.test.ts (vitest) şi de axe (ui_review).
    ────────────────────────────────────────────────────────────── */
 
+/* 3.7.1 — EverShell (tema mărcii, DEFAULT-ul; docs/brand/cursor/colors.css): Petrol #0D3640, Cream
+   #F6F4EE, Phosphor #F2A33A (cursorul = accentul), Muted #BACACB. Pe închis: scara de suprafeţe e
+   derivată din Petrol (pagina mai închisă, panoul = Petrol, ridicatul mai deschis), textul Cream,
+   secundarul Muted, accentul/linkul/focusul Phosphor. Pe deschis: Cream pentru pagină, panouri albe,
+   text Petrol; Phosphor pe crem dă 1,9:1, deci textul/linkurile/inelul de focus trec pe un chihlimbar
+   închis (#8a4f04, 5,97:1 pe crem), iar Phosphor rămâne umplerea (butonul primar, cu text Petrol 6,22:1
+   — tokenul --on-accent al familiei). Contraste verificate în src/themeContrast.test.ts. */
+/* EverShell — dark */
+:root[data-theme='evershell-dark'],
+:root[data-theme='evershell-dark'] .wt-workspace .wt-canvas {
+  --ink-950: 8 39 47;      /* #08272f pagina */
+  --ink-900: 13 54 64;     /* #0d3640 Petrol — panourile */
+  --ink-800: 20 69 81;     /* #144551 suprafaţa ridicată / hover */
+  --ink-700: 30 86 100;    /* #1e5664 linii */
+  --ink-600: 45 106 120;
+  --tx-100: 255 255 255;
+  --tx-200: 246 244 238;   /* Cream */
+  --tx-300: 222 229 228;
+  --tx-400: 186 202 203;   /* Muted */
+  --tx-500: 178 196 198;
+  --tx-600: 174 192 194;
+  --link: 242 163 58;      /* Phosphor — 5,04:1 pe ink-800 */
+  --focus: 242 163 58;
+  --field-border: 110 150 160;
+  --ok: 74 222 160;
+  --warn: 253 224 71;      /* galben (nu chihlimbar): să nu se confunde cu accentul Phosphor */
+  --danger: 255 153 150;
+  --info: 125 211 252;
+  --accent: 242 163 58;
+  --viz-ok: 74 222 160;
+  --viz-warn: 253 224 71;
+  --viz-danger: 255 153 150;
+  --glass-bg: rgba(13, 54, 64, 0.86);
+  --glass-hairline: rgba(246, 244, 238, 0.08);
+  --glass-shadow: 0 20px 55px -14px rgba(0, 0, 0, 0.6), 0 5px 16px -8px rgba(0, 0, 0, 0.4);
+  --window-shadow: 0 30px 70px -18px rgba(0, 0, 0, 0.65), 0 8px 24px -12px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(246, 244, 238, 0.08);
+  --app-gradient:
+    radial-gradient(1200px 820px at 88% -16%, rgba(242, 163, 58, 0.07), transparent 60%),
+    radial-gradient(1000px 760px at 2% 108%, rgba(45, 106, 120, 0.18), transparent 58%),
+    #08272f;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --scrollbar: rgba(186, 202, 203, 0.3);
+}
+
+/* EverShell — light */
+:root[data-theme='evershell-light'],
+:root[data-theme='evershell-light'] .wt-workspace .wt-canvas {
+  --ink-950: 246 244 238;  /* Cream — pagina */
+  --ink-900: 255 255 255;  /* panourile */
+  --ink-800: 239 236 228;  /* #efece4 ridicat / hover */
+  --ink-700: 223 219 208;
+  --ink-600: 196 191 178;
+  --tx-100: 6 33 40;
+  --tx-200: 13 54 64;      /* Petrol */
+  --tx-300: 22 64 74;
+  --tx-400: 38 77 87;
+  --tx-500: 52 88 97;
+  --tx-600: 62 96 105;
+  --link: 138 79 4;        /* chihlimbar închis #8a4f04 — Phosphor pe crem ar da 1,9:1 */
+  --focus: 154 90 6;       /* #9a5a06 — ≥3:1 pe toate suprafeţele (WCAG 1.4.11) */
+  --field-border: 122 128 120;
+  --ok: 6 95 70;
+  --warn: 146 64 14;
+  --danger: 185 28 28;
+  --info: 7 89 133;
+  --accent: 138 79 4;
+  --viz-ok: 5 150 105;
+  --viz-warn: 180 83 9;
+  --viz-danger: 225 29 72;
+  --glass-bg: rgba(253, 252, 249, 0.8);
+  --glass-hairline: rgba(13, 54, 64, 0.1);
+  --glass-shadow: 0 20px 50px -14px rgba(13, 54, 64, 0.22), 0 5px 16px -8px rgba(13, 54, 64, 0.12);
+  --window-shadow: 0 30px 70px -18px rgba(13, 54, 64, 0.3), 0 8px 24px -12px rgba(13, 54, 64, 0.16), 0 0 0 0.5px rgba(13, 54, 64, 0.14);
+  --app-gradient:
+    radial-gradient(1150px 780px at 87% -14%, rgba(242, 163, 58, 0.16), transparent 58%),
+    radial-gradient(1000px 720px at 2% 112%, rgba(13, 54, 64, 0.07), transparent 56%),
+    #f6f4ee;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  --scrollbar: rgba(13, 54, 64, 0.25);
+  --drawer-bg: #f3f0e8;
+}
+
 /* macOS style — light */
 :root[data-theme='mac-light'],
 :root[data-theme='mac-light'] .wt-workspace .wt-canvas {
@@ -455,6 +537,9 @@ body {
   --sky-800: 49 46 129;    /* #312e81 */
   --sky-900: 30 27 75;     /* #1e1b4b */
   --sky-950: 23 20 73;     /* #171449 */
+  /* 3.7.1: textul de pe umplerea primară (bg-sky-600 → `text-on-accent`): alb în toate familiile,
+     Petrol în EverShell (alb pe Phosphor ar da 2,08:1) */
+  --on-accent: 255 255 255;
 }
 
 /* Familiile noi. Scara `sky-*` e albastrul de sistem al fiecăreia, cu ACEEAŞI luminanţă relativă
@@ -569,9 +654,50 @@ body {
   --sky-950: 7 30 42;
 }
 
+/* 3.7.1 — EverShell: cromul workspace-ului e un Petrol foarte închis (luminanţa treptelor `--ws-*` ≈
+   cea a familiei Classic, ca textul fix din .wt-workspace să păstreze ≥4,5:1), terminalul pe Petrol
+   (schema `evershell-dark`). Scara `sky-*` = Phosphor: 500/600 = #f2a33a (inel, umplere), 700 = hover-ul
+   (mai închis, Petrol pe el 5,15:1), 200–400 mai deschise. Pe varianta deschisă inelele (sky-400/500)
+   trec pe chihlimbar închis — regula de după bloc. */
+:root[data-family='evershell'] {
+  --term-bg: #0d3640;
+  --chrome-bg: #05161b;
+  --chrome-elev: #071d23;
+  --chrome-line: rgba(246, 244, 238, 0.08);
+  --chrome-tx: #ece9e1;
+  --chrome-tx-dim: #a9bdbf;
+  --ws-950: 3 15 19;
+  --ws-900: 6 24 30;
+  --ws-800: 8 32 39;
+  --ws-700: 20 52 61;
+  --ws-600: 34 72 84;
+  --command-bg: #071d23;
+  --r-md: 6px;
+  --r-xl: 12px;
+  --r-2xl: 16px;
+  --sky-200: 251 224 184;
+  --sky-300: 248 199 127;
+  --sky-400: 245 179 84;
+  --sky-500: 242 163 58;   /* Phosphor */
+  --sky-600: 242 163 58;
+  --sky-700: 227 145 36;
+  --sky-800: 122 74 14;
+  --sky-900: 61 39 8;
+  --sky-950: 42 27 6;
+  --on-accent: 13 54 64;   /* Petrol pe Phosphor: 6,22:1 */
+}
+/* EverShell light: inelele de selecţie / focus-visible (ring-sky-500, outline-sky-400) pe crem ar fi
+   1,9:1 în Phosphor → chihlimbar închis (≥4,9:1 pe crem şi alb). Umplerea (sky-600/700) rămâne Phosphor.
+   Selectorul trebuie să vină DUPĂ blocul de familie (aceeaşi specificitate); zonele forţat-întunecate
+   îşi iau înapoi Phosphor-ul în regula lor (mai jos), iar canvas-ul deschis din workspace — pe acesta. */
+:root[data-theme='evershell-light'],
+:root[data-theme='evershell-light'] .wt-workspace .wt-canvas {
+  --sky-400: 154 90 6;
+  --sky-500: 138 79 4;
+}
 /* Dashboard-ul şi pagina hostului pe familiile noi: tokenii variantei vin din blocul ei (selectorul
    include `.wt-workspace .wt-canvas`); aici doar culoarea de bază şi fundalul, ca la Aurora. */
-:root:is([data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-workspace .wt-canvas {
+:root:is([data-family='evershell'], [data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-workspace .wt-canvas {
   color: rgb(var(--tx-200));
   background: var(--app-gradient);
   background-attachment: fixed;
@@ -1088,7 +1214,7 @@ textarea {
 /* 3.6.4: şi pe variantele închise ale familiilor noi — Dashboard-ul lor are suprafeţe mai deschise decât
    navy-ul Midnight (pe GNOME dark culoarea hostului cădea sub 4,5:1 pe cardurile ink-900) */
 :root[data-mode='light'] .wt-canvas .wt-hostlabel,
-:root:is([data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
+:root:is([data-family='evershell'], [data-family='mac'], [data-family='win'], [data-family='gnome'], [data-family='kde']) .wt-canvas .wt-hostlabel { color: rgb(var(--tx-400)) !important; }
 
 /* editorul de fişiere (FileEditor): zonă forţat-întunecată, ca .wt-workspace / .wt-command /
    .wt-transfers-widget — deci îşi re-declară AICI setul COMPLET de tokeni întunecaţi, nu doar
@@ -1156,6 +1282,12 @@ textarea {
   scrollbar-color: var(--scrollbar) transparent;
 }
 :root[data-family='mac'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 10 132 255; --field-border: 124 124 132; }
+/* EverShell: Phosphor şi în zonele întunecate (link, accent, inele) — şi pe varianta deschisă, care
+   pune pe :root chihlimbarul închis (ar da ~3:1 pe cromul petrol) */
+:root[data-family='evershell'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) {
+  --focus: 242 163 58; --field-border: 110 140 148; --link: 242 163 58; --accent: 242 163 58;
+  --sky-400: 245 179 84; --sky-500: 242 163 58;
+}
 :root[data-family='win'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 255 255 255; --field-border: 135 135 135; }
 :root[data-family='gnome'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 120 174 237; --field-border: 138 138 145; }
 :root[data-family='kde'] :is(.wt-workspace, .wt-command, .wt-transfers-widget, .wt-editor) { --focus: 61 174 233; --field-border: 128 134 140; }

@@ -8,13 +8,35 @@ import type { ThemeFamily } from './themeModel'
    defaults are not calibrated for a near-black background, so we ship a proper
    palette. Selectable independently of the UI theme, persisted in localStorage. */
 export type TermSchemeId =
-  | 'webterm-dark' | 'gruvbox-dark' | 'catppuccin-mocha'
+  | 'evershell-dark' | 'webterm-dark' | 'gruvbox-dark' | 'catppuccin-mocha'
   | 'macos-terminal' | 'campbell' | 'tango-dark' | 'breeze-konsole'
 
-export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] = [
+/* `nameKey`: numele afişat e tradus (schemele mărcii); celelalte au nume proprii, aceleaşi în orice
+   limbă. Afişarea trece prin schemeName(). */
+export const TERM_SCHEMES: { id: TermSchemeId; name: string; nameKey?: string; theme: ITheme }[] = [
+  {
+    // 3.7.1: schema mărcii (docs/brand/cursor): fundal Petrol, text Cream, cursorul Phosphor. ANSI
+    // calibrat pe petrol (#0d3640 e mai deschis decât negrul Classic): fiecare culoare ≥ 4,5:1 pe
+    // fundal, brightBlack (comentarii / text estompat) ≥ 3:1 — verificat în termtheme.test.ts.
+    id: 'evershell-dark',
+    name: 'EverShell',
+    nameKey: 'theme.scheme.evershell',
+    theme: {
+      background: '#0d3640', foreground: '#f6f4ee',
+      cursor: '#f2a33a', cursorAccent: '#0d3640',
+      selectionBackground: '#25616f', selectionForeground: '#ffffff',
+      black: '#072229', red: '#ff8a80', green: '#8fd9a0', yellow: '#f5c35b',
+      blue: '#7cbcff', magenta: '#e8a2ea', cyan: '#6fdada', white: '#d5dedd',
+      brightBlack: '#7d9ba1', brightRed: '#ffaaa2', brightGreen: '#b0ebbc', brightYellow: '#ffd98a',
+      brightBlue: '#a6d2ff', brightMagenta: '#f2c0f3', brightCyan: '#97ecec', brightWhite: '#ffffff',
+    },
+  },
   {
     id: 'webterm-dark',
-    name: 'EverShell Dark', // 3.7.0: doar numele afişat; id-ul (salvat în preferinţe) rămâne webterm-dark
+    // 3.7.0 → „EverShell Dark"; 3.7.1 → „Classic Dark" (familia istorică a devenit Classic). Doar numele
+    // afişat: id-ul (salvat în preferinţe şi în schema per-host) rămâne webterm-dark.
+    name: 'Classic Dark',
+    nameKey: 'theme.scheme.classicDark',
     theme: {
       background: '#0b0e14', foreground: '#d6dee8',
       cursor: '#7dd3fc', cursorAccent: '#0b0e14',
@@ -113,9 +135,10 @@ export const TERM_SCHEMES: { id: TermSchemeId; name: string; theme: ITheme }[] =
 ]
 
 /** Schema implicită a fiecărei familii de temă: fără o alegere explicită (`wt_term_scheme` lipsă),
-    terminalul urmează familia. WebTerm → `webterm-dark`, deci cine n-a ales nimic vede exact ce
-    vedea înainte de 3.6.4. */
+    terminalul urmează familia. Classic (`webterm`) → `webterm-dark`, deci cine a rămas pe Classic vede
+    exact ce vedea înainte de 3.6.4; EverShell (3.7.1) → schema mărcii. */
 export const FAMILY_SCHEME: Record<ThemeFamily, TermSchemeId> = {
+  evershell: 'evershell-dark',
   webterm: 'webterm-dark',
   mac: 'macos-terminal',
   win: 'campbell',
@@ -164,8 +187,14 @@ export function clearCustomTheme(): void {
   window.dispatchEvent(new Event('wt-termscheme'))
 }
 
+/** Numele afişat al unei scheme: tradus pentru schemele mărcii, „custom" → cheia ei, altfel numele propriu. */
+export function schemeName(s: { id: string; name: string; nameKey?: string }, t: (key: string) => string): string {
+  if (s.id === 'custom') return t('settings.customSchemeName')
+  return s.nameKey ? t(s.nameKey) : s.name
+}
+
 /** Schemele disponibile, inclusiv cea proprie (dacă există). */
-export function allSchemes(): { id: string; name: string; theme: ITheme }[] {
+export function allSchemes(): { id: string; name: string; nameKey?: string; theme: ITheme }[] {
   const custom = customTheme()
   return custom
     ? [...TERM_SCHEMES, { id: 'custom', name: CUSTOM_SCHEME_NAME, theme: custom }]
@@ -179,7 +208,7 @@ export function explicitTermScheme(): string | null {
 }
 
 export function currentTermScheme(): string {
-  return explicitTermScheme() ?? FAMILY_SCHEME[themePref().family] ?? 'webterm-dark'
+  return explicitTermScheme() ?? FAMILY_SCHEME[themePref().family] ?? FAMILY_SCHEME.webterm
 }
 
 export function setTermScheme(id: string): void {
@@ -195,7 +224,9 @@ export function followThemeTermScheme(): void {
 
 /** Schema unei sesiuni: override per-host (ex. „prod = roșiatic"), altfel cea globală. */
 export function termTheme(id: string = currentTermScheme()): ITheme {
-  return (allSchemes().find((s) => s.id === id) ?? TERM_SCHEMES[0]).theme
+  // id necunoscut (schemă proprie ştearsă, id vechi) → schema familiei temei, nu prima din listă
+  const all = allSchemes()
+  return (all.find((s) => s.id === id) ?? all.find((s) => s.id === FAMILY_SCHEME[themePref().family]) ?? TERM_SCHEMES[0]).theme
 }
 
 export function hostScheme(hostId: number | undefined): string {

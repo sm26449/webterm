@@ -76,7 +76,14 @@ for (const v of Object.keys(VARIANTS) as ThemeVariant[]) {
     for (const k of TEXT) need(v, `${k} on ${sn}`, rgb(t[k]), s, 4.5)
     if (sn !== 'sidebar glass') for (const k of UI) need(v, `${k} on ${sn}`, rgb(t[k]), s, 3)
   }
-  need(v, 'white on sky-600', [255, 255, 255], rgb(familyTokens(VARIANTS[v].family)['sky-600']), 4.5)
+  // 3.7.1: textul de pe umplerea primară e `--on-accent` (alb; Petrol în EverShell, unde sky-600 = Phosphor)
+  const ft = familyTokens(VARIANTS[v].family)
+  need(v, 'on-accent on sky-600', rgb(ft['on-accent']), rgb(ft['sky-600']), 4.5)
+  need(v, 'on-accent on sky-700 (hover)', rgb(ft['on-accent']), rgb(ft['sky-700']), 4.5)
+  // inelele de selecţie (ring-sky-500) şi focus-visible (outline-sky-400) pe suprafeţele variantei: ≥ 3:1
+  for (const k of ['sky-400', 'sky-500']) for (const sn of ['ink-950', 'ink-900', 'ink-800'] as const) {
+    if (VARIANTS[v].family === 'evershell') need(v, `${k} on ${sn}`, rgb(t[k] ?? ft[k]), rgb(t[sn]), 3)
+  }
 }
 for (const f of FAMILIES.map((x) => x.id)) {
   const t = familyTokens(f)
@@ -229,7 +236,7 @@ describe('contrastul variantelor de temă (tokeni din index.css)', () => {
   it('zonele forţat-întunecate: focus ≥ 3:1 pe tab strip / ws-950 / paleta de comenzi, şi înapoi pe canvas (UI-02)', () => {
     // regula comună există şi declară ambii tokeni (altfel lanţul ar cădea tăcut pe tokenii variantei)
     expect(Object.keys(zoneShared)).toEqual(expect.arrayContaining(['focus', 'field-border', 'scrollbar']))
-    for (const f of ['mac', 'win', 'gnome', 'kde'] as ThemeFamily[]) expect(Object.keys(zoneFamily(f))).toContain('focus')
+    for (const f of ['evershell', 'mac', 'win', 'gnome', 'kde'] as ThemeFamily[]) expect(Object.keys(zoneFamily(f))).toContain('focus')
     expect(zonePairs.length).toBe(Object.keys(VARIANTS).length * (4 + 1 + 3 * 2))
     const bad = zonePairs.filter((p) => p.r + 1e-9 < p.min).map((p) => `${p.where}: ${p.what} = ${p.r.toFixed(2)}:1 < ${p.min}:1`)
     expect(bad).toEqual([])

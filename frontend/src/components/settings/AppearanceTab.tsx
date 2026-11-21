@@ -6,7 +6,7 @@ import { useTheme } from '../../lib/theme'
 import { FAMILIES, VARIANTS, type Swatch, type ThemeMode } from '../../lib/themeModel'
 import {
   allSchemes, clearCustomTheme, COLOR_KEYS, currentTermScheme, explicitTermScheme, FAMILY_SCHEME,
-  customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
+  customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, schemeName, setTermScheme, termTheme,
 } from '../../lib/termtheme'
 import { Button, SegmentedControl, SettingsSection } from '../ui'
 import HelpTip from '../HelpTip'
@@ -64,9 +64,10 @@ export default function AppearanceTab() {
           options={LANG_ORDER.map((code) => ({ value: code, label: <span lang={code}>{LANG_META[code].name}</span> }))} />
       </SettingsSection>
 
-      {/* ── Temă: familia (stilul) + modul ── cardurile de familie rămân cum erau (paleta nu se schimbă aici) */}
+      {/* ── Temă: familia (stilul) + modul ── 3.7.1: EverShell (marca) primul, apoi Classic şi stilurile de sistem;
+          6 carduri → 2 rânduri de câte 3 (pe 5 coloane al şaselea rămânea singur pe rând) */}
       <SettingsSection data-setting-id="theme" title={t('settings.theme')} description={t('theme.styleHint')}>
-        <div role="group" aria-label={t('settings.theme')} className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        <div role="group" aria-label={t('settings.theme')} className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {FAMILIES.map((f) => {
             const on = pref.family === f.id
             return (
@@ -117,7 +118,7 @@ export default function AppearanceTab() {
                     <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
                   ))}
                 </span>
-                {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
+                {schemeName(s, t)}
               </>,
             })),
           ]} />

@@ -162,7 +162,7 @@ export default function AddHostModal(props: {
       {(['one', 'many', 'csv'] as const).map((m) => (
         <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
           className={`flex-1 rounded-md px-3 py-1.5 font-medium transition ${
-            mode === m ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+            mode === m ? 'bg-sky-600 text-on-accent' : 'text-slate-400 hover:text-slate-200'}`}>
           {m === 'one' ? t('addhost.modeOne') : m === 'many' ? t('addhost.modeMany') : t('addhost.modeCsv')}
         </button>
       ))}
@@ -480,7 +480,7 @@ export default function AddHostModal(props: {
                   <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(defaultPort(ct)) }}
                     className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
-                      connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                      connType === ct ? 'bg-sky-600 text-on-accent' : 'text-slate-400 hover:text-slate-200'}`}>
                     {lbl}
                   </button>
                 ))}
@@ -491,7 +491,7 @@ export default function AddHostModal(props: {
                   <button key={ct} type="button" aria-pressed={connType === ct}
                     onClick={() => { setConnType(ct); setPort(defaultPort(ct)) }}
                     className={`flex-1 rounded-md px-2 py-1.5 text-compact font-medium transition ${
-                      connType === ct ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                      connType === ct ? 'bg-sky-600 text-on-accent' : 'text-slate-400 hover:text-slate-200'}`}>
                     {label}
                   </button>
                 ))}

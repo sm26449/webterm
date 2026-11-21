@@ -2051,7 +2051,7 @@ function MainApp() {
                 <button key={s.id} aria-pressed={s.id === shownPane}
                   onClick={() => { selectPane(s.id); setPaneFocusNonce((n) => n + 1) }}
                   className={`wt-touch flex min-h-[36px] min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs ${
-                    s.id === shownPane ? 'bg-sky-600 text-white' : 'text-slate-300 ring-1 ring-ink-700'}`}>
+                    s.id === shownPane ? 'bg-sky-600 text-on-accent' : 'text-slate-300 ring-1 ring-ink-700'}`}>
                   <span className="font-semibold tabular-nums">{i + 1}</span>
                   <span className="max-w-[110px] truncate">{sessionTitle(s.title, t) || t('app.untitledSession')}</span>
                 </button>
@@ -2327,7 +2327,7 @@ function MainApp() {
                     <span className="shrink-0 truncate font-mono text-2xs text-slate-500">{h?.name}</span>
                     {/* poziţia în split = ordinea bifării */}
                     <span aria-hidden="true" className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-2xs font-semibold tabular-nums ${
-                      order >= 0 ? 'bg-sky-600 text-white' : 'text-transparent'}`}>{order >= 0 ? order + 1 : ''}</span>
+                      order >= 0 ? 'bg-sky-600 text-on-accent' : 'text-transparent'}`}>{order >= 0 ? order + 1 : ''}</span>
                   </label>
                 )
               })}
@@ -2339,7 +2339,7 @@ function MainApp() {
                 {t('common.cancel')}
               </button>
               <button disabled={wizard.sel.length < 2} onClick={saveWizard}
-                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-40">
+                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-accent hover:bg-sky-700 disabled:opacity-40">
                 {wizard.id ? t('common.save') : t('grid.pickConfirm')}
               </button>
             </footer>
@@ -2375,8 +2375,8 @@ function MainApp() {
                 {t(hostKeyAlarm.first ? 'hostkey.firstCancel' : 'hostkey.keepBlocking')}
               </button>
               <button onClick={acceptHostKey} disabled={hostKeyBusy}
-                className={`rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 ${
-                  hostKeyAlarm.first ? 'bg-sky-600 hover:bg-sky-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
+                className={`rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+                  hostKeyAlarm.first ? 'bg-sky-600 text-on-accent hover:bg-sky-700' : 'bg-rose-600 text-white hover:bg-rose-700'}`}>
                 {t(hostKeyAlarm.first ? 'hostkey.firstAccept' : 'hostkey.accept')}
               </button>
             </div>
@@ -2396,7 +2396,7 @@ function MainApp() {
             <div className="text-xs text-slate-400">{t('idle.warnBody', { s: idleWarn })}</div>
           </div>
           <button onClick={stillHere}
-            className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700">
+            className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-on-accent hover:bg-sky-700">
             {t('idle.stillHere')}
           </button>
           <button onClick={() => setIdleDismissed(true)} aria-label={t('app.close')}

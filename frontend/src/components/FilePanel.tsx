@@ -1647,7 +1647,7 @@ export default function FilePanel(props: {
         {listing && !picked.length && gate.write !== 'hidden' && (
           <button type="button" aria-haspopup="menu" aria-label={t('files.fabAria')} data-testid="wt-files-fab"
             onClick={(ev) => { const r = (ev.currentTarget as HTMLElement).getBoundingClientRect(); if (listing) setMenu({ kind: 'new', dir: listing.path, x: r.left, y: r.top, sheet: true }) }}
-            className="absolute bottom-3 right-3 z-10 hidden h-12 w-12 place-items-center rounded-full bg-sky-600 text-white shadow-xl hover:bg-sky-500 [@media(hover:none)]:grid">
+            className="absolute bottom-3 right-3 z-10 hidden h-12 w-12 place-items-center rounded-full bg-sky-600 text-on-accent shadow-xl hover:bg-sky-700 [@media(hover:none)]:grid">
             <PlusIcon size={20} />
           </button>
         )}

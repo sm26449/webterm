@@ -31,9 +31,10 @@ const MATRIX = [
   { name: 'iphone-se', device: devices['iPhone SE'], engine: 'webkit' },
   // 3.6.4: câte o variantă din fiecare familie de temă nouă (KDE din 3.6.11), pe un device existent (`theme` = wt_theme)
   { name: 'iphone-13', device: devices['iPhone 13'], engine: 'webkit', theme: 'mac:light' },
-  { name: 'iphone-15-max', device: devices['iPhone 15 Pro Max'], engine: 'webkit' },
+  // 3.7.1: fără `theme` = default-ul (EverShell dark); Midnight (Classic) şi EverShell light explicit
+  { name: 'iphone-15-max', device: devices['iPhone 15 Pro Max'], engine: 'webkit', theme: 'dark' },
   { name: 'iphone-13-landscape', device: devices['iPhone 13 landscape'], engine: 'webkit' },
-  { name: 'ipad-mini', device: devices['iPad Mini'], engine: 'webkit' },
+  { name: 'ipad-mini', device: devices['iPad Mini'], engine: 'webkit', theme: 'evershell:light' },
   { name: 'ipad-pro-11', device: devices['iPad Pro 11'], engine: 'webkit' },
   { name: 'ipad-pro-11-landscape', device: devices['iPad Pro 11 landscape'], engine: 'webkit' },
   { name: 'galaxy-s9', device: devices['Galaxy S9+'], engine: 'chromium', theme: 'kde:light' },   // 3.6.11
@@ -198,7 +199,7 @@ async function auditDevice(cfg) {
   const ctx = await browser.newContext({ ...cfg.device, locale: 'en-US', serviceWorkers: 'block' })   // UI i18n → limbă RO fixă
   const page = await ctx.newPage()
   await page.addInitScript(() => { try { for (const k of ['wt_walkthrough_done','wt_tip_addhost_agent','wt_tip_addhost_ssh','wt_tip_terminal_paste','wt_tip_toolbar']) localStorage.setItem(k, '1') } catch { /**/ } })  // walkthrough de primă rulare OFF: nu bloca fluxul de test
-  // tema (3.6.4): fără `theme` → default-ul aplicaţiei (Midnight), ca înainte
+  // tema (3.6.4): fără `theme` → default-ul aplicaţiei (din 3.7.1 EverShell dark; înainte Midnight)
   if (cfg.theme) await page.addInitScript((th) => { try { localStorage.setItem('wt_theme', th) } catch { /**/ } }, cfg.theme)
   const errors = []
   const reached = new Set()

@@ -2,7 +2,9 @@
    theme.ts o aplică pe <html>; termtheme.ts citeşte familia pentru schema de terminal implicită.
 
    O temă = FAMILIE × MOD:
-     - familia: `webterm` (Midnight + Aurora, temele istorice), `mac` (stil macOS),
+     - familia: `evershell` (3.7.1, culorile mărcii: Petrol / Cream / Phosphor — DEFAULT-ul),
+       `webterm` (afişată „Classic": Midnight + Aurora, temele istorice; id-ul rămâne `webterm`
+       ca alegerile salvate să rămână valabile), `mac` (stil macOS),
        `win` (stil Windows 11 / Fluent), `gnome` (stil GNOME / libadwaita), `kde` (stil KDE
        Plasma / Breeze, 3.6.11);
      - modul: `light` / `dark` / `auto` (auto = urmează prefers-color-scheme ÎN familia aleasă).
@@ -16,11 +18,14 @@
        3.6.3 citeşte exact aceeaşi temă;
      - celelalte familii: `<familie>:<mod>` (ex. `win:dark`) — 3.6.3 nu le recunoaşte şi cade pe
        Midnight, adică pe default, fără să strice nimic;
-     - orice valoare necunoscută → default (WebTerm, dark = Midnight). */
+     - orice valoare necunoscută SAU lipsă → default (3.7.1: EverShell, dark). Pornirea nu scrie
+       nimic în `wt_theme` (theme.ts initTheme), deci doar cine n-a ales niciodată o temă ajunge pe
+       EverShell; cine a ales (inclusiv Midnight, scris ca `dark`) îşi păstrează alegerea. */
 
-export type ThemeFamily = 'webterm' | 'mac' | 'win' | 'gnome' | 'kde'
+export type ThemeFamily = 'evershell' | 'webterm' | 'mac' | 'win' | 'gnome' | 'kde'
 export type ThemeMode = 'light' | 'dark' | 'auto'
 export type ThemeVariant =
+  | 'evershell-light' | 'evershell-dark'
   | 'dark' | 'macos'                 // WebTerm: Midnight, Aurora (id-uri istorice)
   | 'mac-light' | 'mac-dark'
   | 'win-light' | 'win-dark'
@@ -30,7 +35,8 @@ export type ThemeVariant =
 export interface ThemePref { family: ThemeFamily; mode: ThemeMode }
 
 export const THEME_KEY = 'wt_theme'
-export const DEFAULT_PREF: ThemePref = { family: 'webterm', mode: 'dark' }
+// 3.7.1: tema mărcii e default-ul pentru cine n-a ales nimic (Classic rămâne la un click)
+export const DEFAULT_PREF: ThemePref = { family: 'evershell', mode: 'dark' }
 
 /** Mostre pentru cardurile din Setări (doar ilustraţie: culorile reale sunt tokenii din index.css). */
 export interface Swatch { bg: string; side: string; surface: string; line: string; accent: string; text: string }
@@ -44,6 +50,11 @@ export interface VariantInfo {
 }
 
 export const VARIANTS: Record<ThemeVariant, VariantInfo> = {
+  // 3.7.1 — EverShell (docs/brand/cursor): Petrol #0D3640, Cream #F6F4EE, Phosphor #F2A33A, Muted #BACACB
+  'evershell-dark': { family: 'evershell', light: false, themeColor: '#0d3640',
+    swatch: { bg: '#08272f', side: '#0d3640', surface: '#144551', line: '#1e5664', accent: '#f2a33a', text: '#f6f4ee' } },
+  'evershell-light': { family: 'evershell', light: true, themeColor: '#f6f4ee',
+    swatch: { bg: '#f6f4ee', side: '#fdfcf9', surface: '#ffffff', line: '#dfdbd0', accent: '#f2a33a', text: '#0d3640' } },
   dark: { family: 'webterm', light: false, themeColor: '#0b0e14',
     swatch: { bg: '#0c1017', side: '#151b29', surface: '#1a2030', line: '#252d42', accent: '#4f46e5', text: '#e2e8f0' } },
   macos: { family: 'webterm', light: true, themeColor: '#edf0f7',
@@ -69,6 +80,7 @@ export const VARIANTS: Record<ThemeVariant, VariantInfo> = {
 
 /** Ordinea din Setări; `light`/`dark` = varianta fiecărui mod. */
 export const FAMILIES: readonly { id: ThemeFamily; light: ThemeVariant; dark: ThemeVariant }[] = [
+  { id: 'evershell', light: 'evershell-light', dark: 'evershell-dark' },
   { id: 'webterm', light: 'macos', dark: 'dark' },
   { id: 'mac', light: 'mac-light', dark: 'mac-dark' },
   { id: 'win', light: 'win-light', dark: 'win-dark' },
@@ -91,7 +103,8 @@ export function parseThemePref(raw: string | null | undefined): ThemePref {
   return { ...DEFAULT_PREF }
 }
 
-/** Preferinţă → valoarea scrisă în `wt_theme` (WebTerm în formatul vechi, pentru downgrade). */
+/** Preferinţă → valoarea scrisă în `wt_theme` (WebTerm/Classic în formatul vechi, pentru downgrade;
+    `evershell:<mod>` e necunoscut pentru ≤ 3.7.0, care cade pe default-ul lui — Midnight). */
 export function serializeThemePref(p: ThemePref): string {
   if (p.family === 'webterm') return p.mode === 'light' ? 'macos' : p.mode
   return `${p.family}:${p.mode}`
@@ -111,7 +124,7 @@ export function isLight(v: ThemeVariant): boolean {
 }
 
 export function familyOf(v: ThemeVariant): ThemeFamily {
-  return VARIANTS[v]?.family ?? 'webterm'
+  return VARIANTS[v]?.family ?? DEFAULT_PREF.family
 }
 
 /** Numele afişat al unei variante: Midnight/Aurora rămân nume proprii; restul = „familie · mod". */

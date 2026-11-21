@@ -304,7 +304,7 @@ export function ExportHostsModal(props: { hosts: Host[]; presetFolder?: string; 
   }
 
   const chip = (on: boolean) => `rounded-full px-2.5 py-1 text-xs ring-1 transition ${
-    on ? 'bg-sky-600 text-white ring-sky-600' : 'text-slate-300 ring-ink-700 hover:bg-ink-800'}`
+    on ? 'bg-sky-600 text-on-accent ring-sky-600' : 'text-slate-300 ring-ink-700 hover:bg-ink-800'}`
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">

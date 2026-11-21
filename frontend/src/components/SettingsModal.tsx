@@ -328,13 +328,13 @@ export default function SettingsModal(props: {
                       onClick={() => openCat(c.id)}
                       aria-current={sel ? 'true' : undefined}
                       className={`wt-touch flex min-h-[44px] w-full items-center gap-2 rounded-md px-3 py-2 text-left text-base sm:min-h-0 sm:text-sm ${
-                        sel ? 'text-slate-200 hover:bg-ink-800 sm:bg-sky-600 sm:text-white sm:hover:bg-sky-600' : 'text-slate-300 hover:bg-ink-800'
+                        sel ? 'text-slate-200 hover:bg-ink-800 sm:bg-sky-600 sm:text-on-accent sm:hover:bg-sky-600' : 'text-slate-300 hover:bg-ink-800'
                       }`}
                     >
                       <span className="min-w-0 flex-1">{t(c.labelKey)}</span>
                       {c.id === 'sanatate' && !!props.healthAttention && (
                         <span className={`shrink-0 rounded-full px-1.5 text-2xs font-semibold ${
-                          sel ? 'bg-warn/10 text-warn sm:bg-white/20 sm:text-white' : 'bg-warn/10 text-warn'}`}>
+                          sel ? 'bg-warn/10 text-warn sm:bg-white/20 sm:text-on-accent' : 'bg-warn/10 text-warn'}`}>
                           <span aria-hidden="true">{props.healthAttention}</span>
                           <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
                         </span>

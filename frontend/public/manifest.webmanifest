@@ -2,8 +2,8 @@
   "name": "EverShell",
   "short_name": "EverShell",
   "display": "standalone",
-  "background_color": "#0b0e14",
-  "theme_color": "#0b0e14",
+  "background_color": "#0d3640",
+  "theme_color": "#0d3640",
   "start_url": "/",
   "icons": [
     { "src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },

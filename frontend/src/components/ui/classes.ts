@@ -4,7 +4,8 @@
 
    Auditul UI (2026-10, §2-3) a numărat ~60 de combinaţii de clase pentru acelaşi buton: raze,
    padding şi culori hover alese din ochi. Regulile de aici:
-   - fundalurile pline sunt alese ca albul să treacă AA: sky-600 (6,3:1), rose-600 (4,7:1);
+   - fundalurile pline sunt alese ca albul să treacă AA: sky-600 (6,3:1), rose-600 (4,7:1); pe umplerea
+     sky-600 textul e `text-on-accent` (alb; Petrol în EverShell, unde sky-600 = Phosphor, 6,22:1);
      hover-ul merge spre ÎNCHIS (sky-700/rose-700) — `hover:bg-sky-500` cădea la 4,47:1;
    - raza unui control e `rounded-md` (6px), a unui card `rounded-xl`, a unui dialog `rounded-2xl`;
    - `disabled:` scade opacitatea (exceptat de WCAG 1.4.3) şi scoate cursorul de click.
@@ -26,7 +27,7 @@ const BTN_SIZE: Record<ButtonSize, string> = {
 }
 
 const BTN_VARIANT: Record<ButtonVariant, string> = {
-  primary: 'bg-sky-600 text-white hover:bg-sky-700',
+  primary: 'bg-sky-600 text-on-accent hover:bg-sky-700',
   secondary: 'bg-ink-800 text-slate-300 ring-1 ring-ink-700 hover:bg-ink-700',
   danger: 'bg-rose-600 text-white hover:bg-rose-700',
   ghost: 'text-slate-400 hover:bg-ink-800 hover:text-slate-200',

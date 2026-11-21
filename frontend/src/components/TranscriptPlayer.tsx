@@ -295,7 +295,7 @@ export default function TranscriptPlayer(props: {
               <button key={m} onClick={() => (m === 'text' ? showText() : setMode('play'))}
                 aria-current={mode === m ? 'true' : undefined}
                 className={`wt-touch rounded-md px-2.5 py-1 text-xs ${
-                  mode === m ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-700'}`}
+                  mode === m ? 'bg-sky-600 text-on-accent' : 'text-slate-300 hover:bg-ink-700'}`}
               >{label}</button>
             ))}
           </div>
@@ -427,7 +427,7 @@ export default function TranscriptPlayer(props: {
                   key={s}
                   onClick={() => setSpeed(s)}
                   className={`rounded-md px-2 py-1 text-xs ${
-                    speed === s ? 'bg-sky-600 text-white' : 'bg-ink-800 text-slate-400 hover:bg-ink-700'
+                    speed === s ? 'bg-sky-600 text-on-accent' : 'bg-ink-800 text-slate-400 hover:bg-ink-700'
                   }`}
                 >
                   {s}×

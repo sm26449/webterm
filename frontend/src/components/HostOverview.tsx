@@ -613,7 +613,7 @@ function SessionThumb(props: {
         <ThumbPreview sid={s.id} live />
         {/* overlay „deschide" la hover */}
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100">
-          <span aria-hidden="true" className="rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg">{t('host.openTerminal')}</span>
+          <span aria-hidden="true" className="rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-medium text-on-accent shadow-lg">{t('host.openTerminal')}</span>
         </div>
       </div>
       <div className="flex items-center gap-2 px-3 py-1.5">

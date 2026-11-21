@@ -163,7 +163,7 @@ export default function HostOfflineOverlay(props: {
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 {actions.reconnect && props.onReconnect && (
                   <button type="button" onClick={props.onReconnect} disabled={props.reconnecting}
-                    className={`${btn} bg-sky-600 text-white ring-sky-500 hover:bg-sky-700 disabled:opacity-50`}>
+                    className={`${btn} bg-sky-600 text-on-accent ring-sky-500 hover:bg-sky-700 disabled:opacity-50`}>
                     {props.reconnecting ? t('session.reconnectingBtn') : <><RefreshIcon size={12} /><span className="ml-1">{t('hostOffline.reconnect')}</span></>}
                   </button>
                 )}

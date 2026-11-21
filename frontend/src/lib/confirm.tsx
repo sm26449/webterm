@@ -156,7 +156,7 @@ function PromptModal(props: { o: PromptOptions; onSubmit: (v: string) => void; o
             {props.o.cancelLabel ?? t('common.cancel')}
           </button>
           <button type="submit"
-            className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700">
+            className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-accent hover:bg-sky-700">
             {props.o.confirmLabel ?? t('common.confirm')}
           </button>
         </div>

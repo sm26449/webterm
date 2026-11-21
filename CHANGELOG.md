@@ -10,6 +10,12 @@ back.
 ## [Unreleased]
 
 ### Changed
+- **A new default look in the brand colours: EverShell.** Petrol surfaces, cream text and the
+  phosphor cursor as the accent, in light and dark, with a matching terminal scheme. It is what a
+  browser gets when nobody has picked a theme yet; if you chose one before (Midnight included),
+  you keep it. The original look is still there as **Classic** (Midnight / Aurora), and its
+  terminal scheme is now called *Classic Dark*. Every text and control in both EverShell modes
+  meets WCAG AA contrast.
 - **Settings are organised by who they are for.** Three groups instead of ten mixed tabs: *Personal*
   (Account & security, Appearance, Terminal & workspace, My notifications), *Administration* (People &
   roles, Access & automation, Security policy, Network & certificates, Alert delivery, Backup, Updates)

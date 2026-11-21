@@ -17,16 +17,18 @@ describe('migrarea `wt_theme` (valorile ≤ 3.6.3 arată EXACT la fel)', () => {
     expect(resolveVariant(parseThemePref('auto'), false)).toBe('dark')
   })
 
-  it('lipsă / necunoscut / stricat → default (Midnight), fără excepţii', () => {
+  it('lipsă / necunoscut / stricat → default (3.7.1: EverShell dark), fără excepţii', () => {
     for (const raw of [null, undefined, '', 'light', 'Dark', 'aurora', 'kde:sepia', 'cde:dark', 'mac:sepia', 'mac', ':dark',
       'mac:dark:x', '{"family":"mac"}', ' '.repeat(3)]) {
       expect(parseThemePref(raw)).toEqual(DEFAULT_PREF)
     }
-    expect(resolveVariant(DEFAULT_PREF, true)).toBe('dark')
+    expect(DEFAULT_PREF).toEqual({ family: 'evershell', mode: 'dark' })
+    expect(resolveVariant(DEFAULT_PREF, true)).toBe('evershell-dark')
+    expect(resolveVariant(DEFAULT_PREF, false)).toBe('evershell-dark')
   })
 
   it('familiile noi: `<familie>:<mod>`, dus-întors', () => {
-    const fams: ThemeFamily[] = ['webterm', 'mac', 'win', 'gnome', 'kde']
+    const fams: ThemeFamily[] = ['evershell', 'webterm', 'mac', 'win', 'gnome', 'kde']
     const modes: ThemeMode[] = ['light', 'dark', 'auto']
     for (const family of fams) for (const mode of modes) {
       expect(parseThemePref(serializeThemePref({ family, mode }))).toEqual({ family, mode })
@@ -35,6 +37,9 @@ describe('migrarea `wt_theme` (valorile ≤ 3.6.3 arată EXACT la fel)', () => {
     // 3.6.11: KDE Plasma / Breeze
     expect(parseThemePref('kde:dark')).toEqual({ family: 'kde', mode: 'dark' })
     expect(serializeThemePref({ family: 'kde', mode: 'auto' })).toBe('kde:auto')
+    // 3.7.1: EverShell
+    expect(serializeThemePref({ family: 'evershell', mode: 'light' })).toBe('evershell:light')
+    expect(parseThemePref('evershell:auto')).toEqual({ family: 'evershell', mode: 'auto' })
   })
 
   it('WebTerm se scrie în formatul vechi (un downgrade la 3.6.3 citeşte aceeaşi temă)', () => {
@@ -57,13 +62,19 @@ describe('variante', () => {
 
   it('isLight: toate variantele deschise (nu doar `macos`)', () => {
     const light = (Object.keys(VARIANTS) as ThemeVariant[]).filter(isLight).sort()
-    expect(light).toEqual(['gnome-light', 'kde-light', 'mac-light', 'macos', 'win-light'])
+    expect(light).toEqual(['evershell-light', 'gnome-light', 'kde-light', 'mac-light', 'macos', 'win-light'])
     for (const f of FAMILIES) {
       expect(isLight(f.light)).toBe(true)
       expect(isLight(f.dark)).toBe(false)
       expect(VARIANTS[f.light].family).toBe(f.id)
       expect(VARIANTS[f.dark].family).toBe(f.id)
     }
+  })
+
+  it('ordinea cardurilor: EverShell primul, apoi Classic (webterm), apoi stilurile de sistem', () => {
+    expect(FAMILIES.map((f) => f.id)).toEqual(['evershell', 'webterm', 'mac', 'win', 'gnome', 'kde'])
+    expect(VARIANTS['evershell-dark'].themeColor).toBe('#0d3640')
+    expect(VARIANTS['evershell-light'].themeColor).toBe('#f6f4ee')
   })
 
   it('comutarea din paletă rămâne în familie', () => {
@@ -77,6 +88,7 @@ describe('variante', () => {
     expect(variantName('macos', t)).toBe('Aurora')
     expect(variantName('gnome-dark', t)).toBe('theme.family.gnome · theme.mode.dark')
     expect(variantName('kde-light', t)).toBe('theme.family.kde · theme.mode.light')
+    expect(variantName('evershell-dark', t)).toBe('theme.family.evershell · theme.mode.dark')
   })
 
   it('theme-color PWA: un hex valid pentru fiecare variantă; Midnight/Aurora neschimbate', () => {

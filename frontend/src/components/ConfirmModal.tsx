@@ -28,8 +28,8 @@ export default function ConfirmModal(props: {
     return () => el.removeEventListener('keydown', onKey, true)
   }, [])
   const confirmBtn = props.danger
-    ? 'bg-rose-600 hover:bg-rose-700'
-    : 'bg-sky-600 hover:bg-sky-700'
+    ? 'bg-rose-600 text-white hover:bg-rose-700'
+    : 'bg-sky-600 text-on-accent hover:bg-sky-700'   // 3.7.1: Petrol pe Phosphor în EverShell
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={props.onCancel}>
@@ -57,7 +57,7 @@ export default function ConfirmModal(props: {
           <button
             autoFocus={!props.danger}
             onClick={props.onConfirm}
-            className={`rounded-md px-3 py-1.5 text-sm font-medium text-white ${confirmBtn}`}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium ${confirmBtn}`}
           >
             {props.confirmLabel ?? t('common.confirm')}
           </button>

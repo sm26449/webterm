@@ -73,6 +73,7 @@ const PER_THEME = 41
 // pe variantele DESCHISE şi editorul de fişiere de pe pagina hostului (UI-01: sub `.wt-canvas`
 // cardul lua tokenii temei deschise — fiecare familie are glass-bg/ws-* proprii) = +1.
 const NEW_VARIANTS = [
+  ['evershell:light', 'evershell-light'], ['evershell:dark', 'evershell-dark'],   // 3.7.1 (default-ul)
   ['mac:light', 'mac-light'], ['mac:dark', 'mac-dark'],
   ['win:light', 'win-light'], ['win:dark', 'win-dark'],
   ['gnome:light', 'gnome-light'], ['gnome:dark', 'gnome-dark'],
@@ -1015,7 +1016,7 @@ try {
   }
 
   // ---- 3.6.4: familiile de temă noi (macOS / Windows 11 / GNOME; KDE Plasma din 3.6.11 × light / dark) ----
-  // Setul complet de mai sus rulează pe Midnight şi Aurora; aici, pe fiecare din cele 8 variante noi,
+  // Setul complet de mai sus rulează pe Midnight şi Aurora; aici, pe fiecare din cele 10 variante noi (EverShell din 3.7.1),
   // un subset REPREZENTATIV (login, dashboard, sesiune, Setări → Appearance, file browser, un dialog)
   // + verificări de tastatură — ca timpul porţii să rămână mărginit. Contrastul tuturor tokenilor
   // pe toate variantele e verificat static de frontend/src/themeContrast.test.ts.

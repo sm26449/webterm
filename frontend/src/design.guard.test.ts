@@ -228,7 +228,7 @@ describe('design system: garda de regresie', () => {
   // `theme === 'macos'` nou ar trata macOS/Windows/GNOME light ca teme întunecate (editor negru,
   // watermark alb pe alb). La fel în CSS: regulile „doar pe deschis" stau pe [data-mode='light'].
   it('fără teste pe id-uri de temă în afara lib/theme*.ts (foloseşte isLight)', () => {
-    const THEME_ID_CMP = /(?:\btheme\w*|currentTheme\(\))\s*[!=]==?\s*['"](?:macos|dark|light|(?:mac|win|gnome|kde)-(?:light|dark))['"]|[!=]==?\s*['"]macos['"]/
+    const THEME_ID_CMP = /(?:\btheme\w*|currentTheme\(\))\s*[!=]==?\s*['"](?:macos|dark|light|(?:evershell|mac|win|gnome|kde)-(?:light|dark))['"]|[!=]==?\s*['"]macos['"]/
     const hits = Object.entries(files)
       .filter(([f]) => !/^\.\/lib\/theme(Model)?\.ts$/.test(f))
       .flatMap(([f, s]) => s.split('\n').map((l, i) => ({ file: f, line: i + 1, text: l.trim() }))
@@ -268,5 +268,20 @@ describe('design system: garda de regresie', () => {
       '<IconButton className="wt-accent">', '<IconButton className="bg-ink-700">',
       '<Badge className="hover:text-slate-100">', '<Badge className="px-2">',
     ])
+  })
+})
+
+// 3.7.1: în tema EverShell accentul e Phosphor, iar alb pe Phosphor are 2,08:1 — ilizibil. Textul pe
+// o umplere de accent foloseşte tokenul `text-on-accent` (alb în celelalte teme, Petrol în EverShell).
+describe('text on the accent fill uses text-on-accent', () => {
+  it('no class string combines the accent fill with text-white', () => {
+    const bad: string[] = []
+    const re = /["'`][^"'`]*\bbg-sky-600\b[^"'`]*["'`]/g
+    for (const [path, src] of Object.entries(files)) {
+      for (const m of src.match(re) ?? []) {
+        if (/\btext-white\b/.test(m)) bad.push(`${path}: ${m.slice(0, 80)}`)
+      }
+    }
+    expect(bad).toEqual([])
   })
 })

@@ -131,7 +131,7 @@ export default function ReplayLinkDialog(props: { sid: string; hostId: number; t
                   {REPLAY_EXPIRY_HOURS.map((h) => (
                     <label key={h}
                       className={`wt-touch flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-xs ring-1 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-sky-400 ${
-                        expiry === h ? 'bg-sky-600 text-white ring-sky-600' : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
+                        expiry === h ? 'bg-sky-600 text-on-accent ring-sky-600' : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
                       <input type="radio" name={`${uid}-exp`} value={h} checked={expiry === h}
                         onChange={() => setExpiry(h)} className="sr-only" />
                       {t(expiryKey(h))}

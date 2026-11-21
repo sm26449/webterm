@@ -24,7 +24,7 @@ export function themePref(): ThemePref {
 }
 
 export function currentTheme(): ThemeVariant {
-  // Midnight (WebTerm dark) e tema implicită. „auto" urmează sistemul, în familia aleasă.
+  // fără alegere salvată: EverShell dark (3.7.1; până atunci Midnight). „auto" urmează sistemul, în familia aleasă.
   return resolveVariant(themePref(), systemLight())
 }
 

@@ -247,7 +247,7 @@ export default function DiagnosticModal(props: { host: Host; onClose: () => void
             <button key={c.id} onClick={() => setTab(c.id)}
               aria-current={tab === c.id ? 'true' : undefined}
               className={`wt-touch rounded-md px-3 py-1.5 text-sm ${
-                tab === c.id ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-800'}`}>
+                tab === c.id ? 'bg-sky-600 text-on-accent' : 'text-slate-300 hover:bg-ink-800'}`}>
               {c.label}
             </button>
           ))}

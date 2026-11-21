@@ -69,7 +69,7 @@ export default function MobileKeybar(props: {
   const keyCls = 'min-h-[40px] rounded-md bg-ink-800 px-2 text-xs text-slate-300 active:bg-ink-600'
   // modificator aprins = plin + inel, ca să se vadă dintr-o privire chiar în lumina zilei
   const modCls = (on: boolean) => `min-h-[40px] min-w-[44px] shrink-0 rounded-md px-2 text-xs font-medium ${
-    on ? 'bg-sky-600 text-white ring-2 ring-sky-300' : 'bg-ink-800 text-slate-300'}`
+    on ? 'bg-sky-600 text-on-accent ring-2 ring-sky-300' : 'bg-ink-800 text-slate-300'}`
   const press = (k: KeyDef) => {
     props.onKeys(k.wheel ? k.seq : applyMods(k.seq, ctrl, alt))
     // modificatorii se consumă la ORICE apăsare — altfel rămân aprinşi

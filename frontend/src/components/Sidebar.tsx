@@ -16,7 +16,7 @@ import InstallCommand from './InstallCommand'
 import { hostColor, reachState } from '../lib/host'
 import { canWake } from '../lib/hostOffline'
 import { wakeHost as wakeShared } from '../lib/wake'
-import { allSchemes, hostSchemeRaw, setHostScheme } from '../lib/termtheme'
+import { allSchemes, hostSchemeRaw, schemeName, setHostScheme } from '../lib/termtheme'
 import { AlertsBell } from './AlertsPanel'
 import BrandLogo, { BrandMark } from './BrandLogo'
 import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon, CloseIcon, CollapseIcon, CrownIcon, DownloadIcon, FilesIcon, FolderMoveIcon, GearIcon, KeyIcon, LinkIcon, MoreIcon, NoteIcon, PaletteIcon, PencilIcon, PlugIcon, PlusIcon, PowerIcon, RefreshIcon, SearchIcon, ServerIcon, ShieldSmallIcon, StethoscopeIcon, SubItemIcon, TerminalPromptIcon, WarningIcon } from './Icons'
@@ -1233,7 +1233,7 @@ function GroupChip(props: { label: string; active: boolean; onClick: () => void 
       aria-pressed={props.active}
       className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 transition ${
         props.active
-          ? 'bg-sky-600 text-white ring-sky-600'
+          ? 'bg-sky-600 text-on-accent ring-sky-600'
           : 'bg-ink-800 text-slate-400 ring-ink-700 hover:text-slate-200'
       }`}
     >
@@ -1401,7 +1401,7 @@ function HostMenu(props: {
                         <span key={i} className="h-2.5 w-1 rounded-md" style={{ background: c }} />
                       ))}
                     </span>
-                    {s.name}
+                    {schemeName(s, t)}
                   </button>
                 ))}
               </div>

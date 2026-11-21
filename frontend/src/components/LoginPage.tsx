@@ -256,7 +256,7 @@ export default function LoginPage(props: {
           <button
             type="submit"
             disabled={busy}
-            className="mt-1 rounded-xl bg-sky-600 py-3 text-base font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
+            className="mt-1 rounded-xl bg-sky-600 py-3 text-base font-medium text-on-accent shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
           >
             {busy ? t('login.processing') : props.setupRequired ? t('login.createAccount') : totpRequired ? t('login.confirmCode') : t('login.enter')}
           </button>
