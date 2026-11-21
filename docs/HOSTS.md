@@ -527,7 +527,7 @@ alone no longer opens a connection.
   when the gateway cannot load its CA (for example after restoring onto a server with a different
   vault key). Agents go back to the
   token route, including hosts that were required: an intentional off (this setting, a CDN in front,
-  no valid agents name) lifts the requirement, so it never locks a host out. Behind a CDN that
+  no valid agents name, no edge directory) lifts the requirement, so it never locks a host out. Behind a CDN that
   terminates TLS, mTLS is off by itself.
 - **Going back to a gateway older than 3.7.0** works too: agents 60 keep their token route, and the
   older gateway has no requirement to enforce.

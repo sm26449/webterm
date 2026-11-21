@@ -5,6 +5,7 @@ import { useI18n } from '../../../lib/i18n'
 import { ROLE_KEYS, RolesCatalogue, roleValue, ScopeKind, SCOPE_KINDS, SHELL_ROLES } from '../../../lib/perms'
 import { EXPIRY_CHOICES, expiresIn, expiryFrom, type ExpiryChoice, type UserRow } from '../../../lib/usersAdmin'
 import { field } from '../ui'
+import { byText } from '../../../lib/sortText'
 
 /* Piese comune sub-tab-urilor din Users & roles (3.6.6; mutate din UsersTab.tsx fără schimbări de
    comportament): alegerea scope-ului, opţiunile de rol şi regula „⚑ shell". */
@@ -20,8 +21,8 @@ export function ScopePicker(props: {
   idPrefix: string
 }) {
   const { t } = useI18n()
-  const folders = useMemo(() => [...new Set(props.hosts.map((h) => h.folder || '').filter(Boolean))].sort(), [props.hosts])
-  const tags = useMemo(() => [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort(), [props.hosts])
+  const folders = useMemo(() => [...new Set(props.hosts.map((h) => h.folder || '').filter(Boolean))].sort(byText), [props.hosts])
+  const tags = useMemo(() => [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort(byText), [props.hosts])
   const listId = `${props.idPrefix}-scope-list`
   return (
     <div className="flex flex-col gap-2 sm:flex-row">

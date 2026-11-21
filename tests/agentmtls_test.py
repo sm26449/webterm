@@ -324,6 +324,21 @@ async def main():
         config.AGENT_MTLS = "on"
         await edgemtls._refresh(force=True)
 
+    print("== no edge directory at all (plain docker run): mTLS impossible here, not broken (3.7.1)")
+    real_dir = config.AGENT_LISTS_DIR
+    config.AGENT_LISTS_DIR = os.path.join(EDGE, "does-not-exist")
+    try:
+        await edgemtls._refresh(force=True)
+        check("missing directory → 'no-dir', ratchet lifted, no critical alarm",
+              edgemtls.status["reason"] == "no-dir" and not edgemtls.enforce_ratchet(), edgemtls.status)
+        from app import syshealth as _sh
+        r = await _sh.c_agents_mtls()
+        check("…System health says it is off, not broken", r.severity != "critical" and r.key == "mtls_off", (r.severity, r.key))
+    finally:
+        config.AGENT_LISTS_DIR = real_dir
+        await edgemtls._refresh(force=True)
+    check("directory back → enabled again", edgemtls.enabled())
+
     print("== the CA loads as a matching pair or not at all (Codex audit)")
     good = await db.get_setting(agentca.K_CA, "")
     d = json.loads(good)

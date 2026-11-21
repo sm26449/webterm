@@ -158,7 +158,7 @@ does not count agents per CA. It is planned for a later release, well before the
   `WEBTERM_AGENT_HOST` is not one.
 - **When mTLS breaks** (the CA cannot be loaded, the file cannot be written), the ratchet stays (fail
   closed) and System health raises a critical alarm. Only an intentional off lifts the ratchet:
-  `WEBTERM_AGENT_MTLS=off`, a CDN in front, or no valid agents name. Turning it off is the documented
+  `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name, or no edge directory for Traefik (a plain `docker run`). Turning it off is the documented
   way out.
 - **Forward routing.** When the forward domain equals the main domain, the forward router's
   `HostRegexp` also matches `agents.<domain>`. The agents router gets a higher priority, and the slug

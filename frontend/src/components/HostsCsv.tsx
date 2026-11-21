@@ -7,6 +7,7 @@ import { field } from './settings/ui'
 import { Button, ErrorState } from './ui'
 import HelpTip from './HelpTip'
 import InstallCommand from './InstallCommand'
+import { byText } from '../lib/sortText'
 
 /* Export / import CSV de hosturi (3.5.4). Mutarea unui subset de hosturi pe alt gateway, sau o
    listă editabilă într-un spreadsheet — FĂRĂ secrete (nici parole, nici chei, nici tokenuri).
@@ -271,8 +272,8 @@ export function ExportHostsModal(props: { hosts: Host[]; presetFolder?: string; 
     props.presetFolder === undefined ? [] : list.filter((h) => (h.folder || '') === props.presetFolder).map((h) => h.id)))
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const folders = [...new Set(list.map((h) => h.folder || ''))].sort()
-  const tags = [...new Set(list.flatMap((h) => h.tags || []))].sort()
+  const folders = [...new Set(list.map((h) => h.folder || ''))].sort(byText)
+  const tags = [...new Set(list.flatMap((h) => h.tags || []))].sort(byText)
 
   const allOf = (ids: number[]) => ids.length > 0 && ids.every((id) => sel.has(id))
   function toggleGroup(ids: number[]) {

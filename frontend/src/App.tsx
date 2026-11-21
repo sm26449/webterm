@@ -61,6 +61,7 @@ import { setWalkthroughUser, shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
+import { byText } from './lib/sortText'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -2197,7 +2198,7 @@ function MainApp() {
       )}
       {editHostApp && (
         <Suspense fallback={null}>
-          <AddHostModal host={editHostApp} tagSuggestions={[...new Set(hosts.flatMap((h) => h.tags || []))].sort()}
+          <AddHostModal host={editHostApp} tagSuggestions={[...new Set(hosts.flatMap((h) => h.tags || []))].sort(byText)}
             onSaved={refresh} onClose={() => setEditHostApp(null)} />
         </Suspense>
       )}

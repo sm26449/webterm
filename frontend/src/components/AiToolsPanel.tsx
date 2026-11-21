@@ -14,6 +14,7 @@ import {
 import { CloseIcon, PlusIcon, RefreshIcon } from './Icons'
 import HelpTip from './HelpTip'
 import { Button } from './ui'
+import { byText } from '../lib/sortText'
 
 const FileEditor = lazy(() => import('./FileEditor'))
 
@@ -100,7 +101,7 @@ export default function AiToolsPanel(props: {
         const dir = collectionDir(kind, scope, b)!
         const entries = (await listIfExists(dir)) || []
         const items = entries.map((e) => itemName(kind, e)).filter((n): n is string => !!n)
-          .sort().map((name) => ({ name, path: itemPath(kind, dir, name), desc: null as string | null }))
+          .sort(byText).map((name) => ({ name, path: itemPath(kind, dir, name), desc: null as string | null }))
         // descrierile din frontmatter, în paralel, best-effort (un fişier stricat nu strică lista)
         await Promise.all(items.slice(0, MAX_DESC).map(async (it) => {
           try {

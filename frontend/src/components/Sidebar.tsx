@@ -22,6 +22,7 @@ import { ActivityIcon, ArrowUpIcon, BanIcon, BellIcon, BellOffIcon, ChevronIcon,
 import { fmt } from '../lib/shortcuts'
 import { setHostMuted, updatesSignal, useUpdatesPref } from '../lib/updatesPref'
 import { Badge, Button, ErrorState, IconButton } from './ui'
+import { byText } from '../lib/sortText'
 
 // modale rar folosite → chunk-uri separate, în afara bundle-ului inițial
 const AddHostModal = lazy(() => import('./AddHostModal'))
@@ -421,9 +422,9 @@ export default function Sidebar(props: {
   const [groupFilter, setGroupFilter] = useState<string | null>(null)
 
   // grupurile existente (foldere) pentru filtrare rapidă
-  const groups = [...new Set(props.hosts.map((h) => h.folder || '').filter(Boolean))].sort()
+  const groups = [...new Set(props.hosts.map((h) => h.folder || '').filter(Boolean))].sort(byText)
   // etichetele deja folosite → sugestii în Add-host (evită fragmentarea taxonomiei: web/webserver)
-  const allTags = [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort()
+  const allTags = [...new Set(props.hosts.flatMap((h) => h.tags || []))].sort(byText)
 
   // Ţintele SSH-jump/telnet-prin-agent se salvează cu `via_host_id` = agentul prin care se
   // tunelează. În sidebar le cuibărim SUB acel agent (nu în lista plată de foldere), ca să

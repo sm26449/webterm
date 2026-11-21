@@ -25,6 +25,7 @@ import secrets
 import urllib.parse
 
 import asyncio
+import os
 import time
 
 from . import agentca, config, core, db, edgelists, fwddomain
@@ -98,7 +99,12 @@ def intent_off_reason() -> str:
         return "proxy"
     if not agent_host():
         return "host"
-    if not edgelists._dir():
+    d = edgelists._dir()
+    # Directorul lipsă (nici volum `edge-lists`, nici folder: un `docker run` simplu, un compose vechi)
+    # înseamnă că Traefik nu are de unde citi ruta mTLS, deci mTLS nu poate exista aici: e o stare a
+    # instalării, nu o defecţiune (3.7.1; înainte: alarmă CRITICĂ „write-error FileNotFoundError").
+    # Un director care EXISTĂ dar nu se poate scrie rămâne `write-error` (clichet păstrat, alarmă critică).
+    if not d or not os.path.isdir(d):
         return "no-dir"
     return ""
 

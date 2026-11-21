@@ -251,7 +251,7 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - Only re-enrolling the host clears the mark, and only when the new install claims the link
   (`api.install_script`), not when the link is generated.
 - The requirement is lifted only when mTLS is off on purpose or cannot exist here
-  (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name). That
+  (`edgemtls.enforce_ratchet()`: `WEBTERM_AGENT_MTLS=off`, a CDN in front, no valid agents name, no edge directory). That
   is the rollback, and it must work even when the CA cannot be loaded. When mTLS is broken (CA error,
   file not writable), the requirement stays and System health raises a critical alarm.
 - A client certificate counts only when the request came through Traefik's mTLS router, which proves

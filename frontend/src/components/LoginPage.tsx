@@ -254,6 +254,7 @@ export default function LoginPage(props: {
             {error}
           </div>
           <button
+            type="submit"
             disabled={busy}
             className="mt-1 rounded-xl bg-sky-600 py-3 text-base font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.99] disabled:opacity-50"
           >
