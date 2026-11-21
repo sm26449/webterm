@@ -1153,6 +1153,8 @@ export default function Sidebar(props: {
             // Linkurile adânci (Dashboard, clopoţel, revenirea după step-up) vin ca ţintă explicită.
             initialCat={settingsTarget.cat}
             initialSection={settingsTarget.section}
+            // pe telefon: o ţintă explicită deschide direct categoria; rotiţa — lista categoriilor
+            explicitTarget={settingsCat !== undefined}
             healthAttention={health?.count ?? 0}
             onAccountChanged={props.onAccountChanged}
             onClose={() => setShowSettings(false)}

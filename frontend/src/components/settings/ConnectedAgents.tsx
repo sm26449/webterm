@@ -8,7 +8,8 @@ import {
 } from '../../lib/agentFleet'
 import { mtlsDaysLeft, mtlsExpiringSoon, mtlsState } from '../../lib/mtls'
 import { Badge, Button } from '../ui'
-import { RefreshIcon } from '../Icons'
+import { ChevronIcon, RefreshIcon } from '../Icons'
+import { PHONE_QUERY, useMediaQuery } from '../../lib/sheet'
 import { field } from './ui'
 import DiagnosticModal from '../DiagnosticModal'
 
@@ -27,6 +28,13 @@ export default function ConnectedAgents() {
   const [version, setVersion] = useState('')
   const [hosts, setHosts] = useState<Host[] | null>(null)
   const [diag, setDiag] = useState<Host | null>(null)
+  // 3.7.1 (auditul UX Setări C3/#8): pe telefon tabelul de 8 coloane derula orizontal într-un panou
+  // deja derulabil (502px în 326px). Acolo randăm carduri: ce citeşti întâi (host, stare, rută,
+  // versiune) e sus, restul la atingere. JS, nu CSS: un singur set de butoane în DOM (selectorii
+  // e2e şi cititoarele de ecran nu găsesc dubluri ascunse).
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [open, setOpen] = useState<Set<number>>(() => new Set())
+  const toggle = (id: number) => setOpen((s) => { const n = new Set(s); if (!n.delete(id)) n.add(id); return n })
 
   const load = () => {
     setBusy(true); setErr('')
@@ -98,6 +106,58 @@ export default function ConnectedAgents() {
         <p className="mt-2 text-xs text-slate-500">{t('health.agents.none')}</p>
       ) : rows.length === 0 ? (
         <p className="mt-2 text-xs text-slate-500">{t('health.agents.noMatch')}</p>
+      ) : phone ? (
+        <ul className="mt-2 flex flex-col gap-2" data-agent-cards aria-label={t('health.agents.title')}>
+          {rows.map((a) => {
+            const m = fleetMtls(a)
+            const days = mtlsState(m) === 'none' ? null : mtlsDaysLeft(m, now)
+            const old = a.agent_version != null && data.expected_version != null && a.agent_version < data.expected_version
+            const isOpen = open.has(a.id)
+            const detailsId = `agent-card-${a.id}`
+            return (
+              <li key={a.id} data-agent-card={a.name} className="rounded-md ring-1 ring-ink-800">
+                <button type="button" aria-expanded={isOpen} aria-controls={detailsId} onClick={() => toggle(a.id)}
+                  className="wt-touch flex min-h-[44px] w-full items-start gap-2 rounded-md px-3 py-2 text-left hover:bg-ink-800">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-slate-200">{a.name}</span>
+                    {a.folder && <span className="block truncate text-xs text-slate-500">{a.folder}</span>}
+                    <span className="mt-1 flex flex-wrap gap-1.5">
+                      <Badge tone={a.online ? 'ok' : 'danger'}>{t(a.online ? 'health.agents.online' : 'health.agents.offline')}</Badge>
+                      <Badge tone={a.online && a.route ? (a.route === 'mtls' ? 'info' : 'warn') : 'neutral'}>{t(routeKey(a))}</Badge>
+                      {a.agent_version != null && (
+                        <Badge tone={old ? 'warn' : 'neutral'}>{t('health.agents.versionN', { version: a.agent_version })}</Badge>
+                      )}
+                    </span>
+                  </span>
+                  <span aria-hidden="true" className="mt-0.5 shrink-0 text-slate-500"><ChevronIcon open={isOpen} /></span>
+                </button>
+                {isOpen && (
+                  <div id={detailsId} className="border-t border-ink-800 px-3 py-2 text-xs">
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                      {!a.online && a.last_heartbeat && (<>
+                        <dt className="text-slate-500">{t('health.agents.col.status')}</dt>
+                        <dd>{t('health.agents.lastSeen', { when: fmtTs(a.last_heartbeat) })}</dd>
+                      </>)}
+                      <dt className="text-slate-500">{t('health.agents.col.ip')}</dt>
+                      <dd className="break-all font-mono">{a.agent_ip || '—'}</dd>
+                      <dt className="text-slate-500">{t('health.agents.col.connectedFor')}</dt>
+                      <dd>{a.online && a.connected_since ? fleetDuration(now - a.connected_since, t) : '—'}</dd>
+                      <dt className="text-slate-500">{t('health.agents.col.reconnects')}</dt>
+                      <dd className={'tabular-nums' + (a.reconnects_24h > 5 ? ' wt-warn' : '')}>{a.reconnects_24h}</dd>
+                      <dt className="text-slate-500">{t('health.agents.col.cert')}</dt>
+                      <dd className={days !== null && mtlsExpiringSoon(m, now) ? 'wt-warn' : ''}>
+                        {days === null ? '—' : days < 0 ? t('health.agents.certExpired') : t('host.mtls.expires', { days })}
+                      </dd>
+                    </dl>
+                    <Button variant="secondary" size="sm" type="button" className="mt-2" onClick={() => { void openHost(a.id) }}>
+                      {t('health.agents.openLogShort')}
+                    </Button>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
       ) : (
         <div className="mt-2 overflow-x-auto" role="region" aria-label={t('health.agents.title')} tabIndex={0}>
           <table className="w-full text-xs">

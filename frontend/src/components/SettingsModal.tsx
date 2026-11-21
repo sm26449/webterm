@@ -4,6 +4,8 @@ import { useFocusTrap } from '../lib/useFocusTrap'
 import { groupHits, resolveSettingsTarget, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleGroups, type RuntimeFlags } from '../lib/settingsIndex'
 import { api } from '../lib/api'
 import { rememberSettingsCat } from '../lib/settingsLast'
+import { escapeAction, initialPhoneScreen, railKeyTarget, railTabStop, settingsLayout, type PhoneScreen } from '../lib/settingsNav'
+import { PHONE_QUERY, useMediaQuery } from '../lib/sheet'
 import { can, usePerms } from '../lib/perms'
 import AccountTab from './settings/AccountTab'
 import SignInTab from './settings/SignInTab'
@@ -21,7 +23,7 @@ import UpdatesTab from './settings/UpdatesTab'
 import HealthTab from './settings/HealthTab'
 import AuditTab from './settings/AuditTab'
 import { EmptyState, eyebrow, IconButton } from './ui'
-import { CloseIcon, SearchIcon } from './Icons'
+import { ArrowLeftIcon, ChevronIcon, CloseIcon, SearchIcon } from './Icons'
 
 /** ţinta e un câmp în care se scrie: acolo „/" e text, nu scurtătură */
 const isTypingTarget = (el: EventTarget | null) =>
@@ -72,6 +74,9 @@ export default function SettingsModal(props: {
   initialSection?: string
   onClose: () => void
   onAccountChanged: () => void   // refetch /api/state (refolosit și după salvarea watermark-ului)
+  /** 3.7.1: ţinta a fost cerută explicit (link adânc, căutare, revenire după step-up) — pe telefon
+      se deschide direct categoria; rotiţa simplă deschide lista categoriilor (lib/settingsNav) */
+  explicitTarget?: boolean
   /** 3.6.8: câte verificări din System health cer atenţie (contorul de pe rail) */
   healthAttention?: number
 }) {
@@ -104,6 +109,9 @@ export default function SettingsModal(props: {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const searching = query.trim() !== ''
+  // telefon (sub `sm`): ecranul listei sau al categoriei — vezi mai jos, „Telefon: listă → categorie"
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [screen, setScreen] = useState<PhoneScreen>(() => initialPhoneScreen(!!props.explicitTarget))
   // condiţiile de runtime ale secţiunilor (lib/settingsIndex `requires`): maparea SSO există doar cu
   // SSO activ. Necunoscut (încă se încarcă / a picat) = vizibilă — tab-ul îşi arată atunci eroarea.
   const [runtime, setRuntime] = useState<RuntimeFlags>({})
@@ -149,6 +157,7 @@ export default function SettingsModal(props: {
     setQuery('')
     setActive(0)
     setCat(h.section.cat)
+    setScreen('cat')
     setJump((j) => ({ id: h.section.id, n: (j?.n ?? 0) + 1 }))
   }
 
@@ -176,29 +185,92 @@ export default function SettingsModal(props: {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, props.onClose)
 
+  // ── Telefon: listă → categorie (3.7.1, auditul UX Setări C3) ──
+  // Decizia „ce se vede" e în lib/settingsNav (testată); aici doar o aplicăm. Pragul e acelaşi cu al
+  // clasei `sm:` (PHONE_QUERY), deci stilurile `sm:` şi structura nu se pot contrazice.
+  const layout = settingsLayout(phone, screen, searching)
+  const navRef = useRef<HTMLElement>(null)
+  const catTitleRef = useRef<HTMLHeadingElement>(null)
+  const openCat = (c: SettingsCat) => { setQuery(''); setCat(c); setScreen('cat') }
+  // Focusul urmează ecranul: intrat în categorie → titlul ei (cititorul de ecran anunţă unde a ajuns;
+  // un salt la secţiune îl mută apoi pe secţiune); înapoi pe listă → rândul categoriei din care vii.
+  const prevScreen = useRef(screen)
+  useEffect(() => {
+    if (prevScreen.current === screen) return
+    prevScreen.current = screen
+    if (!phone) return
+    if (screen === 'cat') {
+      if (contentRef.current) contentRef.current.scrollTop = 0
+      catTitleRef.current?.focus({ preventScroll: true })
+    } else {
+      navRef.current?.querySelector<HTMLElement>(`[data-settings-cat="${cat}"]`)?.focus()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen])
+
+  // ── Rail-ul de desktop: o singură oprire de Tab, săgeţile între categorii (auditul Me6) ──
+  // Rămâne `nav` cu butoane + aria-current, nu `tablist`: grupurile cu titlu (role=group) nu sunt
+  // copii permişi ai unui tablist (axe: aria-required-children), iar butoanele se activează nativ
+  // cu Enter/Space — săgeţile doar mută focusul (roving tabindex), deci nimic nu se schimbă singur.
+  const railIds = groups.flatMap((g) => g.cats.map((c) => c.id))
+  const [railFocus, setRailFocus] = useState<SettingsCat | null>(null)
+  const tabStop = railTabStop(railIds, railFocus ?? cat)
+  const onRailKey = (e: KeyboardEvent<HTMLElement>) => {
+    const id = (e.target as HTMLElement).closest<HTMLElement>('[data-settings-cat]')?.dataset.settingsCat
+    const next = railKeyTarget(e.key, railIds.indexOf(id as SettingsCat), railIds.length)
+    if (next === null || e.altKey || e.ctrlKey || e.metaKey) return
+    e.preventDefault()
+    navRef.current?.querySelector<HTMLElement>(`[data-settings-cat="${railIds[next]}"]`)?.focus()
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 sm:p-4">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t('settings.title')}
         onKeyDown={(e) => {
           if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget(e.target)) {
             e.preventDefault()
-            searchRef.current?.focus()
-            searchRef.current?.select()
+            // pe telefon căutarea stă pe ecranul listei: ne întoarcem acolo, apoi focusăm câmpul
+            // (acolo câmpul e încă ascuns în cadrul ăsta); altfel focus imediat, ca până acum
+            const focusSearch = () => { searchRef.current?.focus(); searchRef.current?.select() }
+            if (phone && screen === 'cat') { setScreen('list'); requestAnimationFrame(focusSearch) }
+            else focusSearch()
+            return
+          }
+          // Escape pe telefon, din categorie: înapoi la listă, nu închiderea Setărilor. Doar pentru
+          // evenimente din DOM-ul dialogului — un modal portalat peste noi (jurnalul unui agent,
+          // o confirmare) primeşte evenimentul prin arborele React, dar Escape-ul e al lui.
+          if (e.key === 'Escape' && dialogRef.current?.contains(e.target as Node)
+            && escapeAction(phone, screen, searching) === 'back') {
+            e.preventDefault(); e.stopPropagation()
+            setScreen('list')
           }
         }}
-        className="glass flex h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl sm:h-[88vh] lg:max-w-4xl xl:max-w-5xl">
+        className="wt-settings-frame glass flex h-full w-full flex-col overflow-hidden sm:h-[88vh] sm:max-w-2xl sm:rounded-2xl lg:max-w-4xl xl:max-w-5xl">
         {/* antet fix: titlu, căutare, închidere. În DOM „Închide" vine ÎNAINTEA căutării: useFocusTrap
             pune focusul pe primul element focusabil, iar pe telefon un câmp focusat la deschidere ar
             scoate tastatura de fiecare dată (focusul rămâne pe Închide, ca înainte; „/" duce la
             căutare). Vizual: pe telefon căutarea are rândul ei, sub titlu (la 320px n-ar încăpea
-            lângă el); de la `sm` stă între titlu şi Închide. */}
+            lângă el); de la `sm` stă între titlu şi Închide. Pe telefon, într-o categorie, titlul
+            devine „‹ Settings" + numele categoriei (butonul Back nu e un câmp: tastatura nu apare). */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-ink-800 px-4 py-3 sm:flex-nowrap sm:px-5">
-          <h2 className="order-1 shrink-0 text-lg font-semibold">{t('settings.title')}</h2>
+          {layout.showBack ? (<>
+            <button type="button" data-testid="settings-back" onClick={() => setScreen('list')}
+              aria-label={t('settings.backAria')}
+              className="wt-touch order-1 -ml-2 flex shrink-0 items-center gap-1.5 rounded-md px-2 text-sm font-medium wt-link hover:bg-ink-800">
+              <ArrowLeftIcon /> {t('settings.title')}
+            </button>
+            <h2 ref={catTitleRef} tabIndex={-1} data-settings-current
+              className="order-1 min-w-0 flex-1 truncate text-right text-base font-semibold outline-none">
+              {t(SETTINGS_CATS.find((c) => c.id === cat)?.labelKey ?? 'settings.title')}
+            </h2>
+          </>) : (
+            <h2 className="order-1 shrink-0 text-lg font-semibold">{t('settings.title')}</h2>
+          )}
           <IconButton size="md" onClick={props.onClose} label={t('settings.close')}
             className="order-2 ml-auto sm:order-3 sm:ml-0">
             <CloseIcon size={14} />
           </IconButton>
-          <div role="search" className="relative order-3 w-full min-w-0 sm:order-2 sm:ml-auto sm:w-auto sm:max-w-xs sm:flex-1">
+          <div role="search" className={`${layout.showSearch ? '' : 'hidden'} relative order-3 w-full min-w-0 sm:order-2 sm:ml-auto sm:w-auto sm:max-w-xs sm:flex-1`}>
             <span aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500">
               <SearchIcon size={14} />
             </span>
@@ -230,43 +302,53 @@ export default function SettingsModal(props: {
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          {/* rail de categorii: coloană pe desktop, bandă orizontală pe mobil. 3.7.1 (auditul UX Setări
-              §2.3): categoriile stau în grupuri cu titlu — Personal / Administrare / Operare — ca să se
-              vadă al cui e lucrul înainte de ce e; un grup fără nicio categorie vizibilă nu apare. Pe
-              telefon titlul grupului e un separator mic în bandă (lista → detaliu vine la pasul următor). */}
-          <nav aria-label={t('settings.categoriesNav')}
-            className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 sm:w-48 lg:w-56 sm:flex-col sm:gap-3 sm:overflow-y-auto sm:overflow-x-visible sm:border-b-0 sm:border-r">
+          {/* rail de categorii: coloană pe desktop; pe telefon e ecranul 1 — lista întreagă, pe rânduri
+              de 44px cu chevron (lista → detaliu). 3.7.1 (auditul UX Setări §2.3): categoriile stau în
+              grupuri cu titlu — Personal / Administrare / Operare — ca să se vadă al cui e lucrul
+              înainte de ce e; un grup fără nicio categorie vizibilă nu apare. Pe telefon categoria
+              curentă nu e evidenţiată: lista e un cuprins, nu o selecţie (aria-current rămâne). */}
+          <nav ref={navRef} aria-label={t('settings.categoriesNav')}
+            onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setRailFocus(null) }}
+            className={`${layout.showNav ? 'flex' : 'hidden'} min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-2 sm:w-48 sm:flex-none sm:shrink-0 sm:gap-3 sm:border-r sm:border-ink-800 lg:w-56`}>
             {groups.map((g) => (
               <div key={g.id} role="group" aria-labelledby={`${railId}-${g.id}`}
-                className="flex shrink-0 items-center gap-1 sm:flex-col sm:items-stretch">
+                className="flex flex-col gap-0.5 sm:gap-1">
                 <div id={`${railId}-${g.id}`}
-                  className={`${eyebrow} shrink-0 whitespace-nowrap px-2 sm:px-3 sm:pb-0.5 sm:pt-1`}>{t(g.labelKey)}</div>
-                {g.cats.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => { setQuery(''); setCat(c.id) }}
-                    aria-current={!searching && cat === c.id ? 'true' : undefined}
-                    className={`wt-touch shrink-0 rounded-md px-3 py-2 text-left text-sm sm:w-full ${
-                      !searching && cat === c.id ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-800'
-                    }`}
-                  >
-                    {t(c.labelKey)}
-                    {c.id === 'sanatate' && !!props.healthAttention && (
-                      <span className={`ml-1.5 rounded-full px-1.5 text-2xs font-semibold ${
-                        !searching && cat === c.id ? 'bg-white/20 text-white' : 'bg-warn/10 text-warn'}`}>
-                        <span aria-hidden="true">{props.healthAttention}</span>
-                        <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
-                      </span>
-                    )}
-                  </button>
-                ))}
+                  className={`${eyebrow} px-3 pb-0.5 pt-1`}>{t(g.labelKey)}</div>
+                {g.cats.map((c) => {
+                  const sel = !searching && cat === c.id
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      data-settings-cat={c.id}
+                      tabIndex={c.id === tabStop ? 0 : -1}
+                      onFocus={() => setRailFocus(c.id)}
+                      onKeyDown={onRailKey}
+                      onClick={() => openCat(c.id)}
+                      aria-current={sel ? 'true' : undefined}
+                      className={`wt-touch flex min-h-[44px] w-full items-center gap-2 rounded-md px-3 py-2 text-left text-base sm:min-h-0 sm:text-sm ${
+                        sel ? 'text-slate-200 hover:bg-ink-800 sm:bg-sky-600 sm:text-white sm:hover:bg-sky-600' : 'text-slate-300 hover:bg-ink-800'
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1">{t(c.labelKey)}</span>
+                      {c.id === 'sanatate' && !!props.healthAttention && (
+                        <span className={`shrink-0 rounded-full px-1.5 text-2xs font-semibold ${
+                          sel ? 'bg-warn/10 text-warn sm:bg-white/20 sm:text-white' : 'bg-warn/10 text-warn'}`}>
+                          <span aria-hidden="true">{props.healthAttention}</span>
+                          <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
+                        </span>
+                      )}
+                      <span aria-hidden="true" className="shrink-0 text-slate-500 sm:hidden"><ChevronIcon /></span>
+                    </button>
+                  )
+                })}
               </div>
             ))}
           </nav>
 
           {/* conținut: categoria activă vizibilă (cele vizitate stau montate, ascunse), scrollabil */}
-          <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+          <div ref={contentRef} className={`${layout.showContent ? 'block' : 'hidden'} min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5`}>
             {/* rezultatele căutării: un listbox grupat pe tab-uri. Tab-urile rămân montate dedesubt
                 (doar ascunse), deci o căutare nu pierde nimic din ce era nesalvat. */}
             <span role="status" className="sr-only">

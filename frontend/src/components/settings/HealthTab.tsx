@@ -231,7 +231,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
               </Button>
             )}
             {doc && (
-              <a href={doc} target="_blank" rel="noopener noreferrer" className="wt-link hover:underline">
+              <a href={doc} target="_blank" rel="noopener noreferrer" className="wt-touch inline-flex items-center wt-link hover:underline">
                 {t('health.readDoc', { doc: c.doc.replace(/#.*$/, '') })}
               </a>
             )}
@@ -278,7 +278,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
           {open.length > 0 && <ul className="flex flex-col gap-2">{open.map(renderCheck)}</ul>}
           {passing.length > 0 && (
             <div>
-              <button type="button" className="text-xs wt-link hover:underline" aria-expanded={showOk}
+              <button type="button" className="wt-touch inline-flex items-center text-xs wt-link hover:underline" aria-expanded={showOk}
                 onClick={() => setShowOk((v) => !v)}>
                 {showOk ? t('health.hidePassing') : t('health.showPassing', { count: passing.length })}
               </button>

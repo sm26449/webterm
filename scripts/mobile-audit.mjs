@@ -206,7 +206,7 @@ async function auditDevice(cfg) {
   // telefon în portret (sub `sm`): aici foaia, lista de taburi şi keybar-ul pe 2 rânduri sunt
   // OBLIGATORII — o etapă sărită e bug, ca şi celelalte din REQUIRED
   const isPhone = (cfg.device.viewport?.width ?? 1024) < 640
-  const required = isPhone ? [...REQUIRED, 'keybar', 'selectie-text', 'foaie-panou', 'lista-taburi'] : REQUIRED
+  const required = isPhone ? [...REQUIRED, 'setari-telefon', 'keybar', 'selectie-text', 'foaie-panou', 'lista-taburi'] : REQUIRED
   let blocker = ''            // de ce s-a oprit fluxul, raportat o singură dată
   page.on('pageerror', (e) => errors.push(String(e).slice(0, 120)))
 
@@ -382,8 +382,50 @@ async function auditDevice(cfg) {
     } else {
       await twofa.click()
       const search = page.locator('[role=dialog][aria-modal="true"] [role=search] input')
+      const nav = page.locator('nav[aria-label="Settings categories"]')
+      const back = page.locator('[data-testid="settings-back"]')
+      let tab
+      if (isPhone) {
+        // 3.7.1 (auditul UX Setări C3): pe telefon Setările sunt full-screen, listă → categorie. Linkul
+        // adânc aterizează direct în categorie (titlul ei în antet, „‹ Settings" înapoi); Back duce la
+        // lista categoriilor: rânduri ≥ 44px, fără derulare orizontală, căutarea deasupra.
+        await back.waitFor({ state: 'visible', timeout: 5000 })
+        tab = await page.locator('[data-settings-current]').textContent()
+        const full = await page.evaluate(() => {
+          const r = document.querySelector('[role=dialog][aria-modal="true"]')?.getBoundingClientRect()
+          return !!r && r.left <= 0.5 && r.top <= 0.5 && r.width >= innerWidth - 1 && r.height >= innerHeight - 1
+        })
+        if (!full) note(cfg.name, 'setari-telefon', 'bug', 'Setările nu ocupă tot ecranul pe telefon')
+        await shot('03a-setari-categorie')
+        await back.click()
+        await nav.waitFor({ state: 'visible', timeout: 5000 })
+        await page.waitForTimeout(200)
+        await shot('03a-setari-lista')
+        await check('setari-telefon')
+        const l = await page.evaluate(() => {
+          const rows = [...document.querySelectorAll('nav[aria-label="Settings categories"] button[data-settings-cat]')]
+          const dlg = document.querySelector('[role=dialog][aria-modal="true"]')
+          return {
+            n: rows.length,
+            small: rows.filter((b) => b.getBoundingClientRect().height < 44).map((b) => b.textContent?.trim()),
+            narrow: rows.filter((b) => b.getBoundingClientRect().width < innerWidth * 0.8).length,
+            dlgX: dlg ? dlg.scrollWidth - dlg.clientWidth : 0,
+            docX: document.documentElement.scrollWidth - innerWidth,
+            content: !!document.querySelector('[data-settings-current]'),
+          }
+        })
+        const okList = l.n >= 3 && !l.small.length && !l.narrow && l.dlgX <= 1 && l.docX <= 1 && !l.content
+        if (l.n < 3) note(cfg.name, 'setari-telefon', 'bug', `lista categoriilor are doar ${l.n} rânduri`)
+        if (l.small.length) note(cfg.name, 'setari-telefon', 'bug', `rânduri sub 44px în lista categoriilor: ${l.small.join(', ')}`)
+        if (l.narrow) note(cfg.name, 'setari-telefon', 'bug', `${l.narrow} rânduri din listă nu sunt pe toată lăţimea`)
+        if (l.dlgX > 1 || l.docX > 1) note(cfg.name, 'setari-telefon', 'bug', `lista categoriilor derulează orizontal (${l.dlgX}/${l.docX}px)`)
+        if (l.content) note(cfg.name, 'setari-telefon', 'bug', 'Back n-a întors la lista categoriilor')
+        if (okList && full) reached.add('setari-telefon')
+      } else {
+        await search.waitFor({ state: 'visible', timeout: 5000 })
+        tab = await nav.locator('button[aria-current="true"]').textContent()
+      }
       await search.waitFor({ state: 'visible', timeout: 5000 })
-      const tab = await page.locator('nav[aria-label="Settings categories"] button[aria-current="true"]').textContent()
       if (tab !== 'Account & security') note(cfg.name, 'setari-cautare', 'bug', `link-ul din cardul Securitate a deschis tab-ul „${tab}"`)
       await search.fill('alert')
       await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
@@ -433,7 +475,36 @@ async function auditDevice(cfg) {
         if (u.tabsX !== 'auto') note(cfg.name, 'setari-utilizatori', 'bug', 'sub-tab-urile nu derulează în ele însele când nu încap')
         if (!u.wide.length && u.paneX <= 1 && u.tabsX === 'auto') reached.add('setari-utilizatori')
       }
-      // primul Escape goleşte căutarea, al doilea închide Setările
+      if (isPhone) {
+        // 3.7.1 (auditul UX Setări #8): Connected agents pe telefon = carduri, nu tabelul de 8 coloane
+        // care derula orizontal. Back → listă → System health.
+        if (await back.isVisible().catch(() => false)) await back.click()
+        await page.locator('nav[aria-label="Settings categories"] button[data-settings-cat="sanatate"]').click()
+        const ca = page.locator('[data-testid="connected-agents"]')
+        const shown = await ca.waitFor({ state: 'visible', timeout: 8000 }).then(() => true, () => false)
+        if (!shown) {
+          note(cfg.name, 'setari-agenti', 'bug', 'secţiunea Connected agents nu apare în System health')
+        } else {
+          await page.waitForFunction(() => !!document.querySelector('[data-testid="connected-agents"] [data-agent-cards], [data-testid="connected-agents"] table, [data-testid="connected-agents"] p.mt-2'),
+            null, { timeout: 8000 }).catch(() => {})
+          await ca.scrollIntoViewIfNeeded().catch(() => {})
+          await shot('03d-setari-agenti')
+          const a = await page.evaluate(() => {
+            const root = document.querySelector('[data-testid="connected-agents"]')
+            return { table: !!root?.querySelector('table'), cards: root?.querySelectorAll('[data-agent-card]').length ?? 0 }
+          })
+          if (a.table) note(cfg.name, 'setari-agenti', 'bug', 'Connected agents arată tabelul lat pe telefon, nu carduri')
+          else if (!a.cards) note(cfg.name, 'setari-agenti', 'info', 'Connected agents: niciun agent listat (nimic de verificat pe carduri)')
+          else {
+            await page.locator('[data-agent-card] button[aria-expanded]').first().click()
+            const det = await page.locator('[data-agent-card] button[aria-expanded="true"]').count()
+            if (!det) note(cfg.name, 'setari-agenti', 'bug', 'cardul unui agent nu se desface la atingere')
+            await check('setari-agenti')
+          }
+        }
+      }
+      // tabletă: primul Escape închide (căutarea e deja goală); telefon: primul Escape întoarce din
+      // categorie la listă, al doilea închide Setările
       await page.keyboard.press('Escape')
       await page.keyboard.press('Escape')
       await page.locator('[role=dialog][aria-modal="true"]').waitFor({ state: 'detached', timeout: 5000 }).catch(() => {})

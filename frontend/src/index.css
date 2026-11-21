@@ -942,6 +942,15 @@ textarea {
 .wt-sheet * {
   overscroll-behavior: contain;
 }
+/* Setările pe telefon (3.7.1, auditul UX Setări C3): pe tot ecranul, deci îşi iau singure
+   inset-urile de notch / bara de gesturi, ca foile de mai sus. De la `sm` rămân cardul plutitor. */
+@media (max-width: 639.98px) {
+  .wt-settings-frame {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+      env(safe-area-inset-left);
+    overscroll-behavior: contain;
+  }
+}
 /* Foaie de jos cu acţiuni (3.6.3: „Mai multe" din sesiune, acţiunile unui serviciu pe touch):
    ultimul buton nu stă sub bara de gesturi / home indicator. Doar unde e chiar foaie (sub `sm`
    sau pointer grosier — vezi clasele `sm:` ale fiecărui loc). */
