@@ -843,6 +843,8 @@ def _steady():
     """Ceas continuu: CLOCK_BOOTTIME dacă există (merge şi în suspend, ca ceasul de perete), altfel
     monoton. Folosit doar ca să prindem un SALT al ceasului de perete (epoch-urile tmux sunt pe perete)."""
     cid = getattr(time, "CLOCK_BOOTTIME", None)
+    if cid is None and sys.platform.startswith("linux"):
+        cid = 7          # Python 3.6 nu exportă constanta; pe Linux CLOCK_BOOTTIME = 7 (review)
     if cid is not None:
         try:
             return time.clock_gettime(cid)
@@ -991,6 +993,10 @@ def tmux_kill_if_quiet(s, quiet_secs, deadline, now_wall=None):
             return "active", "tmux format unsupported"
         if v1 != b"1":
             return "active", "tmux activity"
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # review: până aici nu s-a trimis nimic distructiv → refuz curat, nu „kill neconfirmat"
+        return "active", "tmux did not answer before the close"
+    try:
         # decizia: condiţia şi kill-ul în aceeaşi comandă a serverului tmux (argv, fără shell)
         rk = _quiet_tmux(deadline, "if-shell", "-F", "-t", target,
                          tmux_quiet_format(name, threshold, s.pid, attached, client_loop),
@@ -1003,7 +1009,9 @@ def tmux_kill_if_quiet(s, quiet_secs, deadline, now_wall=None):
         # comanda a eşuat. Oricum, nimic omorât şi clientul nostru neatins.
         return ("active", "activity at kill time") if rk.returncode == 0 else ("kill_failed", "tmux kill failed")
     err = (rh.stderr or b"").lower()
-    if b"can't find session" in err or b"no server running" in err:
+    # „no server running" doar dacă if-shell a reuşit (ultima sesiune închisă → serverul iese); cu if-shell
+    # eşuat poate fi un socket dispărut sub un server viu → neconfirmat (review)
+    if b"can't find session" in err or (b"no server running" in err and rk.returncode == 0):
         return "", ""
     return "kill_failed", "tmux state unknown after kill"
 
