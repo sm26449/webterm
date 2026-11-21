@@ -334,6 +334,7 @@ const en: Lang = {
     'err.session.notLive': "The session is no longer running, so it cannot be shared live. To show what happened, share its recording instead.",
     'err.session.live': "The session is live — close it first.",
     'err.session.keepNotLive': "The session is no longer running.",
+    'err.session.keepTooLate': "The session is already being closed for inactivity.",
     'err.session.containerAgentOnly': "Container shells are only available on agent hosts.",
     'err.session.upgradeAgentOnly': "OS upgrade is only available on agent hosts.",
     'err.session.journalAgentOnly': "Following a journal is only available on agent hosts.",

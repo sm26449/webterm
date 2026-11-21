@@ -332,6 +332,7 @@ const ro: Lang = {
     'err.session.notLive': "Sesiunea nu mai rulează, deci nu poate fi partajată live. Ca să arăți ce s-a întâmplat, partajează înregistrarea ei.",
     'err.session.live': "Sesiunea e activă — închide-o mai întâi.",
     'err.session.keepNotLive': "Sesiunea nu mai rulează.",
+    'err.session.keepTooLate': "Sesiunea se închide deja pentru inactivitate.",
     'err.session.containerAgentOnly': "Shell-urile în container sunt disponibile doar pe hosturile cu agent.",
     'err.session.upgradeAgentOnly': "Actualizarea OS e disponibilă doar pe hosturile cu agent.",
     'err.session.journalAgentOnly': "Urmărirea unui jurnal e disponibilă doar pe hosturile cu agent.",

@@ -360,6 +360,17 @@ async def main():
     finally:
         os.stat = real_stat
         await edgemtls._refresh(force=True)
+    broken = os.path.join(EDGE, "dangling-link")
+    os.symlink(os.path.join(EDGE, "nowhere"), broken)
+    config.AGENT_LISTS_DIR = broken
+    try:
+        await edgemtls._refresh(force=True)
+        check("a broken symlink at the edge path → write-error, ratchet kept (re-review 3.7.1)",
+              edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet(), edgemtls.status)
+    finally:
+        config.AGENT_LISTS_DIR = edge_dir
+        os.unlink(broken)
+        await edgemtls._refresh(force=True)
     a_file = os.path.join(EDGE, "not-a-dir")
     with open(a_file, "w") as f:
         f.write("x")

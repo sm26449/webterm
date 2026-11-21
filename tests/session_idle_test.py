@@ -393,6 +393,7 @@ async def body():
           len(fired) == 1 and isinstance(fired[0], list) and len(fired[0]) >= 2, str(fired))
 
     await audit_fixes(hid, src, owner, alice)
+    await rereview_fixes(hid, src, owner, alice)
 
     for c in (owner, ca, cb, cadm):
         await c.aclose()
@@ -694,6 +695,65 @@ async def audit_fixes(hid, src, owner, alice):
     await hX.persist_activity()
     check("C8: …reîncercarea reuşeşte", hX._persisted_active >= hX.last_input_at)
     await close_all_live()
+
+
+async def rereview_fixes(hid, src, owner, alice):
+    """Re-review 3.7.1 (după b54e658)."""
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
+    # 1) Keep apăsat cât _close aşteaptă dovada notificării → nu se închide
+    sK, hK = await new_session(hid, alice, days_old=20)
+    t0 = time.time()
+    await sweep_at(t0)
+    real_proof = idlesess._notice_recorded
+
+    async def keep_meanwhile(*a, **k):
+        await idlesess.set_keep_open(sK, True)
+        return await real_proof(*a, **k)
+    idlesess._notice_recorded = keep_meanwhile
+    try:
+        await sweep_at(t0 + 3 * DAY)
+    finally:
+        idlesess._notice_recorded = real_proof
+    check("re-review: Keep apăsat în timpul închiderii → sesiunea NU se închide",
+          sK not in src.killed and (await srow(sK))["state"] == "live")
+    # …iar Keep cerut cât închiderea e deja trimisă → 409, nu „păstrată"
+    sL, hL = await new_session(hid, alice, days_old=20)
+    hL.idle_closing = True
+    r = await owner.post("/api/sessions/%s/keep-open" % sL, json={"keep": True})
+    check("re-review: Keep după ce închiderea e trimisă → 409 session.keepTooLate",
+          r.status_code == 409 and r.headers.get("X-WebTerm-Error") == "session.keepTooLate", r.text)
+    hL.idle_closing = False
+    # 2) pornirea fără re-autentificare e refuzată şi direct (sub lacăt)
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": False, "grace_days": 2})
+    try:
+        await idlesess.save_policy({"notify": True, "notify_days": 7, "autoclose": True, "grace_days": 2})
+        refused = False
+    except PermissionError:
+        refused = True
+    check("re-review: save_policy nu porneşte închiderea fără re-autentificare", refused
+          and not idlesess.current_policy()["autoclose"])
+    # 3) o oprire care nu s-a putut scrie rămâne oprită şi după o recitire din DB
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
+    real_set = db.set_setting
+
+    async def failing_set(*a, **k):
+        raise OSError("disk full")
+    db.set_setting = failing_set
+    try:
+        try:
+            await idlesess.save_policy({"notify": True, "notify_days": 7, "autoclose": False, "grace_days": 2})
+        except OSError:
+            pass
+    finally:
+        db.set_setting = real_set
+    pol = await idlesess.load_policy(fresh=True)
+    check("re-review: oprirea nescrisă rămâne în vigoare după recitirea din DB", not pol["autoclose"], str(pol))
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": False, "grace_days": 2})
+    check("…iar o salvare reuşită ridică suprascrierea", idlesess._state.get("strict") is None)
 
 
 if __name__ == "__main__":

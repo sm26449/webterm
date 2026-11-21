@@ -113,6 +113,10 @@ def intent_off_reason() -> str:
     try:
         st = os.stat(d)
     except FileNotFoundError:
+        # o legătură simbolică ruptă NU e „lipsă": există ceva acolo, doar că e stricat (re-review 3.7.1)
+        if os.path.lexists(d):
+            status["error"] = "BrokenSymlink"
+            return "write-error"
         return "no-dir"
     except (OSError, ValueError) as e:
         status["error"] = type(e).__name__

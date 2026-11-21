@@ -1189,6 +1189,7 @@ class SessionHub:
         # `_replay_expected` = sursa (agentul) trimite `replay_end`, iar până atunci output-ul din
         # întrerupere poate fi încă pe drum.
         self.idle_closing = False
+        self.keep_open = bool(row["keep_open"]) if "keep_open" in row.keys() else False   # sincron (re-review 3.7.1)
         self.idle_notice_seen: Optional[tuple] = None
         self.attached_mono: Optional[float] = None
         self._replay_expected = False

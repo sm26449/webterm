@@ -97,6 +97,12 @@ async def load_policy(fresh: bool = False) -> dict:
     except ValueError:
         raw = {}
     pol = sanitize(raw)
+    # o oprire salvată în memorie dar nescrisă în DB (scrierea a eşuat) rămâne în vigoare până la o
+    # salvare reuşită (re-review 3.7.1: altfel sweep-ul următor reînvia termenele vechi)
+    ov = _state.get("strict")
+    if ov:
+        pol = dict(pol, autoclose=pol["autoclose"] and ov["autoclose"], notify=pol["notify"] and ov["notify"],
+                   gen=max(pol["gen"], ov["gen"]))
     if _state["ver"] == ver:
         # nicio salvare cât citeam; altfel memoria (scrisă de `save_policy` înaintea DB-ului) câştigă
         _state.update(policy=pol, at=now, loaded=True)
@@ -108,7 +114,7 @@ def _publish(pol: dict) -> None:
     _state.update(policy=dict(pol), at=time.time(), loaded=True)
 
 
-async def save_policy(pol: dict) -> dict:
+async def save_policy(pol: dict, reauth=None) -> dict:
     """Salvează politica. Ordinea contează (auditul Codex 3.7.1, constatarea 2): MEMORIA întâi, în
     varianta strictă — o oprire (închidere sau notificare) are efect imediat, inclusiv pe un sweep în
     zbor; o pornire devine efectivă abia după ce s-a scris în DB. Orice comutare a închiderii sau a
@@ -118,8 +124,15 @@ async def save_policy(pol: dict) -> dict:
         new = sanitize(pol)
         switched = new["autoclose"] != prev["autoclose"] or new["notify"] != prev["notify"]
         new["gen"] = prev["gen"] + 1 if switched else prev["gen"]
-        _publish(dict(new, autoclose=new["autoclose"] and prev["autoclose"],
-                      notify=new["notify"] and prev["notify"]))
+        if new["autoclose"] and not prev["autoclose"]:
+            # re-review 3.7.1: decizia „cere re-autentificare" se ia AICI, sub lacăt, faţă de starea
+            # reală (o cerere care citise „pornit" înaintea unei opriri concurente nu mai sare peste ea)
+            if reauth is None:
+                raise PermissionError("enabling automatic closing needs a fresh re-authentication")
+            await reauth()
+        strict = dict(new, autoclose=new["autoclose"] and prev["autoclose"], notify=new["notify"] and prev["notify"])
+        _state["strict"] = strict
+        _publish(strict)
         if new["autoclose"] and not prev["autoclose"]:
             # Review 3.7.1: oprit apoi repornit, un termen vechi (deja trecut) închidea sesiunea în 10
             # minute, deşi omul văzuse ultima dată „nimic programat". Generaţia o împiedică deja;
@@ -127,6 +140,7 @@ async def save_policy(pol: dict) -> dict:
             await db.execute("UPDATE sessions SET idle_close_after=NULL, idle_close_gen=NULL"
                              " WHERE idle_close_after IS NOT NULL")
         await db.set_setting(SETTING_KEY, json.dumps(new))
+        _state["strict"] = None
         _publish(new)
         return dict(new)
 
@@ -159,13 +173,20 @@ def close_deadline(row, pol: dict) -> Optional[float]:
 
 
 async def set_keep_open(sid: str, keep: bool) -> None:
-    """„Păstrează deschisă": anulează şi o notificare/închidere în curs."""
+    """„Păstrează deschisă": anulează şi o notificare/închidere în curs. Memoria ÎNTÂI, sincron (re-review
+    3.7.1): o închidere aflată între citirea rândului şi ultima verificare trebuie să vadă Keep, altfel
+    utilizatorul primea „păstrată" iar sesiunea se închidea oricum."""
+    hub = core.hubs.get(sid)
+    if hub is not None and keep:
+        hub.idle_pending = False
+        hub.idle_notice_seen = None
+        hub.keep_open = True
     await db.execute("UPDATE sessions SET keep_open=?, idle_notified_at=NULL, idle_close_after=NULL,"
                      " idle_close_gen=NULL WHERE id=?", 1 if keep else 0, sid)
-    hub = core.hubs.get(sid)
     if hub is not None:
         hub.idle_pending = False
         hub.idle_notice_seen = None
+        hub.keep_open = bool(keep)
 
 
 def _transcript_mtime(sid: str) -> Optional[float]:
@@ -316,6 +337,8 @@ def _closable_now(fresh, hub, pol: dict, now: float, mono: float) -> bool:
         return False
     if hub.closed or not hub.attached or hub.clients or not hub.idle_pending or hub.idle_closing:
         return False
+    if getattr(hub, "keep_open", False) or _row_get(fresh, "keep_open"):
+        return False
     if hub.activity_at() > float(notified):
         return False
     return _source_settled(hub, mono) and _mono_grace_ok(hub, float(notified), deadline, mono)
@@ -361,7 +384,7 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
     if why:
         await _unconfirmed(row, hub, now, why)
         return "failed"
-    if hub.closed:
+    if hub.closed and await _closed_as_idle(sid):
         await _confirmed(row, fresh, uids, now)
         return "closed"
     bgtasks.spawn(_await_exit(row, fresh, hub, uids, now), "confirm idle close")
@@ -373,10 +396,18 @@ async def _await_exit(row, fresh, hub, uids: list, now: float) -> None:
     t_end = time.monotonic() + CLOSE_CONFIRM
     while not hub.closed and time.monotonic() < t_end:
         await asyncio.sleep(0.5)
-    if hub.closed:
+    if hub.closed and await _closed_as_idle(row["id"]):
         await _confirmed(row, fresh, uids, now)
     else:
-        await _unconfirmed(row, hub, now, "no exit within %ds" % int(CLOSE_CONFIRM))
+        await _unconfirmed(row, hub, now, "no exit within %ds" % int(CLOSE_CONFIRM) if not hub.closed
+                           else "the session ended for another reason")
+
+
+async def _closed_as_idle(sid: str) -> bool:
+    """Re-review 3.7.1: orice `hub.closed` (pierdută, host şters, ieşire naturală în fereastră) nu e o
+    închidere de inactivitate; doar rândul închis cu motivul `idle` o confirmă."""
+    r = await db.fetchone("SELECT state, close_reason FROM sessions WHERE id=?", sid)
+    return bool(r) and r["state"] == "closed" and (r["close_reason"] or "") == "idle"
 
 
 async def _unconfirmed(row, hub, now: float, why: str) -> None:

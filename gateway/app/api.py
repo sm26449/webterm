@@ -2302,13 +2302,16 @@ async def save_idle_sessions(body: IdleSessionsIn, request: Request,
             raise ApiError(400, "settings.idleDaysRange", "%s must be between %d and %d" % (name, lo, hi),
                            vars={"field": name, "min": lo, "max": hi})
     old = await idlesess.load_policy(fresh=True)
-    if body.autoclose and not old["autoclose"]:
+
+    async def _reauth():
         # Auditul Codex 3.7.1 (constatarea 7): pornirea închiderii automate cere re-autentificare
-        # proaspătă — un cookie furat nu trebuie să poată programa închiderea sesiunilor tuturor
+        # proaspătă — un cookie furat nu trebuie să poată programa închiderea sesiunilor tuturor.
+        # Chemată de save_policy SUB lacăt, doar dacă pornirea e reală faţă de starea de atunci.
         await stepup.reauth_for_access_change(user, request, body,
                                               "turn on automatic closing of idle sessions")
     pol = await idlesess.save_policy({k: getattr(body, k) for k in ("notify", "notify_days",
-                                                                     "autoclose", "grace_days")})
+                                                                     "autoclose", "grace_days")},
+                                     reauth=_reauth)
     audit.detail(request, "idle sessions: notify %s after %d day(s), auto-close %s after %d more day(s)%s" % (
         "on" if pol["notify"] else "off", pol["notify_days"], "ON" if pol["autoclose"] else "off",
         pol["grace_days"], " (auto-close was off)" if pol["autoclose"] and not old["autoclose"] else ""))
@@ -4866,7 +4869,9 @@ async def host_sessions(host_id: int, limit: int = 200, offset: int = 0,
     rows = await db.fetchall(
         "SELECT * FROM sessions WHERE host_id=? ORDER BY created DESC LIMIT ? OFFSET ?",
         host_id, limit, max(0, offset))
-    return [_session_json(r) for r in rows]
+    # re-review 3.7.1: tokenurile nu primesc metadatele de inactivitate/partajare nici aici
+    tok = isinstance(user, dict) and bool(user.get("is_token"))
+    return [_session_json(r, token_view=tok) for r in rows]
 
 
 # ── [stepup] Per-host step-up (2FA window) ────────────────────────────────────────────────────────
@@ -5170,6 +5175,10 @@ async def session_keep_open(sid: str, body: KeepOpenIn, request: Request,
     await stepup.require_session_host_stepup(sid, user)
     if row["state"] not in ("creating", "live"):
         raise ApiError(409, "session.keepNotLive", "the session is no longer running")
+    hub = core.hubs.get(sid)
+    if body.keep and hub is not None and getattr(hub, "idle_closing", False):
+        # re-review 3.7.1: închiderea e deja trimisă — nu răspundem „păstrată" pentru o sesiune care moare
+        raise ApiError(409, "session.keepTooLate", "the session is already being closed for inactivity")
     await idlesess.set_keep_open(sid, body.keep)
     audit.detail(request, "keep open %s" % ("on" if body.keep else "off"))
     return {"ok": True, "keep_open": body.keep}
