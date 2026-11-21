@@ -22,14 +22,33 @@ check = U.Checker()
 DAY = 86400.0
 
 
-class FakeSource:
-    """Sursa unui host: kill-ul închide sesiunea ca agentul (on_exit), sau eşuează la cerere."""
+class FakeSource(core.AgentConnection):
+    """Sursa unui host: un agent ≥ 62 (închidere condiţionată `kill_if_quiet`); kill-ul închide sesiunea ca
+    agentul (on_exit), sau eşuează la cerere. Fără `super().__init__`: nu există websocket."""
     backend = "tmux"
     epoch = "e1"
 
-    def __init__(self):
+    def __init__(self, version=62):
         self.killed = []
         self.fail = False
+        self.agent_version = version
+        self.quiet_asked = []         # `quiet_secs` primit la fiecare kill_if_quiet
+        self.quiet_reply = None       # un răspuns impus (ex. {"ok": False, "code": "active"})
+
+    async def request(self, op, timeout=20.0, **fields):
+        raise core.AgentGone("fake source: no websocket")
+
+    async def kill_if_quiet(self, sid, quiet_secs):
+        if not self.can_kill_if_quiet():
+            return {"ok": False, "code": "unsupported"}
+        self.quiet_asked.append(quiet_secs)
+        if self.quiet_reply is not None:
+            return dict(self.quiet_reply)
+        return await self.kill_checked(sid)
+
+    async def kill_checked(self, sid):
+        await self.kill(sid)
+        return {"ok": True}
 
     async def kill(self, sid):
         if self.fail:
@@ -394,6 +413,7 @@ async def body():
 
     await audit_fixes(hid, src, owner, alice)
     await rereview_fixes(hid, src, owner, alice)
+    await agent62_fixes(hid, src, owner, alice)
 
     for c in (owner, ca, cb, cadm):
         await c.aclose()
@@ -754,6 +774,111 @@ async def rereview_fixes(hid, src, owner, alice):
     await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
                                                          "autoclose": False, "grace_days": 2})
     check("…iar o salvare reuşită ridică suprascrierea", idlesess._state.get("strict") is None)
+
+
+class SshLikeSource:
+    """O sursă care NU e un agent (SSH / telnet / serial): nu poate închide condiţionat."""
+    backend = "pty"
+    epoch = "s1"
+
+    def __init__(self):
+        self.killed = []
+
+    async def kill(self, sid):
+        self.killed.append(sid)
+
+    async def reap(self, sid):
+        pass
+
+    async def send_data(self, sid, data):
+        pass
+
+
+async def agent62_fixes(hid, src, owner, alice):
+    """Agentul 62: închidere CONDIŢIONATĂ (`kill_if_quiet`); doar sursele care o ştiu sunt închise automat."""
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
+    await close_all_live()
+    for label, other in (("agent 61", FakeSource(version=61)), ("SSH", SshLikeSource())):
+        core.sources[hid] = other
+        try:
+            sA, hA = await new_session(hid, alice, days_old=20)
+            t0 = time.time()
+            await sweep_at(t0)
+            rA = await srow(sA)
+            al = [a for a in await alerts_for(alice, "session_idle") if ('"sid":"%s"' % sA) in (a["msg_params"] or "")]
+            check("v62: %s → notificare FĂRĂ termen de închidere" % label,
+                  rA["idle_notified_at"] and rA["idle_close_after"] is None
+                  and idlesess.notice_json(rA, idlesess.current_policy())["close_at"] is None, dict(rA))
+            check("v62: %s → mesajul nu promite închiderea (session_idle, grace 0)" % label,
+                  len(al) == 1 and al[0]["msg_key"] == "session_idle" and '"grace":0' in al[0]["msg_params"],
+                  [dict(a) for a in al])
+            await sweep_at(t0 + 3 * DAY)
+            await sweep_at(t0 + 30 * DAY)
+            rA2 = await srow(sA)
+            killed = getattr(other, "killed", [])
+            check("v62: %s → niciodată închisă, nicio notificare repetată" % label,
+                  sA not in killed and rA2["state"] == "live" and rA2["idle_notified_at"] == rA["idle_notified_at"]
+                  and not getattr(other, "quiet_asked", []), (killed, dict(rA2)))
+        finally:
+            core.sources[hid] = src
+        await close_all_live()
+
+    # agentul vede activitate pe care gateway-ul n-a văzut-o → refuză: notificarea anulată, fără alertă
+    closed_before = len(await alerts_for(alice, "session_idle_closed"))
+    sB, hB = await new_session(hid, alice, days_old=20)
+    t1 = time.time()
+    await sweep_at(t1)
+    check("v62: agent 62 → notificarea are termen", (await srow(sB))["idle_close_after"] is not None)
+    src.quiet_reply = {"ok": False, "code": "active", "msg": "tmux activity"}
+    try:
+        st = await sweep_at(t1 + 3 * DAY)
+    finally:
+        src.quiet_reply = None
+    rB = await srow(sB)
+    check("v62: gateway-ul cere kill_if_quiet cu fereastra de linişte (≥ 3 zile)",
+          len(src.quiet_asked) >= 1 and src.quiet_asked[-1] >= 3 * DAY - 60, src.quiet_asked[-1:])
+    check("v62: răspuns `active` → nu e închisă, notificarea şi termenul şterse",
+          sB not in src.killed and rB["state"] == "live" and rB["idle_notified_at"] is None
+          and rB["idle_close_after"] is None and st["closed"] == 0, (str(st), dict(rB)))
+    check("v62: …fără alerta „închisă”, idle_closing şters, audit 409 (nu 504, nu 200)",
+          len(await alerts_for(alice, "session_idle_closed")) == closed_before and hB.idle_closing is False
+          and hB.idle_pending is False and len(await audit_rows(sB, 409)) == 1
+          and not await audit_rows(sB, 504) and not await audit_rows(sB, 200))
+    check("v62: …o perioadă nouă începe acum (activitatea hub-ului şi last_active avansează)",
+          hB.activity_at() >= t1 and (rB["last_active"] or 0) >= t1, (hB.activity_at(), rB["last_active"]))
+    await sweep_at(t1 + 3 * DAY + 60)
+    check("v62: …nicio notificare nouă imediat după refuz", (await srow(sB))["idle_notified_at"] is None)
+    await close_all_live()
+
+    # agent 62 care răspunde ok → închisă pe calea confirmată (on_exit)
+    n_before = len(src.quiet_asked)
+    sC, hC = await new_session(hid, alice, days_old=20)
+    t2 = time.time()
+    await sweep_at(t2)
+    st = await sweep_at(t2 + 3 * DAY)
+    check("v62: agent 62 + ok → închisă şi confirmată",
+          sC in src.killed and st["closed"] == 1 and (await srow(sC))["state"] == "closed"
+          and len(src.quiet_asked) == n_before + 1 and len(await audit_rows(sC, 200)) == 1, str(st))
+    await close_all_live()
+
+    # termen fixat sub agentul 62, apoi agentul e înlocuit cu unul vechi → nimic închis, termenul dispare
+    sD, hD = await new_session(hid, alice, days_old=20)
+    t3 = time.time()
+    await sweep_at(t3)
+    old = FakeSource(version=61)
+    core.sources[hid] = old
+    try:
+        await sweep_at(t3 + 3 * DAY)
+    finally:
+        core.sources[hid] = src
+    rD = await srow(sD)
+    check("v62: agent retrogradat la 61 după notificare → nu închide, termenul şters, notificarea rămâne",
+          sD not in old.killed and rD["state"] == "live" and rD["idle_close_after"] is None
+          and rD["idle_notified_at"], dict(rD))
+    await close_all_live()
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": False, "grace_days": 2})
 
 
 if __name__ == "__main__":

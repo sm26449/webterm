@@ -3600,7 +3600,7 @@ const ro: Lang = {
     'settings.idle.notifyHint': "Proprietarul sesiunii primește o notificare (în aplicație; pe email doar dacă a pornit-o). Pentru sesiunile fără proprietar sunt anunțați cei care gestionează sesiunile de pe acel host.",
     'settings.idle.notifyDays': "Inactivă de (zile)",
     'settings.idle.autoclose': "Închide automat sesiunile inactive",
-    'settings.idle.autocloseHint': "După notificare, o sesiune tot nefolosită se închide, ca la apăsarea pe Stop. Înregistrarea rămâne în istoric. Sesiunile marcate „Păstrează deschisă” nu se închid niciodată.",
+    'settings.idle.autocloseHint': "După notificare, o sesiune tot nefolosită se închide, ca la apăsarea pe Stop. Înregistrarea rămâne în istoric. Sesiunile marcate „Păstrează deschisă” nu se închid niciodată. Se închid doar sesiunile de pe agentul 62 sau mai nou (agentul verifică din nou că nu s-a întâmplat nimic); SSH, telnet, serial și agenții mai vechi primesc doar notificarea.",
     'settings.idle.graceDays': "Închide la atâtea zile după notificare",
     'settings.idle.range': "Între {min} și {max}.",
     'settings.idle.badDays': "Introdu un număr întreg de zile între {min} și {max}.",

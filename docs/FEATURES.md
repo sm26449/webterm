@@ -488,6 +488,13 @@ or a `tail -f` is never idle. A command that runs silently for days does look id
   on later sends a new notice with the closing date first.
 - WebTerm only closes a session it can see. If the host is offline, the session's output is not
   reaching the gateway, or anything is unclear, it waits for the next check (every ~10 minutes).
+- **Which sessions can be closed automatically:** only sessions on an agent host whose agent is
+  version 62 or later. The host's agent makes the final check: it closes the session only if it has
+  seen no output, no typing and no tmux activity for the whole idle period, and nobody attached to
+  the tmux session directly on the host. If it has, the notice is withdrawn and the idle period
+  starts again. Sessions on older agents, and SSH, telnet and serial sessions, are notified but never
+  closed automatically; their notice says nothing about a closing date. Update the agent (Settings →
+  Updates) to include them.
 
 **Keep a session.** In the session's **⋯** menu, choose **Keep open (never close automatically)**.
 It is never notified or closed again; the same menu turns it back off. Only someone who may control

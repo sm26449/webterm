@@ -46,7 +46,7 @@ import termios
 import threading
 import time
 
-AGENT_VERSION = 61
+AGENT_VERSION = 62
 
 # Sub atâtea secunde de valabilitate, un certificat se roteşte prea des ca un pin pe el să
 # însemne altceva decât o cădere programată. 48h: peste ce emite un CA intern (12h la Caddy),
@@ -819,6 +819,54 @@ def encode_history(data, max_reply=HISTORY_MAX_REPLY):
         truncated = True
 
 
+# ---------------------------------------------------------------------------
+# Închidere condiţionată (v62): `kill_if_quiet`
+# ---------------------------------------------------------------------------
+
+QUIET_MARGIN = 5.0             # secunde: latenţa gateway→agent + granularitatea de o secundă a tmux
+QUIET_TMUX_TIMEOUT = 3         # per comandă tmux, pe loop
+
+
+def session_activity_reason(s, quiet_secs, now_mono=None, now_wall=None):
+    """De ce NU e liniştită sesiunea `s` pe ultimele `quiet_secs - QUIET_MARGIN` secunde (text scurt),
+    sau "" dacă nu există nicio dovadă de activitate. Fail-closed: o întrebare la tmux care nu
+    reuşeşte pe o sesiune tmux vie = refuz. Totul e relativ la ceasurile ACESTUI agent."""
+    window = max(0.0, float(quiet_secs) - QUIET_MARGIN)
+    mono = time.monotonic() if now_mono is None else now_mono
+    if s.pending_input:
+        return "input pending"
+    if mono - s.last_out_mono < window:
+        return "output"
+    if mono - s.last_in_mono < window:
+        return "input"
+    if s.backend != "tmux" or not s.alive:
+        return ""
+    name = "=" + TMUX_SESSION_PREFIX + s.sid
+    try:
+        r = tmux_cmd("list-windows", "-t", name, "-F", "#{session_activity} #{window_activity}",
+                     timeout=QUIET_TMUX_TIMEOUT)
+        if r.returncode != 0:
+            return "tmux query failed"
+        stamps = [int(v) for v in r.stdout.decode("ascii", "replace").split()]
+        if not stamps:
+            return "tmux query failed"
+        # ultima activitate tmux: input (session_activity) sau output în orice fereastră
+        # (window_activity) — inclusiv cât niciun client nu era ataşat
+        wall = time.time() if now_wall is None else now_wall
+        if max(stamps) > wall - window:
+            return "tmux activity"
+        r = tmux_cmd("list-clients", "-t", name, "-F", "#{client_pid}", timeout=QUIET_TMUX_TIMEOUT)
+        if r.returncode != 0:
+            return "tmux query failed"
+        pids = [int(v) for v in r.stdout.decode("ascii", "replace").split()]
+        # alt client decât al nostru = un om ataşat direct pe host: sesiunea e folosită
+        if any(p != s.pid for p in pids):
+            return "another tmux client attached"
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return "tmux query failed"
+    return ""
+
+
 def tmux_cmdline_matches(parts, socket):
     """True dacă un cmdline (listă de octeți split pe NUL din /proc/<pid>/cmdline)
     e un proces `tmux -L <socket>` — server sau client pe socketul nostru. Pur, ca
@@ -1550,6 +1598,11 @@ class Session:
         self.pw_deadline = (time.time() + 15) if self.pw else 0
         self.created = time.time()
         self.last_output = self.created
+        # v62 (kill_if_quiet): ultima ieşire citită din PTY şi ultimul input primit, pe ceasul MONOTON al
+        # agentului. Pornim de la „acum": agentul nu ştie nimic dinaintea lui (fail-closed); pentru tmux
+        # trecutul îl spun marcajele tmux (`session_activity` / `window_activity`).
+        self.last_out_mono = time.monotonic()
+        self.last_in_mono = self.last_out_mono
         self.exited_at = None
         self.alive = True
         self.exit_status = None
@@ -1659,6 +1712,7 @@ class Session:
         self.stream_offset += len(data)
         self.ring_bytes += len(data)
         self.last_output = time.time()
+        self.last_out_mono = time.monotonic()
         while self.ring_bytes > RING_LIMIT and len(self.ring) > 1:
             _, old = self.ring.pop(0)
             self.ring_bytes -= len(old)
@@ -3331,19 +3385,27 @@ class Agent:
                 s = self.sessions.get(msg["sid"])
                 if not s:
                     return err("no_session")
-                s.kill_requested = True
-                if s.alive:
-                    if s.backend == "tmux":
-                        try:
-                            tmux_cmd("kill-session", "-t",
-                                     "=" + TMUX_SESSION_PREFIX + s.sid)
-                        except (OSError, subprocess.TimeoutExpired):
-                            pass
-                    try:
-                        if s.pid:      # None cât suntem între clienţi; kill-session e de-ajuns
-                            os.kill(s.pid, int(msg.get("sig", signal.SIGHUP)))
-                    except OSError:
-                        pass
+                self._kill_session(s, msg.get("sig", signal.SIGHUP))
+                ok()
+
+            elif op == "kill_if_quiet":
+                # INV-13 (docs/design/INVARIANTS.md): închiderea automată nu atinge o sesiune folosită.
+                # v62: închiderea automată a sesiunilor inactive (gateway idlesess.py, INV-13). Gateway-ul
+                # spune cât timp N-A VĂZUT nicio activitate (`quiet_secs`); între ultima lui verificare şi
+                # sosirea op-ului pot trece output / input / un om ataşat direct pe host, pe care el nu
+                # le vede. Agentul închide DOAR dacă nici el nu are dovezi de activitate în fereastra aceea
+                # (auditul Codex 3.7.1, reziduul #3). Orice nu poate verifica = refuz.
+                sid = msg.get("sid")
+                s = self.sessions.get(sid) if isinstance(sid, str) else None
+                if not s:
+                    return err("no_session")
+                q = msg.get("quiet_secs")
+                if isinstance(q, bool) or not isinstance(q, (int, float)) or not (0 <= q < 10 ** 9):
+                    return err("bad_request", "quiet_secs")
+                why = session_activity_reason(s, float(q))
+                if why:
+                    return err("active", why)
+                self._kill_session(s, signal.SIGHUP)
                 ok()
 
             elif op == "reap":
@@ -4044,10 +4106,28 @@ class Agent:
             log("session %s: reattached after %d attempts" % (s.sid, s.respawns))
             self._flush_input(s)          # ce a tastat utilizatorul cât eram fără client
 
+    def _kill_session(self, s, sig):
+        """Corpul op-ului `kill` (comun cu `kill_if_quiet`, v62): tmux-ul omorât, clientul semnalizat."""
+        s.kill_requested = True
+        if s.alive:
+            if s.backend == "tmux":
+                try:
+                    tmux_cmd("kill-session", "-t",
+                             "=" + TMUX_SESSION_PREFIX + s.sid)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            try:
+                if s.pid:      # None cât suntem între clienţi; kill-session e de-ajuns
+                    os.kill(s.pid, int(sig))
+            except OSError:
+                pass
+
     def write_input(self, sid, data):
         s = self.sessions.get(sid)
         if not s or not s.alive:
             return
+        # v62: orice input primit e folosire, chiar dacă îl aruncăm mai jos (plafon / copy-mode)
+        s.last_in_mono = time.monotonic()
         # pty blocat + flux mare de input (paste-storm într-o app care nu citește) ar
         # umfla pending_input nemărginit → OOM. Peste plafon, aruncăm intrarea nouă;
         # ce e deja în coadă se scurge când pty-ul acceptă din nou.

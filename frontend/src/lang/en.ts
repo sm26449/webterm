@@ -3533,7 +3533,7 @@ const en: Lang = {
     'settings.idle.notifyHint': "The session's owner gets a notification (in the app; email only if they turned it on). Sessions with no owner notify the people who manage sessions on that host.",
     'settings.idle.notifyDays': "Idle for (days)",
     'settings.idle.autoclose': "Close idle sessions automatically",
-    'settings.idle.autocloseHint': "After the notice, a session that is still unused is closed, like pressing Stop. Its recording stays in the history. Sessions marked Keep open are never closed.",
+    'settings.idle.autocloseHint': "After the notice, a session that is still unused is closed, like pressing Stop. Its recording stays in the history. Sessions marked Keep open are never closed. Only sessions on agent 62 or later are closed (the agent checks again that nothing happened); SSH, telnet, serial and older agents only get the notice.",
     'settings.idle.graceDays': "Close this many days after the notice",
     'settings.idle.range': "Between {min} and {max}.",
     'settings.idle.badDays': "Enter a whole number of days between {min} and {max}.",

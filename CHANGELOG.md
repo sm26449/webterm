@@ -52,6 +52,16 @@ back.
   main button.
 
 ### Fixed
+- **Closing idle sessions automatically can no longer close one that was used at the last moment
+  (agent 62).** The gateway decides that a session is idle, but between its last check and the moment
+  the agent ended the session, new output, a key or a person attached to tmux directly on the host
+  could slip in unseen. The close is now conditional on the host: the gateway says how long it has
+  seen nothing, and the agent closes the session only if it saw nothing either (no output read, no
+  input written, no tmux activity, no other tmux client attached; a tmux query that fails counts as
+  use). When the agent says "used", the notice is withdrawn and a new idle period starts, with no
+  alert. Only sessions on agents 62 and later are closed automatically; sessions on older agents and
+  SSH, telnet or serial sessions still get the notice, without a closing date. Found by an external
+  review of 3.7.1.
 - **Search in Settings** finds mTLS, client certificates, connected agents and refused connections, and
   "email alerts" finds the per-event choices as well as the mail server; partial words match.
 - **A false critical alarm** "Agent mTLS is not working" on installs without the shared edge directory

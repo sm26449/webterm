@@ -582,6 +582,10 @@ HISTORY_MIN_AGENT = 57
 # Op-ul `scroll_exit` („întoarce-mă la prompt": scoate pane-ul din copy-mode-ul tmux fără nicio
 # tastă) există din agentul 59. Sub el nu-l trimitem: un agent vechi ar răspunde `bad_op`.
 SCROLL_EXIT_MIN_AGENT = 59
+# Op-ul `kill_if_quiet` (închidere condiţionată, INV-13) există din agentul 62: agentul refuză dacă EL a
+# văzut activitate (output, input, un client tmux străin) în fereastra în care gateway-ul n-a văzut nimic.
+# Sub el, închiderea automată nu se face deloc (doar notificare).
+KILL_IF_QUIET_MIN_AGENT = 62
 SCROLL_EXIT_MIN_INTERVAL = 0.25      # per hub: fiecare cerere e un subprocess tmux pe loop-ul agentului
 HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
 HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
@@ -1176,6 +1180,9 @@ class SessionHub:
         # sesiune folosită între timp. `exit_reason` = ce scrie on_exit în close_reason.
         self.last_input_at: Optional[float] = None
         self.last_presence_at: Optional[float] = None
+        # agentul a refuzat o închidere automată pentru că EL a văzut activitate (`kill_if_quiet` →
+        # `active`): o perioadă de inactivitate nouă începe de aici (altfel refuzul s-ar repeta la nesfârşit)
+        self.last_host_activity_at: Optional[float] = None
         keys = row.keys()
         self.idle_pending: bool = bool(row["idle_notified_at"]) if "idle_notified_at" in keys else False
         self._persisted_active: float = (row["last_active"] or 0.0) if "last_active" in keys else 0.0
@@ -1710,7 +1717,8 @@ class SessionHub:
         if self.clients:
             return time.time()
         return max(v for v in (self.created, self.last_output_at, self.last_input_at,
-                               self.last_presence_at, self._persisted_active) if v)
+                               self.last_presence_at, self._persisted_active,
+                               getattr(self, "last_host_activity_at", None)) if v)
 
     def note_presence(self) -> None:
         """Un client s-a ataşat sau a plecat (apelat după `clients.add` / `clients.discard`). Plecarea
@@ -2526,6 +2534,18 @@ class AgentConnection(SessionSource):
         """Ca `kill`, dar întoarce răspunsul agentului (`ok` / `code`, ex. `no_session`): închiderea
         automată (idlesess) nu numără un refuz drept succes."""
         r = await self.request("kill", sid=sid)
+        return r if isinstance(r, dict) else {}
+
+    def can_kill_if_quiet(self) -> bool:
+        return (self.agent_version or 0) >= KILL_IF_QUIET_MIN_AGENT
+
+    async def kill_if_quiet(self, sid, quiet_secs: float) -> dict:
+        """Închidere CONDIŢIONATĂ (agent ≥ 62, INV-13): agentul omoară sesiunea doar dacă nu are dovezi de
+        activitate în ultimele `quiet_secs` secunde; altfel `{"ok": False, "code": "active"}`. Un agent mai
+        vechi nu primeşte op-ul (ar răspunde `bad_op`): răspundem noi `unsupported`, fără nimic trimis."""
+        if not self.can_kill_if_quiet():
+            return {"ok": False, "code": "unsupported"}
+        r = await self.request("kill_if_quiet", sid=sid, quiet_secs=max(0.0, float(quiet_secs)))
         return r if isinstance(r, dict) else {}
 
     async def wake(self, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> dict:
