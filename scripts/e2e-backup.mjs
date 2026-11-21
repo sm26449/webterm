@@ -53,26 +53,28 @@ try {
   await page.click('button[aria-label="Settings"]')
   await page.getByRole('button', { name: 'Backup', exact: true }).click()
   await page.waitForTimeout(300)
-  check('Settings → Backup deschis', await page.locator('text=SFTP').first().isVisible())
+  // 3.7.1: destinaţia e un radio group (SegmentedControl), nu butoane
+  check('Settings → Backup deschis', await page.getByRole('radio', { name: 'SFTP', exact: true }).isVisible())
 
   // toate câmpurile/butoanele formularului sunt ancorate la formularul direct (data-testid), ca
   // să nu se ciocnească cu câmpurile de download/restore care au aceleaşi etichete
   const form = page.locator('[data-testid="direct-backup-form"]')
-  const fLabel = (l) => form.locator(`[aria-label="${l}"]`)
+  // 3.7.1: câmpurile au etichete VIZIBILE (Field), nu aria-label/placeholder
+  const fLabel = (l) => form.getByLabel(l, { exact: true })
   const fBtn = (name) => form.getByRole('button', { name, exact: true })
   const hasText = async (re) => new RegExp(re).test(await page.locator('[role="dialog"], body').first().innerText())
   const waitText = (re, ms = 15000) => page.waitForFunction(
     (r) => new RegExp(r).test(document.body.innerText), re, { timeout: ms })
 
   // ── SFTP: probe (TOFU) → confirmă amprenta → save → upload ──
-  await page.getByRole('button', { name: 'SFTP', exact: true }).click()
-  await fLabel('Host (e.g. backup.example.com)').fill(SFTP_HOST)
+  await page.getByRole('radio', { name: 'SFTP', exact: true }).click()
+  await fLabel('Host').fill(SFTP_HOST)
   await fLabel('Username').fill('backup')
-  await fLabel('Remote path (e.g. /backups/webterm)').fill('backups')
+  await fLabel('Remote path').fill('backups')
   // metoda de auth: Parolă (cheia SSH ar cere o cheie de pus; parola e mai simplă pentru test)
-  await fBtn('Password').click()
+  await form.getByRole('radio', { name: 'Password', exact: true }).click()
   await fLabel('Password').fill('backup-pass-eval')
-  await fLabel('Account password (confirm)').fill(PASSWORD)
+  await fLabel('Your EverShell password').fill(PASSWORD)
 
   // înainte de probe: NU se poate salva (host-key neconfirmat) — butonul Save e dezactivat
   const saveBtn = fBtn('Save configuration')
@@ -96,14 +98,14 @@ try {
   check('SFTP: „Upload now" a raportat succes', true)
 
   // ── FTPS: completează + CA self-signed → save → upload ──
-  await page.getByRole('button', { name: 'FTPS', exact: true }).click()
-  await fLabel('Host (e.g. backup.example.com)').fill(FTPS_HOST)
+  await page.getByRole('radio', { name: 'FTPS', exact: true }).click()
+  await fLabel('Host').fill(FTPS_HOST)
   await fLabel('Username').fill('backup')
-  await fLabel('Remote path (e.g. /backups/webterm)').fill('backups')
+  await fLabel('Remote path').fill('backups')
   await fLabel('Password').fill('backup-pass-eval')
-  if (CA_PEM) await fLabel('CA / certificate PEM (optional, for self-signed servers)').fill(CA_PEM)
+  if (CA_PEM) await fLabel('CA / certificate (PEM)').fill(CA_PEM)
   await fLabel('Encryption passphrase for uploaded archives').fill(PASSPHRASE)
-  await fLabel('Account password (confirm)').fill(PASSWORD)
+  await fLabel('Your EverShell password').fill(PASSWORD)
   await fBtn('Save configuration').click()
   await waitText('Configuration saved\\.')
   check('FTPS: configurare salvată', true)

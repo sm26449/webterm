@@ -10,7 +10,7 @@ import {
   customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
 import { heading } from './ui'
-import { Button } from '../ui'
+import { Button, SegmentedControl } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -135,50 +135,37 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
       <section data-setting-id="themeMode">
         {/* ── Temă: modul (deschis / închis / după sistem), în familia aleasă ── */}
         <h4 id="theme-mode-h" className="mt-4 text-sm font-medium text-slate-300">{t('theme.mode')}</h4>
-        <div role="group" aria-labelledby="theme-mode-h" className="mt-2 flex flex-wrap gap-2">
-          {(['light', 'dark', 'auto'] as const satisfies readonly ThemeMode[]).map((mode) => {
+        {/* 3.7.1 (audit UX Setări M7): o alegere, nu o acţiune — SegmentedControl, nu umplerea primară */}
+        <SegmentedControl labelledBy="theme-mode-h" className="mt-2" value={pref.mode}
+          onChange={(mode) => setTheme({ family: pref.family, mode })}
+          options={(['light', 'dark', 'auto'] as const satisfies readonly ThemeMode[]).map((mode) => {
             const label = mode === 'auto' ? t('settings.themeAuto') : t(`theme.mode.${mode}`)
             // pe WebTerm modurile au nume proprii (Aurora / Midnight) — rămân vizibile
             const proper = pref.family === 'webterm' && mode !== 'auto' ? (mode === 'light' ? 'Aurora' : 'Midnight') : ''
-            return (
-              <button key={mode} onClick={() => setTheme({ family: pref.family, mode })} aria-pressed={pref.mode === mode}
-                className={`rounded-md px-3 py-1.5 text-sm ring-1 ${
-                  pref.mode === mode
-                    ? 'bg-sky-600 text-white ring-sky-600'
-                    : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-                {label}{proper && <span> · {proper}</span>}
-              </button>
-            )
-          })}
-        </div>
+            return { value: mode, label: <>{label}{proper && <span> · {proper}</span>}</> }
+          })} />
       </section>
 
       <section data-setting-id="termColors">
         {/* ── Schema de culori a terminalului ── */}
-        <h3 className={heading}>{t('settings.termColors')}</h3>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <button onClick={followTheme} aria-pressed={schemeAuto} title={t('settings.termMatchThemeTitle')}
-            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
-              schemeAuto
-                ? 'bg-sky-600 text-white ring-sky-600'
-                : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-            {t('settings.termMatchTheme')}
-          </button>
-          {allSchemes().map((s) => (
-            <button key={s.id} onClick={() => pickScheme(s.id)} aria-pressed={!schemeAuto && scheme === s.id}
-              className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm ring-1 ${
-                !schemeAuto && scheme === s.id
-                  ? 'bg-sky-600 text-white ring-sky-600'
-                  : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-              <span className="flex gap-0.5" aria-hidden="true">
-                {[s.theme.red, s.theme.green, s.theme.blue, s.theme.magenta].map((c, i) => (
-                  <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
-                ))}
-              </span>
-              {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
-            </button>
-          ))}
-        </div>
+        <h3 id="term-colors-h" className={heading}>{t('settings.termColors')}</h3>
+        {/* „după temă" e o opţiune a aceleiaşi alegeri (sentinela `@auto` nu poate fi id de schemă) */}
+        <SegmentedControl labelledBy="term-colors-h" className="mt-2" value={schemeAuto ? '@auto' : scheme}
+          onChange={(v) => { if (v === '@auto') followTheme(); else pickScheme(v) }}
+          options={[
+            { value: '@auto', label: <span title={t('settings.termMatchThemeTitle')}>{t('settings.termMatchTheme')}</span> },
+            ...allSchemes().map((s) => ({
+              value: s.id,
+              label: <>
+                <span className="flex gap-0.5" aria-hidden="true">
+                  {[s.theme.red, s.theme.green, s.theme.blue, s.theme.magenta].map((c, i) => (
+                    <span key={i} className="h-3 w-1.5 rounded-md" style={{ background: c }} />
+                  ))}
+                </span>
+                {s.id === 'custom' ? t('settings.customSchemeName') : s.name}
+              </>,
+            })),
+          ]} />
 
         {/* schemă proprie: editor + import iTerm2/VS Code */}
         <div className="mt-2 flex flex-wrap items-center gap-2">

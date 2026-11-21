@@ -108,10 +108,20 @@ Import from `./ui` (or `../ui` from `settings/`).
 | `EmptyState` | "nothing here yet" | icon + title + body + optional action; `size="page"` for full screens, `framed` for a dashed placeholder inside a page |
 | `ErrorState` | "could not load" | never show an empty state for a failed fetch — it lies. `LoadFailed` is `ErrorState` with the standard title and Retry |
 | `Card` | a bordered surface grouping related content | `padding` `md`/`sm`/`none`, `as` keeps the right element |
+| `Field` (3.7.1) | any form control that needs a name | visible `label` above the control, optional `hint` and `error` under it; wires `htmlFor`/`id`, `aria-describedby` (keeps what the control already had) and `aria-invalid`; works for `input`, `select`, `textarea`; `inline` puts the label on the left for short numeric fields. A placeholder may stay only as an example ("backup.example.com"), never as the only label |
+| `SegmentedControl` (3.7.1) | choosing one of a few options (Off · Daily · Weekly, a provider) | ARIA radio group: `role="radiogroup"` named by `label` or `labelledBy`, options `role="radio"` + `aria-checked`, one tab stop (roving tabindex), arrows move and select, Home/End jump; the selected option is a raised surface with an accent ring — **never the primary fill** (that is the main action's) |
+| `Switch` (3.7.1) | an on/off choice that applies immediately | `role="switch"` + `aria-checked` on a `<button type="button">`; the label is a `<label for>`, so clicking the text toggles; `.wt-touch` makes it 44px under `pointer: coarse`; `ariaLabel` names it in context (a column of "Email" switches → "Email for: Host offline"), `labelVisibility` `hidden` / `mobile` (visible on phones, where there is no column header) |
+| `SettingsSection` (3.7.1) | one section of a Settings tab | a card with a real heading (text colour, not the grey eyebrow), a one-line `description`, an optional `instanceWide` badge, the body and an optional `footer` for the section's single Save, with `dirty` showing "Unsaved changes". `tone="danger"` is the danger zone (red outline + "Danger zone" label), placed last. `data-setting-id`, `data-testid` and `hidden` pass through to the `<section>` — write `data-setting-id="…"` literally on the component, `settingsIndex.test.ts` reads it as text |
 
 Class helpers for the cases where you need a string: `buttonClass(variant, size)`,
 `iconButtonClass(...)`, `btn.primary` & co. (kept for `settings/`), `compactAction` (the 24px
 text actions in transfer rows), `eyebrow`, `cardClass`.
+
+**Settings: one save model (3.7.1).** Choices (a schedule, a switch, a segmented option) apply at
+once and confirm with a short status ("Saved"). Forms that carry secrets keep one Save in the
+section footer, with "Unsaved changes" while the form differs from what the server returned. A
+disabled action states why next to it, linked with `aria-describedby` ("Choose a backup file
+first."), and a fixed preference is shown as read-only text with its reason, not as a grey control.
 
 Two rules that keep the components honest:
 
@@ -335,6 +345,11 @@ and fails on:
    (`theme === 'macos'`, `currentTheme() === 'dark'`, …) — use `isLight()`; and a
    `:root[data-theme='macos'] …` CSS rule other than Aurora's own token blocks — brightness-only
    rules go on `[data-mode='light']` so every light variant gets them.
+
+6. (3.7.1) the primary fill as a *selected* state: a ternary branch that puts `bg-sky-600`,
+   `btn.primary` or `buttonClass('primary')` on the chosen option. In `components/settings/` and
+   `components/ui/` this fails outright (use `SegmentedControl`, or `IconButton active`); older
+   screens are counted per file in `PRIMARY_STATE_DEBT`, and a count may only go down.
 
 Intentional exceptions live in the `ALLOW` table at the top of the file, each with its reason.
 To list everything the guard sees (for an audit):

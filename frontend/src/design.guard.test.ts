@@ -16,6 +16,13 @@
       deci `className="text-sm bg-ink-700"` peste varianta componentei e o loterie. Starea activă/
       selectată e `IconButton active`, mărimea şi majusculele unei insigne sunt `Badge size`/`caps`.
 
+   6. (3.7.1, auditul UX Setări M7) umplerea butonului PRIMAR ca stare „ales": o ramură de ternar
+      care pune `bg-sky-600` / `btn.primary` / `buttonClass('primary')` pe opţiunea selectată. Atunci
+      „Off" arată exact ca „Download encrypted backup" şi acţiunea reală nu se mai distinge. Alegerea
+      e `SegmentedControl` (suprafaţă ridicată + inel); umplerea primară rămâne a lui `Button`.
+      În components/settings/ şi components/ui/ regula e strictă; în rest, datoria veche e numărată
+      în PRIMARY_STATE_DEBT şi poate doar să scadă.
+
    Excepţiile sunt în ALLOW, fiecare cu motiv. Se scanează doar string-urile (literali, template-uri,
    text JSX) — comentariile pot vorbi liber despre ✕ şi `text-[10px]`. */
 import ts from 'typescript'
@@ -145,6 +152,56 @@ function primitiveClassHits(file: string, src: string): Hit[] {
   return out
 }
 
+/* ── 6. umplerea primară ca stare „ales" ───────────────────────────────────────────────────────── */
+const PRIMARY_FILL = /(?<![\w-])bg-sky-600(?![\w/-])/
+
+function primaryStateHits(file: string, src: string): Hit[] {
+  if (!file.endsWith('.tsx')) return []
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const out: Hit[] = []
+  // o ramură conţine umplerea primară dacă vreun literal din ea are `bg-sky-600` sau dacă cheamă
+  // `btn.primary` / `buttonClass('primary', …)`
+  const branchHas = (n: ts.Node): boolean => {
+    let hit = false
+    const visit = (x: ts.Node) => {
+      if (hit) return
+      if ((ts.isStringLiteral(x) || ts.isNoSubstitutionTemplateLiteral(x) || ts.isTemplateHead(x)
+          || ts.isTemplateMiddle(x) || ts.isTemplateTail(x)) && PRIMARY_FILL.test(x.text)) hit = true
+      else if (ts.isPropertyAccessExpression(x) && x.expression.getText(sf) === 'btn' && x.name.text === 'primary') hit = true
+      else if (ts.isCallExpression(x) && x.expression.getText(sf) === 'buttonClass'
+          && x.arguments[0] && ts.isStringLiteral(x.arguments[0]) && x.arguments[0].text === 'primary') hit = true
+      else x.forEachChild(visit)
+    }
+    visit(n)
+    return hit
+  }
+  const visit = (n: ts.Node) => {
+    if (ts.isConditionalExpression(n) && (branchHas(n.whenTrue) || branchHas(n.whenFalse))) {
+      out.push({ file, line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1, text: 'primary fill as a selected state' })
+      return
+    }
+    n.forEachChild(visit)
+  }
+  visit(sf)
+  return out
+}
+
+/** datoria de dinainte de 3.7.1, în afara Setărilor: fişier → câte ternare. Poate doar să SCADĂ
+    (migrează pe SegmentedControl / IconButton active şi micşorează numărul); un fişier nou nu intră. */
+const PRIMARY_STATE_DEBT: Record<string, number> = {
+  './App.tsx': 3,
+  './components/AddHostModal.tsx': 2,
+  './components/ConfirmModal.tsx': 1,
+  './components/DiagnosticModal.tsx': 1,
+  './components/HostOfflineOverlay.tsx': 1,
+  './components/HostsCsv.tsx': 1,
+  './components/MobileKeybar.tsx': 1,
+  './components/ReplayLinkDialog.tsx': 1,
+  './components/SettingsModal.tsx': 1,
+  './components/Sidebar.tsx': 1,
+  './components/TranscriptPlayer.tsx': 2,
+}
+
 const fmt = (h: Hit[]) => h.map((x) => `${x.file}:${x.line}  ${x.text}`).join('\n')
 
 describe('design system: garda de regresie', () => {
@@ -182,6 +239,25 @@ describe('design system: garda de regresie', () => {
     const css = (import.meta.glob('./index.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>)['./index.css']
     const sel = [...css.matchAll(/:root\[data-theme='macos'\]([^,{]*)[,{]/g)].map((m) => m[1].trim())
     expect(sel.filter((s) => s !== '' && s !== '.wt-workspace .wt-canvas')).toEqual([])
+  })
+  it('umplerea primară nu e stare „ales" în Setări şi în ui/ (SegmentedControl), iar datoria din rest nu creşte (M7)', () => {
+    const all = Object.entries(files).flatMap(([f, s]) => primaryStateHits(f, s))
+    const strict = all.filter((h) => /^\.\/components\/(settings|ui)\//.test(h.file))
+    expect(fmt(strict)).toBe('')
+    const counts: Record<string, number> = {}
+    for (const h of all) if (!strict.includes(h)) counts[h.file] = (counts[h.file] ?? 0) + 1
+    const over = Object.entries(counts).filter(([f, n]) => n > (PRIMARY_STATE_DEBT[f] ?? 0))
+      .map(([f, n]) => `${f}: ${n} > ${PRIMARY_STATE_DEBT[f] ?? 0}\n${fmt(all.filter((h) => h.file === f))}`)
+    expect(over.join('\n')).toBe('')
+  })
+  it('garda „primară ca stare" prinde ce trebuie (auto-test)', () => {
+    const probe = primaryStateHits('./probe.tsx',
+      'const a = <button className={on ? "bg-sky-600 text-white" : "bg-ink-800"}>a</button>\n'
+      + 'const b = <button className={on ? btn.primary : btn.secondary}>b</button>\n'
+      + 'const c = <button className={`x ${on ? buttonClass("primary") : ""}`}>c</button>\n'
+      + 'const d = <button className={on ? "bg-sky-600/15" : ""}>d</button>\n'
+      + 'const e = <button className="bg-sky-600 text-white">e</button>\n')
+    expect(probe.map((h) => h.line)).toEqual([1, 2, 3])
   })
   it('garda de primitive prinde ce trebuie (auto-test)', () => {
     const probe = primitiveClassHits('./probe.tsx',

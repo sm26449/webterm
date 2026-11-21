@@ -73,8 +73,11 @@ try {
   await page.click('button[aria-label="Settings"]')
   await page.getByRole('button', { name: 'Backup', exact: true }).click()
   await page.setInputFiles('input[type=file]', '/tmp/restore-backup.wtbk')
-  await page.locator('[aria-label="Backup passphrase"]').fill(BK_PASS)
-  await page.getByPlaceholder('your account password').fill(PASSWORD)
+  // 3.7.1: restaurarea e o zonă periculoasă de sine stătătoare, cu etichete vizibile şi parola
+  // contului în câmpul ei (exportul manual are unul cu acelaşi nume — de aici ancorarea)
+  const restore = page.locator('[data-setting-id="backupRestore"]')
+  await restore.getByLabel('Backup passphrase', { exact: true }).fill(BK_PASS)
+  await restore.getByLabel('Your EverShell password', { exact: true }).fill(PASSWORD)
   await page.getByRole('button', { name: 'Restore and restart' }).first().click()
   // De la 3.1.0 confirmarea „RESTORE replaces ALL current data…" e un ConfirmModal în aplicaţie
   // (role=alertdialog, butonul de confirmare ultimul; Anulează e primul şi focusat la `danger`),

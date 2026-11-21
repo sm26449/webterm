@@ -3,8 +3,8 @@ import { api, ApiError, errText } from '../../lib/api'
 import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
-import { field, heading } from './ui'
-import { Button, ErrorState } from '../ui'
+import { field } from './ui'
+import { Badge, Button, ErrorState, eyebrow, Field, SettingsSection, Switch } from '../ui'
 import { fmtTs } from '../../lib/tz'
 import { canSave, type LoadState } from '../../lib/loadable'
 import { AlertPref, applyPref, groupPrefs } from '../../lib/alerts'
@@ -14,6 +14,10 @@ import NotLoaded from './NotLoaded'
 // Notificări: alerte pe email (SMTP) + webhook, praguri de resurse. (Domeniul de port-forwarding
 // s-a mutat în Infrastructură în 3.6.4 — ForwardDomainSection.tsx.)
 // Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
+// 3.7.1 (audit UX Setări #3): trei părţi distincte — Canalele instanţei (Email, Webhook: fiecare cu
+// starea, Save-ul şi testul lui), Regulile instanţei (praguri) şi Notificările MELE (per cont).
+// Înainte livrarea comună, pragurile şi alegerile personale erau un singur bloc, iar cine căuta în
+// preferinţele lui o problemă a canalului comun nu avea cum s-o găsească.
 
 // Ultima livrare reuşită / eşuată pe fiecare canal, persistată de gateway (email_alerts._record).
 // Fără ea, un SMTP care picase de luni de zile era invizibil: eroarea mergea doar în log.
@@ -26,7 +30,9 @@ type AlertStatus = {
 // 3.7.1 (audit UX Setări C3/#6): pe telefon cele ~40 de checkbox-uri din Alert events aveau sub
 // 24 px. Acelaşi tipar ca în Users/Roles (24 px sub `pointer: coarse`), iar eticheta `.wt-touch`
 // umple celula, deci toată celula (≥ 44 px) e ţinta atingerii.
-const alertCheck = 'h-4 w-4 shrink-0 rounded-md accent-sky-600 [@media(pointer:coarse)]:h-6 [@media(pointer:coarse)]:w-6'
+// (3.7.1, pasul 2: bifele au devenit <Switch>, cu ţintă de 44 px prin .wt-touch.)
+type SmtpForm = { host: string; port: number; user: string; password: string; from_addr: string; to_addr: string; starttls: boolean; webhook: string }
+type Channel = 'email' | 'webhook'
 
 export default function NotificationsTab() {
   const { t } = useI18n()
@@ -40,12 +46,14 @@ export default function NotificationsTab() {
   // Fiecare secţiune are starea ei; Save e blocat până când secţiunea s-a încărcat.
   const [thresholds, setThresholds] = useState({ cpu: 90, mem: 90, disk: 90 })
   const [thrState, setThrState] = useState<LoadState>({ status: 'loading' })
+  // ultima valoare de pe server: „Unsaved changes" = formularul diferă de ea
+  const [thrSaved, setThrSaved] = useState({ cpu: 90, mem: 90, disk: 90 })
   const [alertMsg, setAlertMsg] = useState('')
   const [alertErr, setAlertErr] = useState('')
   const loadThresholds = () => {
     setThrState({ status: 'loading' })
     return api<{ cpu: number; mem: number; disk: number }>('/api/settings/alerts')
-      .then((r) => { setThresholds(r); setThrState({ status: 'ok' }) })
+      .then((r) => { setThresholds(r); setThrSaved(r); setThrState({ status: 'ok' }) })
       .catch((e) => setThrState({ status: 'error', error: errText(e, t) }))
   }
   async function saveThresholds() {
@@ -55,6 +63,7 @@ export default function NotificationsTab() {
     setAlertMsg(''); setAlertErr(''); setBusy(true)
     try {
       await api('/api/settings/alerts', { method: 'POST', body: JSON.stringify(thresholds) })
+      setThrSaved(thresholds)
       setAlertMsg(t('settings.thresholdsSaved'))
     } catch (err) {
       setAlertErr(errText(err, t) || t('settings.error'))
@@ -62,10 +71,14 @@ export default function NotificationsTab() {
   }
 
   // SMTP (alerte pe email) + webhook
-  const [smtp, setSmtp] = useState({
+  const [smtp, setSmtp] = useState<SmtpForm>({
     host: '', port: 587, user: '', password: '', from_addr: '', to_addr: '', starttls: true, webhook: '',
   })
+  const [smtpSaved, setSmtpSaved] = useState<SmtpForm | null>(null)
   const [smtpHasPw, setSmtpHasPw] = useState(false)
+  // mesajul stă în cardul canalului care l-a produs (Email sau Webhook). Ambele carduri trimit
+  // ACELAŞI POST /api/settings/smtp, cu tot formularul — exact ca înainte de împărţire.
+  const [chan, setChan] = useState<Channel>('email')
   const [smtpMsg, setSmtpMsg] = useState('')
   const [smtpErr, setSmtpErr] = useState('')
   const [smtpTesting, setSmtpTesting] = useState(false)
@@ -76,8 +89,9 @@ export default function NotificationsTab() {
     if (!quiet) setSmtpState({ status: 'loading' })
     return api<{ host?: string; port?: number; user?: string; from_addr?: string; to_addr?: string
           starttls: boolean; webhook?: string; has_password: boolean; status?: AlertStatus }>('/api/settings/smtp').then((c) => {
-      setSmtp({ host: c.host || '', port: c.port || 587, user: c.user || '', password: '',
-        from_addr: c.from_addr || '', to_addr: c.to_addr || '', starttls: c.starttls, webhook: c.webhook || '' })
+      const loaded = { host: c.host || '', port: c.port || 587, user: c.user || '', password: '',
+        from_addr: c.from_addr || '', to_addr: c.to_addr || '', starttls: c.starttls, webhook: c.webhook || '' }
+      setSmtp(loaded); setSmtpSaved(loaded)
       setSmtpHasPw(c.has_password)
       setAlertStatus(c.status ?? null)
       setSmtpState({ status: 'ok' })
@@ -99,8 +113,8 @@ export default function NotificationsTab() {
         body: JSON.stringify({ ...smtp, current_password: acct }) })
     }
   }
-  async function saveSmtp() {
-    setSmtpMsg(''); setSmtpErr(''); setBusy(true)
+  async function saveSmtp(which: Channel) {
+    setChan(which); setSmtpMsg(''); setSmtpErr(''); setBusy(true)
     try {
       await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
@@ -111,7 +125,7 @@ export default function NotificationsTab() {
     } finally { setBusy(false) }
   }
   async function testSmtp() {
-    setSmtpMsg(''); setSmtpErr(''); setSmtpTesting(true)
+    setChan('email'); setSmtpMsg(''); setSmtpErr(''); setSmtpTesting(true)
     try {
       // salvează ÎNTÂI ce e în formular: altfel testul rulează pe configurația veche şi fluxul
       // natural „completez → testez" testează altceva
@@ -128,7 +142,7 @@ export default function NotificationsTab() {
   // Test pe webhook: acelaşi tipar ca testul SMTP (salvează întâi formularul), dar posteaza pe canalul
   // de chat — înainte singurul test trimitea email, deci un webhook greşit se vedea abia la o alertă pierdută
   async function testWebhook() {
-    setSmtpMsg(''); setSmtpErr(''); setSmtpTesting(true)
+    setChan('webhook'); setSmtpMsg(''); setSmtpErr(''); setSmtpTesting(true)
     try {
       await postSmtp()
       setSmtp((s) => ({ ...s, password: '' }))
@@ -151,9 +165,9 @@ export default function NotificationsTab() {
     setPrefsLoadErr(false)
     api<{ prefs: AlertPref[] }>('/api/alerts/prefs').then((r) => setPrefs(r.prefs)).catch(() => setPrefsLoadErr(true))
   }
-  async function togglePref(kind: string, field: 'email' | 'inapp', value: boolean) {
+  async function togglePref(kind: string, which: 'email' | 'inapp', value: boolean) {
     if (!prefs) return
-    const next = applyPref(prefs, kind, field, value)
+    const next = applyPref(prefs, kind, which, value)
     setPrefs(next); setPrefsErr(''); setPrefsMsg('')
     const p = next.find((x) => x.kind === kind)!
     try {
@@ -169,170 +183,207 @@ export default function NotificationsTab() {
 
   useEffect(() => { void loadSmtp(); void loadThresholds(); loadPrefs() }, [])
 
-  return (
-    <div>
-      <section data-setting-id="smtp" hidden={!vis('smtp')}>
-        {/* ── Alerte pe email (SMTP) ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.smtp.title')}<HelpTip id="smtp" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.smtp.hint')}</p>
-        <NotLoaded state={smtpState} onRetry={() => { void loadSmtp() }} />
-        {canSave(smtpState) && (<div className="mt-2 flex flex-col gap-2">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input value={smtp.host} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })}
-              placeholder={t('settings.smtp.hostPlaceholder')} aria-label={t('settings.smtp.host')}
-              aria-invalid={smtpErr ? true : undefined} aria-describedby={smtpErr ? 'smtp-error' : undefined} className={field} />
-            <input type="number" value={smtp.port} onChange={(e) => setSmtp({ ...smtp, port: +e.target.value })}
-              placeholder={t('settings.smtp.portPlaceholder')} aria-label={t('settings.smtp.port')} className={`${field} sm:w-24 sm:shrink-0`} />
-          </div>
-          <input value={smtp.user} onChange={(e) => setSmtp({ ...smtp, user: e.target.value })}
-            placeholder={t('settings.smtp.user')} aria-label={t('settings.smtp.user')} autoComplete="off" className={field} />
-          <input type="password" value={smtp.password}
-            onChange={(e) => setSmtp({ ...smtp, password: e.target.value })}
-            placeholder={smtpHasPw ? t('settings.smtp.passwordSetPlaceholder') : t('settings.smtp.passwordPlaceholder')}
-            aria-label={t('settings.smtp.password')} autoComplete="off" className={field} />
-          <input value={smtp.from_addr} onChange={(e) => setSmtp({ ...smtp, from_addr: e.target.value })}
-            placeholder={t('settings.smtp.from')} aria-label={t('settings.smtp.from')} className={field} />
-          <input value={smtp.to_addr} onChange={(e) => setSmtp({ ...smtp, to_addr: e.target.value })}
-            placeholder={t('settings.smtp.toPlaceholder')} aria-label={t('settings.smtp.to')} className={field} />
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            <input type="checkbox" checked={smtp.starttls}
-              onChange={(e) => setSmtp({ ...smtp, starttls: e.target.checked })} />
-            {t('settings.smtp.starttls')}
-          </label>
-          {/* webhook: aceleaşi alerte, dar unde le vezi imediat. Independent de SMTP. Are id-ul
-              lui de secţiune (căutarea din Setări duce aici, nu la începutul blocului SMTP). */}
-          <div data-setting-id="webhook" className="flex flex-col gap-2">
-            <input value={smtp.webhook} onChange={(e) => setSmtp({ ...smtp, webhook: e.target.value })}
-              placeholder={t('settings.smtp.webhookPlaceholder')} aria-label={t('settings.smtp.webhook')}
-              spellCheck={false} className={field} />
-            <p className="flex items-start gap-2 text-xs text-slate-500"><span>{t('settings.smtp.webhookHint')}</span><HelpTip id="webhook" /></p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="primary" disabled={busy} onClick={saveSmtp}>
-              {t('settings.save')}
-            </Button>
-            <Button variant="secondary" disabled={smtpTesting} onClick={testSmtp}>
-              {smtpTesting ? t('settings.smtp.sending') : t('settings.smtp.sendTest')}
-            </Button>
-            {smtp.webhook.trim() && (
-              <Button variant="secondary" disabled={smtpTesting} onClick={testWebhook}>
-                {t('settings.smtp.testWebhook')}
-              </Button>
-            )}
-            <span role="status" className={smtpMsg ? 'text-sm wt-good' : 'sr-only'}>{smtpMsg}</span>
-            <span id="smtp-error" role="alert" className={smtpErr ? 'text-sm wt-danger' : 'sr-only'}>{smtpErr}</span>
-          </div>
-          {/* „au plecat alertele?" — ultimul email/webhook trimis şi ultimul eşuat; un eşec mai
-              recent decât ultimul succes e roşu, altfel e doar istoric */}
-          {alertStatus && (
-            <div className="flex flex-col gap-0.5 text-xs" data-testid="alert-delivery-status">
-              {([['email', alertStatus.alert_email_last_sent, alertStatus.alert_email_last_failed],
-                 ['webhook', alertStatus.alert_webhook_last_sent, alertStatus.alert_webhook_last_failed]] as const)
-                .map(([ch, sent, failed]) => {
-                  if (!sent && !failed) {
-                    return ch === 'email'
-                      ? <span key={ch} className="text-slate-500">{t('settings.smtp.neverSent')}</span>
-                      : null
-                  }
-                  const failedRecent = !!failed && (!sent || failed.ts > sent.ts)
-                  return (
-                    <span key={ch} className={failedRecent ? 'wt-danger break-words' : 'text-slate-500'}>
-                      {sent && t(ch === 'email' ? 'settings.smtp.lastSent' : 'settings.smtp.webhookLastSent',
-                        { when: fmtTs(sent.ts), subject: sent.subject })}
-                      {sent && failed ? ' · ' : ''}
-                      {failed && t(ch === 'email' ? 'settings.smtp.lastFailed' : 'settings.smtp.webhookLastFailed',
-                        { when: fmtTs(failed.ts), error: failed.error || '' })}
-                    </span>
-                  )
-                })}
-            </div>
-          )}
-        </div>)}
-      </section>
+  const emailDirty = !!smtpSaved && (smtp.password !== '' || (['host', 'port', 'user', 'from_addr', 'to_addr', 'starttls'] as const)
+    .some((k) => smtp[k] !== smtpSaved[k]))
+  const webhookDirty = !!smtpSaved && smtp.webhook !== smtpSaved.webhook
+  const thrDirty = (['cpu', 'mem', 'disk'] as const).some((k) => thresholds[k] !== thrSaved[k])
+  // „au plecat alertele?" — ultimul trimis şi ultimul eşuat pe un canal; un eşec mai recent decât
+  // ultimul succes e roşu, altfel e doar istoric
+  const delivery = (ch: Channel) => {
+    if (!alertStatus) return null
+    const sent = ch === 'email' ? alertStatus.alert_email_last_sent : alertStatus.alert_webhook_last_sent
+    const failed = ch === 'email' ? alertStatus.alert_email_last_failed : alertStatus.alert_webhook_last_failed
+    if (!sent && !failed) {
+      return ch === 'email' ? <p className="text-xs text-slate-500">{t('settings.smtp.neverSent')}</p> : null
+    }
+    const failedRecent = !!failed && (!sent || failed.ts > sent.ts)
+    return (
+      <p className={`text-xs ${failedRecent ? 'wt-danger break-words' : 'text-slate-500'}`}>
+        {sent && t(ch === 'email' ? 'settings.smtp.lastSent' : 'settings.smtp.webhookLastSent',
+          { when: fmtTs(sent.ts), subject: sent.subject })}
+        {sent && failed ? ' · ' : ''}
+        {failed && t(ch === 'email' ? 'settings.smtp.lastFailed' : 'settings.smtp.webhookLastFailed',
+          { when: fmtTs(failed.ts), error: failed.error || '' })}
+      </p>
+    )
+  }
+  const chanStatus = (ch: Channel) => (
+    <>
+      <span role="status" className={chan === ch && smtpMsg ? 'text-sm wt-good' : 'sr-only'}>{chan === ch ? smtpMsg : ''}</span>
+      <span id={`${ch}-error`} role="alert" className={chan === ch && smtpErr ? 'text-sm wt-danger' : 'sr-only'}>{chan === ch ? smtpErr : ''}</span>
+    </>
+  )
+  const configured = (on: boolean) => (
+    <Badge tone={on ? 'ok' : 'neutral'} size="md">{on ? t('settings.channel.on') : t('settings.channel.off')}</Badge>
+  )
+  const instance = vis('smtp') || vis('webhook') || vis('resourceAlerts')
 
-      <section data-setting-id="resourceAlerts" hidden={!vis('resourceAlerts')}>
-        {/* ── Alerte pe resurse ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alerts.title')}<HelpTip id="resourceAlerts" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.alerts.hint')}</p>
-        <NotLoaded state={thrState} onRetry={() => { void loadThresholds() }} />
-        {canSave(thrState) && (<div className="mt-2 flex flex-wrap items-center gap-3">
-          {([['cpu', 'CPU'], ['mem', 'RAM'], ['disk', t('settings.alerts.disk')]] as const).map(([k, label]) => (
-            <label key={k} className="flex items-center gap-2 text-sm text-slate-300">
-              <span className="w-10 text-slate-400">{label}</span>
-              <input type="number" min={0} max={100} value={thresholds[k]}
-                aria-label={t('settings.alerts.thresholdAria', { label })}
-                onChange={(e) => setThresholds({ ...thresholds, [k]: Math.max(0, Math.min(100, +e.target.value)) })}
-                className={`${field} w-20`} />
-              <span className="text-slate-500">%</span>
-            </label>
-          ))}
-          <Button variant="primary" disabled={busy} onClick={saveThresholds}>
+  return (
+    <div className="space-y-4">
+      {/* ── Canale (instanţă): pe unde pleacă alertele ── */}
+      {(vis('smtp') || vis('webhook')) && <h3 className={eyebrow}>{t('settings.notif.channels')}</h3>}
+      <SettingsSection data-setting-id="smtp" hidden={!vis('smtp')} headingLevel={4} instanceWide
+        title={t('settings.smtp.title')} titleExtra={<>{smtpSaved && configured(!!smtpSaved.host)}<HelpTip id="smtp" /></>}
+        description={t('settings.smtp.hint')}
+        dirty={canSave(smtpState) && emailDirty}
+        footer={canSave(smtpState) ? <>
+          <Button variant="primary" type="button" disabled={busy} onClick={() => { void saveSmtp('email') }}>
+            {t('settings.save')}
+          </Button>
+          <Button variant="secondary" type="button" disabled={smtpTesting} onClick={() => { void testSmtp() }}>
+            {smtpTesting && chan === 'email' ? t('settings.smtp.sending') : t('settings.smtp.sendTest')}
+          </Button>
+          {chanStatus('email')}
+        </> : undefined}>
+        <NotLoaded state={smtpState} onRetry={() => { void loadSmtp() }} />
+        {canSave(smtpState) && (<div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Field label={t('settings.smtp.host')} className="min-w-0 flex-1">
+              <input value={smtp.host} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })}
+                placeholder={t('settings.smtp.hostPlaceholder')} spellCheck={false}
+                aria-invalid={chan === 'email' && smtpErr ? true : undefined}
+                aria-describedby={chan === 'email' && smtpErr ? 'email-error' : undefined} className={field} />
+            </Field>
+            <Field label={t('settings.smtp.port')} className="sm:w-28 sm:shrink-0">
+              <input type="number" value={smtp.port} onChange={(e) => setSmtp({ ...smtp, port: +e.target.value })} className={field} />
+            </Field>
+          </div>
+          <Field label={t('settings.smtp.user')}>
+            <input value={smtp.user} onChange={(e) => setSmtp({ ...smtp, user: e.target.value })} autoComplete="off" className={field} />
+          </Field>
+          <Field label={t('settings.smtp.password')} hint={smtpHasPw ? t('settings.backup.keepStoredHint') : undefined}>
+            <input type="password" value={smtp.password} onChange={(e) => setSmtp({ ...smtp, password: e.target.value })}
+              autoComplete="off" className={field} />
+          </Field>
+          <Field label={t('settings.smtp.from')}>
+            <input value={smtp.from_addr} onChange={(e) => setSmtp({ ...smtp, from_addr: e.target.value })}
+              placeholder={t('settings.smtp.fromPlaceholder')} className={field} />
+          </Field>
+          <Field label={t('settings.smtp.to')}>
+            <input value={smtp.to_addr} onChange={(e) => setSmtp({ ...smtp, to_addr: e.target.value })}
+              placeholder={t('settings.smtp.toPlaceholder')} className={field} />
+          </Field>
+          <Switch checked={smtp.starttls} onChange={(v) => setSmtp({ ...smtp, starttls: v })} label={t('settings.smtp.starttls')} />
+          {delivery('email')}
+        </div>)}
+      </SettingsSection>
+
+      {/* webhook: aceleaşi alerte, dar unde le vezi imediat. Independent de SMTP; propriul card, cu
+          id-ul lui de secţiune (căutarea din Setări duce aici) */}
+      <SettingsSection data-setting-id="webhook" hidden={!vis('webhook')} headingLevel={4} instanceWide
+        title={t('settings.smtp.webhook')} titleExtra={<>{smtpSaved && configured(!!smtpSaved.webhook.trim())}<HelpTip id="webhook" /></>}
+        description={t('settings.smtp.webhookHint')}
+        dirty={canSave(smtpState) && webhookDirty}
+        footer={canSave(smtpState) ? <>
+          <Button variant="primary" type="button" disabled={busy} onClick={() => { void saveSmtp('webhook') }}>
+            {t('settings.save')}
+          </Button>
+          <Button variant="secondary" type="button" disabled={smtpTesting || !smtp.webhook.trim()}
+            aria-describedby={!smtp.webhook.trim() ? 'webhook-test-why' : undefined} onClick={() => { void testWebhook() }}>
+            {smtpTesting && chan === 'webhook' ? t('settings.smtp.sending') : t('settings.smtp.testWebhook')}
+          </Button>
+          {!smtp.webhook.trim() && <span id="webhook-test-why" className="text-xs text-slate-500">{t('settings.smtp.whyWebhookTest')}</span>}
+          {chanStatus('webhook')}
+        </> : undefined}>
+        {/* fără încărcare reuşită nu arătăm formularul: un Save ar scrie valori implicite (U04) */}
+        {!vis('smtp') && <NotLoaded state={smtpState} onRetry={() => { void loadSmtp() }} />}
+        {canSave(smtpState) && (<div className="flex flex-col gap-3">
+          <Field label={t('settings.smtp.webhookUrl')}>
+            <input value={smtp.webhook} onChange={(e) => setSmtp({ ...smtp, webhook: e.target.value })}
+              placeholder={t('settings.smtp.webhookPlaceholder')} spellCheck={false} className={field} />
+          </Field>
+          {delivery('webhook')}
+        </div>)}
+      </SettingsSection>
+
+      {/* ── Reguli (instanţă): când se declanşează o alertă ── */}
+      {vis('resourceAlerts') && <h3 className={`${eyebrow} pt-2`}>{t('settings.notif.rules')}</h3>}
+      <SettingsSection data-setting-id="resourceAlerts" hidden={!vis('resourceAlerts')} headingLevel={4} instanceWide
+        title={t('settings.alerts.title')} titleExtra={<HelpTip id="resourceAlerts" />}
+        description={t('settings.alerts.hint')}
+        dirty={canSave(thrState) && thrDirty}
+        footer={canSave(thrState) ? <>
+          <Button variant="primary" type="button" disabled={busy} onClick={() => { void saveThresholds() }}>
             {t('settings.alerts.saveThresholds')}
           </Button>
           <span role="status" className={alertMsg ? 'text-sm wt-good' : 'sr-only'}>{alertMsg}</span>
           <span role="alert" className={alertErr ? 'text-sm wt-danger' : 'sr-only'}>{alertErr}</span>
+        </> : undefined}>
+        <NotLoaded state={thrState} onRetry={() => { void loadThresholds() }} />
+        {canSave(thrState) && (<div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+          {([['cpu', 'CPU'], ['mem', 'RAM'], ['disk', t('settings.alerts.disk')]] as const).map(([k, label]) => (
+            <div key={k} className="flex items-center gap-1.5">
+              <Field inline label={label}>
+                <input type="number" min={0} max={100} value={thresholds[k]}
+                  aria-label={t('settings.alerts.thresholdAria', { label })}
+                  onChange={(e) => setThresholds({ ...thresholds, [k]: Math.max(0, Math.min(100, +e.target.value)) })}
+                  className={`${field} w-20`} />
+              </Field>
+              <span className="text-sm text-slate-500" aria-hidden="true">%</span>
+            </div>
+          ))}
         </div>)}
-      </section>
+      </SettingsSection>
 
-      <section data-setting-id="alertPrefs">
-        {/* ── Evenimente de alertă: email / în aplicaţie, per tip ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.alertPrefs.title')}<HelpTip id="alertPrefs" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.alertPrefs.hint')}</p>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.alertPrefs.fleetNote')}</p>
+      {/* ── Notificările mele (orice cont): ce primesc eu, pe email şi în aplicaţie ── */}
+      {instance && <h3 className={`${eyebrow} pt-2`}>{t('settings.notif.mine')}</h3>}
+      <SettingsSection data-setting-id="alertPrefs" headingLevel={instance ? 4 : 3}
+        title={t('settings.alertPrefs.title')} titleExtra={<HelpTip id="alertPrefs" />}
+        description={t('settings.alertPrefs.hint')}>
+        <p className="text-xs text-slate-500">{t('settings.alertPrefs.fleetNote')}</p>
         {prefsLoadErr && <ErrorState compact title={t('settings.alertPrefs.loadFailed')} onRetry={loadPrefs} />}
         {prefs && (
-          <div className="mt-2 flex flex-col gap-3" data-testid="alert-prefs">
-            {groupPrefs(prefs).map(({ group, items }) => (
-              <table key={group} className="w-full table-fixed text-sm">
-                <caption className="pb-1 text-left text-xs font-semibold text-slate-400">{t(`alerts.group.${group}`)}</caption>
-                <thead className="sr-only">
-                  <tr>
-                    <th scope="col">{t('settings.alertPrefs.colEvent')}</th>
-                    <th scope="col">{t('settings.alertPrefs.colEmail')}</th>
-                    <th scope="col">{t('settings.alertPrefs.colInapp')}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-ink-800">
-                  {items.map((p) => {
-                    const label = t(`alerts.kind.${p.kind}`)
-                    return (
-                      <tr key={p.kind} data-alert-kind={p.kind}>
-                        <td className="py-1.5 pr-2 align-top text-slate-300">
-                          <span className="break-words">{label}</span>
-                          {p.security && (
-                            <span className="mt-0.5 block text-2xs text-slate-500">{t('settings.alertPrefs.alwaysRecorded')}</span>
+          <div className="mt-3 flex flex-col gap-4" data-testid="alert-prefs">
+            {groupPrefs(prefs).map(({ group, items }) => {
+              const gid = `alert-group-${group}`
+              return (
+                <div key={group} role="group" aria-labelledby={gid}>
+                  {/* antet: numele grupului + (de la sm în sus) coloanele vizibile „Email · In app";
+                      pe telefon fiecare comutator îşi poartă eticheta lângă el */}
+                  <div className="grid grid-cols-[minmax(0,1fr)] items-end gap-2 border-b border-ink-700/70 pb-1 sm:grid-cols-[minmax(0,1fr)_5.5rem_8.5rem]">
+                    <p id={gid} className="text-xs font-semibold text-slate-300">{t(`alerts.group.${group}`)}</p>
+                    <span aria-hidden="true" className="hidden text-xs text-slate-500 sm:block">{t('settings.alertPrefs.colEmail')}</span>
+                    <span aria-hidden="true" className="hidden text-xs text-slate-500 sm:block">{t('settings.alertPrefs.colInapp')}</span>
+                  </div>
+                  <ul className="divide-y divide-ink-800">
+                    {items.map((p) => {
+                      const label = t(`alerts.kind.${p.kind}`)
+                      return (
+                        <li key={p.kind} data-alert-kind={p.kind}
+                          className="grid grid-cols-[minmax(0,1fr)] gap-x-2 gap-y-1 py-2 sm:grid-cols-[minmax(0,1fr)_5.5rem_8.5rem] sm:items-center">
+                          <div className="min-w-0 text-sm text-slate-300">
+                            <span className="break-words">{label}</span>
+                            {p.security && !p.email && (
+                              <span className="mt-0.5 block text-2xs wt-warn" role="note">{t('settings.alertPrefs.securityEmailOff')}</span>
+                            )}
+                          </div>
+                          <Switch checked={p.email} label={t('settings.alertPrefs.colEmail')} labelVisibility="mobile"
+                            ariaLabel={t('settings.alertPrefs.emailAria', { event: label })}
+                            onChange={(v) => { void togglePref(p.kind, 'email', v) }} />
+                          {p.security ? (
+                            // istoricul în aplicaţie al unui eveniment de securitate nu se poate opri:
+                            // stare de citire, cu motivul lângă ea (audit Me4 / #11), nu o bifă gri
+                            <p className="text-xs text-slate-400">
+                              <span className="sm:hidden">{t('settings.alertPrefs.colInapp')}: </span>
+                              {t('settings.alertPrefs.inappAlways')}
+                            </p>
+                          ) : (
+                            <Switch checked={p.inapp} label={t('settings.alertPrefs.colInapp')} labelVisibility="mobile"
+                              ariaLabel={t('settings.alertPrefs.inappAria', { event: label })}
+                              onChange={(v) => { void togglePref(p.kind, 'inapp', v) }} />
                           )}
-                          {p.security && !p.email && (
-                            <span className="mt-0.5 block text-2xs wt-warn" role="note">{t('settings.alertPrefs.securityEmailOff')}</span>
-                          )}
-                        </td>
-                        <td className="w-20 py-1.5 align-top">
-                          <label className="wt-touch flex w-full cursor-pointer items-center gap-1.5 text-xs text-slate-400">
-                            <input type="checkbox" checked={p.email} className={alertCheck}
-                              aria-label={t('settings.alertPrefs.emailAria', { event: label })}
-                              onChange={(e) => togglePref(p.kind, 'email', e.target.checked)} />
-                            <span aria-hidden="true">{t('settings.alertPrefs.colEmail')}</span>
-                          </label>
-                        </td>
-                        <td className="w-28 py-1.5 align-top">
-                          <label className="wt-touch flex w-full cursor-pointer items-center gap-1.5 text-xs text-slate-400">
-                            <input type="checkbox" checked={p.inapp} disabled={p.security} className={alertCheck}
-                              aria-label={t('settings.alertPrefs.inappAria', { event: label })}
-                              onChange={(e) => togglePref(p.kind, 'inapp', e.target.checked)} />
-                            <span aria-hidden="true">{t('settings.alertPrefs.colInapp')}</span>
-                          </label>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            ))}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              )
+            })}
           </div>
         )}
         <span role="status" className={prefsMsg ? 'text-sm wt-good' : 'sr-only'}>{prefsMsg}</span>
         <span role="alert" className={prefsErr ? 'text-sm wt-danger' : 'sr-only'}>{prefsErr}</span>
-      </section>
+      </SettingsSection>
     </div>
   )
 }

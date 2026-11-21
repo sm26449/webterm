@@ -13,7 +13,7 @@ import { copyText } from '../../lib/clipboard'
 import { downloadBlob, field, heading } from './ui'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
-import { Button, ErrorState } from '../ui'
+import { Button, ErrorState, SegmentedControl } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -308,15 +308,10 @@ export default function InfrastructureTab(props: { onAccountChanged: () => void 
             <div className="rounded-md bg-amber-500/10 p-2.5 text-xs wt-warn ring-1 ring-amber-500/25">
               {t('settings.sign.noKeyYet')}
             </div>
-            <div className="flex gap-1 text-sm">
-              {([['gen', t('settings.sign.genNewKey')], ['import', t('settings.sign.importExistingKey')]] as const).map(([m, label]) => (
-                <button key={m} onClick={() => { setSignMode(m); setSignErr('') }}
-                  className={`rounded-md px-3 py-1.5 ring-1 ${signMode === m
-                    ? 'bg-sky-600 text-white ring-sky-600' : 'bg-ink-800 text-slate-300 ring-ink-700 hover:bg-ink-700'}`}>
-                  {label}
-                </button>
-              ))}
-            </div>
+            {/* 3.7.1 (audit UX Setări M7): alegere, nu acţiune — fără umplerea butonului primar */}
+            <SegmentedControl label={t('settings.signingKey')} value={signMode} className="self-start"
+              onChange={(m) => { setSignMode(m); setSignErr('') }}
+              options={[{ value: 'gen', label: t('settings.sign.genNewKey') }, { value: 'import', label: t('settings.sign.importExistingKey') }]} />
             {signMode === 'gen' ? (
               <>
                 <input type="password" value={signPass} onChange={(e) => setSignPass(e.target.value)}
