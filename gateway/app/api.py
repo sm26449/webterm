@@ -4707,7 +4707,28 @@ class SessionPatch(BaseModel):
     note: str = None
 
 
-def _session_json(row) -> dict:
+def _last_output(row) -> float | None:
+    """Ultima activitate (output) a unei sesiuni ACTIVE, pentru dialogul „New session" (3.7.1).
+    Din hub dacă e ataşat şi a primit ceva; altfel mtime-ul transcriptului .out (supravieţuieşte
+    unui restart de gateway). Sesiunile închise nu au „activitate" → None. Orice eroare → None:
+    e un indiciu de UI, nu o decizie."""
+    if row["state"] not in ("creating", "live"):
+        return None
+    hub = core.hubs.get(row["id"])
+    if hub is not None and hub.last_output_at:
+        return hub.last_output_at
+    try:
+        return core.transcript_paths(row["id"])[0].stat().st_mtime
+    except (OSError, ValueError):
+        return None
+
+
+def _session_json(row, show_share: bool = False) -> dict:
+    # `shared` = există un link de share ACTIV. Doar pentru utilizatori de browser (nu tokenuri de
+    # automatizare), la fel ca GET /api/sessions/{sid}/share (aceeaşi permisiune session.watch);
+    # tokenul/URL-ul nu ies niciodată — doar booleanul.
+    shared = bool(show_share and row["share_token"]
+                  and (row["share_expires"] or 0) > time.time())
     return {
         "id": row["id"], "host_id": row["host_id"], "title": row["title"],
         "note": row["note"], "state": row["state"], "created": row["created"],
@@ -4723,6 +4744,8 @@ def _session_json(row) -> dict:
         # pe tab-urile din fundal; tmux rulează cu status off, deci idle = 0 octeți
         "out_offset": core.hubs[row["id"]].agent_offset
             if row["id"] in core.hubs else (row["agent_offset"] or 0),
+        "last_output": _last_output(row),
+        "shared": shared,
     }
 
 
@@ -4763,7 +4786,8 @@ async def list_sessions(request: Request,
         allowed = set() if is_token else {
             hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
-    return [_session_json(r) for r in rows]
+    show_share = not (isinstance(user, dict) and user.get("is_token"))
+    return [_session_json(r, show_share) for r in rows]
 
 
 @router.get("/api/hosts/{host_id}/sessions")

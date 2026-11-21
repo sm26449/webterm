@@ -267,6 +267,10 @@ export interface Session {
   out_offset: number
   /** cine a deschis-o (3.6; null = dinainte de roluri) */
   created_by_id?: number | null
+  /** 3.7.1: ultimul output văzut de gateway (epoch s); null pe sesiunile închise / gateway vechi */
+  last_output?: number | null
+  /** 3.7.1: are un link de share live activ (doar booleanul; niciodată tokenul) */
+  shared?: boolean
 }
 
 /* Rezumatul de securitate (GET /api/security/summary, 3.5.4). Serverul NU trimite proză: doar

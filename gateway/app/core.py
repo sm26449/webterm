@@ -1165,6 +1165,9 @@ class SessionHub:
         self._last_scroll_exit = 0.0
         self.lock_reason = ""        # "idle" | "stepup" (ataşare fără step-up) | "stepup_max"
         self.last_interaction = time.time()
+        # momentul ultimului output primit de la agent (3.7.1): dialogul „New session" arată
+        # „activ acum 5 min" pe sesiunile deschise, ca omul să ştie pe care s-o reia
+        self.last_output_at: Optional[float] = None
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
@@ -1568,6 +1571,7 @@ class SessionHub:
             self.osc.gap()                    # fail-closed: starea devine „necunoscută"
         self.out_pos += len(data)
         self.out_f.write(data)
+        self.last_output_at = time.time()
         self._cast_event("o", data)
         for client in self.clients:
             client.push(data)

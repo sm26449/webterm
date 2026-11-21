@@ -58,6 +58,21 @@ async def main():
     check("sesiuni: Viewer@B doar pe B", sids(await vb.get("/api/sessions")) == {sb})
     check("sesiuni: Owner pe ambele", sids(await owner.get("/api/sessions")) == {sa, sb})
     check("sesiuni: fără legături → []", (await nob.get("/api/sessions")).json() == [])
+    # 3.7.1: dialogul „New session" citeşte `shared` + `last_output` din aceeaşi listă
+    row = next(s for s in (await op.get("/api/sessions")).json() if s["id"] == sa)
+    check("sesiuni: `shared` fals fără share, `last_output` prezent",
+          row["shared"] is False and "last_output" in row, str(row))
+    await db.execute("UPDATE sessions SET share_token='h', share_expires=? WHERE id=?",
+                     time.time() + 600, sa)
+    row = next(s for s in (await op.get("/api/sessions")).json() if s["id"] == sa)
+    check("sesiuni: share activ → `shared` adevărat (doar booleanul, fără token)",
+          row["shared"] is True and "share_token" not in row and "h" not in row.values(), str(row))
+    await db.execute("UPDATE sessions SET share_expires=? WHERE id=?", time.time() - 1, sa)
+    row = next(s for s in (await op.get("/api/sessions")).json() if s["id"] == sa)
+    check("sesiuni: share expirat → `shared` fals", row["shared"] is False)
+    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL WHERE id=?", sa)
+    row = next(s for s in (await owner.get("/api/sessions")).json() if s["id"] == sb)
+    check("sesiuni: închisă → `last_output` null", row["last_output"] is None)
 
     # ── căutare: filtrul e ÎNAINTE de citirea transcripturilor ───────────────────────────
     seen = []
