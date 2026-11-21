@@ -91,6 +91,19 @@ def router_secret_ok(headers) -> bool:
     return bool(_secret) and bool(got) and hmac.compare_digest(got.encode(), _secret.encode())
 
 
+# Există hosturi cu `mtls_required`? Citit asincron în `_refresh` (intent_off_reason e sincronă şi fără
+# DB). Implicit True = fail closed: până la prima citire, un director lipsă nu ridică clichetul.
+_in_use = {"required": True}
+
+
+async def _load_in_use() -> None:
+    try:
+        row = await db.fetchone("SELECT 1 AS x FROM hosts WHERE mtls_required=1 LIMIT 1")
+        _in_use["required"] = bool(row)
+    except Exception:                            # noqa: BLE001 — DB indisponibil: păstrăm clichetul
+        _in_use["required"] = True
+
+
 def intent_off_reason() -> str:
     """Motivul pentru care mTLS e oprit INTENŢIONAT sau nu poate exista aici — calculat FĂRĂ CA şi fără
     DB (review 3.7.0: altfel un CA care nu se încarcă bloca rollback-ul `WEBTERM_AGENT_MTLS=off`)."""
@@ -116,6 +129,12 @@ def intent_off_reason() -> str:
         # o legătură simbolică ruptă NU e „lipsă": există ceva acolo, doar că e stricat (re-review 3.7.1)
         if os.path.lexists(d):
             status["error"] = "BrokenSymlink"
+            return "write-error"
+        # Auditul Codex 3.7.1 (recheck): un director CONFIGURAT care lipseşte (un mount eşuat la
+        # repornire) nu înseamnă „mTLS n-a existat aici" dacă vreun host îl cere deja → defecţiune,
+        # clichet păstrat. Rollback-ul explicit (WEBTERM_AGENT_MTLS=off / LISTS_DIR=off) rămâne mai sus.
+        if _in_use["required"]:
+            status["error"] = "EdgeDirMissing"
             return "write-error"
         return "no-dir"
     except (OSError, ValueError) as e:
@@ -269,6 +288,7 @@ async def _refresh(force: bool = False) -> None:
     """O trecere: întâi intenţia (oprit / CDN / fără nume) — fără CA, ca rollback-ul să meargă oricând;
     apoi secretul (independent de CA) şi CA-ul, apoi fişierul pentru Traefik."""
     status["error"] = ""
+    await _load_in_use()
     reason = intent_off_reason()
     if reason:
         # `write-error` aici = directorul edge e inaccesibil (nu lipsă): eroarea rămâne pentru System health

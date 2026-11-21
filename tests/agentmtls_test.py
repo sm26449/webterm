@@ -327,14 +327,19 @@ async def main():
     print("== no edge directory at all (plain docker run): mTLS impossible here, not broken (3.7.1)")
     real_dir = config.AGENT_LISTS_DIR
     config.AGENT_LISTS_DIR = os.path.join(EDGE, "does-not-exist")
+    # un `docker run` simplu nu are niciun host care cere mTLS (cu unul, lipsa e o defecţiune — mai jos)
+    req_rows = await db.fetchall("SELECT id FROM hosts WHERE mtls_required=1")
+    await db.execute("UPDATE hosts SET mtls_required=0")
     try:
         await edgemtls._refresh(force=True)
         check("missing directory → 'no-dir', ratchet lifted, no critical alarm",
               edgemtls.status["reason"] == "no-dir" and not edgemtls.enforce_ratchet(), edgemtls.status)
         from app import syshealth as _sh
         r = await _sh.c_agents_mtls()
-        check("…System health says it is off, not broken", r.severity != "critical" and r.key == "mtls_off", (r.severity, r.key))
+        check("…System health says it is off, not broken", r.severity != "critical" and r.key == "mtls_off", str((r.severity, r.key)))
     finally:
+        for rr in req_rows:
+            await db.execute("UPDATE hosts SET mtls_required=1 WHERE id=?", rr["id"])
         config.AGENT_LISTS_DIR = real_dir
         await edgemtls._refresh(force=True)
     check("directory back → enabled again", edgemtls.enabled())
@@ -360,6 +365,35 @@ async def main():
     finally:
         os.stat = real_stat
         await edgemtls._refresh(force=True)
+    print("== a configured edge directory that vanished while a host requires mTLS keeps the ratchet (Codex recheck)")
+    hrow = await db.fetchone("SELECT id FROM hosts LIMIT 1")
+    if hrow:
+        prev_req = (await db.fetchone("SELECT mtls_required FROM hosts WHERE id=?", hrow["id"]))["mtls_required"]
+        await db.execute("UPDATE hosts SET mtls_required=1 WHERE id=?", hrow["id"])
+        config.AGENT_LISTS_DIR = os.path.join(EDGE, "gone-mount")
+        try:
+            await edgemtls._refresh(force=True)
+            check("missing configured edge dir + a host requiring mTLS → write-error, ratchet kept",
+                  edgemtls.status["reason"] == "write-error" and edgemtls.enforce_ratchet()
+                  and bool(edgemtls.status["error"]), edgemtls.status)
+        finally:
+            config.AGENT_LISTS_DIR = edge_dir
+            await db.execute("UPDATE hosts SET mtls_required=? WHERE id=?", prev_req, hrow["id"])
+            await edgemtls._refresh(force=True)
+        req_rows = await db.fetchall("SELECT id FROM hosts WHERE mtls_required=1")
+        await db.execute("UPDATE hosts SET mtls_required=0")
+        config.AGENT_LISTS_DIR = os.path.join(EDGE, "gone-mount")
+        try:
+            await edgemtls._refresh(force=True)
+            check("…with no host requiring mTLS, a missing dir is still 'no-dir' (plain docker run)",
+                  edgemtls.status["reason"] == "no-dir", edgemtls.status)
+        finally:
+            for rr in req_rows:
+                await db.execute("UPDATE hosts SET mtls_required=1 WHERE id=?", rr["id"])
+            config.AGENT_LISTS_DIR = edge_dir
+            await edgemtls._refresh(force=True)
+    else:
+        check("test setup: a host exists", False)
     broken = os.path.join(EDGE, "dangling-link")
     os.symlink(os.path.join(EDGE, "nowhere"), broken)
     config.AGENT_LISTS_DIR = broken

@@ -257,7 +257,11 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
   is the rollback, and it must work even when the CA cannot be loaded. When mTLS is broken (CA error,
   file not writable, an edge directory that exists but cannot be checked: permission denied, a file
   instead of a directory, a path through a file), the requirement stays and System health raises a
-  critical alarm. Only "does not exist" counts as missing; any other error is a failure.
+  critical alarm. Only "does not exist" counts as missing; any other error is a failure, and so is a
+  broken symlink. A missing directory counts as "cannot exist here" only while no host requires
+  mTLS: once one does, a directory that has vanished (a mount that failed after a restart) is a
+  failure too. The rollback is then the explicit switch (`WEBTERM_AGENT_MTLS=off` or
+  `WEBTERM_AGENT_LISTS_DIR=off`).
 - A client certificate counts only when the request came through Traefik's mTLS router, which proves
   it with the installation's secret header. A certificate is public information; the header alone
   proves nothing.
@@ -293,8 +297,17 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - While the kill is in flight, new attaches (owner or share guest) are refused (close code 4410).
   The close counts as done only when the session's exit arrives; an agent error or no exit within
   30 s is audited as "not confirmed", sends no "closed" alert and is not retried for an hour.
-- Closing goes through the source's kill, like the Stop button, so the recording is
-  kept, and is audited as `system:idle-sessions`.
+- Closing goes through the source's **conditional** kill (`kill_if_quiet`, agent 62+), so the
+  recording is kept like with the Stop button, and is audited as `system:idle-sessions`. The gateway
+  sends how long it has seen no activity; the agent refuses (`active`) if, within that window minus a
+  5 s margin, it read output from the session, received input for it, has input still queued, tmux
+  reports activity (`session_activity` or any `window_activity`), or a tmux client other than its own
+  is attached. A tmux query that fails on a live tmux session is a refusal. A refusal is use: the
+  notice is withdrawn, the hub's activity moves to now (a new idle period), no alert, audit 409.
+- Only sessions whose source is an agent of version 62 or later are ever closed automatically. Older
+  agents, SSH, telnet and serial sessions get the notice without a closing date (no deadline is
+  stored, the message does not promise a close), and a deadline whose source no longer supports the
+  conditional kill is dropped without closing.
 
-**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
-**Tests**: `session_idle`.
+**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
+**Tests**: `session_idle`, `agent_v62`.
