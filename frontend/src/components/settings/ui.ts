@@ -2,10 +2,16 @@ import { ApiError } from '../../lib/api'
 
 // Clase UI partajate între tab-urile din Settings (extrase din god-component-ul SettingsModal
 // când a fost spart pe tab-uri). O singură sursă, ca input-urile/heading-urile să rămână identice.
+/** `field` fără lăţime: pentru câmpurile cu lăţime proprie (o coloană `w-28`, `flex-1`). Cu `field`
+ *  + `w-28`, `w-full` câştiga în CSS-ul generat (ordinea din fişierul Tailwind, nu din className),
+ *  iar select-ul din regulile guardrail se lăţea peste card (3.7.1-rc3, raportat pe ecran). */
+export const fieldBase =
+  'rounded-md bg-ink-800 px-3 py-2 text-base sm:text-sm text-slate-200 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500'
+
 export const field =
   // ring pe `--field-border` (nu ink-700): conturul câmpului trebuie să treacă 3:1 (WCAG 1.4.11);
   // ink-700 dădea 1,2–1,3:1 pe ambele teme — câmpul se distingea doar prin fundal
-  'w-full rounded-md bg-ink-800 px-3 py-2 text-base sm:text-sm text-slate-200 placeholder-slate-500 ring-1 ring-[rgb(var(--field-border))] focus:ring-sky-500'
+  'w-full ' + fieldBase
 export const heading = 'mt-6 text-compact font-semibold uppercase tracking-wide text-slate-400'
 
 // Butoane: patru intenţii, o singură sursă — mutate în design system (components/ui/classes.ts,

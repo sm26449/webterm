@@ -10,7 +10,7 @@ import { mtlsDaysLeft, mtlsExpiringSoon, mtlsState } from '../../lib/mtls'
 import { Badge, Button } from '../ui'
 import { ChevronIcon, RefreshIcon } from '../Icons'
 import { PHONE_QUERY, useMediaQuery } from '../../lib/sheet'
-import { field } from './ui'
+import { field, fieldBase } from './ui'
 import DiagnosticModal from '../DiagnosticModal'
 
 const ROUTES: RouteFilter[] = ['all', 'mtls', 'token', 'offline']
@@ -91,11 +91,11 @@ export default function ConnectedAgents() {
         <div className="mt-2 flex flex-wrap gap-2">
           <input type="search" className={field + ' sm:max-w-xs'} value={q} onChange={(e) => setQ(e.target.value)}
             placeholder={t('health.agents.search')} aria-label={t('health.agents.search')} />
-          <select className={field + ' w-auto'} value={route} onChange={(e) => setRoute(e.target.value as RouteFilter)}
+          <select className={fieldBase + ' w-auto'} value={route} onChange={(e) => setRoute(e.target.value as RouteFilter)}
             aria-label={t('health.agents.filterRoute')}>
             {ROUTES.map((r) => <option key={r} value={r}>{t('health.agents.filter.' + r)}</option>)}
           </select>
-          <select className={field + ' w-auto'} value={version} onChange={(e) => setVersion(e.target.value)}
+          <select className={fieldBase + ' w-auto'} value={version} onChange={(e) => setVersion(e.target.value)}
             aria-label={t('health.agents.filterVersion')}>
             <option value="">{t('health.agents.allVersions')}</option>
             {versions.map(([v]) => <option key={v} value={v}>{t('health.agents.versionN', { version: v })}</option>)}

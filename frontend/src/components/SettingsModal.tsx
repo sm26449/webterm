@@ -104,6 +104,14 @@ export default function SettingsModal(props: {
   // 3.7.1: rotiţa redeschide ultimul tab folosit (lib/settingsLast) — orice tab ajuns activ, din rail,
   // din căutare sau dintr-un link adânc, e „ultimul folosit"
   useEffect(() => { rememberSettingsCat(cat) }, [cat])
+  // PWA (3.7.1-rc3, raportat): un element prea lat din Setări (sau scrollIntoView pe o secţiune) muta
+  // pagina din spate pe orizontală, iar deplasarea rămânea şi după închidere. Pagina nu are niciodată
+  // scroll orizontal legitim: o readucem la 0 la deschidere şi la închidere.
+  useEffect(() => {
+    const reset = () => { if (window.scrollX) window.scrollTo(0, window.scrollY) }
+    reset()
+    return reset
+  }, [])
 
   // ── Căutarea ──
   const [query, setQuery] = useState('')
@@ -224,7 +232,7 @@ export default function SettingsModal(props: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 sm:p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden overscroll-none bg-black/50 sm:p-4">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t('settings.title')}
         onKeyDown={(e) => {
           if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget(e.target)) {
@@ -328,13 +336,13 @@ export default function SettingsModal(props: {
                       onClick={() => openCat(c.id)}
                       aria-current={sel ? 'true' : undefined}
                       className={`wt-touch flex min-h-[44px] w-full items-center gap-2 rounded-md px-3 py-2 text-left text-base sm:min-h-0 sm:text-sm ${
-                        sel ? 'text-slate-200 hover:bg-ink-800 sm:bg-sky-600 sm:text-on-accent sm:hover:bg-sky-600' : 'text-slate-300 hover:bg-ink-800'
+                        sel ? 'text-slate-200 hover:bg-ink-800 sm:bg-ink-800 sm:font-medium sm:text-slate-100 sm:shadow-[inset_3px_0_0_rgb(var(--accent))]' : 'text-slate-300 hover:bg-ink-800'
                       }`}
                     >
                       <span className="min-w-0 flex-1">{t(c.labelKey)}</span>
                       {c.id === 'sanatate' && !!props.healthAttention && (
                         <span className={`shrink-0 rounded-full px-1.5 text-2xs font-semibold ${
-                          sel ? 'bg-warn/10 text-warn sm:bg-white/20 sm:text-on-accent' : 'bg-warn/10 text-warn'}`}>
+                          'bg-warn/10 text-warn'}`}>
                           <span aria-hidden="true">{props.healthAttention}</span>
                           <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
                         </span>
@@ -348,7 +356,7 @@ export default function SettingsModal(props: {
           </nav>
 
           {/* conținut: categoria activă vizibilă (cele vizitate stau montate, ascunse), scrollabil */}
-          <div ref={contentRef} className={`${layout.showContent ? 'block' : 'hidden'} min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5`}>
+          <div ref={contentRef} data-settings-content className={`${layout.showContent ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5`}>
             {/* rezultatele căutării: un listbox grupat pe tab-uri. Tab-urile rămân montate dedesubt
                 (doar ascunse), deci o căutare nu pierde nimic din ce era nesalvat. */}
             <span role="status" className="sr-only">

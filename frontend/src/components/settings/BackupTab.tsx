@@ -4,7 +4,7 @@ import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { fmtTs } from '../../lib/tz'
 import { copyText } from '../../lib/clipboard'
-import { downloadBlob, field } from './ui'
+import { downloadBlob, field, fieldBase } from './ui'
 import { Button, Field, SegmentedControl, SettingsSection, Switch } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
@@ -444,7 +444,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
       <Field inline label={t('settings.cloud.keep')}>
         <input type="number" min={1} max={365} value={keep} onChange={(e) => setKeep(Number(e.target.value))}
-          className={field + ' w-20'} />
+          className={fieldBase + ' w-20'} />
       </Field>
       <Switch checked={tx} onChange={setTx} label={t('settings.backup.includeTranscripts')} />
     </div>

@@ -3,7 +3,7 @@ import { errText, api, CommandGuard, DeployKeyPolicy, WatermarkConfig } from '..
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { CloseIcon } from '../Icons'
-import { field } from './ui'
+import { field, fieldBase } from './ui'
 import HelpTip from '../HelpTip'
 import { Button, Field, IconButton, SettingsSection, Switch } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
@@ -159,13 +159,13 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
                   placeholder={t('settings.guardrailRegexPlaceholder')}
                   aria-label={t('settings.guardrailPatternN', { n: i + 1 })}
                   onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, pattern: e.target.value } : x) })}
-                  className={field + ' min-w-0 flex-1 font-mono'}
+                  className={fieldBase + ' min-w-0 flex-1 font-mono'}
                 />
                 <select
                   value={r.action}
                   aria-label={t('settings.guardrailActionFor', { pattern: r.pattern || String(i + 1) })}
                   onChange={(e) => setGuard({ ...guard, rules: guard.rules.map((x, j) => j === i ? { ...x, action: e.target.value as 'confirm' | 'block' } : x) })}
-                  className={field + ' w-28 shrink-0'}
+                  className={fieldBase + ' w-28 shrink-0'}
                 >
                   <option value="confirm">{t('settings.guardrailConfirm')}</option>
                   <option value="block">{t('settings.guardrailBlock')}</option>

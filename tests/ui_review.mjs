@@ -638,6 +638,29 @@ try {
         await settingsTab(page, tab)
         await page.screenshot({ path: `${OUT}/${theme}-05-settings-${slug}.png` })
         await scan(page, `${theme} settings: ${slug}`)
+        // 3.7.1-rc3 (raportat): rândurile de reguli guardrail ieşeau din card, iar în PWA pagina rămânea
+        // derulată pe orizontală. Niciun element din panou nu trece de marginea lui, şi pagina nu se mişcă.
+        const over = await page.evaluate(() => {
+          const pane = document.querySelector('[data-settings-content]')
+          if (!pane) return { bad: ['no [data-settings-content]'], scrollX: window.scrollX }
+          // marginea interioară a panoului (fără padding): un card sau un câmp care trece de ea iese din card
+          const r0 = pane.getBoundingClientRect()
+          const box = { right: r0.right - parseFloat(getComputedStyle(pane).paddingRight) }
+          const bad = [...pane.querySelectorAll('section *')]
+            .filter((el) => {
+              const r = el.getBoundingClientRect()
+              if (!(r.width > 0 && r.right > box.right + 1)) return false
+              // conţinutul unei regiuni cu derulare proprie (CodeLine, tabele) are voie să fie mai lat
+              for (let a = el.parentElement; a && a !== pane; a = a.parentElement) {
+                if (getComputedStyle(a).overflowX !== 'visible') return false
+              }
+              return true
+            })
+            .slice(0, 3).map((el) => `${el.tagName.toLowerCase()}.${(el.className?.toString() ?? '').split(' ').slice(0, 3).join('.')}`)
+          return { bad, scrollX: window.scrollX }
+        })
+        check(`${theme} settings ${slug}: nothing wider than the panel, page not shifted sideways`,
+          over.bad.length === 0 && over.scrollX === 0, { note: JSON.stringify(over) })
       }
       // căutarea din Setări: lista de rezultate (listbox grupat pe tab-uri) trece şi ea prin axe
       await page.fill('[role=search] input', 'alert')
