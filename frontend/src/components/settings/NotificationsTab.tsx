@@ -23,6 +23,11 @@ type AlertStatus = {
   alert_webhook_last_sent: Delivery; alert_webhook_last_failed: Delivery
 }
 
+// 3.7.1 (audit UX Setări C3/#6): pe telefon cele ~40 de checkbox-uri din Alert events aveau sub
+// 24 px. Acelaşi tipar ca în Users/Roles (24 px sub `pointer: coarse`), iar eticheta `.wt-touch`
+// umple celula, deci toată celula (≥ 44 px) e ţinta atingerii.
+const alertCheck = 'h-4 w-4 shrink-0 rounded-md accent-sky-600 [@media(pointer:coarse)]:h-6 [@media(pointer:coarse)]:w-6'
+
 export default function NotificationsTab() {
   const { t } = useI18n()
   const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
@@ -302,16 +307,16 @@ export default function NotificationsTab() {
                           )}
                         </td>
                         <td className="w-20 py-1.5 align-top">
-                          <label className="wt-touch inline-flex items-center gap-1.5 text-xs text-slate-400">
-                            <input type="checkbox" checked={p.email}
+                          <label className="wt-touch flex w-full cursor-pointer items-center gap-1.5 text-xs text-slate-400">
+                            <input type="checkbox" checked={p.email} className={alertCheck}
                               aria-label={t('settings.alertPrefs.emailAria', { event: label })}
                               onChange={(e) => togglePref(p.kind, 'email', e.target.checked)} />
                             <span aria-hidden="true">{t('settings.alertPrefs.colEmail')}</span>
                           </label>
                         </td>
                         <td className="w-28 py-1.5 align-top">
-                          <label className="wt-touch inline-flex items-center gap-1.5 text-xs text-slate-400">
-                            <input type="checkbox" checked={p.inapp} disabled={p.security}
+                          <label className="wt-touch flex w-full cursor-pointer items-center gap-1.5 text-xs text-slate-400">
+                            <input type="checkbox" checked={p.inapp} disabled={p.security} className={alertCheck}
                               aria-label={t('settings.alertPrefs.inappAria', { event: label })}
                               onChange={(e) => togglePref(p.kind, 'inapp', e.target.checked)} />
                             <span aria-hidden="true">{t('settings.alertPrefs.colInapp')}</span>

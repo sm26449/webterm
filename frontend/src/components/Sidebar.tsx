@@ -5,7 +5,8 @@ import { fetchSelfRow } from './settings/users/shared'
 import { crownDialog, withCrownConfirm } from '../lib/crown'
 import { notify, notifyError } from '../lib/notify'
 import { fmtTs } from '../lib/tz'
-import type { SettingsTarget } from '../lib/settingsIndex'
+import { visibleCats, type SettingsTarget } from '../lib/settingsIndex'
+import { readLastSettingsCat, settingsOpenTarget } from '../lib/settingsLast'
 import type { FleetStatus } from '../lib/fleetLoad'
 import { useI18n } from '../lib/i18n'
 import { anyHost, can, canOn, usePerms } from '../lib/perms'
@@ -112,6 +113,12 @@ export default function Sidebar(props: {
   const [exportCsv, setExportCsv] = useState<{ folder?: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsCat, setSettingsCat] = useState<SettingsTarget | undefined>(undefined)
+  // ţinta Setărilor la deschidere (lib/settingsLast); modalul o citeşte doar la montare. Cu
+  // permisiunile încă necunoscute `can` spune „da", deci ultima categorie nu e pierdută la pornire.
+  const settingsTarget: SettingsTarget = showSettings
+    ? settingsOpenTarget(settingsCat, readLastSettingsCat(),
+      (c) => visibleCats((p) => can(perms, p)).some((x) => x.id === c))
+    : { cat: 'cont' }
   const [showFleetRun, setShowFleetRun] = useState(false)
   const [showStatus, setShowStatus] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
@@ -1141,11 +1148,11 @@ export default function Sidebar(props: {
           <SettingsModal
             email={props.email}
             webauthnAvailable={props.webauthnAvailable}
-            // fără ţintă explicită, punctul de pe rotiţă alege: cheia de semnare (lipsă sau blocată —
-            // acelaşi lucru îl spune şi title-ul rotiţei) → backup gata → Cont
-            initialCat={settingsCat?.cat ?? (props.signingLocked ? 'infrastructura' : health ? 'sanatate'
-              : props.signingMissing ? 'infrastructura' : props.backupReady ? 'backup' : undefined)}
-            initialSection={settingsCat?.section ?? (props.signingLocked || (!health && props.signingMissing) ? 'signingKey' : undefined)}
+            // 3.7.1 (audit UX Setări C1): rotiţa deschide ultima categorie folosită (implicit Account),
+            // nu tab-ul ales de starea serverului — alarmele rămân pe punctul rotiţei şi pe rail.
+            // Linkurile adânci (Dashboard, clopoţel, revenirea după step-up) vin ca ţintă explicită.
+            initialCat={settingsTarget.cat}
+            initialSection={settingsTarget.section}
             healthAttention={health?.count ?? 0}
             onAccountChanged={props.onAccountChanged}
             onClose={() => setShowSettings(false)}

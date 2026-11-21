@@ -3,6 +3,7 @@ import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { catOfSection, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleCats, type RuntimeFlags } from '../lib/settingsIndex'
 import { api } from '../lib/api'
+import { rememberSettingsCat } from '../lib/settingsLast'
 import { can, usePerms } from '../lib/perms'
 import AccountTab from './settings/AccountTab'
 import UsersTab from './settings/UsersTab'
@@ -89,6 +90,9 @@ export default function SettingsModal(props: {
   const [visited, setVisited] = useState<Set<SettingsCat>>(() => new Set([firstCat]))
   const setCat = (c: SettingsCat) => { setCatRaw(c); setVisited((v) => (v.has(c) ? v : new Set(v).add(c))) }
   const pane = (c: SettingsCat, node: ReactNode) => visited.has(c) ? <div hidden={cat !== c}>{node}</div> : null
+  // 3.7.1: rotiţa redeschide ultimul tab folosit (lib/settingsLast) — orice tab ajuns activ, din rail,
+  // din căutare sau dintr-un link adânc, e „ultimul folosit"
+  useEffect(() => { rememberSettingsCat(cat) }, [cat])
 
   // ── Căutarea ──
   const [query, setQuery] = useState('')

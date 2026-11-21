@@ -63,6 +63,14 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'system health status problems attention checks alerts timer backup cloudflare token authentik disk '
       + 'sso clock heartbeat dead man switch cleanup docker janitor database vacuum '
       + 'sanatate sistem probleme verificari atentie ceas disc curatare baza de date', perm: 'security.view' },
+  // 3.7.1 (audit UX Setări M5): sub-blocurile din Health au intrări proprii — „mTLS" dădea 0 rezultate
+  { id: 'edgeRefusals', cat: 'sanatate', titleKey: 'health.edge.title',
+    keywords: 'refused rejected blocked connections handshake handshakes mtls client certificate token only sign-ins login failures '
+      + 'traefik allow deny list ip episodes brute force '
+      + 'refuzate respinse blocate conexiuni autentificari esuate certificat client lista adrese', perm: 'security.view' },
+  { id: 'connectedAgents', cat: 'sanatate', titleKey: 'health.agents.title', hintKey: 'health.agents.hint',
+    keywords: 'connected agents online offline mtls client certificate token only route version fleet connection log '
+      + 'agenti conectati certificat client ruta versiune flota jurnal conexiune', perm: 'security.view' },
   // ── Utilizatori şi roluri (3.6) ──
   { id: 'myAccess', cat: 'utilizatori', titleKey: 'roles.myAccess', hintKey: 'roles.myAccessHint',
     keywords: 'role roles access permissions owner admin operator viewer scope rol roluri acces permisiuni' },
@@ -115,13 +123,14 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
   // ── Notificări ──
   { id: 'smtp', cat: 'notificari', titleKey: 'settings.smtp.title', hintKey: 'settings.smtp.hint',
-    keywords: 'smtp email mail alert notification alerte notificari', perm: 'settings.manage' },
+    keywords: 'smtp email mail alert alerts notification notifications server outgoing alerte notificari pe email posta server', perm: 'settings.manage' },
   { id: 'webhook', cat: 'notificari', titleKey: 'settings.smtp.webhook', hintKey: 'settings.smtp.webhookHint',
     keywords: 'webhook slack discord teams ntfy chat alerts alerte', perm: 'settings.manage' },
   { id: 'resourceAlerts', cat: 'notificari', titleKey: 'settings.alerts.title', hintKey: 'settings.alerts.hint',
     keywords: 'cpu ram memory disk threshold load alerts prag memorie resurse', perm: 'settings.manage' },
   { id: 'alertPrefs', cat: 'notificari', titleKey: 'settings.alertPrefs.title', hintKey: 'settings.alertPrefs.hint',
-    keywords: 'alert events notifications bell history in-app email toggle mute security clopotel istoric evenimente notificari alerte' },
+    keywords: 'alert alerts events notifications bell history in-app email emails mail toggle mute security which choose '
+      + 'clopotel istoric evenimente notificari alerte alerta pe email mail aleg ce primesc' },
   // ── Backup ──
   { id: 'backupDownload', cat: 'backup', titleKey: 'settings.backup.downloadTitle',
     keywords: 'backup download export archive copie descarca arhiva', perm: 'backups.manage' },
@@ -182,9 +191,29 @@ export interface SettingHit {
   score: number
 }
 
-/** Caută în index. Fiecare cuvânt din întrebare trebuie să apară undeva (titlu, cuvinte-cheie,
-    numele tab-ului, textul explicativ); scorul favorizează titlul, apoi cuvintele-cheie. Nu e
-    potrivire „fuzzy" pe subsecvenţe ca în paletă: pe texte lungi (hint-urile) aceea găseşte orice. */
+/** Potrivirea unui cuvânt din întrebare într-un text deja „împăturit" (fold):
+    3 = un cuvânt din text ÎNCEPE cu el („alert" → „alerts", „cert" → „certificate");
+    2 = o formă flexionată: un cuvânt din text (≥ 4 litere) e începutul lui, cu cel mult 3 litere în
+        plus („alerts"/„alerte"/„alertele" → „alert", „certificates" → „certificate");
+    1 = apare în interiorul unui cuvânt („key" în „passkey") — păstrat de dinainte, cu scor mic;
+    0 = nicăieri. */
+function matchWord(txt: string, w: string): number {
+  if (!txt) return 0
+  let best = 0
+  for (const tok of txt.split(/[^a-z0-9]+/)) {
+    if (!tok) continue
+    if (tok.startsWith(w)) return 3
+    if (best < 2 && tok.length >= 4 && w.startsWith(tok) && w.length - tok.length <= 3) best = 2
+  }
+  if (best) return best
+  return txt.includes(w) ? 1 : 0
+}
+
+/** Caută în index. Fiecare cuvânt din întrebare trebuie să se potrivească undeva (titlu,
+    cuvinte-cheie, numele tab-ului, textul explicativ), pe PREFIX de cuvânt sau formă flexionată
+    (3.7.1, auditul UX Setări M5: „email alerts" nu găsea „Alert events", fiindcă „alerts" nu era
+    scris nicăieri). Scorul favorizează titlul, apoi cuvintele-cheie. Nu e potrivire „fuzzy" pe
+    subsecvenţe ca în paletă: pe texte lungi (hint-urile) aceea găseşte orice. */
 export function searchSettings(query: string, t: (key: string) => string): SettingHit[] {
   const words = fold(query).split(/\s+/).filter(Boolean)
   if (words.length === 0) return []
@@ -196,13 +225,15 @@ export function searchSettings(query: string, t: (key: string) => string): Setti
     const ft = fold(title), fk = fold(s.keywords), fh = fold(hint), fc = catLabel.get(s.cat) ?? ''
     let score = 0
     for (const w of words) {
-      const atWordStart = (txt: string) => txt.startsWith(w) || txt.includes(' ' + w)
-      if (atWordStart(ft)) score += 40
-      else if (ft.includes(w)) score += 30
-      else if (atWordStart(fk)) score += 20
-      else if (fk.includes(w)) score += 15
-      else if (fc.includes(w)) score += 10
-      else if (fh.includes(w)) score += 5
+      const mt = matchWord(ft, w), mk = matchWord(fk, w)
+      if (mt === 3) score += 40
+      else if (mt === 2) score += 35
+      else if (mt === 1) score += 30
+      else if (mk === 3) score += 20
+      else if (mk === 2) score += 18
+      else if (mk === 1) score += 15
+      else if (matchWord(fc, w)) score += 10
+      else if (matchWord(fh, w)) score += 5
       else return   // un cuvânt negăsit = secţiunea nu se potriveşte
     }
     // la egalitate rămâne ordinea din index (= ordinea din UI)

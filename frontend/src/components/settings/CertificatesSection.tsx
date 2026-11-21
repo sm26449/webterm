@@ -8,7 +8,7 @@ import { askSecret } from '../../lib/secretPrompt'
 import { certStateText, certTone, renewMode, sortCerts, type CertItem, type CertStatus } from '../../lib/certs'
 import { field, heading } from './ui'
 import HelpTip from '../HelpTip'
-import { Badge, Button } from '../ui'
+import { Badge, Button, CodeLine } from '../ui'
 import type { LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 
@@ -155,7 +155,7 @@ export default function CertificatesSection() {
                   )}
                   {(mode === 'terminal' || mode === 'copy') && it.renew_command && (
                     <div className="mt-2 flex items-center gap-2">
-                      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-ink-900 px-2 py-1 font-mono text-slate-300">{it.renew_command}</code>
+                      <CodeLine label={t('settings.certs.commandRegion')} className="rounded-md bg-ink-900 px-2 py-1 text-slate-300">{it.renew_command}</CodeLine>
                       <Button variant="ghost" size="sm" type="button" onClick={() => { void copy(it.renew_command!) }}
                         aria-label={t('settings.certs.copyCommand')}>
                         {copied === it.renew_command ? t('fleet.copied') : t('settings.certs.copy')}

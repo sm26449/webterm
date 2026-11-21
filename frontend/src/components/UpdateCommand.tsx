@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { copyText } from '../lib/clipboard'
-import { Button } from './ui'
+import { Button, CodeLine } from './ui'
 
 /** Starea verificării de versiune, când gazda vrea să o arate lângă comandă. `error` = ultima
     verificare a EŞUAT (GitHub inaccesibil, DNS, proxy): atunci spunem „n-am putut verifica" cu
@@ -35,9 +35,9 @@ export default function UpdateCommand(props: { command: string; status?: UpdateC
       )}
       <div className="flex items-center gap-2 rounded-md border border-ink-700 bg-ink-950 px-2.5 py-1.5">
         {/* overflow-x pe cod: o comandă lungă derulează în cutia ei, nu lăţeşte modalul */}
-        <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-xs text-slate-300">
+        <CodeLine pre label={t('settings.update.commandRegion')} className="text-xs text-slate-300">
           {props.command}
-        </code>
+        </CodeLine>
         <button
           type="button"
           onClick={() => {

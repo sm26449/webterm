@@ -12,7 +12,7 @@ import {
 } from '../../lib/health'
 import { heading } from './ui'
 import HelpTip from '../HelpTip'
-import { Badge, Button } from '../ui'
+import { Badge, Button, CodeLine } from '../ui'
 import { ChevronDownIcon } from '../Icons'
 import FileMenu, { type MenuItem } from '../FileMenu'
 import type { LoadState } from '../../lib/loadable'
@@ -191,7 +191,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
               <li key={h.id} className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-slate-300">{h.name}</span>
                 {hostButtons && (
-                  <Button variant="secondary" size="sm" type="button" loading={hostBusy === h.id}
+                  <Button variant="secondary" size="sm" type="button" className="wt-touch" loading={hostBusy === h.id}
                     disabled={!!hostBusy} onClick={() => { void hostAction(c, h.id) }}>
                     {c.action === 'agent_update' ? t('health.updateNow') : t('health.enableAutostart')}
                   </Button>
@@ -204,8 +204,8 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
         {c.severity !== 'ok' && c.commands.map((cmd, i) => (
           <div key={i} className="mt-2 flex flex-col gap-1">
             <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-ink-900 px-2 py-1 font-mono text-slate-300">{cmd.text}</code>
-              <Button variant="ghost" size="sm" type="button" onClick={() => { void copy(cmd.text) }}
+              <CodeLine label={t('health.commandRegion')} className="rounded-md bg-ink-900 px-2 py-1 text-slate-300">{cmd.text}</CodeLine>
+              <Button variant="ghost" size="sm" type="button" className="wt-touch" onClick={() => { void copy(cmd.text) }}
                 aria-label={t('health.copyCommand')}>
                 {copied === cmd.text ? t('fleet.copied') : t('settings.certs.copy')}
               </Button>
@@ -213,7 +213,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
             <div className="flex flex-wrap items-center gap-2 text-slate-500">
               {cmd.requires_root && <span>{t('health.needsRoot')}</span>}
               {mode === 'terminal' && (
-                <Button variant="secondary" size="sm" type="button" loading={opening === c.id + ':' + i}
+                <Button variant="secondary" size="sm" type="button" className="wt-touch" loading={opening === c.id + ':' + i}
                   disabled={!!opening} onClick={() => { void openTerminal(c, i) }}>
                   {t('health.openTerminal')}
                 </Button>
@@ -226,7 +226,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
         {(target || doc || (st?.can_manage && c.severity !== 'ok')) && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {target && props.onJump && c.severity !== 'ok' && (
-              <Button variant="secondary" size="sm" type="button" onClick={() => props.onJump?.(target.cat, target.section)}>
+              <Button variant="secondary" size="sm" type="button" className="wt-touch" onClick={() => props.onJump?.(target.cat, target.section)}>
                 {t('health.goTo')}
               </Button>
             )}
@@ -237,7 +237,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
             )}
             {st?.can_manage && c.severity !== 'ok' && (canMute(c, st) || c.muted) && (
               // visible text = accessible name ("Mute…" / "Muted…"); the menu itself carries health.muteLabel
-              <Button variant="secondary" size="sm" type="button" aria-haspopup="menu"
+              <Button variant="secondary" size="sm" type="button" className="wt-touch" aria-haspopup="menu"
                 aria-expanded={muteMenu?.id === c.id} data-testid={`health-mute-${c.id}`}
                 ref={(el) => { if (el) muteBtns.current.set(c.id, el); else muteBtns.current.delete(c.id) }}
                 onClick={(e) => openMute(c, e.currentTarget)}
@@ -267,7 +267,7 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
               {attention ? t('health.attention', { count: attention }) : t('health.allGood')}
             </Badge>
             {st.can_manage && (
-              <Button variant="secondary" size="sm" type="button" loading={busy} onClick={recheck}>
+              <Button variant="secondary" size="sm" type="button" className="wt-touch" loading={busy} onClick={recheck}>
                 {t('health.recheck')}
               </Button>
             )}
@@ -285,8 +285,11 @@ export default function HealthTab(props: { onJump?: (cat: string, section?: stri
               {showOk && <ul className="mt-2 flex flex-col gap-2">{passing.map(renderCheck)}</ul>}
             </div>
           )}
-          {st.edge && <AgentHandshakes edge={st.edge} />}
-          <ConnectedAgents />
+          {/* 3.7.1: ţinte proprii pentru căutare („mTLS", „handshake", „refused" ajung direct aici,
+              nu doar pe System health); id-urile stau în acest *Tab.tsx pentru contractul din
+              settingsIndex.test.ts */}
+          {st.edge && <div data-setting-id="edgeRefusals"><AgentHandshakes edge={st.edge} /></div>}
+          <div data-setting-id="connectedAgents"><ConnectedAgents /></div>
         </div>
       )}
       {muteMenu && muteCheck && (

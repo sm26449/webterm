@@ -135,12 +135,12 @@ function AddAccountForm(props: {
         <p className="text-xs text-slate-500" data-reauth-hint>{t('access.reauth.noPassword')}</p>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="primary" type="submit" loading={busy}
+        <Button variant="primary" type="submit" loading={busy} className="wt-touch"
           disabled={(needsPw && !newUser.current_password) || (!!newUser.role && (!scopeOk(newUser.scope_kind, newUser.scope_value)
             || expiryFrom(newUser.expiry, newUser.custom, Date.now()) === 'invalid'))}>
           {t('settings.users.add')}
         </Button>
-        <Button type="button" onClick={props.onCancel}>{t('roles.custom.cancel')}</Button>
+        <Button type="button" className="wt-touch" onClick={props.onCancel}>{t('roles.custom.cancel')}</Button>
       </div>
     </form>
   )
@@ -399,7 +399,7 @@ export default function AccountsPanel(props: {
     <>
       <div className="flex flex-wrap items-center gap-2">
         <p className="min-w-0 flex-1 text-xs text-slate-500">{t('settings.users.hint')}</p>
-        <Button ref={addBtnRef} type="button" size="sm" variant={adding ? 'secondary' : 'primary'}
+        <Button ref={addBtnRef} type="button" size="sm" className="wt-touch" variant={adding ? 'secondary' : 'primary'}
           aria-expanded={adding} aria-controls={adding ? formId : undefined} data-add-user
           onClick={() => (adding ? closeAdd() : setAdding(true))}>
           {t('settings.users.add')}

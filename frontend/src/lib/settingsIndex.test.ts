@@ -130,6 +130,45 @@ describe('searchSettings', () => {
     expect(ids('qwertyuiop')).toEqual([])
   })
 
+  // 3.7.1 (audit UX Setări M5): ce tastează oamenii şi nu găseau
+  it.each(['mTLS', 'client certificate', 'token only', 'handshake', 'refused'])('„%s" găseşte agenţii conectaţi / conexiunile refuzate', (q) => {
+    for (const t of [tEn, tRo]) {
+      const r = ids(q, t)
+      expect(r.some((id) => id === 'connectedAgents' || id === 'edgeRefusals'), q).toBe(true)
+      expect(r[0] === 'connectedAgents' || r[0] === 'edgeRefusals', `${q}: ${r[0]}`).toBe(true)
+    }
+  })
+  it('mTLS găseşte ambele blocuri; refused / handshake duc întâi la conexiunile refuzate', () => {
+    expect(ids('mtls')).toEqual(expect.arrayContaining(['connectedAgents', 'edgeRefusals']))
+    expect(ids('refused')[0]).toBe('edgeRefusals')
+    expect(ids('handshake')[0]).toBe('edgeRefusals')
+    expect(ids('connected agents')[0]).toBe('connectedAgents')
+    expect(ids('agenti conectati', tRo)[0]).toBe('connectedAgents')
+    expect(ids('conexiuni refuzate', tRo)[0]).toBe('edgeRefusals')
+    expect(ids('certificat client', tRo)).toEqual(expect.arrayContaining(['connectedAgents', 'edgeRefusals']))
+  })
+  it('„email alerts" găseşte Alert events şi SMTP (en şi ro)', () => {
+    for (const [q, t] of [['email alerts', tEn], ['email alerts', tRo], ['alerte email', tRo], ['alerte pe email', tRo],
+      ['alerte email', tEn], ['alerte pe email', tEn]] as const) {
+      expect(ids(q, t), `${q}`).toEqual(expect.arrayContaining(['alertPrefs', 'smtp']))
+    }
+  })
+  it('potrivire pe prefix şi pe forma flexionată, fiecare cuvânt tot obligatoriu', () => {
+    expect(ids('alert')).toContain('alertPrefs')
+    expect(ids('alerts')).toContain('alertPrefs')
+    expect(ids('cert')[0]).toBe('certificates')
+    expect(ids('certificates')).toContain('certificates')
+    expect(ids('webh')[0]).toBe('webhook')
+    expect(ids('alerts xyzzy')).toEqual([])
+    // o literă în plus nu face din orice cuvânt scurt o potrivire
+    expect(ids('pe')).not.toContain('timezone')
+  })
+  it('căutarea în română e fără diacritice în ambele sensuri', () => {
+    expect(ids('alerte', tRo)).toContain('alertPrefs')
+    expect(ids('notificări', tRo)).toContain('alertPrefs')
+    expect(ids('notificari', tRo)).toContain('alertPrefs')
+  })
+
   it('groupHits grupează pe tab, în ordinea celui mai bun rezultat', () => {
     const groups = groupHits(searchSettings('alert', tEn))
     expect(groups[0].cat).toBe('notificari')

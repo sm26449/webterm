@@ -4,6 +4,9 @@ import { useI18n } from '../../lib/i18n'
 import { field, heading } from './ui'
 import { Button } from '../ui'
 
+// 3.7.1 (audit UX Setări #6): pe ecrane tactile câmpurile contului ating 44 px (.wt-touch, index.css)
+const touchField = `${field} wt-touch`
+
 // Cont: schimbarea emailului/parolei (cu al doilea factor pe dispozitiv nou — email-code).
 // Lista de conturi + rolurile lor s-au mutat în UsersTab (3.6, „Users & roles").
 
@@ -60,24 +63,24 @@ export default function AccountTab(props: { email?: string | null; onAccountChan
         <form onSubmit={saveAccount} className="mt-2 flex flex-col gap-2">
           <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)}
             placeholder={t('settings.email')} aria-label={t('settings.email')}
-            autoComplete="username" className={field} />
+            autoComplete="username" className={touchField} />
           <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
             placeholder={t('settings.newPasswordPlaceholder')} aria-label={t('settings.newPassword')}
-            autoComplete="new-password" className={field} />
+            autoComplete="new-password" className={touchField} />
           <input type="password" required value={curPw} onChange={(e) => setCurPw(e.target.value)}
             placeholder={t('settings.currentPasswordConfirm')} aria-label={t('settings.currentPassword')}
-            autoComplete="current-password" className={field} />
+            autoComplete="current-password" className={touchField} />
           {codeAsked && (
             <div className="flex flex-col gap-1">
               <input type="text" inputMode="numeric" autoComplete="one-time-code"
                 value={emailCode} onChange={(e) => setEmailCode(e.target.value)}
                 placeholder={t('settings.emailCodePlaceholder')} aria-label={t('settings.emailCodePlaceholder')}
-                className={field} />
+                className={touchField} />
               <p className="text-xs text-slate-400">{t('settings.emailCodeHint')}</p>
             </div>
           )}
           <div className="flex items-center gap-3">
-            <Button variant="primary" disabled={busy || !curPw}>
+            <Button variant="primary" type="submit" className="wt-touch" disabled={busy || !curPw}>
               {t('settings.saveAccount')}
             </Button>
             {accountMsg && <span className="text-sm wt-good">{accountMsg}</span>}
