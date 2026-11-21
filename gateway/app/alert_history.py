@@ -50,6 +50,10 @@ KINDS: dict = {
     # aplicaţie); deschiderea e informativă, throttle-uită per link
     "replay_link":      {"group": "account",  "scope": "account", "security": True},
     "replay_opened":    {"group": "account",  "scope": "account", "security": False},
+    # 3.7.1: igiena sesiunilor inactive (idlesess.py). Implicit DOAR în aplicaţie: emailul e cutia
+    # comună a instanţei, iar o sesiune uitată nu e un incident (`email: False` = implicitul de email)
+    "session_idle":        {"group": "account", "scope": "account", "security": False, "email": False},
+    "session_idle_closed": {"group": "account", "scope": "account", "security": False, "email": False},
     # securitatea instanţei
     "admin_change":     {"group": "security", "scope": "fleet", "security": True},
     "ssh_key":          {"group": "security", "scope": "fleet", "security": True},
@@ -81,6 +85,12 @@ KINDS: dict = {
 
 def kind_meta(kind: str) -> dict:
     return KINDS.get(kind) or KINDS["system"]
+
+
+def _default(kind: str) -> tuple:
+    """(email, în aplicaţie) implicite ale unui tip: emailul e pornit, cu excepţia tipurilor marcate
+    `email: False` (3.7.1). Tabela `alert_prefs` ţine doar abaterile de la ACEST implicit."""
+    return (bool(kind_meta(kind).get("email", True)), True)
 
 
 # ── igienă: nimic secret în `details` ─────────────────────────────────────────────────────
@@ -247,14 +257,15 @@ async def record(kind: str, severity: str, title: str, details: str = "",
         # de alerte e a instanţei, iar o alertă pierdută e mai rea decât una în plus.
         return True
     prefs = await _prefs_for(uids, kind)
-    want_email = any(prefs.get(u, (True, True))[0] for u in uids)
+    dflt = _default(kind)
+    want_email = any(prefs.get(u, dflt)[0] for u in uids)
     now = time.time()
     t, d = scrub(title, 200), scrub(details)
     hid = int(host_id) if host_id else None
     mk = key if key and _KEY_RE.match(str(key)) else None
     mp = message_params(params) if mk else ""
     for u in uids:
-        if not (meta["security"] or prefs.get(u, (True, True))[1]):
+        if not (meta["security"] or prefs.get(u, dflt)[1]):
             continue
         await db.execute(
             "INSERT INTO alerts(user_id, ts, kind, severity, title, details, host_id, read,"
@@ -327,7 +338,7 @@ async def get_prefs(uid: int) -> list:
     for kind, m in KINDS.items():
         if m.get("hidden"):
             continue
-        email, inapp = have.get(kind, (True, True))
+        email, inapp = have.get(kind, _default(kind))
         out.append({"kind": kind, "group": m["group"], "scope": m["scope"],
                     "security": m["security"], "email": email,
                     # securitate: în aplicaţie e mereu ON, indiferent ce e stocat
@@ -342,9 +353,10 @@ async def set_prefs(uid: int, prefs: dict) -> list:
         if kind not in KINDS or KINDS[kind].get("hidden"):
             raise ValueError(kind)
     for kind, p in prefs.items():
-        email = bool(p.get("email", True))
-        inapp = True if KINDS[kind]["security"] else bool(p.get("inapp", True))
-        if email and inapp:
+        d_email, d_inapp = _default(kind)
+        email = bool(p.get("email", d_email))
+        inapp = True if KINDS[kind]["security"] else bool(p.get("inapp", d_inapp))
+        if (email, inapp) == (d_email, d_inapp):
             await db.execute("DELETE FROM alert_prefs WHERE user_id=? AND kind=?", uid, kind)
         else:
             await db.execute(

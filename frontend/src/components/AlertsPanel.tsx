@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { api, errText, timeAgo, type Host } from '../lib/api'
+import { api, errText, timeAgo, withStepup, type Host } from '../lib/api'
 import { AlertItem, AlertPage, badgeText, localizeAlert, mergePage, normSeverity, setUnread, severityTone, unreadStore } from '../lib/alerts'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
@@ -142,6 +142,26 @@ export default function AlertsPanel(props: {
     if (!a.read) void markRead([a.id])         // a deschis-o = a citit-o
   }
 
+  // 3.7.1: notificarea unei sesiuni inactive poartă `sid`-ul ei: acţiunile direct din alertă. Serverul
+  // decide dacă ai voie (sesiunea ta sau session.manage) şi dacă sesiunea mai rulează.
+  const [idleDone, setIdleDone] = useState<Record<number, string>>({})
+  // „Închide acum" = acelaşi Stop, confirmat ÎN panou (ca „Şterge tot"): un ConfirmModal ar sta sub
+  // dialogul ăsta (acelaşi z-50, panoul e portal după rădăcină) şi sub focus-trap-ul lui
+  const [confirmIdle, setConfirmIdle] = useState<number | null>(null)
+  const idleAct = (a: AlertItem, sid: string, what: 'keep' | 'close') => act(async () => {
+    const hid = a.host_id
+    const call = () => (what === 'keep'
+      ? api(`/api/sessions/${sid}/keep-open`, { method: 'POST', body: JSON.stringify({ keep: true }) })
+      : api(`/api/sessions/${sid}/kill`, { method: 'POST' }))
+    await (hid != null ? withStepup(hid, call) : call())
+    setConfirmIdle(null)
+    setIdleDone((d) => ({ ...d, [a.id]: what === 'keep' ? t('idle.keptShort') : t('idle.closedShort') }))
+  })
+  const idleSid = (a: AlertItem): string | null => {
+    const sid = a.msg_params?.sid
+    return a.kind === 'session_idle' && typeof sid === 'string' && /^[0-9a-f]{32}$/.test(sid) ? sid : null
+  }
+
   const hostName = (id: number | null) => (id == null ? null : props.hosts.find((h) => h.id === id)?.name ?? null)
 
   return (
@@ -233,6 +253,27 @@ export default function AlertsPanel(props: {
                       ) : (
                         <span className="text-2xs text-slate-500">{t('alerts.hostGone')}</span>
                       ))}
+                      {idleSid(a) && (idleDone[a.id] ? (
+                        <span role="status" className="text-2xs text-slate-400">{idleDone[a.id]}</span>
+                      ) : (<>
+                        <button type="button" className={`${compactAction} wt-link`} disabled={busy}
+                          onClick={() => { void idleAct(a, idleSid(a)!, 'keep') }}>
+                          {t('idle.keep')}
+                        </button>
+                        <button type="button" className={`${compactAction} text-slate-300`} disabled={busy}
+                          onClick={() => setConfirmIdle(a.id)}>
+                          {t('idle.closeNow')}
+                        </button>
+                      </>))}
+                      {confirmIdle === a.id && idleSid(a) && !idleDone[a.id] && (
+                        <div role="alertdialog" aria-labelledby={`wt-idle-q-${a.id}`}
+                          className="flex w-full flex-wrap items-center gap-2 rounded-md bg-ink-800 p-2 text-xs">
+                          <span id={`wt-idle-q-${a.id}`} className="min-w-0 flex-1 text-slate-300">{t('session.confirmKill')}</span>
+                          <Button size="sm" variant="danger" disabled={busy} autoFocus
+                            onClick={() => { void idleAct(a, idleSid(a)!, 'close') }}>{t('session.stopSession')}</Button>
+                          <Button size="sm" variant="secondary" onClick={() => setConfirmIdle(null)}>{t('common.cancel')}</Button>
+                        </div>
+                      )}
                       {!a.read && (
                         <button type="button" className={`${compactAction} ml-auto text-slate-400`} disabled={busy}
                           onClick={() => markRead([a.id])}>

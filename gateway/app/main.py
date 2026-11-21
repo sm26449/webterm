@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .errors import ApiError
 from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
-               hosts_api, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
+               hosts_api, idlesess, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
                webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -164,6 +164,21 @@ async def _idle_lock_sweep() -> None:
             log.exception("the step-up cap sweep failed")
         await asyncio.sleep(_IDLE_LOCK_INTERVAL)
 
+async def _idle_session_sweep() -> None:
+    """Igiena sesiunilor inactive (3.7.1, idlesess.py): la ~10 min persistă activitatea, notifică
+    sesiunile nefolosite şi, dacă instanţa a pornit-o, le închide pe cele notificate după grație.
+    Pauză la pornire: reconcilierea agenţilor re-ataşează întâi hub-urile (fără ele nu vedem output-ul)."""
+    await asyncio.sleep(idlesess.SWEEP_STARTUP_GRACE)
+    while True:
+        try:
+            stats = await idlesess.sweep()
+            if stats["notified"] or stats["closed"]:
+                log.info("idle sessions: %d notified, %d closed", stats["notified"], stats["closed"])
+        except Exception:
+            log.exception("the idle-session sweep failed")
+        await asyncio.sleep(idlesess.SWEEP_INTERVAL)
+
+
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 # App-level so the headers travel with any deployment (Docker+Caddy or bare
@@ -294,6 +309,7 @@ async def lifespan(app: FastAPI):
     janitor = asyncio.create_task(_janitor())
     reaper = asyncio.create_task(_session_reaper())   # reconciliere liveness sesiuni 'live'
     idlelock = asyncio.create_task(_idle_lock_sweep())  # blocare terminal idle pe host 2FA
+    idlesesst = asyncio.create_task(_idle_session_sweep())  # 3.7.1: sesiuni nefolosite de zile
     lagmon = asyncio.create_task(health.loop_lag_monitor())   # sănătatea gateway-ului
     backupt = asyncio.create_task(_scheduled_backup())        # backup-uri programate (off/daily/weekly)
     # 3.6.7: the TLS certificate Traefik serves (read-only handshake; alerts before expiry)
@@ -318,6 +334,7 @@ async def lifespan(app: FastAPI):
     janitor.cancel()
     reaper.cancel()
     idlelock.cancel()
+    idlesesst.cancel()
     lagmon.cancel()
     backupt.cancel()
     await db.close()

@@ -1080,6 +1080,7 @@ class BrowserClient:
                 await asyncio.wait_for(asyncio.shield(self._pong_fut), PONG_HARD_TIMEOUT)
             except asyncio.TimeoutError:
                 self.hub.clients.discard(self)      # stop fanning output to it
+                self.hub.note_presence()
                 # dacă era operatorul verificat, invitaţii prin share nu-l aşteaptă pe `finally`-ul
                 # handler-ului (care depinde de închiderea transportului): blocaţi acum
                 if self.is_owner:
@@ -1168,6 +1169,17 @@ class SessionHub:
         # momentul ultimului output primit de la agent (3.7.1): dialogul „New session" arată
         # „activ acum 5 min" pe sesiunile deschise, ca omul să ştie pe care s-o reia
         self.last_output_at: Optional[float] = None
+        # Igiena sesiunilor inactive (3.7.1, idlesess.py): „inactivă" = fără input, fără output ŞI fără
+        # client ataşat. Ultima tastă (orice client care are voie să scrie) şi ultima schimbare de
+        # prezenţă (ataşare/plecare). `idle_pending` = s-a trimis notificarea: PRIMA activitate după ea
+        # o anulează imediat în DB (nu la următorul sweep), ca o închidere programată să nu prindă o
+        # sesiune folosită între timp. `exit_reason` = ce scrie on_exit în close_reason.
+        self.last_input_at: Optional[float] = None
+        self.last_presence_at: Optional[float] = None
+        keys = row.keys()
+        self.idle_pending: bool = bool(row["idle_notified_at"]) if "idle_notified_at" in keys else False
+        self._persisted_active: float = (row["last_active"] or 0.0) if "last_active" in keys else 0.0
+        self.exit_reason = "exited"
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
@@ -1572,6 +1584,8 @@ class SessionHub:
         self.out_pos += len(data)
         self.out_f.write(data)
         self.last_output_at = time.time()
+        if getattr(self, "idle_pending", False):   # hub-uri de test fără __init__
+            self._idle_activity()
         self._cast_event("o", data)
         for client in self.clients:
             client.push(data)
@@ -1646,8 +1660,8 @@ class SessionHub:
         # Fără asta, linkul rămânea listat ca „activ" (şi numărat în rezumatul de securitate).
         await db.execute(
             "UPDATE sessions SET state='closed', closed_at=?, exit_status=?,"
-            " close_reason='exited', share_token=NULL, share_expires=NULL WHERE id=?",
-            time.time(), status, self.sid)
+            " close_reason=?, share_token=NULL, share_expires=NULL WHERE id=?",
+            time.time(), status, self.exit_reason or "exited", self.sid)
         await self.broadcast_json({"type": "exit", "status": status, "signal": sig})
         source = self._source()
         if source:
@@ -1667,6 +1681,48 @@ class SessionHub:
             time.time(), reason, self.sid)
         await self.broadcast_json({"type": "lost", "reason": reason})
         self.teardown()
+
+    # -- igiena sesiunilor inactive (3.7.1, idlesess.py) ------------------------
+
+    def activity_at(self) -> float:
+        """Ultimul moment în care sesiunea a fost folosită, din ce a văzut ACEST hub: output, input,
+        ataşare/plecare, crearea hub-ului. Un client ataşat = folosită ACUM."""
+        if self.clients:
+            return time.time()
+        return max(v for v in (self.created, self.last_output_at, self.last_input_at,
+                               self.last_presence_at, self._persisted_active) if v)
+
+    def note_presence(self) -> None:
+        """Un client s-a ataşat sau a plecat (apelat după `clients.add` / `clients.discard`). Plecarea
+        se persistă imediat: e momentul de la care începe să curgă timpul de inactivitate."""
+        if self.closed:
+            return
+        self.last_presence_at = time.time()
+        if getattr(self, "idle_pending", False):   # hub-uri de test fără __init__
+            self._idle_activity()
+        bgtasks.spawn(self.persist_activity(), "persist session activity")
+
+    def _idle_activity(self) -> None:
+        """Prima activitate după o notificare de inactivitate: anulează notificarea şi închiderea
+        programată, în DB, acum (sincron doar flag-ul — calea de output e fierbinte)."""
+        self.idle_pending = False
+        bgtasks.spawn(self._idle_cancel(), "cancel idle notice")
+
+    async def _idle_cancel(self) -> None:
+        at = self.activity_at()
+        await db.execute(
+            "UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL,"
+            " last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=?", at, self.sid)
+
+    async def persist_activity(self) -> None:
+        """Scrie `last_active` doar când a avansat (apelat de sweep la ~10 min şi la prezenţă) —
+        niciodată per tastă/per bucată de output."""
+        at = self.activity_at()
+        if at <= self._persisted_active:
+            return
+        self._persisted_active = at
+        await db.execute("UPDATE sessions SET last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=?",
+                         at, self.sid)
 
     def teardown(self) -> None:
         self.closed = True
@@ -1851,6 +1907,10 @@ class SessionHub:
             return
         now = time.time()
         client.last_interaction = now
+        # igiena sesiunilor (3.7.1): ORICE tastă acceptată (şi a unui invitat writable) e folosire
+        self.last_input_at = now
+        if getattr(self, "idle_pending", False):   # hub-uri de test fără __init__
+            self._idle_activity()
         # DOAR input-ul OWNER-ului (client autentificat) contează ca „activitate de operator" pentru
         # idle-lock. Altfel un invitat writable ţinea sesiunea deblocată tastând — iar pe un host cu
         # require_2fa asta ocolea poarta de 2FA a owner-ului după ce el pleca (sesiunea nu se mai

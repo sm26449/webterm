@@ -74,6 +74,14 @@ back.
     [docs/design/AGENT-MTLS.md](docs/design/AGENT-MTLS.md).
 
 ### Added
+- **Forgotten sessions get noticed.** Because a session survives closing the tab, shells used to stay
+  open for weeks with nobody looking at them. When nobody has typed in a session, it has printed
+  nothing and no browser has been attached for 7 days, its owner now gets a notification (alert bell,
+  and a toast with **Keep open** / **Close now** while in the app; email only if you turn it on in My
+  notifications). A build or `tail -f` that keeps printing is never idle. An Owner or Admin can also
+  have such sessions closed automatically, 2 days after the notice if still unused (Settings →
+  Security policy → Idle sessions; off by default, both numbers adjustable). Closing works like the
+  Stop button and keeps the recording. **Keep open** in a session's ⋯ menu exempts it.
 - **WebTerm is now EverShell.** The app shows the new name, logo and tagline (*Close the tab. Keep the
   shell.*): browser tab, installed app (PWA) name and icons, sign-in screen, sidebar and About, which
   links to [evershell.dev](https://evershell.dev). Only the name changed: the repository, the Docker

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useI18n } from '../lib/i18n'
-import type { ToastKind } from '../lib/notify'
+import type { ToastAction, ToastKind } from '../lib/notify'
 import { CloseIcon, WarningIcon } from './Icons'
 
 export interface ToastItem {
@@ -14,6 +14,8 @@ export interface ToastItem {
   onClick?: () => void
   /** 3.6.30: cu etichetă, acţiunea e un buton separat după mesaj (mesajul rămâne text simplu) */
   actionLabel?: string
+  /** 3.7.1: a doua acţiune (doar împreună cu `actionLabel`), tot buton separat */
+  secondary?: ToastAction
 }
 
 /* Stiva de toast-uri. Trei lucruri pe care auditul de accesibilitate (2026-10, 2.1 şi 5.3) le-a
@@ -73,6 +75,15 @@ export default function Toasts(props: {
           >
             {item.actionLabel}
           </button>
+          {item.secondary && (
+            <button
+              type="button"
+              onClick={() => { item.secondary?.onClick(); props.onDismiss(item.id) }}
+              className="-my-0.5 shrink-0 rounded-md px-2 py-0.5 text-sm font-medium text-slate-300 ring-1 ring-ink-600 hover:bg-ink-700 hover:text-slate-100"
+            >
+              {item.secondary.label}
+            </button>
+          )}
         </>
       ) : item.onClick ? (
         <button

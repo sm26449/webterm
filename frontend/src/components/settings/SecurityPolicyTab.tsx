@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { errText, api, CommandGuard, DeployKeyPolicy, WatermarkConfig } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, IdleSessionsPolicy, WatermarkConfig } from '../../lib/api'
+import { parseDays } from '../../lib/idleSessions'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { CloseIcon } from '../Icons'
@@ -103,17 +104,64 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     }
   }
 
+  // ── Sesiuni inactive (3.7.1): notificare după N zile, închidere automată opţională ──
+  // Câmpurile de zile se ţin ca TEXT (ce tastează omul) şi se validează la salvare, cu aceleaşi
+  // limite ca serverul; un fetch picat nu arată formularul (U04: un Save peste implicite ar fi
+  // schimbat politica instanţei).
+  const [idle, setIdle] = useState<IdleSessionsPolicy>({ notify: true, notify_days: 7, autoclose: false, grace_days: 2 })
+  const [idleDays, setIdleDays] = useState({ notify: '7', grace: '2' })
+  const [idleBase, setIdleBase] = useState('')
+  const [idleMsg, setIdleMsg] = useState('')
+  const [idleErr, setIdleErr] = useState(false)
+  const [idleState, setIdleState] = useState<LoadState>({ status: 'loading' })
+  const nb = idle.bounds?.notify_days ?? [1, 90]
+  const gb = idle.bounds?.grace_days ?? [1, 30]
+  const idleSnapshot = (p: IdleSessionsPolicy, d: { notify: string; grace: string }) =>
+    JSON.stringify([p.notify, p.autoclose, d.notify.trim(), d.grace.trim()])
+  const applyIdle = (p: IdleSessionsPolicy) => {
+    const d = { notify: String(p.notify_days), grace: String(p.grace_days) }
+    setIdle(p); setIdleDays(d); setIdleBase(idleSnapshot(p, d))
+  }
+  const loadIdle = () => {
+    setIdleState({ status: 'loading' })
+    api<IdleSessionsPolicy>('/api/settings/idle-sessions')
+      .then((p) => { applyIdle(p); setIdleState({ status: 'ok' }) })
+      .catch((e) => setIdleState({ status: 'error', error: errText(e, t) }))
+  }
+  const saveIdle = async () => {
+    if (!canSave(idleState)) return
+    const nd = parseDays(idleDays.notify, nb[0], nb[1])
+    const gd = parseDays(idleDays.grace, gb[0], gb[1])
+    if (nd == null || gd == null) {
+      setIdleErr(true)
+      setIdleMsg(nd == null ? t('settings.idle.badDays', { min: nb[0], max: nb[1] }) : t('settings.idle.badDays', { min: gb[0], max: gb[1] }))
+      return
+    }
+    try {
+      const saved = await api<IdleSessionsPolicy>('/api/settings/idle-sessions', {
+        method: 'POST', body: JSON.stringify({ notify: idle.notify, notify_days: nd, autoclose: idle.autoclose, grace_days: gd }),
+      })
+      applyIdle(saved)
+      setIdleErr(false); setIdleMsg(t('settings.saved'))
+      setTimeout(() => setIdleMsg(''), 1500)
+    } catch (e) {
+      setIdleErr(true); setIdleMsg(errText(e, t) || t('settings.saveError'))
+    }
+  }
+
   // se încarcă la montarea tab-ului (= la deschiderea categoriei)
   useEffect(() => {
     loadGuard()
     loadDkPolicy()
     loadWm()
+    loadIdle()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 3.7.1 (audit UX Setări M6): formularele salvate cu un buton arată „Unsaved changes" până la Save
   const guardDirty = canSave(guardState) && guardBase !== '' && JSON.stringify(guard) !== guardBase
   const wmDirty = canSave(wmState) && wmBase !== '' && JSON.stringify(wm) !== wmBase
+  const idleDirty = canSave(idleState) && idleBase !== '' && idleSnapshot(idle, idleDays) !== idleBase
   return (
     <div className="flex flex-col gap-4">
       {/* ── Guardrail de comenzi ── bifa (nu comutator): face parte din formularul salvat cu „Save guardrail" */}
@@ -197,6 +245,38 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
             hint={t('settings.dkpolicy.requireRestrictHint')}
             onChange={(v) => { void saveDkPolicy({ ...dkPolicy, require_restrict: v }) }} />
           <span role="status" className={dkPolicyMsg ? 'text-xs text-slate-400' : 'sr-only'}>{dkPolicyMsg}</span>
+        </div>)}
+      </SettingsSection>
+
+      {/* ── Sesiuni inactive (3.7.1) ── formular salvat cu un buton, ca watermark-ul */}
+      <SettingsSection data-setting-id="idleSessions" hidden={!vis('idleSessions')} instanceWide
+        title={t('settings.idle.title')} titleExtra={<HelpTip id="idleSessions" />}
+        description={t('settings.idle.desc')} dirty={idleDirty}
+        footer={canSave(idleState) ? <>
+          <Button variant="primary" type="button" onClick={saveIdle}>{t('settings.idle.save')}</Button>
+          <span role="status" className={idleMsg && !idleErr ? 'text-xs wt-good' : 'sr-only'}>{idleErr ? '' : idleMsg}</span>
+          <span role="alert" className={idleMsg && idleErr ? 'text-xs wt-danger' : 'sr-only'}>{idleErr ? idleMsg : ''}</span>
+        </> : undefined}>
+        <NotLoaded state={idleState} onRetry={loadIdle} />
+        {canSave(idleState) && (<div className="flex flex-col gap-3">
+          <Switch checked={idle.notify} label={t('settings.idle.notify')} hint={t('settings.idle.notifyHint')}
+            onChange={(v) => setIdle({ ...idle, notify: v })} />
+          {idle.notify && (<>
+            <Field label={t('settings.idle.notifyDays')} hint={t('settings.idle.range', { min: nb[0], max: nb[1] })}>
+              <input type="number" inputMode="numeric" min={nb[0]} max={nb[1]} step={1} value={idleDays.notify}
+                onChange={(e) => setIdleDays({ ...idleDays, notify: e.target.value })}
+                className={fieldBase + ' w-24'} />
+            </Field>
+            <Switch checked={idle.autoclose} label={t('settings.idle.autoclose')} hint={t('settings.idle.autocloseHint')}
+              onChange={(v) => setIdle({ ...idle, autoclose: v })} />
+            {idle.autoclose && (
+              <Field label={t('settings.idle.graceDays')} hint={t('settings.idle.range', { min: gb[0], max: gb[1] })}>
+                <input type="number" inputMode="numeric" min={gb[0]} max={gb[1]} step={1} value={idleDays.grace}
+                  onChange={(e) => setIdleDays({ ...idleDays, grace: e.target.value })}
+                  className={fieldBase + ' w-24'} />
+              </Field>
+            )}
+          </>)}
         </div>)}
       </SettingsSection>
 

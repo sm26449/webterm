@@ -453,6 +453,38 @@ def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: 
                   "masking": bool(redact), "ip": ip})
 
 
+def notify_session_idle(user_id: int, title: str, host_name: str, host_id, sid: str, days: int,
+                        grace_days: int) -> None:
+    """Igiena sesiunilor (3.7.1, idlesess.py): o sesiune n-a mai fost folosită `days` zile. Doar
+    proprietarului (sau, fără proprietar, celor cu session.manage — câte un apel per cont). `grace_days`
+    > 0 = închiderea automată e pornită şi o va închide după atâtea zile dacă rămâne nefolosită.
+    `sid` merge în parametri ca UI-ul să ofere „Păstrează deschisă" / „Închide acum"."""
+    closing = grace_days > 0
+    _fire("A session has not been used for %d days" % days,
+          f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
+          f"Nobody has typed in it, it has printed nothing and no browser has been attached for "
+          f"{days} days. "
+          + (f"It will be closed automatically in {grace_days} day(s) unless it is used, or kept "
+             f"open from the session menu (Keep open)." if closing else
+             "Close it if you no longer need it, or keep it open from the session menu (Keep open)."),
+          kind="session_idle", severity="warning" if closing else "info", host_id=host_id,
+          user_id=user_id, key="session_idle_close" if closing else "session_idle",
+          params={"session": title or "", "host": host_name, "days": int(days),
+                  "grace": int(grace_days), "sid": sid})
+
+
+def notify_session_idle_closed(user_id: int, title: str, host_name: str, host_id, sid: str,
+                               days: int) -> None:
+    """Sesiunea notificată a fost închisă automat (3.7.1). Transcriptul rămâne în istoric."""
+    _fire("An unused session was closed automatically",
+          f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
+          f"It had not been used for about {days} days after a notice. Its recording stays in the "
+          f"session history.",
+          kind="session_idle_closed", severity="info", host_id=host_id, user_id=user_id,
+          key="session_idle_closed",
+          params={"session": title or "", "host": host_name, "days": int(days), "sid": sid})
+
+
 def notify_replay_opened(link_id: int, title: str, label: str, ip: str, user_agent: str,
                          email: str, user_id=None) -> None:
     """Cineva a deschis un link de replay. Doar contului care l-a creat; cel mult o alertă per

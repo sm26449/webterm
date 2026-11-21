@@ -683,6 +683,14 @@ MIGRATIONS = [
     "ALTER TABLE hosts ADD COLUMN mtls_required INTEGER DEFAULT 0",
     "ALTER TABLE hosts ADD COLUMN mtls_last REAL",
     "ALTER TABLE hosts ADD COLUMN mtls_next_at REAL",          # când s-a trimis certificatul reînnoit
+    # 3.7.1 — igiena sesiunilor inactive (idlesess.py): ultima activitate persistată GROSIER (cel mult
+    # la ~10 min + la plecarea unui client), ca un restart să nu repornească ceasul; momentul
+    # notificării; termenul de închidere fixat la notificare (doar dacă închiderea automată era
+    # pornită atunci); „Păstrează deschisă" = nu se notifică şi nu se închide niciodată
+    "ALTER TABLE sessions ADD COLUMN last_active REAL",
+    "ALTER TABLE sessions ADD COLUMN idle_notified_at REAL",
+    "ALTER TABLE sessions ADD COLUMN idle_close_after REAL",
+    "ALTER TABLE sessions ADD COLUMN keep_open INTEGER DEFAULT 0",
 ]
 
 # tabele adăugate ulterior (executeScript de mai sus le creează pe DB-uri noi;

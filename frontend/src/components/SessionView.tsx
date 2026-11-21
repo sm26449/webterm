@@ -2693,6 +2693,22 @@ export default function SessionView(props: {
       .catch((e) => notifyError(t('session.killFailed'), errText(e, t)))
   }
 
+  // 3.7.1: „Păstrează deschisă" — sesiunea nu mai e notificată ca inactivă şi nu se închide automat.
+  // Starea locală ţine răspunsul serverului până aduce poll-ul lista nouă (fără pâlpâit în meniu).
+  const [keepLocal, setKeepLocal] = useState<boolean | null>(null)
+  const keepOpen = keepLocal ?? !!session.keep_open
+  useEffect(() => { setKeepLocal(null) }, [session.keep_open])
+  async function toggleKeepOpen() {
+    const next = !keepOpen
+    try {
+      await withStepup(session.host_id, () =>
+        api(`/api/sessions/${session.id}/keep-open`, { method: 'POST', body: JSON.stringify({ keep: next }) }))
+      setKeepLocal(next)
+    } catch (e) {
+      notifyError(t('session.keepOpenFailed'), errText(e, t))
+    }
+  }
+
   async function deleteSession() {
     if (!(await confirm({
       title: t('host.deleteTitle'), message: t('session.confirmDelete'),
@@ -3033,6 +3049,11 @@ export default function SessionView(props: {
                   }}><FullscreenIcon /> {t('session.fullscreen')}</MoreItem>
                   {/* oprirea, cu etichetă text: în bară e doar pictograma ■, uşor de confundat cu
                       „închide tab-ul" (care NU opreşte sesiunea) */}
+                  {isLive && (
+                    <MoreItem onClick={() => { setMoreOpen(false); void toggleKeepOpen() }}>
+                      <ClockIcon /> {keepOpen ? t('session.keepOpenStop') : t('session.keepOpen')}
+                    </MoreItem>
+                  )}
                   {isLive && (
                     <>
                       <div className="my-1 h-px bg-ink-800" aria-hidden="true" />

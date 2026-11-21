@@ -146,6 +146,9 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'guardrail dangerous commands block confirm regex rm -rf rules comenzi periculoase reguli blocare', perm: 'settings.manage' },
   { id: 'deployKeyPolicy', cat: 'politici', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
     keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
+  { id: 'idleSessions', cat: 'politici', titleKey: 'settings.idle.title', hintKey: 'settings.idle.desc',
+    keywords: 'idle inactive stale unused abandoned sessions cleanup close automatically keep open '
+      + 'inactiv inactive nefolosite sesiuni curatenie inchidere automata pastreaza deschisa', perm: 'settings.manage' },
   { id: 'watermark', cat: 'politici', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',
     keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
   // ── Reţea şi certificate ──

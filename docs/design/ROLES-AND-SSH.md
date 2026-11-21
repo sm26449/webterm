@@ -1754,6 +1754,8 @@ describe the pre-3.6 state this design started from.
 | `/api/settings/command-guard` | POST | `settings.manage` | G | |
 | `/api/settings/watermark` | GET | — | S | everyone needs it to render the watermark |
 | `/api/settings/watermark` | POST | `settings.manage` | G | |
+| `/api/settings/idle-sessions` | GET | `settings.manage` | G | idle-session notice / auto-close policy (3.7.1) |
+| `/api/settings/idle-sessions` | POST | `settings.manage` | G | days validated (notify 1–90, grace 1–30) |
 | `/api/settings/smtp` | GET | `settings.manage` | G | |
 | `/api/settings/smtp` | POST | `settings.manage` | G | |
 | `/api/settings/webhook/test` | POST | `settings.manage` | G | |
@@ -1862,6 +1864,7 @@ describe the pre-3.6 state this design started from.
 | `/api/sessions/{sid}` | PATCH | `session.open` (own) / `session.manage` | H(sid) | | | rename/note |
 | `/api/sessions/{sid}/reconnect` | POST | `session.open` | H(sid) | su | | |
 | `/api/sessions/{sid}/kill` | POST | `session.open` (own) / `session.manage` | H(sid) | su | | |
+| `/api/sessions/{sid}/keep-open` | POST | `session.open` (own) / `session.manage` | H(sid) | su | | never notify / auto-close this session (3.7.1) |
 | `/api/sessions/{sid}` | DELETE | `session.open` (own) / `session.manage` | H(sid) | su | | |
 | `/api/sessions/{sid}/share` | POST | `share.live` (+ `share.live_write` if writable) | H(sid) | su | | |
 | `/api/sessions/{sid}/share` | GET | `session.watch` | H(sid) | | | |

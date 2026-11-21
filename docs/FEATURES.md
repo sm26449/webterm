@@ -454,3 +454,41 @@ History: `<sid>.out` (raw stream, replayed on reconnect) + `<sid>.cast`
 never written to a transcript, so a password typed at an echo-off prompt cannot
 leak into a recording or a backup of one. Closed sessions
 stay in the sidebar until you delete them.
+
+## Idle sessions
+
+Because sessions survive closing the tab, it is easy to leave shells running for weeks. WebTerm
+notices them (3.7.1).
+
+**What counts as idle.** For the whole period: nobody typed in the session, it printed nothing, and
+no browser (yours, someone else's, or a share-link guest) was attached. A build that keeps printing
+or a `tail -f` is never idle. A command that runs silently for days does look idle; the notice and
+**Keep open** are there for that case.
+
+**What happens.**
+
+| Setting (Settings → Security policy → Idle sessions) | Default |
+|---|---|
+| Notify the owner after N days idle | on, 7 days (1–90) |
+| Close idle sessions automatically | **off** (an Owner or Admin turns it on for the instance) |
+| Close this many days after the notice | 2 days (1–30) |
+
+- The notice goes to the person who opened the session: an entry in the alert bell (with **Keep
+  open** and **Close now**), and a toast with the same two buttons while you are in the app. Email
+  and webhook follow your per-event choices in **My notifications** ("One of your sessions has not
+  been used for days"); email is off by default. Sessions with no owner (opened before roles
+  existed) notify the people allowed to manage sessions on that host. The private root terminals on
+  the gateway host notify only their owner.
+- Each idle period gives one notice. Any use afterwards (a key, any output, a browser attaching)
+  cancels it, and the clock starts again.
+- With automatic closing on, a session that is still unused the set number of days after its notice
+  is closed exactly as if its owner pressed **Stop**: the shell on the host ends, the recording stays
+  in the history, and the closing is in the audit log (`system:idle-sessions`). The owner gets a
+  second alert. A notice sent while automatic closing was off never leads to a closing; turning it
+  on later sends a new notice with the closing date first.
+- WebTerm only closes a session it can see. If the host is offline, the session's output is not
+  reaching the gateway, or anything is unclear, it waits for the next check (every ~10 minutes).
+
+**Keep a session.** In the session's **⋯** menu, choose **Keep open (never close automatically)**.
+It is never notified or closed again; the same menu turns it back off. Only someone who may control
+the session (its owner, or a role with `session.manage` on the host) can change it.

@@ -26,7 +26,7 @@ from .errors import ApiError, rate_limited
 from . import gitpanel, owners
 from . import webauthn_api
 from . import (accounts, alert_history, audit, authz, backup, certmon, cmdguard, config,
-               agentca, agentgate, core, db, edgeguard, edgelists, edgemtls, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, push,
+               agentca, agentgate, core, db, edgeguard, edgelists, edgemtls, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, idlesess, push,
                pyruntime, replay, scim, security, sessctl, shares, conntypes, fwddomain, signing, ssomap,
                stepup, syshealth, totp, updatecheck, watermark)
 
@@ -2187,6 +2187,13 @@ class SmtpIn(BaseModel):
     current_password: str = ""  # cerut la ORICE schimbare (SMTP-ul poartă codurile de email)
 
 
+class IdleSessionsIn(BaseModel):
+    notify: bool = True
+    notify_days: int = 7
+    autoclose: bool = False
+    grace_days: int = 2
+
+
 class WatermarkIn(BaseModel):
     enabled: bool = False
     content: str = "${email} · ${time}"
@@ -2269,6 +2276,31 @@ async def save_watermark(body: WatermarkIn, user=Depends(authz.perm('settings.ma
     }
     await db.set_setting("watermark", json.dumps(cfg))
     return cfg
+
+
+@router.get("/api/settings/idle-sessions")
+async def get_idle_sessions(user=Depends(authz.perm('settings.manage'))):
+    """Igiena sesiunilor inactive (3.7.1, idlesess.py): notificare după N zile, închidere opţională."""
+    pol = await idlesess.load_policy(fresh=True)
+    return dict(pol, bounds={"notify_days": list(idlesess.NOTIFY_DAYS), "grace_days": list(idlesess.GRACE_DAYS)})
+
+
+@router.post("/api/settings/idle-sessions")
+async def save_idle_sessions(body: IdleSessionsIn, request: Request,
+                             user=Depends(authz.perm('settings.manage'))):
+    # valori în afara limitelor = refuz explicit (nu le tăiem în tăcere: un „0 zile" tastat din
+    # greşeală nu trebuie să devină „o zi" şi să închidă sesiunile tuturor a doua zi)
+    for name, (lo, hi) in (("notify_days", idlesess.NOTIFY_DAYS), ("grace_days", idlesess.GRACE_DAYS)):
+        v = getattr(body, name)
+        if not lo <= v <= hi:
+            raise ApiError(400, "settings.idleDaysRange", "%s must be between %d and %d" % (name, lo, hi),
+                           vars={"field": name, "min": lo, "max": hi})
+    old = await idlesess.load_policy(fresh=True)
+    pol = await idlesess.save_policy(body.model_dump())
+    audit.detail(request, "idle sessions: notify %s after %d day(s), auto-close %s after %d more day(s)%s" % (
+        "on" if pol["notify"] else "off", pol["notify_days"], "ON" if pol["autoclose"] else "off",
+        pol["grace_days"], " (auto-close was off)" if pol["autoclose"] and not old["autoclose"] else ""))
+    return dict(pol, bounds={"notify_days": list(idlesess.NOTIFY_DAYS), "grace_days": list(idlesess.GRACE_DAYS)})
 
 
 @router.get("/api/settings/smtp")
@@ -4707,6 +4739,10 @@ class SessionPatch(BaseModel):
     note: str = None
 
 
+class KeepOpenIn(BaseModel):
+    keep: bool
+
+
 def _last_output(row) -> float | None:
     """Ultima activitate (output) a unei sesiuni ACTIVE, pentru dialogul „New session" (3.7.1).
     Din hub dacă e ataşat şi a primit ceva; altfel mtime-ul transcriptului .out (supravieţuieşte
@@ -4723,7 +4759,7 @@ def _last_output(row) -> float | None:
         return None
 
 
-def _session_json(row, show_share: bool = False) -> dict:
+def _session_json(row, show_share: bool = False, idle_pol: Optional[dict] = None) -> dict:
     # `shared` = există un link de share ACTIV. Doar pentru utilizatori de browser (nu tokenuri de
     # automatizare), la fel ca GET /api/sessions/{sid}/share (aceeaşi permisiune session.watch);
     # tokenul/URL-ul nu ies niciodată — doar booleanul.
@@ -4746,6 +4782,9 @@ def _session_json(row, show_share: bool = False) -> dict:
             if row["id"] in core.hubs else (row["agent_offset"] or 0),
         "last_output": _last_output(row),
         "shared": shared,
+        # igiena sesiunilor (3.7.1): „Păstrează deschisă" + notificarea de inactivitate în curs
+        "keep_open": bool(row["keep_open"]) if "keep_open" in row.keys() else False,
+        "idle_notice": idlesess.notice_json(row, idle_pol) if idle_pol else None,
     }
 
 
@@ -4787,7 +4826,8 @@ async def list_sessions(request: Request,
             hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
     show_share = not (isinstance(user, dict) and user.get("is_token"))
-    return [_session_json(r, show_share) for r in rows]
+    idle_pol = await idlesess.load_policy()
+    return [_session_json(r, show_share, idle_pol) for r in rows]
 
 
 @router.get("/api/hosts/{host_id}/sessions")
@@ -5092,6 +5132,24 @@ async def reconnect_session(sid: str, request: Request,
         raise ApiError(409, "telnet.limit", "the telnet session limit was reached — close one first")
     except RuntimeError as e:
         raise errors.runtime_api_error(e, "session.createFailed")
+
+
+@router.post("/api/sessions/{sid}/keep-open")
+async def session_keep_open(sid: str, body: KeepOpenIn, request: Request,
+                            user=Depends(authz.perm('session.open', host='sid'))):
+    """„Păstrează deschisă" (3.7.1): sesiunea nu mai primeşte notificări de inactivitate şi nu se
+    închide automat niciodată; anulează şi o notificare/închidere în curs. Cine controlează sesiunea."""
+    row = await db.fetchone("SELECT state FROM sessions WHERE id=?", sid)
+    if not row:
+        raise ApiError(404, "session.missing", "no such session")
+    await sessctl.require_session_control(request, sid, user)
+    # mutaţie pe o sesiune de pe un host 2FA: aceeaşi poartă ca redenumirea (update_session)
+    await stepup.require_session_host_stepup(sid, user)
+    if row["state"] not in ("creating", "live"):
+        raise ApiError(409, "session.keepNotLive", "the session is no longer running")
+    await idlesess.set_keep_open(sid, body.keep)
+    audit.detail(request, "keep open %s" % ("on" if body.keep else "off"))
+    return {"ok": True, "keep_open": body.keep}
 
 
 @router.post("/api/sessions/{sid}/kill")
@@ -6230,6 +6288,7 @@ async def shared_ws(ws: WebSocket, token: str):
         if start_locked:
             client.lock()
         hub.clients.add(client)
+        hub.note_presence()       # igiena sesiunilor (3.7.1): un client ataşat = sesiune folosită
         # re-verificat SINCRON cu adăugarea: operatorul poate pleca în timpul `send_bytes` de mai
         # sus, iar `sync_guests` din plecarea lui nu-l vedea încă pe acest invitat
         if share_2fa and not start_locked and not hub.has_operator():
@@ -6308,6 +6367,7 @@ async def shared_ws(ws: WebSocket, token: str):
         reval_task.cancel()
         if hub and client:
             hub.clients.discard(client)
+            hub.note_presence()   # plecarea porneşte ceasul de inactivitate (3.7.1)
             if client.sender_task:
                 client.sender_task.cancel()
             await hub.broadcast_roster()
@@ -6482,6 +6542,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         if start_locked:
             client.lock()
         hub.clients.add(client)
+        hub.note_presence()       # igiena sesiunilor (3.7.1)
         await _send_osc133(client, hub, osc_span if replay_sent else None)
         client.sender_task = asyncio.create_task(client.sender())
         if not start_locked:
@@ -6726,6 +6787,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         authz.unsubscribe(wake)
         if hub and client:
             hub.clients.discard(client)
+            hub.note_presence()   # plecarea porneşte ceasul de inactivitate (3.7.1)
             if client.sender_task:
                 client.sender_task.cancel()
             # ultimul operator verificat a plecat → invitaţii prin share se blochează ACUM, nu la

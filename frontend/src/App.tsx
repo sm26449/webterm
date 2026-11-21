@@ -59,6 +59,7 @@ import { closedTabToastKey, menuNav } from './lib/tablist'
 import { createPortal } from 'react-dom'
 import { setWalkthroughUser, shouldAutoOpen } from './lib/walkthrough'
 import { fmtTs, getTimezone } from './lib/tz'
+import { loadSeen, noticeKey, pendingIdleNotices, saveSeen } from './lib/idleSessions'
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
 import { byText } from './lib/sortText'
@@ -581,13 +582,50 @@ function MainApp() {
     }
   }, [])
   useEffect(() => {
-    registerToast((message, kind, key, onClick, actionLabel) => {
+    registerToast((message, kind, key, onClick, actionLabel, secondary) => {
       const id = `${Date.now()}-${Math.random()}`
-      setToasts((t) => upsertToast(t, { id, message, kind, key, onClick, actionLabel }))
-      // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s
-      setTimeout(() => expireToast(id), kind === 'error' ? 12000 : 6000)
+      setToasts((t) => upsertToast(t, { id, message, kind, key, onClick, actionLabel, secondary }))
+      // erorile stau mai mult (12s) — ai nevoie de timp să citeşti motivul; info/warn 6s; un toast cu
+      // DOUĂ acţiuni (3.7.1, sesiune inactivă) cere o decizie: 30 s
+      setTimeout(() => expireToast(id), secondary ? 30000 : kind === 'error' ? 12000 : 6000)
     })
   }, [expireToast])
+
+  // 3.7.1: o sesiune A TA nefolosită de zile (serverul a notificat-o) → un toast cu „Păstrează
+  // deschisă" / „Închide acum", o singură dată per notificare (reţinut în localStorage). Alerta din
+  // clopoţel există oricum; toast-ul e doar scurtătura cât eşti în aplicaţie.
+  const myUserId = appState?.authenticated ? appState.user_id : null
+  useEffect(() => {
+    const seen = loadSeen()
+    const due = pendingIdleNotices(sessions, myUserId, seen)
+    if (!due.length) return
+    for (const s of due.slice(0, 3)) {
+      const k = noticeKey(s)
+      if (k) seen.add(k)
+      const host = hosts.find((h) => h.id === s.host_id)?.name ?? '?'
+      const vars = { title: sessionTitle(s.title, t), host, days: s.idle_notice?.days ?? 0 }
+      const msg = s.idle_notice?.close_at
+        ? t('idle.toastClose', { ...vars, date: fmtTs(s.idle_notice.close_at) })
+        : t('idle.toast', vars)
+      notifyToast(msg, 'warn', `idle-${s.id}`, () => {
+        withStepup(s.host_id, () => api(`/api/sessions/${s.id}/keep-open`, { method: 'POST', body: JSON.stringify({ keep: true }) }))
+          .then(() => notifyToast(t('idle.kept', { title: vars.title })))
+          .catch((e) => notifyError(t('session.keepOpenFailed'), errText(e, t)))
+      }, t('idle.keep'), {
+        label: t('idle.closeNow'),
+        onClick: () => {
+          // aceeaşi confirmare ca butonul Stop: închiderea opreşte tot ce rulează în sesiune
+          void confirm({ title: t('session.killTitle'), message: t('session.confirmKill'), danger: true,
+            confirmLabel: t('session.stopSession') }).then((ok) => {
+            if (!ok) return
+            withStepup(s.host_id, () => api(`/api/sessions/${s.id}/kill`, { method: 'POST' }))
+              .catch((e) => notifyError(t('session.killFailed'), errText(e, t)))
+          })
+        },
+      })
+    }
+    saveSeen(seen)
+  }, [sessions, hosts, myUserId, t, confirm])
 
   // gazda pentru askSecret(): acelaşi tipar imperativ ca credReq (promise + modal).
   // O cerere nouă peste una deschisă o anulează pe cea veche (resolve null) — fluxurile

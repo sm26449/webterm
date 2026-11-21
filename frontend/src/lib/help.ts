@@ -17,6 +17,7 @@ export const HELP = {
   signingKey: { doc: 'docs/design/SIGNED-UPDATES.md#whose-key' },
   enrollGroups: { doc: 'docs/FLEET.md#bulk-enrollment' },
   deployKeyPolicy: { doc: 'docs/SSH-KEYS.md#deploy-key-policy-settings--security-policy' },
+  idleSessions: { doc: 'docs/FEATURES.md#idle-sessions' },
   smtp: { doc: 'docs/ALERTS.md#events' },
   webhook: { doc: 'docs/ALERTS.md#channels-email-and-webhook' },
   resourceAlerts: { doc: 'docs/ALERTS.md#resource-thresholds' },

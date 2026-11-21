@@ -9,7 +9,10 @@ export type ToastKind = 'info' | 'warn' | 'error'
     duce în panoul X (dispatch `wt-open-session`). Opţional; absenţa lui = toast pur informativ.
     `actionLabel` (3.6.30): cu el, `onClick` nu mai e pe mesaj ci pe un BUTON separat cu textul ăsta
     (ex. „Redeschide") — acţiunea e vizibilă, nu ascunsă într-un mesaj subliniat la hover. */
-type ToastHost = (msg: string, kind: ToastKind, key?: string, onClick?: () => void, actionLabel?: string) => void
+/** 3.7.1: o A DOUA acţiune, buton separat după prima (ex. „Păstrează deschisă" + „Închide acum") */
+export interface ToastAction { label: string; onClick: () => void }
+type ToastHost = (msg: string, kind: ToastKind, key?: string, onClick?: () => void, actionLabel?: string,
+                  secondary?: ToastAction) => void
 let toastHost: ToastHost | null = null
 
 export function registerToast(fn: ToastHost) {
@@ -73,8 +76,8 @@ export function notifyOs(title: string, body: string, tag?: string): boolean {
     inserată") se întâmplă fix când tabul e în faţă şi omul se uită la ecran — un pop-up de
     sistem ar fi spam şi redundant. Mesajul se anunţă oricum prin regiunea live a stivei. */
 export function notifyToast(message: string, kind: 'info' | 'warn' = 'info', key?: string, onClick?: () => void,
-                            actionLabel?: string) {
-  toastHost?.(message, kind, key, onClick, actionLabel)
+                            actionLabel?: string, secondary?: ToastAction) {
+  toastHost?.(message, kind, key, onClick, actionLabel, secondary)
 }
 
 /** Eroare acţionabilă (ex. „nu m-am putut conecta: port greşit"): MEREU un toast ÎN PAGINĂ,

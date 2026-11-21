@@ -25,6 +25,7 @@ The rules are ordered from "a mistake leaks a secret or grants access" to "a mis
 | [INV-10](#inv-10) | The gateway never gains new powers on a host |
 | [INV-11](#inv-11) | Every forwarded request is authenticated |
 | [INV-12](#inv-12) | An agent host that has connected with its client certificate never goes back to the token alone |
+| [INV-13](#inv-13) | Closing an idle session automatically never touches a session that is in use, kept, or unannounced |
 
 ---
 
@@ -261,3 +262,22 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 **Enforced in**: `api.py` `[ws]` `agent_ws`; `edgemtls.py` `router_secret_ok`; `agentca.py` `verify_client_cert`.
 **Tests**: `agentmtls`, `agentca`.
 
+<a id="inv-13"></a>
+## INV-13: closing an idle session automatically never touches a session that is in use, kept, or unannounced
+
+**Rule.**
+- A session is idle only when, for the whole period, nobody typed in it, it printed nothing and no
+  browser (owner, other account or share-link guest) was attached. Output counts as use: a build or a
+  `tail -f` is never closed.
+- Automatic closing is off until an Owner or Admin turns it on for the instance. It only closes a
+  session whose owner (or, with no owner, a `session.manage` holder) was notified **while automatic
+  closing was on**, and only after the grace period, with no use at all since the notice. Any use
+  cancels the notice immediately, not at the next check.
+- A session marked **Keep open** is never notified and never closed.
+- When anything is unknown it does nothing: no hub watching the session's output, the host offline,
+  an unreadable transcript, no one to notify, an error. A missing answer is "don't close".
+- Closing goes through the same path as the Stop button (`core.kill_session`), so the recording is
+  kept, and is audited as `system:idle-sessions`.
+
+**Enforced in**: `idlesess.py` `sweep`, `_close`, `close_deadline`, `last_activity`; `core.py` `[hub]` `_idle_activity`.
+**Tests**: `session_idle`.
