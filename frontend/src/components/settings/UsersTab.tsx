@@ -1,13 +1,11 @@
 import { useEffect, useId, useState } from 'react'
-import { api, errText, Host, withAccessReauth, withSecondFactor as withSecondFactorT } from '../../lib/api'
-import { useConfirm } from '../../lib/confirm'
+import { api, errText, Host } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { Binding, loadPerms, ROLE_KEYS, roleLabel, RolesCatalogue, scopeLabel, SHELL_ROLES, usePerms, can } from '../../lib/perms'
+import { loadPerms, RolesCatalogue, usePerms, can } from '../../lib/perms'
 import { effectiveSubTab, hasNoRole, loadSubTab, saveSubTab, subTabOfSection, visibleSubTabs,
   type SsoMapping, type UserRow, type UsersSubTab } from '../../lib/usersAdmin'
 import { heading } from './ui'
-import { Badge, Button, ErrorState } from '../ui'
-import HelpTip from '../HelpTip'
+import { ErrorState } from '../ui'
 import { type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
 import SubTabs from './users/SubTabs'
@@ -15,26 +13,24 @@ import AccountsPanel from './users/AccountsPanel'
 import RolesPanel from './users/RolesPanel'
 import SsoPanel from './users/SsoPanel'
 import ScimPanel from './users/ScimPanel'
-import { ActionStatus, RETURN_USERS, selfOf } from './users/shared'
-import ExplainAccess from './users/ExplainAccess'
+import { ActionStatus, selfOf } from './users/shared'
 
-/* Settings → Users & roles (3.6). Conturile şi LEGĂTURILE lor de rol (rol @ scope — docs/ROLES.md),
-   rolurile custom (3.6.2) şi maparea grupurilor SSO (3.6.2). Fără `users.manage` vezi doar propriul
-   acces, read-only; serverul aplică oricum regulile (anti-escaladare, doar Owner atinge Owner-ii,
-   ultimul Owner, nu-ţi schimbi singur accesul) — UI-ul doar le face vizibile.
+/* Settings → People & roles (3.6; „Users & roles" până în 3.7.1). Conturile şi LEGĂTURILE lor de
+   rol (rol @ scope — docs/ROLES.md), rolurile custom (3.6.2) şi maparea grupurilor SSO (3.6.2).
+   Serverul aplică oricum regulile (anti-escaladare, doar Owner atinge Owner-ii, ultimul Owner, nu-ţi
+   schimbi singur accesul) — UI-ul doar le face vizibile.
 
-   3.6.6: pagina nu mai e un scroll fără capăt. „Your access" rămâne un rezumat compact DEASUPRA
-   sub-tab-urilor — e singura parte pe care o vede orice cont, iar un admin are nevoie de propriul
-   scope tocmai când acordă altora; ca tab separat ar fi ascuns exact contextul ăsta, iar un cont
-   fără drepturi de administrare ar fi văzut un tablist cu un singur tab. Dedesubt: Accounts | Roles
-   | SSO groups (users/*.tsx), cu aceleaşi condiţii de vizibilitate ca secţiunile de dinainte.
+   3.6.6: Accounts | Roles | SSO groups (users/*.tsx) pe sub-tab-uri. 3.7.1 (auditul UX Setări M1):
+   „Your access" s-a mutat în Account & security (MyAccessTab.tsx) — un cont fără drepturi de
+   administrare nu mai primeşte un tab întreg pentru un singur card; tab-ul ăsta apare doar cu
+   `users.manage` / `roles.manage`.
 
    Contractul cu căutarea din Setări (lib/settingsIndex): fiecare panou poartă `data-setting-id`-ul
    secţiunii lui AICI, iar `jump` (de la SettingsModal) comută sub-tab-ul înainte ca modalul să
    caute secţiunea vizibilă. */
 
 type SsoState = { enabled: boolean; mappings: SsoMapping[]; local_password_accounts?: number }
-type Where = 'self' | UsersSubTab
+type Where = UsersSubTab
 
 export default function UsersTab(props: { jump?: { id: string; n: number } | null }) {
   const { t } = useI18n()
@@ -46,9 +42,8 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const [hosts, setHosts] = useState<Host[]>([])
   const [catalogue, setCatalogue] = useState<RolesCatalogue | null>(null)
   const [sso, setSso] = useState<SsoState | null>(null)
-  const { confirm } = useConfirm()
   // unde apare mesajul: în panoul care l-a produs (altfel un „Rol salvat" ar apărea în alt sub-tab)
-  const [note, setNote] = useState<{ at: Where; msg: string; err: string }>({ at: 'self', msg: '', err: '' })
+  const [note, setNote] = useState<{ at: Where | null; msg: string; err: string }>({ at: null, msg: '', err: '' })
   const [loadErr, setLoadErr] = useState('')
 
   // U04: o listă de utilizatori goală pe un fetch picat ascundea conturile (şi rolurile) existente
@@ -83,9 +78,6 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const idPrefix = useId()
   const withTabs = tabs.length > 1
 
-  const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
-  const hostName = (id: number) => hosts.find((h) => h.id === id)?.name
-  const chip = (b: Binding) => t('roles.chip', { role: roleLabel(b, t), scope: scopeLabel(b, hostName, t) })
   const doneAt = (at: Where) => (text: string) => { setNote({ at, msg: text, err: '' }); void loadPerms() }
   const failAt = (at: Where) => (e: unknown) => { setNote({ at, msg: '', err: errText(e, t) || String(e) }) }
   const status = (at: Where) => <ActionStatus msg={note.at === at ? note.msg : ''} err={note.at === at ? note.err : ''} />
@@ -93,32 +85,6 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const reloadRoles = async () => { await Promise.all([loadCatalogue(), manage ? loadUsers() : Promise.resolve()]) }
   const reloadSso = async () => { await Promise.all([loadSso(), loadCatalogue(), loadUsers()]) }
 
-  const self = users.find((u) => u.is_self)
-
-  // 3.6.2 (revizuirea de securitate): un cont SSO cu parolă locală nu primeşte roluri din
-  // grupuri. Omul îşi scoate singur parola; scoaterea revocă şi passkey-urile. Re-auth-ul (RB-03):
-  // passkey account-scope dacă are, altfel step-up SSO (redirect; la întoarcere fereastra e deschisă)
-  // — serverul ignoră parola unui cont SSO. Confirmarea e dialogul de aici, nu încă unul.
-  async function removeLocalPassword() {
-    if (!(await confirm({ title: t('roles.localPw.confirmTitle'), message: t('roles.localPw.confirmBody'),
-      confirmLabel: t('roles.localPw.remove'), danger: true }))) return
-    try {
-      // promptul poartă şi linia de parolă (ca toate celelalte): pe planul cu parolă (rând propriu
-      // necunoscut, gateway vechi) askSecret arată întrebarea completă, nu doar titlul dialogului
-      const r = await withAccessReauth(t, t('access.reauth.removeLocalPw'),
-        (cred) => withSecondFactor((extra) => api('/api/account',
-          { method: 'POST', body: JSON.stringify({ remove_password: true, ...cred, ...extra }) })),
-        { me: self, returnTo: RETURN_USERS })
-      if (r === null) return
-      await loadUsers()
-      doneAt('self')(t('roles.localPw.removed'))
-    } catch (x) {
-      failAt('self')(x)
-    }
-  }
-  const mine = perms?.bindings ?? self?.bindings ?? []
-  const sourceTitle = (b: Binding) => (b.source === 'migration' ? t('roles.sourceMigration')
-    : b.source === 'sso' ? t('roles.sourceSso') : undefined)
   const usersOk = usersState.status === 'ok'
   const noRole = usersOk ? users.filter(hasNoRole).length : 0
   const labels: Record<UsersSubTab, string> = {
@@ -138,53 +104,10 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
 
   return (
     <div>
-      <section data-setting-id="myAccess" className="rounded-xl bg-ink-800/40 px-3 py-3 ring-1 ring-ink-700">
-        <h3 className={heading + ' !mt-0 flex items-center gap-2'}>{t('roles.myAccess')}<HelpTip id="roles" /></h3>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5" data-my-access>
-          {mine.length === 0
-            ? <span className="text-sm text-slate-400">{t('roles.myNone')}</span>
-            : mine.map((b) => (
-              <Badge key={b.id} tone={b.role === 'owner' ? 'accent' : 'neutral'} size="md"
-                title={sourceTitle(b)}>{chip(b)}</Badge>
-            ))}
-        </div>
-        <p className="mt-2 text-xs text-slate-500">{t('roles.myAccessHint')}</p>
-        {/* 3.6.10: „de ce pot / nu pot…" pe un host anume — aceeaşi explicaţie ca pentru un admin */}
-        {self && hosts.length > 0 && (
-          <details className="mt-2" data-explain-self>
-            <summary className="cursor-pointer text-xs wt-link">{t('explain.titleSelf')}</summary>
-            <div className="mt-2">
-              <ExplainAccess userId={self.id} email={self.email} self hosts={hosts} />
-            </div>
-          </details>
-        )}
-        {self?.sso && self.local_password && (
-          <div className="mt-3 flex flex-col items-start gap-2 rounded-md bg-warn/10 px-3 py-2" data-localpw-self>
-            <p className="text-xs text-warn">{t('roles.localPw.mine')}</p>
-            <Button type="button" size="sm" variant="danger" onClick={removeLocalPassword}>{t('roles.localPw.remove')}</Button>
-          </div>
-        )}
-        {status('self')}
-        {/* fără sub-tab-ul Roles (cont fără drepturi de administrare), ce înseamnă fiecare rol stă aici */}
-        {!tabs.includes('roles') && (
-          <ul className="mt-3 flex flex-col gap-1 text-xs text-slate-400" data-role-glossary>
-            {ROLE_KEYS.map((k) => (
-              <li key={k} className="flex items-start gap-2">
-                <span className="w-20 shrink-0 font-semibold text-slate-300">{t('roles.role.' + k)}</span>
-                <span className="min-w-0 flex-1">{t('roles.roleDesc.' + k)}</span>
-                {SHELL_ROLES.includes(k) && (
-                  <Badge tone="warn" title={t('roles.shellHint')}>{t('roles.shell')}</Badge>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
       {loadErr && <p role="alert" className="mt-3 text-sm wt-danger">{loadErr}</p>}
 
       {tab && (
-        <div className="mt-5">
+        <div>
           {withTabs && (
             <SubTabs idPrefix={idPrefix} label={t('settings.users.tabsLabel')} active={tab} onChange={choose}
               tabs={tabs.map((x) => ({ id: x, label: labels[x], count: counts[x],

@@ -21,11 +21,17 @@ const NO_SWALLOW = [
   './components/SnippetsMenu.tsx',
   './components/HostsCsv.tsx',
   './components/settings/SignInTab.tsx',
-  './components/settings/NotificationsTab.tsx',
   './components/settings/AppearanceTab.tsx',
-  './components/settings/InfrastructureTab.tsx',
   './components/settings/UsersTab.tsx',
   './components/settings/PreferencesTab.tsx',
+  // 3.7.1: tab-urile desprinse din Infrastructure / Notifications / Preferences / Users & roles
+  './components/settings/AccessTab.tsx',
+  './components/settings/SecurityPolicyTab.tsx',
+  './components/settings/NetworkTab.tsx',
+  './components/settings/AlertDeliveryTab.tsx',
+  './components/settings/MyNotificationsTab.tsx',
+  './components/settings/MyAccessTab.tsx',
+  './components/settings/UpdatesTab.tsx',
   // 3.6.3: aplicaţiile de pe dashboard, versiunea din Status
   './components/Dashboard.tsx',
   './components/StatusModal.tsx',
@@ -42,11 +48,12 @@ describe('audit UI 3.6.1 — eroare ≠ gol', () => {
   })
 
   it('formularele de securitate se salvează doar peste valori încărcate (guardrail, chei de deploy, watermark, SMTP)', () => {
-    const infra = file('./components/settings/InfrastructureTab.tsx')
-    expect(infra).toMatch(/saveGuard = async \(\) => \{\s*if \(!canSave\(guardState\)\) return/)
-    expect(infra).toMatch(/saveDkPolicy = async \(next: DeployKeyPolicy\) => \{\s*if \(!canSave\(dkState\)\) return/)
-    expect(file('./components/settings/AppearanceTab.tsx')).toMatch(/if \(!canSave\(wmState\)\) return/)
-    expect(file('./components/settings/NotificationsTab.tsx')).toMatch(/if \(!canSave\(smtpState\)\) throw/)
+    // 3.7.1: guardrail, chei de deploy şi watermark stau împreună în Security policy
+    const policy = file('./components/settings/SecurityPolicyTab.tsx')
+    expect(policy).toMatch(/saveGuard = async \(\) => \{\s*if \(!canSave\(guardState\)\) return/)
+    expect(policy).toMatch(/saveDkPolicy = async \(next: DeployKeyPolicy\) => \{\s*if \(!canSave\(dkState\)\) return/)
+    expect(policy).toMatch(/if \(!canSave\(wmState\)\) return/)
+    expect(file('./components/settings/AlertDeliveryTab.tsx')).toMatch(/if \(!canSave\(smtpState\)\) throw/)
   })
 })
 

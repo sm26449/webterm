@@ -66,11 +66,11 @@ try {
   await page.keyboard.press('Escape')
   await page.waitForTimeout(300)
 
-  // verific că apare şi în gestiunea din Settings → Infrastructure & tokens (fostul „Security", 3.5.9)
+  // verific că apare şi în gestiunea din Settings → Access & automation (fostul „Infrastructure & tokens", 3.7.1)
   await page.click('button[aria-label="Settings"]')
-  await page.getByRole('button', { name: 'Infrastructure & tokens', exact: true }).click()
+  await page.getByRole('button', { name: 'Access & automation', exact: true }).click()
   await waitText('prod-rollout', 8000).catch(() => {})
-  check('tokenul apare în lista de management (Settings → Infrastructure & tokens)',
+  check('tokenul apare în lista de management (Settings → Access & automation)',
     await page.locator('text=prod-rollout').first().isVisible())
   await page.keyboard.press('Escape')
   await page.waitForTimeout(300)

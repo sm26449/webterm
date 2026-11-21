@@ -400,7 +400,7 @@ export default function Sidebar(props: {
         title: t('stepup.needsFactorTitle'), message: t('host.require2faNoFactor', { name: host.name }),
         confirmLabel: t('stepup.openSignin'),
       })) {
-        setSettingsCat({ cat: 'autentificare', section: 'totp' })
+        setSettingsCat({ cat: 'cont', section: 'totp' })
         setShowSettings(true)
       }
     }

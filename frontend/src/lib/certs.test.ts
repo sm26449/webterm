@@ -78,9 +78,9 @@ describe('certificate status (3.6.7)', () => {
       }
     }
   })
-  it('the section is in the settings search, on the Infrastructure tab, behind settings.manage', () => {
+  it('the section is in the settings search, on the Network & certificates tab, behind settings.manage', () => {
     const s = SETTINGS_INDEX.find((x) => x.id === 'certificates')
-    expect(s?.cat).toBe('infrastructura')
+    expect(s?.cat).toBe('retea')
     expect(s?.perm).toBe('settings.manage')
     expect(sectionVisible('certificates', (p) => p === 'settings.manage')).toBe(true)
     expect(sectionVisible('certificates', () => false)).toBe(false)

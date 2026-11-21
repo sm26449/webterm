@@ -5,6 +5,8 @@
    action is on offer. It never builds, edits or sends a command: "Open in terminal" names the
    CHECK and the index of its command, and the server re-derives the command itself. */
 
+import { catOfSection, type SettingsCat } from './settingsIndex'
+
 export type Severity = 'ok' | 'info' | 'warning' | 'critical'
 
 export interface HealthCommand {
@@ -173,18 +175,24 @@ export function fixMode(st: Pick<HealthStatus, 'can_terminal' | 'terminal_host'>
   return st.terminal_host ? 'terminal' : 'pick'
 }
 
+/** The Settings section a server action opens. Only the section is named here: its tab comes from
+    lib/settingsIndex (`catOfSection`), so moving a section between tabs (3.7.1) cannot leave a
+    stale tab id behind in a second list. */
+const ACTION_SECTION: Readonly<Record<string, string>> = {
+  'settings:notifications': 'smtp',
+  'settings:backup': 'backupAuto',
+  'settings:signing': 'signingKey',
+  'settings:certificates': 'certificates',
+  'settings:forward': 'forwardDomain',
+  'settings:enroll': 'enrollGroups',
+  'about:update': 'appUpdate',
+}
+
 /** Where a UI action leads inside Settings (tab + section), or null when it is not a jump. */
-export function actionTarget(action: string): { cat: string; section?: string } | null {
-  switch (action) {
-    case 'settings:notifications': return { cat: 'notificari', section: 'smtp' }
-    case 'settings:backup': return { cat: 'backup', section: 'backupAuto' }
-    case 'settings:signing': return { cat: 'infrastructura', section: 'signingKey' }
-    case 'settings:certificates': return { cat: 'infrastructura', section: 'certificates' }
-    case 'settings:forward': return { cat: 'infrastructura', section: 'forwardDomain' }
-    case 'settings:enroll': return { cat: 'infrastructura', section: 'enrollGroups' }
-    case 'about:update': return { cat: 'preferinte', section: 'appUpdate' }
-    default: return null
-  }
+export function actionTarget(action: string): { cat: SettingsCat; section: string } | null {
+  const section = Object.prototype.hasOwnProperty.call(ACTION_SECTION, action) ? ACTION_SECTION[action] : undefined
+  const cat = section ? catOfSection(section) : undefined
+  return section && cat ? { cat, section } : null
 }
 
 /** A docs path from the server → the repository URL (only paths under docs/, nothing else). */

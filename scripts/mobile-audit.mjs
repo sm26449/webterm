@@ -374,7 +374,7 @@ async function auditDevice(cfg) {
 
     // ── Setări: căutarea (3.5.9) încape, iar lista de rezultate e folosibilă şi la 320px ──
     // Intrăm pe calea de pe telefon care nu cere sertarul: rândul „Your 2FA" din cardul Securitate
-    // (link adânc → Setări pe „Sign-in & 2FA"). Rotiţa stă în sidebar, iar sertarul lăsat deschis
+    // (link adânc → Setări pe „Account & security", fostul „Sign-in & 2FA" — 3.7.1). Rotiţa stă în sidebar, iar sertarul lăsat deschis
     // ar acoperi cardul hostului din etapa următoare.
     const twofa = page.locator('[data-testid="dashboard"] button', { hasText: 'Your 2FA' }).first()
     if (!(await twofa.isVisible().catch(() => false))) {
@@ -384,7 +384,7 @@ async function auditDevice(cfg) {
       const search = page.locator('[role=dialog][aria-modal="true"] [role=search] input')
       await search.waitFor({ state: 'visible', timeout: 5000 })
       const tab = await page.locator('nav[aria-label="Settings categories"] button[aria-current="true"]').textContent()
-      if (tab !== 'Sign-in & 2FA') note(cfg.name, 'setari-cautare', 'bug', `link-ul din cardul Securitate a deschis tab-ul „${tab}"`)
+      if (tab !== 'Account & security') note(cfg.name, 'setari-cautare', 'bug', `link-ul din cardul Securitate a deschis tab-ul „${tab}"`)
       await search.fill('alert')
       await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
       await page.waitForTimeout(300)
@@ -396,7 +396,7 @@ async function auditDevice(cfg) {
       }))
       if (w.input < 160) note(cfg.name, 'setari-cautare', 'bug', `câmpul de căutare din Setări e prea îngust (${Math.round(w.input)}px)`)
       else if (w.option < 200) note(cfg.name, 'setari-cautare', 'bug', `rezultatele căutării sunt prea înguste (${Math.round(w.option)}px)`)
-      else if (tab === 'Sign-in & 2FA') reached.add('setari-cautare')
+      else if (tab === 'Account & security') reached.add('setari-cautare')
       // 3.6.6: Users & roles pe sub-tab-uri. Căutarea „accounts" aterizează pe sub-tab-ul Accounts;
       // un cont desfăcut (legături + acţiuni) nu iese din dialog, panoul nu derulează pe orizontală,
       // iar tablist-ul sub-tab-urilor derulează în el însuşi dacă nu încape.
@@ -407,7 +407,7 @@ async function auditDevice(cfg) {
         document.querySelector('[data-subtab="accounts"]')?.getAttribute('aria-selected') === 'true'
         && document.querySelector('[data-setting-id="users"]')?.offsetParent != null, null, { timeout: 5000 }).then(() => true, () => false)
       if (!onAccounts) {
-        note(cfg.name, 'setari-utilizatori', 'bug', 'căutarea „accounts" n-a deschis Users & roles → Accounts')
+        note(cfg.name, 'setari-utilizatori', 'bug', 'căutarea „accounts" n-a deschis People & roles → Accounts')
       } else {
         await page.locator('[data-users-list] li button[aria-expanded]').first().click()
         await page.waitForSelector('[data-account-details]', { timeout: 5000 })

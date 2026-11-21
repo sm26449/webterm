@@ -47,7 +47,7 @@ export default function ForwardDomainSection() {
   useEffect(() => { if (vis('forwardDomain')) void loadFwd() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-      // <section data-setting-id> stă în InfrastructureTab (indexul căutării verifică tab-urile)
+      // <section data-setting-id> stă în NetworkTab (indexul căutării verifică tab-urile)
     <>
       {/* ── Port forwarding (domeniu) ── */}
       <h3 className={heading + ' flex items-center gap-2'}>{t('settings.forward.title')}<HelpTip id="forwardDomain" /></h3>

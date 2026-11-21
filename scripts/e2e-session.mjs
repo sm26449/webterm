@@ -2490,10 +2490,10 @@ try {
   await toolbarTip.locator('button:has-text("Got it")').click()
   check('tips: ambele sfaturi închise după „Got it"',
     (await hidden(pasteTip)) && (await hidden(toolbarTip)))
-  // „Arată din nou sfaturile" din Setări → Preferinţe şterge toate cheile wt_tip_*
+  // „Arată din nou sfaturile" din Setări → Terminal & workspace (fostele Preferinţe) şterge toate cheile wt_tip_*
   await goHome()
   await page.click('button[aria-label="Settings"]')
-  await page.click('button:has-text("Preferences")')
+  await page.click('button:has-text("Terminal & workspace")')
   await page.click('button:has-text("Show contextual tips again")')
   check('tips: „reset tips" din Setări şterge toate cheile wt_tip_*',
     await page.evaluate(() => ['wt_tip_addhost_agent', 'wt_tip_addhost_ssh', 'wt_tip_terminal_paste', 'wt_tip_toolbar'].every((k) => localStorage.getItem(k) === null)))
@@ -2511,15 +2511,15 @@ try {
   await page.locator('[role=listbox] [role=option]').first().waitFor({ state: 'visible', timeout: 5000 })
   await page.keyboard.press('Enter')
   const whOk = await flashed('webhook')
-  check('setări: „webhook" + Enter → tab-ul Notifications, secţiunea webhook evidenţiată',
-    whOk && (await curTab()) === 'Notifications')
+  check('setări: „webhook" + Enter → tab-ul Alert delivery, secţiunea webhook evidenţiată',
+    whOk && (await curTab()) === 'Alert delivery')
   await setSearch.fill('passkey')
   await page.keyboard.press('Enter')
   const pkOk = await flashed('passkeys')
-  check('setări: „passkey" + Enter → tab-ul Sign-in & 2FA, secţiunea Passkeys',
-    pkOk && (await curTab()) === 'Sign-in & 2FA')
+  check('setări: „passkey" + Enter → tab-ul Account & security, secţiunea Passkeys',
+    pkOk && (await curTab()) === 'Account & security')
   // „/" (focus în afara unui câmp) duce la căutare; Escape goleşte, nu închide modalul
-  await page.locator('nav[aria-label="Settings categories"] button', { hasText: 'Account' }).click()
+  await page.locator('nav[aria-label="Settings categories"] button', { hasText: 'Account & security' }).click()
   await page.keyboard.press('/')
   await page.keyboard.type('zzqx')
   const noneShown = await visible(page.locator('[role=dialog] >> text=No setting matches'), 3000)

@@ -21,7 +21,7 @@ interface Passkey {
 
 // Autentificare şi 2FA: dispozitivele conectate, passkeys şi 2FA (TOTP) — felul în care intri TU
 // în cont. Desprins (3.5.9) din fostul SecurityTab, care amesteca asta cu cheia de semnare,
-// token-urile şi guardrail-ul (acelea sunt acum în InfrastructureTab). Logica secţiunilor e mutată
+// token-urile şi guardrail-ul (acelea sunt acum în AccessTab / SecurityPolicyTab; din 3.7.1 tab-ul ăsta e randat în panoul „Account & security"). Logica secţiunilor e mutată
 // ca atare; tab-ul îşi ţine starea şi încarcă tot la montare (= la deschiderea secţiunii).
 export default function SignInTab(props: { webauthnAvailable: boolean }) {
   const { t } = useI18n()

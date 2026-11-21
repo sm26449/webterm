@@ -1,20 +1,25 @@
 import { KeyboardEvent, ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
-import { catOfSection, groupHits, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleCats, type RuntimeFlags } from '../lib/settingsIndex'
+import { groupHits, resolveSettingsTarget, searchSettings, sectionVisible, SETTINGS_CATS, SettingsCat, visibleGroups, type RuntimeFlags } from '../lib/settingsIndex'
 import { api } from '../lib/api'
 import { rememberSettingsCat } from '../lib/settingsLast'
 import { can, usePerms } from '../lib/perms'
 import AccountTab from './settings/AccountTab'
-import UsersTab from './settings/UsersTab'
 import SignInTab from './settings/SignInTab'
-import InfrastructureTab from './settings/InfrastructureTab'
-import AuditTab from './settings/AuditTab'
+import MyAccessTab from './settings/MyAccessTab'
 import AppearanceTab from './settings/AppearanceTab'
-import NotificationsTab from './settings/NotificationsTab'
-import BackupTab from './settings/BackupTab'
 import PreferencesTab from './settings/PreferencesTab'
+import MyNotificationsTab from './settings/MyNotificationsTab'
+import UsersTab from './settings/UsersTab'
+import AccessTab from './settings/AccessTab'
+import SecurityPolicyTab from './settings/SecurityPolicyTab'
+import NetworkTab from './settings/NetworkTab'
+import AlertDeliveryTab from './settings/AlertDeliveryTab'
+import BackupTab from './settings/BackupTab'
+import UpdatesTab from './settings/UpdatesTab'
 import HealthTab from './settings/HealthTab'
+import AuditTab from './settings/AuditTab'
 import { EmptyState, eyebrow, IconButton } from './ui'
 import { CloseIcon, SearchIcon } from './Icons'
 
@@ -75,11 +80,12 @@ export default function SettingsModal(props: {
   // serverul refuză oricum); un tab fără nicio secţiune vizibilă dispare din rail şi din căutare
   const perms = usePerms()
   const has = (p: string) => can(perms, p)
-  const cats = visibleCats(has)
-  // categoria activă: modalul nu mai e un scroll lung — arată o secțiune odată. Cu o secţiune cerută
-  // şi fără tab explicit, tab-ul e cel al secţiunii (indexul ştie unde stă fiecare).
-  const firstCat: SettingsCat = props.initialCat
-    ?? (props.initialSection ? catOfSection(props.initialSection) : undefined) ?? 'cont'
+  const groups = visibleGroups(has)
+  // categoria activă: modalul nu mai e un scroll lung — arată o secțiune odată. Cu o secţiune cerută,
+  // tab-ul e cel care o randează ACUM (indexul ştie unde stă fiecare; 3.7.1 a mutat secţiuni între
+  // tab-uri), iar un id de categorie retras trece prin LEGACY_CATS — vezi resolveSettingsTarget.
+  const initial = resolveSettingsTarget({ cat: props.initialCat, section: props.initialSection })
+  const firstCat: SettingsCat = initial?.cat ?? 'cont'
   const [cat, setCatRaw] = useState<SettingsCat>(firstCat)
   // Tab-urile VIZITATE rămân montate (ascunse cu `hidden`), ca o editare nesalvată să supravieţuiască
   // unei schimbări de categorie — înainte se monta doar tab-ul activ şi un formular pe jumătate
@@ -109,9 +115,10 @@ export default function SettingsModal(props: {
   }, [canUsers])
   const hits = useMemo(() => searchSettings(query, t).filter((h) => sectionVisible(h.section.id, (p) => can(perms, p), runtime)),
     [query, t, perms, runtime])
-  const groups = useMemo(() => groupHits(hits), [hits])
-  const flat = useMemo(() => groups.flatMap((g) => g.hits), [groups])   // ordinea afişată = ordinea tastelor
+  const hitGroups = useMemo(() => groupHits(hits), [hits])
+  const flat = useMemo(() => hitGroups.flatMap((g) => g.hits), [hitGroups])   // ordinea afişată = ordinea tastelor
   const listId = useId()
+  const railId = useId()
   const optId = (i: number) => `${listId}-opt-${i}`
   const searchRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -119,7 +126,7 @@ export default function SettingsModal(props: {
   // Saltul la o secţiune: aşteptăm cadrul în care tab-ul ei e montat ŞI vizibil (offsetParent).
   // `n` face ca alegerea aceleiaşi secţiuni de două ori să re-declanşeze efectul.
   const [jump, setJump] = useState<{ id: string; n: number } | null>(
-    () => (props.initialSection ? { id: props.initialSection, n: 0 } : null))
+    () => (initial?.section ? { id: initial.section, n: 0 } : null))
   useEffect(() => {
     if (!jump) return
     let raf = 0
@@ -223,27 +230,38 @@ export default function SettingsModal(props: {
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          {/* rail de categorii: coloană pe desktop, bandă orizontală pe mobil */}
+          {/* rail de categorii: coloană pe desktop, bandă orizontală pe mobil. 3.7.1 (auditul UX Setări
+              §2.3): categoriile stau în grupuri cu titlu — Personal / Administrare / Operare — ca să se
+              vadă al cui e lucrul înainte de ce e; un grup fără nicio categorie vizibilă nu apare. Pe
+              telefon titlul grupului e un separator mic în bandă (lista → detaliu vine la pasul următor). */}
           <nav aria-label={t('settings.categoriesNav')}
-            className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 sm:w-44 lg:w-52 sm:flex-col sm:overflow-x-visible sm:border-b-0 sm:border-r">
-            {cats.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => { setQuery(''); setCat(c.id) }}
-                aria-current={!searching && cat === c.id ? 'true' : undefined}
-                className={`wt-touch shrink-0 rounded-md px-3 py-2 text-left text-sm sm:w-full ${
-                  !searching && cat === c.id ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-800'
-                }`}
-              >
-                {t(c.labelKey)}
-                {c.id === 'sanatate' && !!props.healthAttention && (
-                  <span className={`ml-1.5 rounded-full px-1.5 text-2xs font-semibold ${
-                    !searching && cat === c.id ? 'bg-white/20 text-white' : 'bg-warn/10 text-warn'}`}>
-                    <span aria-hidden="true">{props.healthAttention}</span>
-                    <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
-                  </span>
-                )}
-              </button>
+            className="flex shrink-0 gap-1 overflow-x-auto border-b border-ink-800 p-2 sm:w-48 lg:w-56 sm:flex-col sm:gap-3 sm:overflow-y-auto sm:overflow-x-visible sm:border-b-0 sm:border-r">
+            {groups.map((g) => (
+              <div key={g.id} role="group" aria-labelledby={`${railId}-${g.id}`}
+                className="flex shrink-0 items-center gap-1 sm:flex-col sm:items-stretch">
+                <div id={`${railId}-${g.id}`}
+                  className={`${eyebrow} shrink-0 whitespace-nowrap px-2 sm:px-3 sm:pb-0.5 sm:pt-1`}>{t(g.labelKey)}</div>
+                {g.cats.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => { setQuery(''); setCat(c.id) }}
+                    aria-current={!searching && cat === c.id ? 'true' : undefined}
+                    className={`wt-touch shrink-0 rounded-md px-3 py-2 text-left text-sm sm:w-full ${
+                      !searching && cat === c.id ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-ink-800'
+                    }`}
+                  >
+                    {t(c.labelKey)}
+                    {c.id === 'sanatate' && !!props.healthAttention && (
+                      <span className={`ml-1.5 rounded-full px-1.5 text-2xs font-semibold ${
+                        !searching && cat === c.id ? 'bg-white/20 text-white' : 'bg-warn/10 text-warn'}`}>
+                        <span aria-hidden="true">{props.healthAttention}</span>
+                        <span className="sr-only">{t('health.attention', { count: props.healthAttention })}</span>
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
             ))}
           </nav>
 
@@ -263,7 +281,7 @@ export default function SettingsModal(props: {
               />
             ) : (
               <div id={listId} role="listbox" aria-label={t('settings.search.results')} className="flex max-w-3xl flex-col gap-4">
-                {groups.map((g) => {
+                {hitGroups.map((g) => {
                   const label = t(SETTINGS_CATS.find((c) => c.id === g.cat)?.labelKey ?? '')
                   const gid = `${listId}-g-${g.cat}`
                   return (
@@ -306,31 +324,47 @@ export default function SettingsModal(props: {
                 secţiunile cu liste (audit, backup) folosesc toată lăţimea */}
             <div hidden={searching} className={cat === 'audit' || cat === 'backup' ? '' : 'max-w-3xl'}>
 
-        {pane('cont', <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />)}
+        {/* Personal. „Account & security" (3.7.1, auditul UX Setări M1) = Account + fostul tab Sign-in & 2FA
+            + „Your access" (mutat din Users & roles): trei fişiere *Tab.tsx în acelaşi panou, fiecare cu
+            secţiunile lui (settingsIndex.test.ts verifică exact maparea asta). */}
+        {pane('cont', <>
+          <AccountTab email={props.email} onAccountChanged={props.onAccountChanged} />
+          <div className="mt-6"><SignInTab webauthnAvailable={props.webauthnAvailable} /></div>
+          <MyAccessTab />
+        </>)}
 
-        {/* 3.6.8: un rând de System health poate trimite la secţiunea care îl rezolvă */}
-        {pane('sanatate', <HealthTab onJump={(c, section) => {
-          if (!SETTINGS_CATS.some((x) => x.id === c)) return
-          setCat(c as SettingsCat)
-          if (section) setJump((j) => ({ id: section, n: (j?.n ?? 0) + 1 }))
-        }} />)}
-
-        {/* `jump`: sub-tab-ul secţiunii căutate (Accounts / Roles / SSO groups) se deschide înainte de salt */}
-        {pane('utilizatori', <UsersTab jump={jump} />)}
+        {pane('aspect', <AppearanceTab />)}
 
         {pane('preferinte', <PreferencesTab />)}
 
-        {pane('aspect', <AppearanceTab onAccountChanged={props.onAccountChanged} />)}
+        {pane('notificari', <MyNotificationsTab />)}
 
-        {pane('autentificare', <SignInTab webauthnAvailable={props.webauthnAvailable} />)}
+        {/* Administrare */}
+        {/* `jump`: sub-tab-ul secţiunii căutate (Accounts / Roles / SSO groups) se deschide înainte de salt */}
+        {pane('utilizatori', <UsersTab jump={jump} />)}
 
-        {pane('infrastructura', <InfrastructureTab onAccountChanged={props.onAccountChanged} />)}
+        {pane('acces', <AccessTab onAccountChanged={props.onAccountChanged} />)}
 
-        {pane('audit', <AuditTab />)}
+        {pane('politici', <SecurityPolicyTab onAccountChanged={props.onAccountChanged} />)}
 
-        {pane('notificari', <NotificationsTab />)}
+        {pane('retea', <NetworkTab />)}
+
+        {pane('alerte', <AlertDeliveryTab />)}
 
         {pane('backup', <BackupTab onAccountChanged={props.onAccountChanged} />)}
+
+        {pane('actualizari', <UpdatesTab />)}
+
+        {/* Operare. 3.6.8: un rând de System health poate trimite la secţiunea care îl rezolvă */}
+        {pane('sanatate', <HealthTab onJump={(c, section) => {
+          // ţinta trece prin acelaşi normalizator ca orice link adânc (id-uri retrase, secţiuni mutate)
+          const target = resolveSettingsTarget({ cat: c, section })
+          if (!target) return
+          setCat(target.cat)
+          if (target.section) setJump((j) => ({ id: target.section!, n: (j?.n ?? 0) + 1 }))
+        }} />)}
+
+        {pane('audit', <AuditTab />)}
             </div>
 
           </div>

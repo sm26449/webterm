@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SettingsCat } from './settingsIndex'
 import { readLastSettingsCat, rememberSettingsCat, SETTINGS_LAST_KEY, settingsOpenTarget } from './settingsLast'
 
 const all = () => true
@@ -16,14 +17,21 @@ describe('settingsOpenTarget', () => {
   it('an explicit deep link always wins, section included', () => {
     expect(settingsOpenTarget({ cat: 'notificari', section: 'alertPrefs' }, 'aspect', all))
       .toEqual({ cat: 'notificari', section: 'alertPrefs' })
-    expect(settingsOpenTarget({ cat: 'autentificare', section: 'totp' }, null, all))
-      .toEqual({ cat: 'autentificare', section: 'totp' })
+    // 3.7.1: un id retras + secţiune → categoria care randează secţiunea acum
+    expect(settingsOpenTarget({ cat: 'autentificare' as SettingsCat, section: 'totp' }, null, all))
+      .toEqual({ cat: 'cont', section: 'totp' })
   })
 
   it('ignores an unknown or corrupt stored value', () => {
     expect(settingsOpenTarget(undefined, 'securitate', all)).toEqual({ cat: 'cont' })
     expect(settingsOpenTarget(undefined, '', all)).toEqual({ cat: 'cont' })
     expect(settingsOpenTarget(undefined, '{"cat":"backup"}', all)).toEqual({ cat: 'cont' })
+  })
+
+  it('translates a category id stored before 3.7.1 (and still checks visibility)', () => {
+    expect(settingsOpenTarget(undefined, 'autentificare', all)).toEqual({ cat: 'cont' })
+    expect(settingsOpenTarget(undefined, 'infrastructura', all)).toEqual({ cat: 'acces' })
+    expect(settingsOpenTarget(undefined, 'infrastructura', (c) => c !== 'acces')).toEqual({ cat: 'cont' })
   })
 
   it('falls back to Account when the remembered tab is no longer visible', () => {

@@ -4,20 +4,18 @@ import { askSecret } from '../../lib/secretPrompt'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
 import { field } from './ui'
-import { Badge, Button, ErrorState, eyebrow, Field, SettingsSection, Switch } from '../ui'
+import { Badge, Button, eyebrow, Field, SettingsSection, Switch } from '../ui'
 import { fmtTs } from '../../lib/tz'
 import { canSave, type LoadState } from '../../lib/loadable'
-import { AlertPref, applyPref, groupPrefs } from '../../lib/alerts'
 import HelpTip from '../HelpTip'
 import NotLoaded from './NotLoaded'
 
-// Notificări: alerte pe email (SMTP) + webhook, praguri de resurse. (Domeniul de port-forwarding
-// s-a mutat în Infrastructură în 3.6.4 — ForwardDomainSection.tsx.)
-// Extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
-// 3.7.1 (audit UX Setări #3): trei părţi distincte — Canalele instanţei (Email, Webhook: fiecare cu
-// starea, Save-ul şi testul lui), Regulile instanţei (praguri) şi Notificările MELE (per cont).
-// Înainte livrarea comună, pragurile şi alegerile personale erau un singur bloc, iar cine căuta în
-// preferinţele lui o problemă a canalului comun nu avea cum s-o găsească.
+// Livrarea alertelor (instanţă): alerte pe email (SMTP) + webhook, praguri de resurse. Fostul tab
+// „Notifications"; extras din SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
+// 3.7.1 (audit UX Setări #3): Canalele instanţei (Email, Webhook: fiecare cu starea, Save-ul şi
+// testul lui) şi Regulile instanţei (praguri). Notificările MELE (per cont, „Alert events") au plecat
+// în 3.7.1 în MyNotificationsTab, în grupul Personal: cine căuta în preferinţele lui nu mai dă peste
+// SMTP-ul comun, iar un Viewer nu mai vede un tab „Notifications" cu alt conţinut decât un Owner.
 
 // Ultima livrare reuşită / eşuată pe fiecare canal, persistată de gateway (email_alerts._record).
 // Fără ea, un SMTP care picase de luni de zile era invizibil: eroarea mergea doar în log.
@@ -34,7 +32,7 @@ type AlertStatus = {
 type SmtpForm = { host: string; port: number; user: string; password: string; from_addr: string; to_addr: string; starttls: boolean; webhook: string }
 type Channel = 'email' | 'webhook'
 
-export default function NotificationsTab() {
+export default function AlertDeliveryTab() {
   const { t } = useI18n()
   const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [busy, setBusy] = useState(false)
@@ -155,33 +153,7 @@ export default function NotificationsTab() {
   }
 
 
-  // Evenimente de alertă (3.5.11): per tip, email (+ webhook) şi istoric în aplicaţie. Fiecare
-  // bifă se salvează imediat (un singur tip pe cerere); la eroare revenim la starea serverului.
-  const [prefs, setPrefs] = useState<AlertPref[] | null>(null)
-  const [prefsErr, setPrefsErr] = useState('')
-  const [prefsLoadErr, setPrefsLoadErr] = useState(false)
-  const [prefsMsg, setPrefsMsg] = useState('')
-  const loadPrefs = () => {
-    setPrefsLoadErr(false)
-    api<{ prefs: AlertPref[] }>('/api/alerts/prefs').then((r) => setPrefs(r.prefs)).catch(() => setPrefsLoadErr(true))
-  }
-  async function togglePref(kind: string, which: 'email' | 'inapp', value: boolean) {
-    if (!prefs) return
-    const next = applyPref(prefs, kind, which, value)
-    setPrefs(next); setPrefsErr(''); setPrefsMsg('')
-    const p = next.find((x) => x.kind === kind)!
-    try {
-      const r = await api<{ prefs: AlertPref[] }>('/api/alerts/prefs', {
-        method: 'POST', body: JSON.stringify({ prefs: { [kind]: { email: p.email, inapp: p.inapp } } }),
-      })
-      setPrefs(r.prefs); setPrefsMsg(t('settings.alertPrefs.saved'))
-    } catch (err) {
-      setPrefsErr(errText(err, t) || t('settings.error'))
-      loadPrefs()
-    }
-  }
-
-  useEffect(() => { void loadSmtp(); void loadThresholds(); loadPrefs() }, [])
+  useEffect(() => { void loadSmtp(); void loadThresholds() }, [])
 
   const emailDirty = !!smtpSaved && (smtp.password !== '' || (['host', 'port', 'user', 'from_addr', 'to_addr', 'starttls'] as const)
     .some((k) => smtp[k] !== smtpSaved[k]))
@@ -216,7 +188,6 @@ export default function NotificationsTab() {
   const configured = (on: boolean) => (
     <Badge tone={on ? 'ok' : 'neutral'} size="md">{on ? t('settings.channel.on') : t('settings.channel.off')}</Badge>
   )
-  const instance = vis('smtp') || vis('webhook') || vis('resourceAlerts')
 
   return (
     <div className="space-y-4">
@@ -325,65 +296,6 @@ export default function NotificationsTab() {
         </div>)}
       </SettingsSection>
 
-      {/* ── Notificările mele (orice cont): ce primesc eu, pe email şi în aplicaţie ── */}
-      {instance && <h3 className={`${eyebrow} pt-2`}>{t('settings.notif.mine')}</h3>}
-      <SettingsSection data-setting-id="alertPrefs" headingLevel={instance ? 4 : 3}
-        title={t('settings.alertPrefs.title')} titleExtra={<HelpTip id="alertPrefs" />}
-        description={t('settings.alertPrefs.hint')}>
-        <p className="text-xs text-slate-500">{t('settings.alertPrefs.fleetNote')}</p>
-        {prefsLoadErr && <ErrorState compact title={t('settings.alertPrefs.loadFailed')} onRetry={loadPrefs} />}
-        {prefs && (
-          <div className="mt-3 flex flex-col gap-4" data-testid="alert-prefs">
-            {groupPrefs(prefs).map(({ group, items }) => {
-              const gid = `alert-group-${group}`
-              return (
-                <div key={group} role="group" aria-labelledby={gid}>
-                  {/* antet: numele grupului + (de la sm în sus) coloanele vizibile „Email · In app";
-                      pe telefon fiecare comutator îşi poartă eticheta lângă el */}
-                  <div className="grid grid-cols-[minmax(0,1fr)] items-end gap-2 border-b border-ink-700/70 pb-1 sm:grid-cols-[minmax(0,1fr)_5.5rem_8.5rem]">
-                    <p id={gid} className="text-xs font-semibold text-slate-300">{t(`alerts.group.${group}`)}</p>
-                    <span aria-hidden="true" className="hidden text-xs text-slate-500 sm:block">{t('settings.alertPrefs.colEmail')}</span>
-                    <span aria-hidden="true" className="hidden text-xs text-slate-500 sm:block">{t('settings.alertPrefs.colInapp')}</span>
-                  </div>
-                  <ul className="divide-y divide-ink-800">
-                    {items.map((p) => {
-                      const label = t(`alerts.kind.${p.kind}`)
-                      return (
-                        <li key={p.kind} data-alert-kind={p.kind}
-                          className="grid grid-cols-[minmax(0,1fr)] gap-x-2 gap-y-1 py-2 sm:grid-cols-[minmax(0,1fr)_5.5rem_8.5rem] sm:items-center">
-                          <div className="min-w-0 text-sm text-slate-300">
-                            <span className="break-words">{label}</span>
-                            {p.security && !p.email && (
-                              <span className="mt-0.5 block text-2xs wt-warn" role="note">{t('settings.alertPrefs.securityEmailOff')}</span>
-                            )}
-                          </div>
-                          <Switch checked={p.email} label={t('settings.alertPrefs.colEmail')} labelVisibility="mobile"
-                            ariaLabel={t('settings.alertPrefs.emailAria', { event: label })}
-                            onChange={(v) => { void togglePref(p.kind, 'email', v) }} />
-                          {p.security ? (
-                            // istoricul în aplicaţie al unui eveniment de securitate nu se poate opri:
-                            // stare de citire, cu motivul lângă ea (audit Me4 / #11), nu o bifă gri
-                            <p className="text-xs text-slate-400">
-                              <span className="sm:hidden">{t('settings.alertPrefs.colInapp')}: </span>
-                              {t('settings.alertPrefs.inappAlways')}
-                            </p>
-                          ) : (
-                            <Switch checked={p.inapp} label={t('settings.alertPrefs.colInapp')} labelVisibility="mobile"
-                              ariaLabel={t('settings.alertPrefs.inappAria', { event: label })}
-                              onChange={(v) => { void togglePref(p.kind, 'inapp', v) }} />
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        <span role="status" className={prefsMsg ? 'text-sm wt-good' : 'sr-only'}>{prefsMsg}</span>
-        <span role="alert" className={prefsErr ? 'text-sm wt-danger' : 'sr-only'}>{prefsErr}</span>
-      </SettingsSection>
     </div>
   )
 }

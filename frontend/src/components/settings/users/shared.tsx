@@ -123,7 +123,9 @@ export function useRoleName(catalogue: RolesCatalogue | null) {
     (altfel am promite „fără parolă" şi serverul ar răspunde 401). `returnTo` = panoul Settings de
     redeschis după un redirect la IdP (salvat în sessionStorage înainte de plecare). */
 export const RETURN_USERS: SettingsReturn = { cat: 'utilizatori' }
-export const RETURN_INFRA: SettingsReturn = { cat: 'infrastructura' }
+// 3.7.1: secţiunea merge cu ţinta — la întoarcere categoria se derivă din ea (lib/settingsIndex)
+export const RETURN_ACCESS: SettingsReturn = { cat: 'acces', section: 'tokens' }
+export const RETURN_MY_ACCESS: SettingsReturn = { cat: 'cont', section: 'myAccess' }
 export function useAccessReauth(me: ReauthMe, opts: { passwordGate?: boolean; returnTo?: SettingsReturn } = {}) {
   const { t } = useI18n()
   const { confirm } = useConfirm()

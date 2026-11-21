@@ -1,33 +1,22 @@
 import { useEffect, useState } from 'react'
-import { api, errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { useSectionVisible } from '../../lib/perms'
 import { allTimezones, browserTimezone, getTimezone, setTimezone, timeInZone } from '../../lib/tz'
-import UpdateCommand from '../UpdateCommand'
 import { lsGet, lsSet } from '../../lib/storage'
-import { ensureNotificationPermission } from '../../lib/notify'
-import { setTaskNotifyEnabled, setTaskNotifySeconds, taskNotifyEnabled, taskNotifySeconds } from '../../lib/taskNotify'
-import { pushStatus, pushSupported, setPushPrefs, subscribeThisDevice, testPush, thisDeviceSubscribed, unsubscribeThisDevice, type PushStatus } from '../../lib/push'
 import { isWalkthroughDone, markWalkthroughDone, resetWalkthrough } from '../../lib/walkthrough'
 import { resetAllTips } from '../../lib/coachtips'
 import { INBOX_REL, PasteDest, inboxDays, pasteDest, setInboxDays, setPasteDest } from '../../lib/transfers'
 import { UpdatesMode, setUpdatesMode, unmuteAllHosts, useUpdatesPref } from '../../lib/updatesPref'
 import { field, heading } from './ui'
 import HelpTip from '../HelpTip'
-import { Button, ErrorState } from '../ui'
 
-// Preferinţe: fus orar, accesibilitate (mod screen-reader), verificarea de versiune. Extras din
-// SettingsModal ca tab de sine stătător (îşi ţine starea, se încarcă la montare).
-type UpdateInfo = {
-  current: string; enabled: boolean; latest?: string
-  update_available?: boolean; configurable?: boolean; error?: string
-  update_command?: string
-  release_url?: string
-}
+// Terminal şi spaţiu de lucru (fostele Preferinţe; id-ul `preferinte` rămâne): fus orar, accesibilitate
+// (mod screen-reader), turul, sfaturile, terminalul, transferurile, insigna de update-uri OS — tot
+// preferinţe ale TALE, per browser. Extras din SettingsModal ca tab de sine stătător. 3.7.1 (auditul
+// UX Setări M2/M3): notificările de task au plecat în MyNotificationsTab, verificarea de versiune
+// (o setare a instanţei, lângă fusul tău orar) în UpdatesTab.
 
 export default function PreferencesTab() {
-  const { t, lang } = useI18n()
-  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
+  const { t } = useI18n()
   const [tz, setTz] = useState(getTimezone())
   const [clock, setClock] = useState(timeInZone(getTimezone()))
   const [srMode, setSrMode] = useState(() => lsGet('wt_sr') === '1')
@@ -39,42 +28,6 @@ export default function PreferencesTab() {
   const [unicode11, setUnicode11] = useState(() => lsGet('wt_unicode11') === '1')
   // renderer-ul terminalului (3.6.19): webgl (implicit) | canvas | dom — per browser, aplicat pe loc
   const [renderer, setRenderer] = useState(() => { const v = lsGet('wt_renderer'); return v === 'canvas' || v === 'dom' ? v : 'webgl' })
-  // notificări de task (Faza 1): preferinţă per-browser (ca rendererul). Toggle + prag în secunde.
-  const [taskNotif, setTaskNotif] = useState(() => taskNotifyEnabled())
-  const [taskSec, setTaskSec] = useState(() => String(taskNotifySeconds()))
-  // push pe acest dispozitiv (Faza 2): telefon cu aplicația închisă. `pushSt` = starea contului +
-  // disponibilitatea server-side; `pushHere` = e abonat DISPOZITIVUL ăsta.
-  const [pushSt, setPushSt] = useState<PushStatus | null>(null)
-  const [pushHere, setPushHere] = useState(false)
-  const [pushBusy, setPushBusy] = useState(false)
-  const [pushErr, setPushErr] = useState('')
-  const [pushMsg, setPushMsg] = useState('')
-  useEffect(() => {
-    if (!pushSupported()) return
-    pushStatus().then(setPushSt).catch(() => { /* push nedisponibil pe server */ })
-    void thisDeviceSubscribed().then(setPushHere)
-  }, [])
-  async function togglePush(on: boolean) {
-    setPushErr(''); setPushMsg(''); setPushBusy(true)
-    try {
-      if (on) {
-        const st = await subscribeThisDevice(lang)
-        await setPushPrefs(true, taskNotifySeconds())   // o singură valoare de prag (cea de deasupra)
-        setPushSt(st); setPushHere(true)
-      } else {
-        setPushSt(await unsubscribeThisDevice()); setPushHere(false)
-      }
-    } catch (e) {
-      setPushErr(e instanceof Error && e.message === 'denied' ? t('push.denied') : (errText(e, t) || t('push.failed')))
-      setPushHere(await thisDeviceSubscribed())
-    } finally { setPushBusy(false) }
-  }
-  async function doPushTest() {
-    setPushErr(''); setPushMsg('')
-    try { const r = await testPush(); setPushMsg(t('push.testSent', { n: r.sent })) } catch (e) { setPushErr(errText(e, t) || t('push.failed')) }
-  }
-  const [upd, setUpd] = useState<UpdateInfo | null>(null)
-  const [updBusy, setUpdBusy] = useState(false)
   // transferuri: unde ajung fişierele lipite în terminal + retenţia inbox-ului (lib/transfers.ts)
   const [dest, setDest] = useState<PasteDest>(pasteDest)
   const [days, setDays] = useState<string>(() => String(inboxDays()))
@@ -85,12 +38,6 @@ export default function PreferencesTab() {
     return () => clearInterval(iv)
   }, [tz])
 
-  // singura conexiune iniţiată de gateway spre exterior; o citim la deschiderea tab-ului
-  // U04: un fetch picat lăsa bifa dezactivată fără explicaţie — acum eroarea + Reîncearcă
-  const [updLoadErr, setUpdLoadErr] = useState<string | null>(null)
-  const loadUpd = () => { setUpdLoadErr(null); api<UpdateInfo>('/api/version').then(setUpd).catch((e) => setUpdLoadErr(errText(e, t))) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (upd === null) loadUpd() }, [])
 
   function chooseTz(value: string) {
     setTz(value)
@@ -228,61 +175,6 @@ export default function PreferencesTab() {
         <p id="wt-renderer-hint" className="mt-0.5 text-xs text-slate-500">{t('settings.rendererHint')}</p>
       </section>
 
-      <section data-setting-id="taskNotify">
-        {/* ── Notificări de task (Faza 1, local) ── */}
-        <h3 className={heading + ' flex items-center gap-2'}>{t('settings.taskNotify')}<HelpTip id="taskNotify" /></h3>
-        <p className="mt-1 text-xs text-slate-500">{t('settings.taskNotifyHint')}</p>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={taskNotif}
-            onChange={(e) => {
-              const on = e.target.checked
-              setTaskNotif(on)
-              setTaskNotifyEnabled(on)
-              if (on) void ensureNotificationPermission()   // cere permisiunea DIN gestul de utilizator (cerut pe iOS)
-            }}
-            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
-          />
-          <span>
-            {t('settings.taskNotifyEnable')}
-            <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifyEnableHint')}</span>
-          </span>
-        </label>
-        <label className="mt-3 block text-sm text-slate-300">
-          <span className="mb-1 block text-xs text-slate-400">{t('settings.taskNotifySeconds')}</span>
-          <input type="number" min={1} max={3600} step={1} value={taskSec} disabled={!taskNotif}
-            onChange={(e) => { setTaskSec(e.target.value); const n = Number(e.target.value); if (Number.isFinite(n)) setTaskNotifySeconds(n) }}
-            onBlur={() => setTaskSec(String(taskNotifySeconds()))}
-            className={field + ' max-w-[8rem]'} />
-          <span className="mt-0.5 block text-xs text-slate-500">{t('settings.taskNotifySecondsHint')}</span>
-        </label>
-        {/* Faza 2 — push pe acest dispozitiv (telefon cu aplicația închisă); apare doar dacă e
-            suportat de browser ȘI configurat pe server (cheie VAPID). */}
-        {pushSupported() && pushSt?.available && (
-          <div className="mt-3 border-t border-ink-800 pt-3">
-            <label className="flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-              <input type="checkbox" checked={pushHere} disabled={pushBusy}
-                onChange={(e) => { void togglePush(e.target.checked) }}
-                className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
-              <span>
-                {t('settings.pushEnable')}
-                <span className="mt-0.5 block text-xs text-slate-500">{t('settings.pushEnableHint')}</span>
-              </span>
-            </label>
-            {pushHere && (
-              <div className="mt-2">
-                <Button variant="secondary" disabled={pushBusy} onClick={() => { void doPushTest() }}>
-                  {t('push.test')}
-                </Button>
-              </div>
-            )}
-            <span role="status" className={pushMsg ? 'mt-1 block text-xs wt-good' : 'sr-only'}>{pushMsg}</span>
-            <span role="alert" className={pushErr ? 'mt-1 block text-xs wt-danger' : 'sr-only'}>{pushErr}</span>
-          </div>
-        )}
-      </section>
-
       <section data-setting-id="transfers">
         {/* ── Transferuri ── */}
         <h3 className={heading}>{t('transfers.settingsTitle')}</h3>
@@ -320,82 +212,6 @@ export default function PreferencesTab() {
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
             <span>{t('updates.prefMuted', { count: updPref.muted.size })}</span>
             <button type="button" onClick={unmuteAllHosts} className="wt-link">{t('updates.prefUnmuteAll')}</button>
-          </div>
-        )}
-      </section>
-
-      <section data-setting-id="appUpdate" hidden={!vis('appUpdate')}>
-        {/* ── Verificare de versiune ── */}
-        <h3 className={heading}>{t('settings.update.title')}</h3>
-        {upd === null && updLoadErr !== null && (
-          <div className="mt-2 rounded-md ring-1 ring-ink-700"><ErrorState compact title={t('settings.notLoaded')} message={updLoadErr} onRetry={loadUpd} /></div>
-        )}
-        {upd?.configurable === false ? (
-          <p className="mt-2 text-xs text-slate-500">{t('settings.update.disabledByEnv')}</p>
-        ) : (
-          <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-            <input
-              type="checkbox"
-              checked={!!upd?.enabled}
-              disabled={upd === null}
-              onChange={async (e) => {
-                const enabled = e.target.checked
-                setUpd((u) => (u ? { ...u, enabled } : u))
-                try {
-                  setUpd(await api<UpdateInfo>('/api/version/check',
-                    { method: 'POST', body: JSON.stringify({ enabled }) }))
-                } catch { /* rămâne starea optimistă; reîncercarea e o re-deschidere */ }
-              }}
-              className="mt-0.5 h-4 w-4 rounded-md accent-sky-600"
-            />
-            <span>
-              {t('settings.update.label')}
-              <span className="mt-0.5 block text-xs text-slate-500">{t('settings.update.hint')}</span>
-              {upd?.enabled && upd.update_available && (
-                <span className="mt-1 block text-xs wt-warn">
-                  {t('status.updateAvailable', { version: upd.latest ?? '' })}
-                </span>
-              )}
-              {upd?.enabled && upd.update_available === false && (
-                <span className="mt-1 block text-xs wt-good">{t('status.upToDate')}</span>
-              )}
-              {upd?.enabled && upd.error && (
-                <span className="mt-1 block text-xs text-slate-500">{t('settings.update.unreachable')}</span>
-              )}
-            </span>
-          </label>
-        )}
-        {upd?.enabled && (
-          <button
-            type="button"
-            onClick={async () => {
-              setUpdBusy(true)
-              try { setUpd(await api<UpdateInfo>('/api/version/refresh', { method: 'POST' })) }
-              catch (e) {
-                // cererea însăşi a picat (reţea, 5xx): fără asta rămânea afişată starea VECHE
-                // („la zi" de acum o săptămână) — exact ce nu vrem de la un check de update
-                setUpd((u) => (u ? { ...u, error: e instanceof Error ? e.message : String(e) } : u))
-              }
-              finally { setUpdBusy(false) }
-            }}
-            disabled={updBusy}
-            className="mt-2 rounded-md border border-ink-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-ink-800 disabled:opacity-50"
-          >
-            {updBusy ? t('settings.update.checking') : t('settings.update.checkNow')}
-          </button>
-        )}
-        {upd?.update_command && (
-          <div className="mt-3">
-            <p className="text-xs text-slate-500">{t('settings.update.howTo')}</p>
-            <UpdateCommand command={upd.update_command}
-              status={{ error: upd.error, checking: updBusy,
-                        onRetry: () => { setUpdBusy(true); api<UpdateInfo>('/api/version/refresh', { method: 'POST' }).then(setUpd).catch((e) => setUpd((u) => (u ? { ...u, error: errText(e, t) || t('common.loadFailed') } : u))).finally(() => setUpdBusy(false)) } }} />
-            {upd.release_url && (
-              <a href={upd.release_url} target="_blank" rel="noopener noreferrer"
-                className="wt-link mt-2 inline-block text-xs hover:underline">
-                {t('settings.update.releaseNotes', { version: upd.latest ?? '' })}
-              </a>
-            )}
           </div>
         )}
       </section>

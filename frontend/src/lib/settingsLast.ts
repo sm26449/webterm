@@ -10,23 +10,24 @@
    Preferinţă per browser, nu per cont: e doar o comoditate de navigare, iar un localStorage blocat
    (lib/storage) înseamnă pur şi simplu „Account". */
 import { lsGet, lsSet } from './storage'
-import { SETTINGS_CATS, type SettingsCat, type SettingsTarget } from './settingsIndex'
+import { resolveCat, resolveSettingsTarget, type SettingsCat, type SettingsTarget } from './settingsIndex'
 
 export const SETTINGS_LAST_KEY = 'wt_settings_last'
 
-const isCat = (v: string | null): v is SettingsCat => !!v && SETTINGS_CATS.some((c) => c.id === v)
-
-/** Ţinta la deschiderea Setărilor: ţinta explicită (link adânc) neschimbată; altfel ultima
-    categorie, dacă e un tab cunoscut şi încă vizibil contului; altfel Account. */
+/** Ţinta la deschiderea Setărilor: ţinta explicită (link adânc), normalizată (secţiunea decide
+    categoria; id-urile retrase trec prin `LEGACY_CATS`); altfel ultima categorie, dacă e un tab
+    cunoscut (sau unul retras, tradus) şi încă vizibil contului; altfel Account. */
 export function settingsOpenTarget(
   explicit: SettingsTarget | undefined,
   last: string | null,
   visible: (cat: SettingsCat) => boolean,
 ): SettingsTarget {
-  if (explicit) return explicit
-  // o valoare veche / coruptă sau un tab pierdut între timp (permisiune retrasă) nu deschide un
-  // panou gol: cade pe Account, care e vizibil oricui
-  if (isCat(last) && visible(last)) return { cat: last }
+  const target = resolveSettingsTarget(explicit)
+  if (target) return target
+  // o valoare coruptă sau un tab pierdut între timp (permisiune retrasă) nu deschide un panou gol:
+  // cade pe Account, care e vizibil oricui. Un id de dinainte de 3.7.1 (`autentificare`) e tradus.
+  const cat = resolveCat(last)
+  if (cat && visible(cat)) return { cat }
   return { cat: 'cont' }
 }
 

@@ -11,24 +11,51 @@
    randează un id care lipseşte din index — o secţiune nouă fără intrare aici e o regresie. */
 
 /** id-urile tab-urilor din modalul de Setări (rămân în română, ca înainte de 3.5.9).
-    `securitate` a fost spart în `autentificare` + `infrastructura`. */
+    `securitate` a fost spart în `autentificare` + `infrastructura` (3.5.9); în 3.7.1 (auditul UX
+    Setări, varianta minimă) categoriile s-au regrupat după intenţie: `autentificare` s-a unit cu
+    `cont`, iar `infrastructura` s-a spart în `acces` + `politici` + `retea`. Id-urile vechi rămân
+    valide PENTRU TOTDEAUNA prin `LEGACY_CATS` (sunt persistate: sessionStorage la revenirea din
+    step-up SSO, localStorage „ultima categorie", linkuri adânci). */
 export type SettingsCat =
-  | 'cont' | 'sanatate' | 'utilizatori' | 'autentificare' | 'infrastructura' | 'audit' | 'aspect' | 'notificari' | 'backup' | 'preferinte'
+  | 'cont' | 'aspect' | 'preferinte' | 'notificari'
+  | 'utilizatori' | 'acces' | 'politici' | 'retea' | 'alerte' | 'backup' | 'actualizari'
+  | 'sanatate' | 'audit'
 
-/** ordinea din rail-ul modalului */
-export const SETTINGS_CATS: readonly { id: SettingsCat; labelKey: string }[] = [
-  { id: 'cont', labelKey: 'settings.cat.account' },
-  // 3.6.8: System health — tot ce poate cădea în tăcere, cu motiv, recomandare şi comanda exactă
-  { id: 'sanatate', labelKey: 'settings.cat.health' },
-  { id: 'utilizatori', labelKey: 'settings.cat.users' },
-  { id: 'autentificare', labelKey: 'settings.cat.signin' },
-  { id: 'infrastructura', labelKey: 'settings.cat.infra' },
-  { id: 'audit', labelKey: 'settings.cat.audit' },
-  { id: 'aspect', labelKey: 'settings.cat.appearance' },
-  { id: 'notificari', labelKey: 'settings.cat.notifications' },
-  { id: 'backup', labelKey: 'settings.cat.backup' },
-  { id: 'preferinte', labelKey: 'settings.cat.preferences' },
+/** Grupurile rail-ului: „al cui e lucrul ăsta?" înainte de „ce e?" (audit UX Setări §2.3). */
+export type SettingsGroup = 'personal' | 'admin' | 'ops'
+export const SETTINGS_GROUPS: readonly { id: SettingsGroup; labelKey: string }[] = [
+  { id: 'personal', labelKey: 'settings.group.personal' },
+  { id: 'admin', labelKey: 'settings.group.admin' },
+  { id: 'ops', labelKey: 'settings.group.ops' },
 ]
+
+/** ordinea din rail-ul modalului (în cadrul grupului) */
+export const SETTINGS_CATS: readonly { id: SettingsCat; labelKey: string; group: SettingsGroup }[] = [
+  // ── Personal: oricine, doar despre contul şi browserul tău ──
+  { id: 'cont', labelKey: 'settings.cat.account', group: 'personal' },
+  { id: 'aspect', labelKey: 'settings.cat.appearance', group: 'personal' },
+  { id: 'preferinte', labelKey: 'settings.cat.preferences', group: 'personal' },
+  { id: 'notificari', labelKey: 'settings.cat.notifications', group: 'personal' },
+  // ── Administrare: setări ale instanţei, ascunse fără permisiune ──
+  { id: 'utilizatori', labelKey: 'settings.cat.users', group: 'admin' },
+  { id: 'acces', labelKey: 'settings.cat.access', group: 'admin' },
+  { id: 'politici', labelKey: 'settings.cat.policy', group: 'admin' },
+  { id: 'retea', labelKey: 'settings.cat.network', group: 'admin' },
+  { id: 'alerte', labelKey: 'settings.cat.alertDelivery', group: 'admin' },
+  { id: 'backup', labelKey: 'settings.cat.backup', group: 'admin' },
+  { id: 'actualizari', labelKey: 'settings.cat.updates', group: 'admin' },
+  // ── Operare: ce se întâmplă acum (3.6.8: System health) ──
+  { id: 'sanatate', labelKey: 'settings.cat.health', group: 'ops' },
+  { id: 'audit', labelKey: 'settings.cat.audit', group: 'ops' },
+]
+
+/** Id-uri de categorie retrase → categoria care le-a preluat. Doar adăugări aici, niciodată
+    ştergeri: un id vechi poate sta luni de zile în localStorage sau într-un link salvat. */
+export const LEGACY_CATS: Readonly<Record<string, SettingsCat>> = {
+  autentificare: 'cont',        // 3.7.1: „Sign-in & 2FA" s-a unit cu Account → „Account & security"
+  infrastructura: 'acces',      // 3.7.1: „Infrastructure & tokens" → Access & automation (+ Security policy, Network)
+  securitate: 'cont',           // înainte de 3.5.9 (spart atunci în autentificare + infrastructura)
+}
 
 /** Un link adânc în Setări: tab-ul şi, opţional, secţiunea (derulată + evidenţiată la deschidere). */
 export type SettingsTarget = { cat: SettingsCat; section?: string }
@@ -55,9 +82,97 @@ export type RuntimeFlag = 'sso'
 export type RuntimeFlags = Partial<Record<RuntimeFlag, boolean>>
 
 export const SETTINGS_INDEX: readonly SettingSection[] = [
-  // ── Cont ──
+  // ── Cont şi securitate (3.7.1: Account + Sign-in & 2FA + „Your access") ──
   { id: 'account', cat: 'cont', titleKey: 'settings.account',
     keywords: 'email password change parola schimba profile profil' },
+  { id: 'devices', cat: 'cont', titleKey: 'settings.devices', hintKey: 'settings.devicesHint',
+    keywords: 'devices sessions browsers sign out logout revoke dispozitive sesiuni deconectare' },
+  { id: 'passkeys', cat: 'cont', titleKey: 'settings.passkeys', hintKey: 'settings.passkeysAvailable',
+    keywords: 'passkey webauthn fido yubikey security key hardware fingerprint face id touch id cheie amprenta' },
+  { id: 'totp', cat: 'cont', titleKey: 'settings.totp.title', hintKey: 'settings.totp.hint',
+    keywords: '2fa mfa otp totp authenticator recovery codes doi pasi coduri recuperare' },
+  { id: 'myAccess', cat: 'cont', titleKey: 'roles.myAccess', hintKey: 'roles.myAccessHint',
+    keywords: 'role roles access permissions owner admin operator viewer scope rol roluri acces permisiuni' },
+  // ── Aspect ──
+  { id: 'language', cat: 'aspect', titleKey: 'settings.language', hintKey: 'settings.languageHint',
+    keywords: 'language english romanian locale limba engleza romana' },
+  { id: 'theme', cat: 'aspect', titleKey: 'settings.theme', hintKey: 'theme.styleHint',
+    keywords: 'theme style look appearance midnight aurora macos mac apple windows win11 fluent mica '
+      + 'gnome adwaita libadwaita linux ubuntu vibrancy kde plasma breeze kubuntu tema stil aspect' },
+  { id: 'themeMode', cat: 'aspect', titleKey: 'theme.mode',
+    keywords: 'dark light mode auto system night day appearance mod intunecat luminos noapte zi sistem' },
+  { id: 'termColors', cat: 'aspect', titleKey: 'settings.termColors',
+    keywords: 'terminal colors color scheme palette iterm vscode import culori schema paleta' },
+  // ── Terminal şi spaţiu de lucru (fostele Preferinţe) ──
+  { id: 'timezone', cat: 'preferinte', titleKey: 'settings.timezone',
+    keywords: 'timezone tz time clock utc fus orar ora ceas' },
+  { id: 'accessibility', cat: 'preferinte', titleKey: 'settings.accessibility', hintKey: 'settings.screenReaderMode',
+    keywords: 'accessibility a11y screen reader nvda voiceover orca accesibilitate cititor ecran' },
+  { id: 'walkthrough', cat: 'preferinte', titleKey: 'walkthrough.settingsTitle',
+    keywords: 'walkthrough tour welcome onboarding tur bun venit' },
+  { id: 'tips', cat: 'preferinte', titleKey: 'tips.resetTitle', hintKey: 'tips.resetDesc',
+    keywords: 'tips hints reset sfaturi indicii' },
+  { id: 'terminal', cat: 'preferinte', titleKey: 'settings.terminal',
+    keywords: 'terminal unicode emoji wide characters xterm caractere late' },
+  { id: 'transfers', cat: 'preferinte', titleKey: 'transfers.settingsTitle', hintKey: 'transfers.pasteDestHint',
+    keywords: 'transfers upload paste inbox images files transferuri incarcare lipire fisiere' },
+  { id: 'updatesBadge', cat: 'preferinte', titleKey: 'updates.prefTitle', hintKey: 'updates.prefDesc',
+    keywords: 'os updates badge apt dnf packages actualizari insigna pachete' },
+  // ── Notificările mele ──
+  { id: 'alertPrefs', cat: 'notificari', titleKey: 'settings.alertPrefs.title', hintKey: 'settings.alertPrefs.hint',
+    keywords: 'alert alerts events notifications bell history in-app email emails mail toggle mute security which choose '
+      + 'clopotel istoric evenimente notificari alerte alerta pe email mail aleg ce primesc' },
+  { id: 'taskNotify', cat: 'notificari', titleKey: 'settings.taskNotify', hintKey: 'settings.taskNotifyHint',
+    keywords: 'notifications task done finished failed command agent push notificari task terminat esuat comanda agent' },
+  // ── Oameni şi roluri (3.6) ──
+  { id: 'users', cat: 'utilizatori', titleKey: 'settings.users.title', hintKey: 'settings.users.hint',
+    keywords: 'users accounts people team invite admin bindings utilizatori conturi echipa oameni legaturi',
+    perm: 'users.manage' },
+  { id: 'roles', cat: 'utilizatori', titleKey: 'roles.custom.title', hintKey: 'roles.custom.hint',
+    keywords: 'custom roles permissions editor role create edit auditor files-only roluri custom permisiuni editor',
+    perm: ['roles.manage', 'users.manage'] },
+  { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
+    keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup scim provisioning deprovisioning provizionare token',
+    perm: 'users.manage', requires: 'sso' },
+  // ── Acces şi automatizare ──
+  { id: 'signingKey', cat: 'acces', titleKey: 'settings.signingKey',
+    keywords: 'signing key ed25519 agent update signature pem semnare cheie semnatura', perm: 'signing.manage' },
+  { id: 'tokens', cat: 'acces', titleKey: 'settings.tokens.title', hintKey: 'settings.tokens.hint',
+    keywords: 'token api bearer cron ci automation script monitoring tokenuri automatizare', perm: 'tokens.create' },
+  { id: 'enrollGroups', cat: 'acces', titleKey: 'settings.enrollGroups.title', hintKey: 'settings.enrollGroups.hint',
+    keywords: 'bulk enrollment group token onboarding fleet many machines inrolare masa grup flota', perm: 'hosts.create' },
+  // ── Politici de securitate ──
+  { id: 'guardrail', cat: 'politici', titleKey: 'settings.guardrail', hintKey: 'settings.guardrailHint',
+    keywords: 'guardrail dangerous commands block confirm regex rm -rf rules comenzi periculoase reguli blocare', perm: 'settings.manage' },
+  { id: 'deployKeyPolicy', cat: 'politici', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
+    keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
+  { id: 'watermark', cat: 'politici', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',
+    keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
+  // ── Reţea şi certificate ──
+  { id: 'certificates', cat: 'retea', titleKey: 'settings.certs.title',
+    keywords: 'tls ssl https certificate certificates cert expiry expires renew renewal lets encrypt acme traefik wildcard dns-01 http-01 '
+      + 'certificat certificate expirare expira reinnoire reinnoieste', perm: 'settings.manage' },
+  { id: 'forwardDomain', cat: 'retea', titleKey: 'settings.forward.title',
+    keywords: 'port forwarding domain dns wildcard certificate tls subdomain domeniu certificat', perm: 'settings.manage' },
+  // ── Livrarea alertelor (instanţă) ──
+  { id: 'smtp', cat: 'alerte', titleKey: 'settings.smtp.title', hintKey: 'settings.smtp.hint',
+    keywords: 'smtp email mail alert alerts notification notifications server outgoing alerte notificari pe email posta server', perm: 'settings.manage' },
+  { id: 'webhook', cat: 'alerte', titleKey: 'settings.smtp.webhook', hintKey: 'settings.smtp.webhookHint',
+    keywords: 'webhook slack discord teams ntfy chat alerts alerte', perm: 'settings.manage' },
+  { id: 'resourceAlerts', cat: 'alerte', titleKey: 'settings.alerts.title', hintKey: 'settings.alerts.hint',
+    keywords: 'cpu ram memory disk threshold load alerts prag memorie resurse', perm: 'settings.manage' },
+  // ── Backup ──
+  { id: 'backupDownload', cat: 'backup', titleKey: 'settings.backup.downloadTitle',
+    keywords: 'backup download export archive copie descarca arhiva', perm: 'backups.manage' },
+  { id: 'backupAuto', cat: 'backup', titleKey: 'settings.backup.autoTitle',
+    keywords: 'automatic scheduled backup snapshot retention automat programat', perm: 'backups.manage' },
+  { id: 'backupCloud', cat: 'backup', titleKey: 'settings.cloud.title', hintKey: 'settings.cloud.hint',
+    keywords: 'cloud google drive dropbox offsite off-host', perm: 'backups.manage' },
+  { id: 'backupRestore', cat: 'backup', titleKey: 'settings.backup.restoreTitle',
+    keywords: 'restore import recover restaurare recuperare', perm: 'backups.manage' },
+  // ── Actualizări ──
+  { id: 'appUpdate', cat: 'actualizari', titleKey: 'settings.update.title', hintKey: 'settings.update.hint',
+    keywords: 'version update new release github versiune actualizare', perm: 'settings.manage' },
   // ── Sănătatea sistemului (3.6.8) ──
   { id: 'systemHealth', cat: 'sanatate', titleKey: 'health.title', hintKey: 'health.hint',
     keywords: 'system health status problems attention checks alerts timer backup cloudflare token authentik disk '
@@ -71,94 +186,9 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   { id: 'connectedAgents', cat: 'sanatate', titleKey: 'health.agents.title', hintKey: 'health.agents.hint',
     keywords: 'connected agents online offline mtls client certificate token only route version fleet connection log '
       + 'agenti conectati certificat client ruta versiune flota jurnal conexiune', perm: 'security.view' },
-  // ── Utilizatori şi roluri (3.6) ──
-  { id: 'myAccess', cat: 'utilizatori', titleKey: 'roles.myAccess', hintKey: 'roles.myAccessHint',
-    keywords: 'role roles access permissions owner admin operator viewer scope rol roluri acces permisiuni' },
-  { id: 'users', cat: 'utilizatori', titleKey: 'settings.users.title', hintKey: 'settings.users.hint',
-    keywords: 'users accounts people team invite admin bindings utilizatori conturi echipa oameni legaturi',
-    perm: 'users.manage' },
-  { id: 'roles', cat: 'utilizatori', titleKey: 'roles.custom.title', hintKey: 'roles.custom.hint',
-    keywords: 'custom roles permissions editor role create edit auditor files-only roluri custom permisiuni editor',
-    perm: ['roles.manage', 'users.manage'] },
-  { id: 'ssoMapping', cat: 'utilizatori', titleKey: 'roles.sso.title', hintKey: 'roles.sso.hint',
-    keywords: 'sso oidc authentik groups claim mapping group role idp grupuri mapare grup scim provisioning deprovisioning provizionare token',
-    perm: 'users.manage', requires: 'sso' },
-  // ── Autentificare şi 2FA ──
-  { id: 'devices', cat: 'autentificare', titleKey: 'settings.devices', hintKey: 'settings.devicesHint',
-    keywords: 'devices sessions browsers sign out logout revoke dispozitive sesiuni deconectare' },
-  { id: 'passkeys', cat: 'autentificare', titleKey: 'settings.passkeys', hintKey: 'settings.passkeysAvailable',
-    keywords: 'passkey webauthn fido yubikey security key hardware fingerprint face id touch id cheie amprenta' },
-  { id: 'totp', cat: 'autentificare', titleKey: 'settings.totp.title', hintKey: 'settings.totp.hint',
-    keywords: '2fa mfa otp totp authenticator recovery codes doi pasi coduri recuperare' },
-  // ── Infrastructură şi tokenuri ──
-  { id: 'signingKey', cat: 'infrastructura', titleKey: 'settings.signingKey',
-    keywords: 'signing key ed25519 agent update signature pem semnare cheie semnatura', perm: 'signing.manage' },
-  { id: 'tokens', cat: 'infrastructura', titleKey: 'settings.tokens.title', hintKey: 'settings.tokens.hint',
-    keywords: 'token api bearer cron ci automation script monitoring tokenuri automatizare', perm: 'tokens.create' },
-  { id: 'enrollGroups', cat: 'infrastructura', titleKey: 'settings.enrollGroups.title', hintKey: 'settings.enrollGroups.hint',
-    keywords: 'bulk enrollment group token onboarding fleet many machines inrolare masa grup flota', perm: 'hosts.create' },
-  { id: 'deployKeyPolicy', cat: 'infrastructura', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
-    keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
-  { id: 'certificates', cat: 'infrastructura', titleKey: 'settings.certs.title',
-    keywords: 'tls ssl https certificate certificates cert expiry expires renew renewal lets encrypt acme traefik wildcard dns-01 http-01 '
-      + 'certificat certificate expirare expira reinnoire reinnoieste', perm: 'settings.manage' },
-  { id: 'forwardDomain', cat: 'infrastructura', titleKey: 'settings.forward.title',
-    keywords: 'port forwarding domain dns wildcard certificate tls subdomain domeniu certificat', perm: 'settings.manage' },
-  { id: 'guardrail', cat: 'infrastructura', titleKey: 'settings.guardrail', hintKey: 'settings.guardrailHint',
-    keywords: 'guardrail dangerous commands block confirm regex rm -rf rules comenzi periculoase reguli blocare', perm: 'settings.manage' },
   // ── Audit ──
   { id: 'audit', cat: 'audit', titleKey: 'settings.audit.title', hintKey: 'settings.audit.hint',
     keywords: 'audit log history who did what jurnal istoric' },
-  // ── Aspect ──
-  { id: 'language', cat: 'aspect', titleKey: 'settings.language', hintKey: 'settings.languageHint',
-    keywords: 'language english romanian locale limba engleza romana' },
-  { id: 'theme', cat: 'aspect', titleKey: 'settings.theme', hintKey: 'theme.styleHint',
-    keywords: 'theme style look appearance midnight aurora macos mac apple windows win11 fluent mica '
-      + 'gnome adwaita libadwaita linux ubuntu vibrancy kde plasma breeze kubuntu tema stil aspect' },
-  { id: 'themeMode', cat: 'aspect', titleKey: 'theme.mode',
-    keywords: 'dark light mode auto system night day appearance mod intunecat luminos noapte zi sistem' },
-  { id: 'termColors', cat: 'aspect', titleKey: 'settings.termColors',
-    keywords: 'terminal colors color scheme palette iterm vscode import culori schema paleta' },
-  { id: 'watermark', cat: 'aspect', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',
-    keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
-  // ── Notificări ──
-  { id: 'smtp', cat: 'notificari', titleKey: 'settings.smtp.title', hintKey: 'settings.smtp.hint',
-    keywords: 'smtp email mail alert alerts notification notifications server outgoing alerte notificari pe email posta server', perm: 'settings.manage' },
-  { id: 'webhook', cat: 'notificari', titleKey: 'settings.smtp.webhook', hintKey: 'settings.smtp.webhookHint',
-    keywords: 'webhook slack discord teams ntfy chat alerts alerte', perm: 'settings.manage' },
-  { id: 'resourceAlerts', cat: 'notificari', titleKey: 'settings.alerts.title', hintKey: 'settings.alerts.hint',
-    keywords: 'cpu ram memory disk threshold load alerts prag memorie resurse', perm: 'settings.manage' },
-  { id: 'alertPrefs', cat: 'notificari', titleKey: 'settings.alertPrefs.title', hintKey: 'settings.alertPrefs.hint',
-    keywords: 'alert alerts events notifications bell history in-app email emails mail toggle mute security which choose '
-      + 'clopotel istoric evenimente notificari alerte alerta pe email mail aleg ce primesc' },
-  // ── Backup ──
-  { id: 'backupDownload', cat: 'backup', titleKey: 'settings.backup.downloadTitle',
-    keywords: 'backup download export archive copie descarca arhiva', perm: 'backups.manage' },
-  { id: 'backupAuto', cat: 'backup', titleKey: 'settings.backup.autoTitle',
-    keywords: 'automatic scheduled backup snapshot retention automat programat', perm: 'backups.manage' },
-  { id: 'backupCloud', cat: 'backup', titleKey: 'settings.cloud.title', hintKey: 'settings.cloud.hint',
-    keywords: 'cloud google drive dropbox offsite off-host', perm: 'backups.manage' },
-  { id: 'backupRestore', cat: 'backup', titleKey: 'settings.backup.restoreTitle',
-    keywords: 'restore import recover restaurare recuperare', perm: 'backups.manage' },
-  // ── Preferinţe ──
-  { id: 'timezone', cat: 'preferinte', titleKey: 'settings.timezone',
-    keywords: 'timezone tz time clock utc fus orar ora ceas' },
-  { id: 'accessibility', cat: 'preferinte', titleKey: 'settings.accessibility', hintKey: 'settings.screenReaderMode',
-    keywords: 'accessibility a11y screen reader nvda voiceover orca accesibilitate cititor ecran' },
-  { id: 'walkthrough', cat: 'preferinte', titleKey: 'walkthrough.settingsTitle',
-    keywords: 'walkthrough tour welcome onboarding tur bun venit' },
-  { id: 'tips', cat: 'preferinte', titleKey: 'tips.resetTitle', hintKey: 'tips.resetDesc',
-    keywords: 'tips hints reset sfaturi indicii' },
-  { id: 'terminal', cat: 'preferinte', titleKey: 'settings.terminal',
-    keywords: 'terminal unicode emoji wide characters xterm caractere late' },
-  { id: 'taskNotify', cat: 'preferinte', titleKey: 'settings.taskNotify', hintKey: 'settings.taskNotifyHint',
-    keywords: 'notifications task done finished failed command agent push notificari task terminat esuat comanda agent' },
-  { id: 'transfers', cat: 'preferinte', titleKey: 'transfers.settingsTitle', hintKey: 'transfers.pasteDestHint',
-    keywords: 'transfers upload paste inbox images files transferuri incarcare lipire fisiere' },
-  { id: 'updatesBadge', cat: 'preferinte', titleKey: 'updates.prefTitle', hintKey: 'updates.prefDesc',
-    keywords: 'os updates badge apt dnf packages actualizari insigna pachete' },
-  { id: 'appUpdate', cat: 'preferinte', titleKey: 'settings.update.title', hintKey: 'settings.update.hint',
-    keywords: 'version update new release github versiune actualizare', perm: 'settings.manage' },
 ]
 
 const BY_ID = new Map(SETTINGS_INDEX.map((s) => [s.id, s]))
@@ -172,13 +202,43 @@ export function sectionVisible(id: string, has: (perm: string) => boolean, runti
 }
 
 /** Tab-urile cu MĂCAR o secţiune vizibilă (un tab gol nu apare în rail). */
-export function visibleCats(has: (perm: string) => boolean): readonly { id: SettingsCat; labelKey: string }[] {
+export function visibleCats(has: (perm: string) => boolean): readonly { id: SettingsCat; labelKey: string; group: SettingsGroup }[] {
   return SETTINGS_CATS.filter((c) => SETTINGS_INDEX.some((s) => s.cat === c.id && sectionVisible(s.id, has)))
+}
+
+/** Rail-ul pe grupuri: un grup apare doar cu măcar o categorie vizibilă (Viewer: doar „Personal"
+    şi „Operare" → Audit, cu rândurile proprii). */
+export function visibleGroups(has: (perm: string) => boolean) {
+  const cats = visibleCats(has)
+  return SETTINGS_GROUPS
+    .map((g) => ({ ...g, cats: cats.filter((c) => c.group === g.id) }))
+    .filter((g) => g.cats.length > 0)
 }
 
 /** tab-ul unei secţiuni (undefined = id necunoscut) */
 export function catOfSection(id: string): SettingsCat | undefined {
   return BY_ID.get(id)?.cat
+}
+
+/** Un id de categorie venit din afară (localStorage, sessionStorage, catalogul de Health, un link
+    adânc): id-ul curent, id-ul care a preluat un id retras (`LEGACY_CATS`), sau undefined. */
+export function resolveCat(v: unknown): SettingsCat | undefined {
+  if (typeof v !== 'string' || !v) return undefined
+  if (SETTINGS_CATS.some((c) => c.id === v)) return v as SettingsCat
+  return Object.prototype.hasOwnProperty.call(LEGACY_CATS, v) ? LEGACY_CATS[v] : undefined
+}
+
+/** Normalizează o ţintă de Setări venită din afară. Cu o secţiune cunoscută, categoria e cea care
+    o randează ACUM (indexul e singura sursă: o secţiune mutată între categorii nu rupe linkurile
+    vechi de tip `{cat:'infrastructura', section:'guardrail'}`); fără secţiune, id-ul (eventual vechi)
+    al categoriei. O ţintă de nerecunoscut → undefined (apelantul cade pe implicit). */
+export function resolveSettingsTarget(raw: unknown): SettingsTarget | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const { cat, section } = raw as { cat?: unknown; section?: unknown }
+  const known = typeof section === 'string' ? BY_ID.get(section) : undefined
+  if (known) return { cat: known.cat, section: known.id }
+  const c = resolveCat(cat)
+  return c ? { cat: c } : undefined
 }
 
 /** litere mici, fără diacritice (ă→a, ș/ş→s): aceeaşi regulă ca în CommandPalette */

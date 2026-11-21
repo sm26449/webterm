@@ -34,7 +34,7 @@ import CopyToast from './components/CopyToast'
 import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './lib/fleetLoad'
 import { errText, api, ApiError, AppState, Host, isSessionLive, SETTINGS_RETURN_KEY, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
-import { SETTINGS_CATS, type SettingsTarget } from './lib/settingsIndex'
+import { resolveSettingsTarget, type SettingsTarget } from './lib/settingsIndex'
 import { stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from './lib/stepup'
 import { useI18n } from './lib/i18n'
 import { useConfirm } from './lib/confirm'
@@ -619,8 +619,10 @@ function MainApp() {
       const raw = sessionStorage.getItem(SETTINGS_RETURN_KEY)
       if (raw) {
         sessionStorage.removeItem(SETTINGS_RETURN_KEY)
-        const target = JSON.parse(raw) as SettingsTarget
-        if (target && SETTINGS_CATS.some((c) => c.id === target.cat)) {
+        // id-urile de categorie de dinainte de 3.7.1 (ţinta poate fi scrisă de o versiune veche a
+        // paginii, chiar înainte de redirect) sunt traduse; o ţintă de nerecunoscut nu redeschide nimic
+        const target = resolveSettingsTarget(JSON.parse(raw))
+        if (target) {
           setSettingsCat(target); setSettingsSignal((n) => n + 1)
           notifyToast(t('access.reauth.backRepeat'), 'info')
         }
@@ -1107,7 +1109,7 @@ function MainApp() {
       title: t('stepup.needsFactorTitle'), message: t('err.stepup.needsFactor'),
       confirmLabel: t('stepup.openSignin'),
     })) {
-      setSettingsCat({ cat: 'autentificare', section: 'totp' })
+      setSettingsCat({ cat: 'cont', section: 'totp' })
       setSettingsSignal((n) => n + 1)
     }
   }, [confirm, t])

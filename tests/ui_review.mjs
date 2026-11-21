@@ -630,8 +630,9 @@ try {
     // ── Settings: TOATE tab-urile ──
     await step('setări', async () => {
       await openSettings(page)
-      // fostul „Security" e spart (3.5.9) în „Sign-in & 2FA" + „Infrastructure & tokens"
-      for (const tab of ['Account', 'Users & roles', 'Sign-in & 2FA', 'Infrastructure & tokens', 'Audit', 'Appearance', 'Notifications', 'Backup', 'Preferences']) {
+      // 3.7.1: categoriile regrupate pe intenţie (Personal / Administration / Operations), fără System health
+      for (const tab of ['Account & security', 'Appearance', 'Terminal & workspace', 'My notifications', 'People & roles',
+        'Access & automation', 'Security policy', 'Network & certificates', 'Alert delivery', 'Backup', 'Updates', 'Audit log']) {
         const slug = tab.toLowerCase().replace(/[^a-z0-9]+/g, '-')
         await settingsTab(page, tab)
         await page.screenshot({ path: `${OUT}/${theme}-05-settings-${slug}.png` })
@@ -668,7 +669,7 @@ try {
         }) })
       })
       await openSettings(page)
-      await settingsTab(page, 'Users & roles')
+      await settingsTab(page, 'People & roles')
       const selected = () => page.locator('[data-users-subtabs] [role=tab][aria-selected="true"]').getAttribute('data-subtab')
       // tastatura: focus pe tab-ul activ, End → ultimul, Home → primul, → → al doilea (roving tabindex)
       await page.locator('[data-subtab="accounts"]').click()

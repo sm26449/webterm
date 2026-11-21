@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, errText, WatermarkConfig } from '../../lib/api'
+import { errText } from '../../lib/api'
 import { useI18n } from '../../lib/i18n'
-import { useSectionVisible } from '../../lib/perms'
 import { LANG_META, LANG_ORDER } from '../../lang'
 import { useTheme } from '../../lib/theme'
 import { FAMILIES, VARIANTS, type Swatch, type ThemeMode } from '../../lib/themeModel'
@@ -10,15 +9,13 @@ import {
   customTheme, followThemeTermScheme, parseThemeFile, saveCustomTheme, setTermScheme, termTheme,
 } from '../../lib/termtheme'
 import { heading } from './ui'
-import { Button, SegmentedControl } from '../ui'
-import { canSave, type LoadState } from '../../lib/loadable'
-import NotLoaded from './NotLoaded'
+import { SegmentedControl } from '../ui'
 
 // Aspect: limbă, temă (light/dark/auto), schema de culori a terminalului (+ editor live şi import
-// iTerm2/VS Code) şi watermark-ul de identitate. Extras din SettingsModal ca tab de sine stătător.
-export default function AppearanceTab(props: { onAccountChanged: () => void }) {
+// iTerm2/VS Code). Extras din SettingsModal ca tab de sine stătător. Watermark-ul (o setare a
+// instanţei, nu a ta) s-a mutat în 3.7.1 în SecurityPolicyTab.
+export default function AppearanceTab() {
   const { t, lang, setLang } = useI18n()
-  const vis = useSectionVisible()   // 3.6: secţiunile fără permisiunea globală nu apar
   const [pref, , setTheme] = useTheme()
   const [scheme, setScheme] = useState(currentTermScheme())
   // „Potrivit cu tema" (fără alegere explicită): schema terminalului urmează familia temei
@@ -31,37 +28,6 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [importErr, setImportErr] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
-
-  // Watermark — persistat server-side, aplicat pe workspace + link-uri partajate.
-  const [wm, setWm] = useState<WatermarkConfig>({
-    enabled: false, content: '${email} · ${time}', opacity: 0.08, angle: -30, fontSize: 13,
-  })
-  const [wmMsg, setWmMsg] = useState('')
-  const [wmErr, setWmErr] = useState(false)   // acelaşi text, dar rol diferit: `alert` la eşec
-  // U04: un fetch picat lăsa valorile implicite („dezactivat") afişate ca setare — iar „Salvează"
-  // OPREA un watermark activ pe server. Formularul apare doar peste valorile încărcate.
-  const [wmState, setWmState] = useState<LoadState>({ status: 'loading' })
-  const loadWm = () => {
-    setWmState({ status: 'loading' })
-    api<WatermarkConfig>('/api/settings/watermark')
-      .then((r) => { setWm(r); setWmState({ status: 'ok' }) })
-      .catch((e) => setWmState({ status: 'error', error: errText(e, t) }))
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadWm() }, [])
-  const saveWatermark = async () => {
-    if (!canSave(wmState)) return
-    try {
-      const saved = await api<WatermarkConfig>('/api/settings/watermark',
-        { method: 'POST', body: JSON.stringify(wm) })
-      setWm(saved)
-      setWmErr(false); setWmMsg(t('settings.saved'))
-      props.onAccountChanged()   // refetch /api/state → overlay-ul live se actualizează
-      setTimeout(() => setWmMsg(''), 1500)
-    } catch {
-      setWmErr(true); setWmMsg(t('settings.saveError'))
-    }
-  }
 
   const openEditor = () => {
     const base = customTheme() ?? termTheme(scheme)
@@ -212,65 +178,6 @@ export default function AppearanceTab(props: { onAccountChanged: () => void }) {
             </div>
           </div>
         )}
-      </section>
-
-      <section data-setting-id="watermark" hidden={!vis('watermark')}>
-        {/* ── Watermark ── */}
-        <h3 className={heading}>{t('settings.watermark')}</h3>
-        <NotLoaded state={wmState} onRetry={loadWm} />
-        {canSave(wmState) && (<>
-        <label className="mt-2 flex cursor-pointer items-start gap-2.5 text-sm text-slate-300">
-          <input type="checkbox" checked={wm.enabled}
-            onChange={(e) => setWm({ ...wm, enabled: e.target.checked })}
-            className="mt-0.5 h-4 w-4 rounded-md accent-sky-600" />
-          <span>
-            {t('settings.watermarkToggle')}
-            <span className="mt-0.5 block text-xs text-slate-500">
-              {t('settings.watermarkHint')} <code className="font-mono">{'${email}'}</code>{' '}
-              <code className="font-mono">{'${host}'}</code> <code className="font-mono">{'${date}'}</code>{' '}
-              <code className="font-mono">{'${time}'}</code>.
-            </span>
-          </span>
-        </label>
-        {wm.enabled && (
-          <div className="mt-3 space-y-3">
-            <label className="block text-xs text-slate-400">
-              {t('settings.text')}
-              <input type="text" value={wm.content} maxLength={200}
-                onChange={(e) => setWm({ ...wm, content: e.target.value })}
-                className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-slate-200 focus:border-sky-500 focus:outline-none" />
-            </label>
-            <div className="grid grid-cols-3 gap-3">
-              <label className="block text-xs text-slate-400">
-                {t('settings.opacity')} <span className="text-slate-500">{wm.opacity.toFixed(2)}</span>
-                <input type="range" min={0.02} max={0.5} step={0.01} value={wm.opacity}
-                  onChange={(e) => setWm({ ...wm, opacity: parseFloat(e.target.value) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-              <label className="block text-xs text-slate-400">
-                {t('settings.angle')} <span className="text-slate-500">{wm.angle}°</span>
-                <input type="range" min={-90} max={90} step={5} value={wm.angle}
-                  onChange={(e) => setWm({ ...wm, angle: parseInt(e.target.value, 10) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-              <label className="block text-xs text-slate-400">
-                {t('settings.size')} <span className="text-slate-500">{wm.fontSize}px</span>
-                <input type="range" min={8} max={40} step={1} value={wm.fontSize}
-                  onChange={(e) => setWm({ ...wm, fontSize: parseInt(e.target.value, 10) })}
-                  className="mt-1 w-full accent-sky-600" />
-              </label>
-            </div>
-          </div>
-        )}
-        <div className="mt-3 flex items-center gap-3">
-          <Button variant="primary" onClick={saveWatermark}>
-            {t('settings.saveWatermark')}
-          </Button>
-          {/* două regiuni, nu una cu rol variabil: schimbarea rolului pe acelaşi nod nu e anunţată */}
-          <span role="status" className={wmMsg && !wmErr ? 'text-xs wt-good' : 'sr-only'}>{wmErr ? '' : wmMsg}</span>
-          <span role="alert" className={wmMsg && wmErr ? 'text-xs wt-danger' : 'sr-only'}>{wmErr ? wmMsg : ''}</span>
-        </div>
-        </>)}
       </section>
     </div>
   )

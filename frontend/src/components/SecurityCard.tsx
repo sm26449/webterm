@@ -23,10 +23,10 @@ export type SecurityTarget =
   | { kind: 'status' }
 
 const TARGET: Record<string, SecurityTarget | undefined> = {
-  account2fa: { kind: 'settings', target: { cat: 'autentificare', section: 'passkeys' } },
+  account2fa: { kind: 'settings', target: { cat: 'cont', section: 'passkeys' } },
   shares: { kind: 'shares' },
-  guardrail: { kind: 'settings', target: { cat: 'infrastructura', section: 'guardrail' } },
-  signingKey: { kind: 'settings', target: { cat: 'infrastructura', section: 'signingKey' } },
+  guardrail: { kind: 'settings', target: { cat: 'politici', section: 'guardrail' } },
+  signingKey: { kind: 'settings', target: { cat: 'acces', section: 'signingKey' } },
   backup: { kind: 'settings', target: { cat: 'backup', section: 'backupAuto' } },
   alerts: { kind: 'settings', target: { cat: 'notificari', section: 'smtp' } },
   agents: { kind: 'status' },
