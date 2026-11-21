@@ -82,7 +82,7 @@ export default function LoginPage(props: {
       try { cached = localStorage.getItem(SSO_KNOWN_KEY) } catch { /* localStorage indisponibil */ }
       setSso(ssoFallback(cached))
     }
-    loadSso()
+    void loadSso()
     // eroare venită din redirect-ul de callback (?sso_error=...): o arătăm, nu o înghiţim
     const p = new URLSearchParams(window.location.search)
     if (p.get('sso_error') || p.get('sso') === 'disabled') {

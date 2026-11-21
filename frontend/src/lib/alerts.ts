@@ -153,15 +153,15 @@ export async function refreshUnread(): Promise<void> {
   } catch { /* offline / sesiune expirată: păstrăm ultima valoare, App tratează 401-ul */ }
 }
 
-const onVis = () => { if (!document.hidden) refreshUnread() }
+const onVis = () => { if (!document.hidden) void refreshUnread() }
 
 export const unreadStore = {
   /** useSyncExternalStore: primul abonat porneşte poll-ul, ultimul îl opreşte */
   subscribe(cb: () => void) {
     listeners.add(cb)
     if (users++ === 0) {
-      refreshUnread()
-      timer = setInterval(() => { if (!document.hidden) refreshUnread() }, POLL_MS)
+      void refreshUnread()
+      timer = setInterval(() => { if (!document.hidden) void refreshUnread() }, POLL_MS)
       document.addEventListener('visibilitychange', onVis)
     }
     return () => {

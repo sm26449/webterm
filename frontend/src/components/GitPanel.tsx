@@ -273,9 +273,9 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   // reîncarcă DOAR datele tab-ului vizibil (+ bara de status), ca Live/refresh să
   // nu ceară degeaba log/branches/reflog pe care nu le vede nimeni.
   const loadTab = useCallback((which: Tab) => {
-    if (which === 'commits') loadCommits()
-    else if (which === 'branches') loadBranches()
-    else if (which === 'activity') loadReflog()
+    if (which === 'commits') void loadCommits()
+    else if (which === 'branches') void loadBranches()
+    else if (which === 'activity') void loadReflog()
   }, [loadCommits, loadBranches, loadReflog])
 
   // Agent lookup is best-effort: changing user in the terminal does not change
@@ -294,7 +294,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
 
   const tick = useCallback(async () => {
     if (following) await pullCwd()
-    refresh()
+    void refresh()
     loadTab(tab)
   }, [following, pullCwd, refresh, loadTab, tab])
 
@@ -303,7 +303,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     if (!isAgent) return
     const known = getCwd(props.sessionId)
     if (known) setCwdState(known)
-    pullCwd()
+    void pullCwd()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAgent, props.host.id, props.sessionId])
 
@@ -324,7 +324,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     setSel(null); setDiff(''); setCommitView(null); setShowText('')
     // caches → null: efectul de mai jos (pe tab) reîncarcă tab-ul activ
     setCommits(null); setBranches(null); setReflog(null)
-    refresh()
+    void refresh()
     return invalidateRequests
   }, [cwd, refresh, invalidateRequests])
 
@@ -334,16 +334,16 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
   // comutarea pe un tab încarcă datele lui dacă nu-s deja (null = neîncărcat)
   useEffect(() => {
     if (!cwd || notRepo) return
-    if (tab === 'commits' && commits === null) loadCommits()
-    else if (tab === 'branches' && branches === null) loadBranches()
-    else if (tab === 'activity' && reflog === null) loadReflog()
+    if (tab === 'commits' && commits === null) void loadCommits()
+    else if (tab === 'branches' && branches === null) void loadBranches()
+    else if (tab === 'activity' && reflog === null) void loadReflog()
   }, [tab, cwd, notRepo, commits, branches, reflog, loadCommits, loadBranches, loadReflog])
 
   // Live: la ~5s, cât panoul e vizibil și tab-ul browserului e în focus
   useEffect(() => {
     if (!live || !cwd) return
     const id = window.setInterval(() => {
-      if (document.visibilityState === 'visible') tick()
+      if (document.visibilityState === 'visible') void tick()
     }, 5000)
     return () => window.clearInterval(id)
   }, [live, cwd, tick])
@@ -355,13 +355,13 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     setError('')
     setFollowing(false)
     setCwdError('')
-    if (p === cwd) { refresh(); loadTab(tab) } else setCwdState(p)
+    if (p === cwd) { void refresh(); loadTab(tab) } else setCwdState(p)
   }
 
   function backToTerminal() {
     setFollowing(true)
     setError('')
-    pullCwd()
+    void pullCwd()
   }
 
   // Grant: type the gateway-built `sudo usermod …` command into THIS session's terminal, at a
@@ -427,7 +427,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
     } finally {
       setBusy(false)
       setSel(null); setDiff('')
-      refresh()
+      void refresh()
     }
   }
 
@@ -445,7 +445,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
       if (r.exit_code === 0) {
         setMsg(''); setSel(null); setDiff('')
         notify(t('git.commitDone'), r.stdout.split('\n')[0] || m, 'info')
-        refresh()
+        void refresh()
         if (tab !== 'changes') loadTab(tab)
       } else {
         setError((r.stderr || r.stdout || t('git.error.commitFailed')).trim())
@@ -603,7 +603,7 @@ export default function GitPanel(props: { host: Host; sessionId: string; onClose
         <textarea
           value={msg}
           onChange={(e) => setMsg(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit() } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void commit() } }}
           placeholder={staged.length ? t('git.commitPlaceholder') : t('git.commitPlaceholderEmpty')}
           rows={2}
           className="w-full resize-none rounded-md bg-ink-800 px-2 py-1 font-mono text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500"

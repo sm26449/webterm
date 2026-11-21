@@ -599,7 +599,7 @@ export default function Sidebar(props: {
                 </span>
                 {host.note && <span className="truncate italic" title={host.note}>· {host.note}</span>}
                 <IconButton touch={false}
-                  onClick={(e) => { e.stopPropagation(); editNote(host) }}
+                  onClick={(e) => { e.stopPropagation(); void editNote(host) }}
                   label={t('sidebar.noteAria', { name: host.name })}
                   className="opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                 ><NoteIcon /></IconButton>
@@ -607,7 +607,7 @@ export default function Sidebar(props: {
                     că e tăcut); pornit = doar la hover. Doar host-uri de agent (doar ele alertează). */}
                 {(!host.connection_type || host.connection_type === 'agent') && (
                   <button
-                    onClick={(e) => { e.stopPropagation(); muteHost(host, !host.alerts_muted) }}
+                    onClick={(e) => { e.stopPropagation(); void muteHost(host, !host.alerts_muted) }}
                     title={host.alerts_muted ? t('sidebar.alertsMutedTitle') : t('sidebar.alertsOnTitle')}
                     aria-label={host.alerts_muted
                       ? t('sidebar.alertsUnmuteAria', { name: host.name })
@@ -621,7 +621,7 @@ export default function Sidebar(props: {
                     Doar host-uri de agent (WoL n-are sens pe SSH/telnet). */}
                 {canWake(host) && (
                   <IconButton touch={false}
-                    onClick={(e) => { e.stopPropagation(); wakeHost(host) }}
+                    onClick={(e) => { e.stopPropagation(); void wakeHost(host) }}
                     disabled={waking === host.id}
                     title={t('sidebar.wakeTitle')} label={t('sidebar.wakeAria', { name: host.name })}
                   >{waking === host.id ? '…' : <PowerIcon size={14} />}</IconButton>
@@ -649,7 +649,7 @@ export default function Sidebar(props: {
                   <span className="shrink-0"><WarningIcon size={12} /></span><span className="truncate">{t('sidebar.uninstalledBadge')}</span>
                 </span>
                 <button
-                  onClick={(e) => { e.stopPropagation(); deleteHost(host) }}
+                  onClick={(e) => { e.stopPropagation(); void deleteHost(host) }}
                   className="wt-danger shrink-0 rounded-md px-1.5 py-1 text-2xs ring-1 ring-ink-700 hover:bg-ink-800"
                 >{t('sidebar.uninstalledRemove')}</button>
               </div>
@@ -681,7 +681,7 @@ export default function Sidebar(props: {
           )}
           {host.online && host.update_pending && !host.update_blocked && (
             <button
-              onClick={(e) => { e.stopPropagation(); updateAgent(host) }}
+              onClick={(e) => { e.stopPropagation(); void updateAgent(host) }}
               /* `?? '?'`: amândouă sunt `number | null`, iar template-ul de dinainte le
                  transforma tăcut în cuvântul „null" în tooltip. */
               title={t('sidebar.updateAgentTitle',

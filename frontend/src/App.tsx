@@ -153,7 +153,7 @@ function FingerprintRow(props: { label: string; value?: string; copyLabel: strin
         </code>
       </dd>
       {props.value && (
-        <button type="button" onClick={() => { copyText(props.value!) }} aria-label={props.copyLabel} title={props.copyLabel}
+        <button type="button" onClick={() => { void copyText(props.value!) }} aria-label={props.copyLabel} title={props.copyLabel}
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-slate-400 hover:bg-ink-800 hover:text-slate-200">
           <CopyIcon />
         </button>
@@ -632,7 +632,7 @@ function MainApp() {
   const refresh = useCallback(async () => {
     // 3.6: permisiunile contului (gating cosmetic) — reîmprospătate odată cu lista de hosturi,
     // ca o schimbare de rol să se vadă fără reload; un eşec lasă starea veche
-    loadPerms()
+    void loadPerms()
     try {
       const [hr, sr, sv] = await Promise.all([
         api<Host[]>('/api/hosts').then((v) => ({ status: 'fulfilled', value: v }) as const,
@@ -858,11 +858,11 @@ function MainApp() {
     // load: Safari refuză cererile fără gest, iar Chrome le degradează („quieter UI")
     const askOnce = () => ensureNotificationPermission()
     window.addEventListener('pointerdown', askOnce, { once: true })
-    refresh()
+    void refresh()   // void: refresh îşi tratează singur eşecul (banner + /api/state)
     // fereastra ascunsă nu mai face poll (PWA-ul din fundal făcea ~1.400
     // cereri/oră degeaba); la revenire, refresh imediat
-    const timer = setInterval(() => { if (!document.hidden) refresh() }, 5000)
-    const onVis = () => { if (!document.hidden) refresh() }
+    const timer = setInterval(() => { if (!document.hidden) void refresh() }, 5000)
+    const onVis = () => { if (!document.hidden) void refresh() }
     document.addEventListener('visibilitychange', onVis)
     return () => {
       window.removeEventListener('pointerdown', askOnce)
@@ -1372,7 +1372,7 @@ function MainApp() {
       onOpenContainerLogs={openContainerLogs}
       onJournal={openJournal}
       onOpenConnection={openConnection}
-      onDeleted={() => { closeTab(s.id); refresh() }}
+      onDeleted={() => { closeTab(s.id); void refresh() }}
     />
   )
 
@@ -1448,7 +1448,7 @@ function MainApp() {
     }
     setSplitViews((prev) => prev.map((v) => (v.id === id ? { ...v, ...changes } : v)))   // optimist
     try { await api(`/api/split-views/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }) }
-    catch (e) { splitErr(e); refresh() }   // dezacord cu serverul → explică + resincronizează
+    catch (e) { splitErr(e); void refresh() }   // dezacord cu serverul → explică + resincronizează
   }
   const createSplit = async (panes: string[], name?: string) => {
     const uniq = [...new Set(panes)].slice(0, GRID_MAX)   // distincte, ordine păstrată
@@ -1478,7 +1478,7 @@ function MainApp() {
     if (!other) { navigate(sid); return }   // nimic cu care să facem split
     const same = findSameSet(splitViewsRef.current, [other, sid])
     if (same) { enterSplit(same.id); return }
-    createSplit([other, sid])
+    void createSplit([other, sid])
   }
   // wizard: creare (nume implicit + primele taburi) sau editare (nume + panourile existente, ÎN
   // ordinea lor, inclusiv cele care nu mai au tab)
@@ -1510,7 +1510,7 @@ function MainApp() {
     }))) return
     setSplitViews((prev) => prev.filter((x) => x.id !== id))
     if (activeSplitId === id) setActiveSplitId(null)
-    try { await api(`/api/split-views/${id}`, { method: 'DELETE' }) } catch { refresh() }
+    try { await api(`/api/split-views/${id}`, { method: 'DELETE' }) } catch { void refresh() }
   }
   // reordonarea chip-urilor: optimist + PATCH `position` doar pentru cele mutate
   const reorderSplits = (from: number, to: number) => {
@@ -1523,7 +1523,7 @@ function MainApp() {
   }
   const pickLayout = (l: SplitLayout) => {
     if (!activeSplit || splitDegraded) return
-    patchSplit(activeSplit.id, { layout: l, sizes: equalSizes(l) })
+    void patchSplit(activeSplit.id, { layout: l, sizes: equalSizes(l) })
   }
   const paneTitle = (sid: string) => {
     const s = sessions.find((x) => x.id === sid)
@@ -1536,7 +1536,7 @@ function MainApp() {
     if (!next) return
     if (m.kind === 'replace' && selectedSid === m.target && !activeSplit.panes.includes(m.with)) replaceRoute(m.with)
     const moved = m.kind === 'swap' ? m.from : m.with
-    patchSplit(activeSplit.id, { panes: next })
+    void patchSplit(activeSplit.id, { panes: next })
     setSrAnnounce(t('split.paneMoved', { title: paneTitle(moved), pos: t('split.pos.' + positionKeys(splitLayout)[next.indexOf(moved)]) }))
   }
   const movePane = (sid: string, dir: 1 | -1) => {
@@ -1564,7 +1564,7 @@ function MainApp() {
     const send = () => {
       sizeTimer.current = 0
       api(`/api/split-views/${id}`, { method: 'PATCH', body: JSON.stringify({ layout, sizes }) })
-        .catch((e) => { splitErr(e); refresh() })
+        .catch((e) => { splitErr(e); void refresh() })
       setLayoutNonce((n) => n + 1)     // divider eliberat: panourile îşi reclamă dimensiunea
     }
     if (debounce) sizeTimer.current = setTimeout(send, 400)
@@ -1756,7 +1756,7 @@ function MainApp() {
       }))
       setHostKeyAlarm(null)
       notify(t(a.first ? 'hostkey.firstAccepted' : 'hostkey.accepted', { name: a.name }), t('hostkey.acceptedBody'), 'info')
-      refresh()
+      void refresh()
     } catch (e) {
       notifyError(t('hostkey.acceptFailed'), errText(e, t) || t('app.error'))
     } finally {
@@ -1798,7 +1798,7 @@ function MainApp() {
       navigate(r.id)
       setSidebarOpen(false)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1842,7 +1842,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1863,7 +1863,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1886,7 +1886,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1906,7 +1906,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1931,7 +1931,7 @@ function MainApp() {
       openTab(r.id)
       navigate(r.id)
     } catch (e) {
-      startFailed(host, e)
+      void startFailed(host, e)
     }
   }
 
@@ -1941,7 +1941,7 @@ function MainApp() {
   async function deleteSession(sid: string): Promise<void> {
     await api(`/api/sessions/${sid}`, { method: 'DELETE' })
     closeTab(sid)
-    refresh()
+    void refresh()
   }
 
   return (
@@ -2021,7 +2021,7 @@ function MainApp() {
               onCreate: openWizardCreate,
               onEdit: (id) => { const v = splitViews.find((x) => x.id === id); if (v) openWizardEdit(v) },
               onDelete: deleteSplit,
-              onBroadcast: () => { if (activeSplit) patchSplit(activeSplit.id, { broadcast: !broadcast }) },
+              onBroadcast: () => { if (activeSplit) void patchSplit(activeSplit.id, { broadcast: !broadcast }) },
               // „exit" doar DEZACTIVEAZĂ view-ul (rămâne salvat în DB); nu-l şterge
               onExit: () => setActiveSplitId(null),
             }}
@@ -2184,7 +2184,7 @@ function MainApp() {
       </div>
       {toolboxHost && (
         <ToolboxPanel key={toolboxHost.id} host={toolboxHost} overlay onClose={() => setToolboxHost(null)}
-          onOpen={(h, cid) => { setToolboxHost(null); openConnection(h, cid) }} />
+          onOpen={(h, cid) => { setToolboxHost(null); void openConnection(h, cid) }} />
       )}
       {serialHost && (
         <SerialModal
@@ -2302,7 +2302,7 @@ function MainApp() {
               <label className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">{t('split.nameLabel')}</span>
                 <input autoFocus value={wizard.name} onChange={(e) => setWizard((w) => (w ? { ...w, name: e.target.value.slice(0, 80) } : w))}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && wizard.sel.length >= 2) saveWizard() }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && wizard.sel.length >= 2) void saveWizard() }}
                   placeholder={t('split.namePlaceholder')}
                   className="w-full rounded-md bg-ink-800 px-2 py-1 text-sm text-slate-100 ring-1 ring-ink-700 focus:ring-sky-500" />
               </label>

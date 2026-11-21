@@ -85,8 +85,8 @@ export default function StatusModal(props: { onClose: () => void }) {
   useEffect(() => {
     // un refresh reuşit şterge eroarea (înainte rămânea „n-am putut încărca" lângă date proaspete)
     const load = () => api<Status>('/api/status').then((v) => { setS(v); setErr(false) }).catch(() => setErr(true))
-    load()
-    const iv = setInterval(() => { if (!document.hidden) load() }, 5000)
+    void load()
+    const iv = setInterval(() => { if (!document.hidden) void load() }, 5000)
     return () => clearInterval(iv)
   }, [])
   // verificarea de versiune e cache-uită server-side (1h) — o cerem o dată (+ Reîncearcă)

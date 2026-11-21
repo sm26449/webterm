@@ -419,7 +419,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                           <input autoFocus value={renaming.title} aria-label={t('fleet.renameSaved', { name: s.title })}
                             onChange={(e) => setRenaming({ id: s.id, title: e.target.value })}
                             onKeyDown={(e) => {
-                              if (e.key === 'Enter') { e.preventDefault(); renameSaved() }
+                              if (e.key === 'Enter') { e.preventDefault(); void renameSaved() }
                               // Escape anulează DOAR redenumirea, nu închide consola
                               if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setRenaming(null) }
                             }}
@@ -453,7 +453,7 @@ export default function FleetRunModal(props: { hosts: Host[]; onClose: () => voi
                 <div className="mt-1 flex flex-wrap items-center gap-2">
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t('fleet.command')}</label>
                   <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveCurrent() } }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void saveCurrent() } }}
                     placeholder={t('fleet.saveNamePlaceholder')} aria-label={t('fleet.saveName')}
                     className="ml-auto w-40 rounded-md bg-ink-800 px-2 py-0.5 text-2xs text-slate-200 ring-1 ring-ink-700 focus:ring-sky-500" />
                   <button type="button" onClick={saveCurrent}

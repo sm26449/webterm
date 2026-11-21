@@ -56,8 +56,8 @@ export default function SessionPreview(props: { sid: string; live: boolean }) {
         /* ignoră */
       }
     }
-    load()
-    const timer = props.live ? setInterval(() => { if (!document.hidden) load() }, 3000) : undefined
+    void load()
+    const timer = props.live ? setInterval(() => { if (!document.hidden) void load() }, 3000) : undefined
     const ro = new ResizeObserver(() => fit.fit())
     ro.observe(ref.current!)
 

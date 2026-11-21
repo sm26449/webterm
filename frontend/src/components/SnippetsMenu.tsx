@@ -55,7 +55,7 @@ export default function SnippetsMenu(props: {
   useEffect(() => {
     if (open) {
       setFilter('')
-      load()
+      void load()
     }
   }, [open])
   useEffect(() => {
@@ -83,7 +83,7 @@ export default function SnippetsMenu(props: {
       setBody('')
       setTags('')
       setEditId(null)
-      load()
+      void load()
     } catch (e) {
       setSaveErr(errText(e, t) || t('snippets.saveFailed'))
     } finally {
@@ -101,7 +101,7 @@ export default function SnippetsMenu(props: {
     } catch (e) {
       setSaveErr(errText(e, t) || t('snippets.deleteFailed'))
     }
-    load()
+    void load()
   }
 
   const q = filter.trim().toLowerCase()

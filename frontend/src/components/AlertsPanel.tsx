@@ -112,7 +112,7 @@ export default function AlertsPanel(props: {
     }
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setItems(null); load() }, [unreadOnly])
+  useEffect(() => { setItems(null); void load() }, [unreadOnly])
 
   async function act(fn: () => Promise<void>) {
     setActionErr(''); setBusy(true)
@@ -139,7 +139,7 @@ export default function AlertsPanel(props: {
       if (n.has(a.id)) n.delete(a.id); else n.add(a.id)
       return n
     })
-    if (!a.read) markRead([a.id])         // a deschis-o = a citit-o
+    if (!a.read) void markRead([a.id])         // a deschis-o = a citit-o
   }
 
   const hostName = (id: number | null) => (id == null ? null : props.hosts.find((h) => h.id === id)?.name ?? null)

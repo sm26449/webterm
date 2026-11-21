@@ -1621,7 +1621,7 @@ export default function SessionView(props: {
       if (payload.length > 200000) return true
       try {
         const bytes = Uint8Array.from(atob(payload), (ch) => ch.charCodeAt(0))
-        copySession(session.id, new TextDecoder().decode(bytes))
+        void copySession(session.id, new TextDecoder().decode(bytes))
       } catch {
         /* base64 invalid: ignoră */
       }
@@ -1835,7 +1835,7 @@ export default function SessionView(props: {
           term.clearSelection()
           return true
         }
-        copySession(session.id, sel).then(flashCopied)
+        void copySession(session.id, sel).then(flashCopied)
         term.clearSelection()
         return false
       }
@@ -1860,7 +1860,7 @@ export default function SessionView(props: {
       if (e.pointerType === 'touch') return
       const sel = term.getSelection()
       if (sel) {
-        copySession(session.id, sel).then(flashCopied)
+        void copySession(session.id, sel).then(flashCopied)
         lastCopiedRef.current = sel
       }
     }
@@ -1975,7 +1975,7 @@ export default function SessionView(props: {
         rendererRef.current = canvas
       } catch { /* renderer DOM implicit */ }
     }
-    reloadRendererRef.current = () => { loadRenderer() }
+    reloadRendererRef.current = () => { void loadRenderer() }
     ;(async () => {
       await loadRenderer()
       try {
@@ -2956,7 +2956,7 @@ export default function SessionView(props: {
             <ToolButton
               title={t('session.fullscreen')}
               onClick={() => {
-                if (document.fullscreenElement) document.exitFullscreen()
+                if (document.fullscreenElement) document.exitFullscreen().catch(() => {})   // respins doar dacă ecranul complet s-a închis între timp: nimic de făcut
                 else document.documentElement.requestFullscreen().catch(() => {})
               }}
             ><FullscreenIcon /></ToolButton>
@@ -3019,7 +3019,7 @@ export default function SessionView(props: {
                   )}
                   <MoreItem onClick={() => { openLinks(); setMoreOpen(false) }}><ExternalLinkIcon /> {t('session.links')}</MoreItem>
                   <MoreItem onClick={() => { setShowNote(!showNote); setMoreOpen(false) }}><NoteIcon /> {t('session.note')}</MoreItem>
-                  {hasSel && <MoreItem onClick={() => { copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>}
+                  {hasSel && <MoreItem onClick={() => { void copySelection(); setMoreOpen(false) }}><CopyIcon /> {t('session.copySelection')}</MoreItem>}
                   <MoreItem onClick={() => { openSelectText(); setMoreOpen(false) }}><CopyIcon /> {t('seltext.menu')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize + 1)}>A+ {t('session.fontLarger')}</MoreItem>
                   <MoreItem onClick={() => setPreferredFont(fontSize - 1)}>A− {t('session.fontSmaller')}</MoreItem>
@@ -3027,7 +3027,7 @@ export default function SessionView(props: {
                     <MoreItem onClick={() => { share(); setMoreOpen(false) }}><ShareIcon /> {t('session.shareLink')}</MoreItem>
                   )}
                   <MoreItem onClick={() => {
-                    if (document.fullscreenElement) document.exitFullscreen()
+                    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})   // respins doar dacă ecranul complet s-a închis între timp
                     else document.documentElement.requestFullscreen().catch(() => {})
                     setMoreOpen(false)
                   }}><FullscreenIcon /> {t('session.fullscreen')}</MoreItem>
@@ -3117,7 +3117,7 @@ export default function SessionView(props: {
             <span className="min-w-0 flex-1 text-xs text-slate-400">{t('session.shareActiveNoUrl')}</span>
           )}
           {shareUrl && <Button variant="primary" size="sm"
-            onClick={() => { copyText(shareUrl).then((ok) => { if (!ok) return
+            onClick={() => { void copyText(shareUrl).then((ok) => { if (!ok) return
               setCopied(true); setTimeout(() => setCopied(false), 1200) }) }} className="shrink-0">
             {copied ? <CheckIcon /> : t('session.copy')}
           </Button>}
@@ -3626,12 +3626,12 @@ export default function SessionView(props: {
                 Pe touch meniul se deschide de pe loc GOL (pe un cuvânt apăsarea lungă selectează),
                 deci ar fi mereu gri: îl arătăm doar când chiar are ce copia (venit din bula ⋯). */}
             {(hasSel || !lastPointerTouch.current) && (
-              <MoreItem disabled={!hasSel} onClick={() => { copySelection(); setCtxMenu(null) }}>
+              <MoreItem disabled={!hasSel} onClick={() => { void copySelection(); setCtxMenu(null) }}>
                 <CopyIcon /> {t('session.copy')}
               </MoreItem>
             )}
             {isLive && (
-              <MoreItem onClick={() => { paste(); setCtxMenu(null) }}>
+              <MoreItem onClick={() => { void paste(); setCtxMenu(null) }}>
                 <PasteIcon /> {t('session.pasteMenu')}
               </MoreItem>
             )}

@@ -180,7 +180,7 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
 
   const copyRedirect = () => {
     if (!cloud) return
-    copyText(cloud.redirect_uri).then((ok) => {
+    void copyText(cloud.redirect_uri).then((ok) => {
       if (!ok) return
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
@@ -355,9 +355,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
   // vizitarea secţiunii Backup „vede" notificarea (punctul de pe rotiţa Setări) → o stinge la
   // montarea tab-ului, nu doar la descărcare (altfel rămânea aprinsă dacă ştergeai fără să descarci)
   useEffect(() => {
-    loadBackup()
-    markBackupSeen()
-    loadCloud()
+    void loadBackup()
+    void markBackupSeen()
+    void loadCloud()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

@@ -79,7 +79,7 @@ export default function DockerPanel(props: {
     </div>
   )
 
-  useEffect(() => { load(kind) }, [kind, load])
+  useEffect(() => { void load(kind) }, [kind, load])
 
   async function action(id: string, act: 'start' | 'stop' | 'restart', name?: string) {
     // stop/restart opresc un container VIU (şi ce rulează în el) — confirmare care numeşte

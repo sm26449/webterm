@@ -167,7 +167,7 @@ export default function NotificationsTab() {
     }
   }
 
-  useEffect(() => { loadSmtp(); loadThresholds(); loadPrefs() }, [])
+  useEffect(() => { void loadSmtp(); void loadThresholds(); loadPrefs() }, [])
 
   return (
     <div>

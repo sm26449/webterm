@@ -122,8 +122,8 @@ export default function HostOverview(props: {
       .catch((e) => {
         if (alive) setSessLoad((cur) => settleLoad(cur, hostKey, { ok: false, error: errText(e, t) || t('common.loadFailed') }))
       })
-    load()
-    const iv = setInterval(() => { if (!document.hidden) load() }, 6000)
+    void load()
+    const iv = setInterval(() => { if (!document.hidden) void load() }, 6000)
     return () => { alive = false; clearInterval(iv) }
   }, [hostKey, sessReload, t])
   const sessState = loadFor(sessLoad, hostKey)
@@ -570,8 +570,8 @@ function ThumbPreview({ sid, live }: { sid: string; live: boolean }) {
         setText(lines.slice(-14).join('\n'))
       } catch { /* ignoră */ }
     }
-    load()
-    const timer = live ? setInterval(() => { if (!document.hidden) load() }, 3000) : undefined
+    void load()
+    const timer = live ? setInterval(() => { if (!document.hidden) void load() }, 3000) : undefined
     return () => { cancelled = true; if (timer) clearInterval(timer) }
   }, [sid, live])
 

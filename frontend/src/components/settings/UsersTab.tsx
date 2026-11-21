@@ -63,7 +63,7 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const loadSso = () => api<SsoState>('/api/settings/oidc-roles').then((r) => { setSso(r); setSsoErr('') })
     .catch((e) => { setSso(null); setSsoErr(errText(e, t) || t('common.loadFailed')) })
   useEffect(() => {
-    loadUsers()
+    void loadUsers()
     api<Host[]>('/api/hosts').then(setHosts).catch((e) => setLoadErr(t('common.loadFailed') + ' ' + errText(e, t)))
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (manage || rolesManage) void loadCatalogue() }, [manage, rolesManage])   // eslint-disable-line react-hooks/exhaustive-deps
@@ -86,7 +86,7 @@ export default function UsersTab(props: { jump?: { id: string; n: number } | nul
   const withSecondFactor = <T,>(send: (extra: object) => Promise<T>) => withSecondFactorT(t, send)
   const hostName = (id: number) => hosts.find((h) => h.id === id)?.name
   const chip = (b: Binding) => t('roles.chip', { role: roleLabel(b, t), scope: scopeLabel(b, hostName, t) })
-  const doneAt = (at: Where) => (text: string) => { setNote({ at, msg: text, err: '' }); loadPerms() }
+  const doneAt = (at: Where) => (text: string) => { setNote({ at, msg: text, err: '' }); void loadPerms() }
   const failAt = (at: Where) => (e: unknown) => { setNote({ at, msg: '', err: errText(e, t) || String(e) }) }
   const status = (at: Where) => <ActionStatus msg={note.at === at ? note.msg : ''} err={note.at === at ? note.err : ''} />
   const reloadAccounts = async () => { await Promise.all([loadUsers(), catalogue ? loadCatalogue() : Promise.resolve()]) }

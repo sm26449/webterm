@@ -52,7 +52,7 @@ export default function PreferencesTab() {
   useEffect(() => {
     if (!pushSupported()) return
     pushStatus().then(setPushSt).catch(() => { /* push nedisponibil pe server */ })
-    thisDeviceSubscribed().then(setPushHere)
+    void thisDeviceSubscribed().then(setPushHere)
   }, [])
   async function togglePush(on: boolean) {
     setPushErr(''); setPushMsg(''); setPushBusy(true)

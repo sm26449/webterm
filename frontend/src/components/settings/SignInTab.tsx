@@ -68,7 +68,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
       setDevErr(errText(e, t) || t('settings.deviceRevokeFailed'))
     } finally {
       setRevoking(null)
-      loadDevices()
+      void loadDevices()
     }
   }
 
@@ -106,9 +106,9 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
 
   // tot ce ţine de autentificare se încarcă la montarea tab-ului (= la deschiderea secţiunii)
   useEffect(() => {
-    load()
-    loadTotp()
-    loadDevices()
+    void load()
+    void loadTotp()
+    void loadDevices()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -210,7 +210,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
         body: JSON.stringify({ credential, name: name.trim() || 'passkey', password, ...extra }),
       }))
       setPkMsg(t('settings.passkeyAdded'))
-      load()
+      void load()
     } catch (err) {
       if (err instanceof Error && err.name !== 'NotAllowedError') setSecurityErr(err.message)
     } finally {
@@ -256,7 +256,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
     } finally {
       setRemovingPk(null)
     }
-    load()
+    void load()
   }
 
   return (
@@ -269,7 +269,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
           <div className="mt-2 text-xs text-slate-500">{t('settings.loading')}</div>
         ) : devicesErr !== null ? (
           <div className="mt-2 rounded-md ring-1 ring-ink-700">
-            <LoadFailed compact message={devicesErr} onRetry={() => { setDevices(null); loadDevices() }} />
+            <LoadFailed compact message={devicesErr} onRetry={() => { setDevices(null); void loadDevices() }} />
           </div>
         ) : devices.length === 0 ? (
           <div className="mt-2 text-xs text-slate-500">{t('settings.devicesNone')}</div>
@@ -340,7 +340,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
           {pkState.status === 'error' && (
             <div className="rounded-md ring-1 ring-ink-700">
               <ErrorState compact title={t('settings.passkeysLoadFailed')} message={pkState.error}
-                onRetry={() => { setPkState({ status: 'loading' }); load() }} />
+                onRetry={() => { setPkState({ status: 'loading' }); void load() }} />
             </div>
           )}
           {pkState.status !== 'error' && passkeys.map((p) => (
@@ -384,7 +384,7 @@ export default function SignInTab(props: { webauthnAvailable: boolean }) {
         {totpState.status === 'error' && (
           <div className="mt-2 rounded-md ring-1 ring-ink-700">
             <ErrorState compact title={t('settings.totp.loadFailed')} message={totpState.error}
-              onRetry={() => { setTotpState({ status: 'loading' }); loadTotp() }} />
+              onRetry={() => { setTotpState({ status: 'loading' }); void loadTotp() }} />
           </div>
         )}
 

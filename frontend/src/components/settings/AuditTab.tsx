@@ -57,7 +57,7 @@ export default function AuditTab() {
   }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadAudit(true) }, [])   // încarcă la deschiderea tab-ului
+  useEffect(() => { void loadAudit(true) }, [])   // încarcă la deschiderea tab-ului
 
   return (
     <div>
@@ -69,7 +69,7 @@ export default function AuditTab() {
           <input
             value={auditQ}
             onChange={(e) => setAuditQ(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') loadAudit(true) }}
+            onKeyDown={(e) => { if (e.key === 'Enter') void loadAudit(true) }}
             placeholder={t('settings.audit.searchPlaceholder')}
             aria-label={t('settings.audit.searchAria')}
             spellCheck={false}

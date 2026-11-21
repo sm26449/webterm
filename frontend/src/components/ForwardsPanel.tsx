@@ -68,7 +68,7 @@ export default function ForwardsPanel(props: {
     }
   }, [props.host.id, probe, t])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   function resetForm() {
     setFLabel(''); setFPort(''); setFDesc(''); setFHost('127.0.0.1'); setFScheme('http'); setFApp('')
@@ -136,7 +136,7 @@ export default function ForwardsPanel(props: {
         })
       }
       closeForm()
-      load()
+      void load()
     } catch (e) {
       setError(errText(e, t) || t('forwards.error.generic'))
     } finally {
@@ -162,7 +162,7 @@ export default function ForwardsPanel(props: {
     try {
       await withStepup(props.host.id, () =>
         api(`/api/forwards/${f.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !f.enabled }) }))
-      load()
+      void load()
     } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
   }
 
@@ -170,7 +170,7 @@ export default function ForwardsPanel(props: {
     setConfirmDel(null)
     try {
       await withStepup(props.host.id, () => api(`/api/forwards/${f.id}`, { method: 'DELETE' }))
-      load()
+      void load()
     } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
   }
 
@@ -185,7 +185,7 @@ export default function ForwardsPanel(props: {
       const next = f.app_type ? '' : demotedType.current[f.id] || 'custom'
       await withStepup(f.host_id, () => api(`/api/forwards/${f.id}`,
         { method: 'PATCH', body: JSON.stringify({ app_type: next }) }))
-      load()
+      void load()
     } catch (e) { setError(errText(e, t) || t('forwards.error.generic')) }
   }
   const APP_COLOR: Record<string, string> = {
@@ -195,7 +195,7 @@ export default function ForwardsPanel(props: {
   }
 
   function copyLink(f: PortForward) {
-    copyText(f.url).then((ok) => {
+    void copyText(f.url).then((ok) => {
       if (!ok) return
       setCopied(f.id); setTimeout(() => setCopied((c) => (c === f.id ? null : c)), 1500)
     })

@@ -64,7 +64,7 @@ export default function ServicesPanel(props: {
     }
   }, [props.host.id, failedOnly, viewKey, t])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   async function act(unit: string, action: Action) {
     // stop/restart taie un serviciu VIU pe host (sshd, nginx, baza de date) dintr-un singur

@@ -112,7 +112,7 @@ export default function ToolboxPanel(props: {
   // eşecul de încărcare e o stare a lui, NU lista goală (altfel „n-ai nimic" minte)
   const [histErr, setHistErr] = useState<string | null>(null)
   const [connErr, setConnErr] = useState<string | null>(null)
-  const copy = (cmd: string) => { copyText(cmd) }         // copyText afişează toast-ul standard
+  const copy = (cmd: string) => { void copyText(cmd) }         // copyText afişează toast-ul standard
 
   // ── SSH keys (chei de deploy host→host): privata trăieşte pe hostul sursă; aici doar
   //    materialul public + graful sursă→ţintă, cu revoke per-muchie. Vezi audit v54 (H-1..H-4).
@@ -144,7 +144,7 @@ export default function ToolboxPanel(props: {
       setError(errText(e, t)); setDkFailed(true)
     }
   }, [props.host.id, t])
-  useEffect(() => { if (tab === 'sshkeys' && dk === null) loadDk() }, [tab, dk, loadDk])
+  useEffect(() => { if (tab === 'sshkeys' && dk === null) void loadDk() }, [tab, dk, loadDk])
 
   // garda anti-pivot (409 sshkey.pivot) cere un DA explicit → dialog propriu + retry cu confirmed
   const pivotOk = () => confirm({ title: t('toolbox.ssh.pivotTitle'), message: t('toolbox.ssh.pivotConfirm'), danger: true })
@@ -193,7 +193,7 @@ export default function ToolboxPanel(props: {
   const dkRevoke = async (d: DeployKeyDeployment) => {
     if (!(await confirm({ title: `${t('toolbox.ssh.revoke')} — ${d.target_name}`,
       message: t('toolbox.ssh.confirmRevoke', { target: d.target_name }), confirmLabel: t('toolbox.ssh.revoke'), danger: true }))) return
-    dkRun('revoke' + d.id, () =>
+    void dkRun('revoke' + d.id, () =>
       api(`/api/hosts/${d.target_host_id}/deploy-key/revoke`, { method: 'POST', body: JSON.stringify({ key_host_id: props.host.id }) }))
   }
   const dkTest = (d: DeployKeyDeployment) => dkRun('test' + d.id, async () => {
@@ -209,7 +209,7 @@ export default function ToolboxPanel(props: {
   const dkRotate = async () => {
     if (!(await confirm({ title: t('toolbox.ssh.rotate'), message: t('toolbox.ssh.confirmRotate'),
       confirmLabel: t('toolbox.ssh.rotate'), danger: true }))) return
-    dkRun('rotate', async () => {
+    void dkRun('rotate', async () => {
       const r = await api<{ results: DkResult[]; left_with_old_key?: DkLeft[] }>(
         `/api/hosts/${props.host.id}/deploy-key/rotate`, { method: 'POST', body: JSON.stringify({}) })
       setDkResults({ kind: 'rotate', items: r.results ?? [], leftOld: r.left_with_old_key ?? [] })
@@ -218,7 +218,7 @@ export default function ToolboxPanel(props: {
   const dkDelete = async () => {
     if (!(await confirm({ title: t('toolbox.ssh.deleteKey'), message: t('toolbox.ssh.confirmDeleteKey'),
       confirmLabel: t('toolbox.delete'), danger: true }))) return
-    dkRun('delete', () => api(`/api/hosts/${props.host.id}/deploy-key`, { method: 'DELETE' }))
+    void dkRun('delete', () => api(`/api/hosts/${props.host.id}/deploy-key`, { method: 'DELETE' }))
   }
   const DK_STATUS: Record<DeployKeyDeployment['status'], string> = {
     deployed: 'bg-emerald-500', edited: 'bg-amber-400', missing: 'bg-rose-500', revoked: 'bg-slate-600',
@@ -230,7 +230,7 @@ export default function ToolboxPanel(props: {
       setHistErr(null); setHist(r)
     } catch (e) { setHistErr(errText(e, t)); setHist([]) }
   }, [props.host.id, t])
-  useEffect(() => { if (tab === 'history' && hist === null) loadHist() }, [tab, hist, loadHist])
+  useEffect(() => { if (tab === 'history' && hist === null) void loadHist() }, [tab, hist, loadHist])
 
   // Comenzi proprii în Library: NU un store nou — refolosim snippet-urile existente
   // (/api/snippets, aceleaşi pe care le vezi în palette/sidebar). „Adaugă" = creează un snippet.
@@ -240,7 +240,7 @@ export default function ToolboxPanel(props: {
   const loadSnips = useCallback(async () => {
     try { setSnips(await api<Snippet[]>('/api/snippets')) } catch { setSnips([]) }
   }, [])
-  useEffect(() => { if (tab === 'library' && snips === null) loadSnips() }, [tab, snips, loadSnips])
+  useEffect(() => { if (tab === 'library' && snips === null) void loadSnips() }, [tab, snips, loadSnips])
   async function saveSnip(d: { id?: number; title: string; body: string; tags: string }) {
     try {
       await api(`/api/snippets${d.id ? '/' + d.id : ''}`, { method: d.id ? 'PATCH' : 'POST',
@@ -282,7 +282,7 @@ export default function ToolboxPanel(props: {
       setConnErr(errText(e, t) || (e instanceof ApiError ? e.message : t('toolbox.error'))); setRows([])
     }
   }, [props.host.id, t])
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   async function save(d: Draft) {
     const body = { label: d.label, engine: d.engine, target_host: d.target_host,
@@ -353,7 +353,7 @@ export default function ToolboxPanel(props: {
           {tab === 'connections' && (rows === null ? (
             <div className="p-4 text-center text-xs text-slate-500">{t('toolbox.loading')}</div>
           ) : connErr !== null ? (
-            <LoadFailed message={connErr} onRetry={() => { setRows(null); load() }} />
+            <LoadFailed message={connErr} onRetry={() => { setRows(null); void load() }} />
           ) : rows.length === 0 ? (
             <div className="p-6 text-center text-xs text-slate-500">
               <span className="inline-flex items-center gap-2">{t('toolbox.empty')}<HelpTip id="toolbox" /></span><br />

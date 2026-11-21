@@ -210,7 +210,7 @@ export default function FileEditor(props: {
       if (!(e.metaKey || e.ctrlKey) || (e.key !== 's' && e.key !== 'S')) return
       if (host.current && e.target instanceof Node && host.current.contains(e.target)) return
       e.preventDefault()
-      saveRef.current(false)
+      void saveRef.current(false)   // void: save îşi arată singură eroarea
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -270,7 +270,7 @@ export default function FileEditor(props: {
             className="flex items-center gap-3 border-b border-ink-800 bg-amber-500/10 px-4 py-2 text-xs">
             <span id="editor-conflict-msg" className="wt-warn">{t('files.conflictMsg')}</span>
             {/* amber-700, nu amber-600: alb pe amber-600 = 3,19:1 (sub AA); pe amber-700 = 4,7:1 */}
-            <button onClick={() => { setConflict(false); save(true) }} className="rounded-md bg-amber-700 px-2 py-0.5 font-medium text-white hover:bg-amber-800">{t('files.overwriteAnyway')}</button>
+            <button onClick={() => { setConflict(false); void save(true) }} className="rounded-md bg-amber-700 px-2 py-0.5 font-medium text-white hover:bg-amber-800">{t('files.overwriteAnyway')}</button>
             {/* focusul iniţial pe acţiunea SIGURĂ (APG alertdialog): un Enter din inerţie nu suprascrie */}
             <button autoFocus onClick={() => setConflict(false)} className="text-slate-400 hover:underline">{t('files.cancel')}</button>
           </div>

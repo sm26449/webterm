@@ -218,7 +218,7 @@ export default function AddHostModal(props: {
         .then((r) => { if (alive) setEvents(r.events.slice(0, 6)) })
         // 403 (step-up pe host cu 2FA) sau reţea: panoul rămâne util şi fără jurnal
         .catch(() => { if (alive) setEvents((e) => e ?? []) })
-    load()
+    void load()   // void: load are propriul .catch (jurnal opţional)
     const iv = setInterval(load, 10_000)
     return () => { alive = false; clearInterval(iv) }
   }, [stuck, created, online])
@@ -362,7 +362,7 @@ export default function AddHostModal(props: {
     ? `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${pendingKey.pub}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`
     : ''
   function copyKey(what: 'pub' | 'cmd') {
-    copyText(what === 'pub' ? pendingKey?.pub ?? '' : installCmd).then((okc) => {
+    void copyText(what === 'pub' ? pendingKey?.pub ?? '' : installCmd).then((okc) => {
       if (okc) { setKeyCopied(what); setTimeout(() => setKeyCopied(''), 1500) }
     })
   }

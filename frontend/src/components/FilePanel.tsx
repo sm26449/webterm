@@ -370,7 +370,7 @@ export default function FilePanel(props: {
   // nu în ~. Pe agenți vechi fără op-ul ăsta, .catch cade curat pe ~.
   const loadSessionCwd = useCallback(() => {
     const known = getCwd(props.sessionId)
-    if (known) { load(known); return }
+    if (known) { void load(known); return }
     api<{ cwd: string }>(`/api/hosts/${props.host.id}/fs/cwd?sid=${encodeURIComponent(props.sessionId)}`)
       .then((r) => load(r.cwd || '~'))
       .catch(() => load('~'))
@@ -382,9 +382,9 @@ export default function FilePanel(props: {
     if (!isAgent) return
     // `revealPath` (meniul contextual al terminalului) are prioritate şi opreşte follow-ul — vrem
     // panoul FIX la calea cerută, nu tras înapoi la cwd de primul `cd`.
-    if (props.revealPath) { setFollow(false); load(props.revealPath); return }
+    if (props.revealPath) { setFollow(false); void load(props.revealPath); return }
     const wanted = takeFilesDir(props.host.id)
-    if (wanted) { setFollow(false); load(wanted) } else loadSessionCwd()
+    if (wanted) { setFollow(false); void load(wanted) } else loadSessionCwd()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAgent])
   // `initialAction` („Fişier/Dosar nou" din submeniul terminalului): odată ce directorul s-a
@@ -404,7 +404,7 @@ export default function FilePanel(props: {
       if (d.hostId !== props.host.id) return
       takeFilesDir(props.host.id)
       setFollow(false)
-      load(d.dir)
+      void load(d.dir)
     }
     window.addEventListener('wt-open-files', onOpen)
     return () => window.removeEventListener('wt-open-files', onOpen)
@@ -429,7 +429,7 @@ export default function FilePanel(props: {
     if (!isAgent) return
     const onCwd = (e: Event) => {
       const d = (e as CustomEvent<{ sid: string; cwd: string }>).detail
-      if (follow && d.sid === props.sessionId) load(d.cwd)
+      if (follow && d.sid === props.sessionId) void load(d.cwd)
     }
     window.addEventListener('wt-cwd', onCwd)
     return () => window.removeEventListener('wt-cwd', onCwd)
@@ -810,7 +810,7 @@ export default function FilePanel(props: {
     const existing = new Set(listing.entries.map((e) => e.name))
     const collides = items.filter((it) => !it.rel.includes('/') && existing.has(it.rel))
     if (collides.length) setOverwrite({ items, count: collides.length })
-    else reallyUpload(items)
+    else void reallyUpload(items)
   }
 
   async function reallyUpload(items: UpItem[], baseDir?: string) {
@@ -1452,7 +1452,7 @@ export default function FilePanel(props: {
               <FolderIcon />
               <input autoFocus value={newFolder} onChange={(e) => setNewFolder(e.target.value)} aria-label={t('files.newDir')}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') doMkdir(newFolder)
+                  if (e.key === 'Enter') void doMkdir(newFolder)
                   if (e.key === 'Escape') { e.stopPropagation(); setNewFolder(null); refocus() }
                 }}
                 onBlur={() => doMkdir(newFolder)} placeholder={t('files.newDirPh')}
@@ -1471,7 +1471,7 @@ export default function FilePanel(props: {
                 <input autoFocus value={newFile} aria-label={t('files.newFilePh')}
                   onChange={(e) => { setNewFile(e.target.value); if (newFileErr) setNewFileErr('') }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') doNewFile(newFile, 'empty')
+                    if (e.key === 'Enter') void doNewFile(newFile, 'empty')
                     if (e.key === 'Escape') { e.stopPropagation(); setNewFile(null); refocus() }
                   }}
                   placeholder={t('files.newFilePh')}
@@ -1554,7 +1554,7 @@ export default function FilePanel(props: {
                 <input autoFocus defaultValue={e.name} aria-label={t('files.renameAria', { name: e.name })}
                   // numele fără extensie selectat (ca în orice manager de fişiere): tastezi direct noul nume
                   onFocus={(ev) => { const d = e.dir ? -1 : e.name.lastIndexOf('.'); ev.target.setSelectionRange(0, d > 0 ? d : e.name.length) }}
-                  onKeyDown={(ev) => { if (ev.key === 'Enter') doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null); refocus(e.name) } }}
+                  onKeyDown={(ev) => { if (ev.key === 'Enter') void doRename(e, (ev.target as HTMLInputElement).value); if (ev.key === 'Escape') { ev.stopPropagation(); setRenaming(null); refocus(e.name) } }}
                   onBlur={(ev) => doRename(e, ev.target.value)}
                   className="min-w-0 flex-1 rounded-md bg-ink-800 px-1 py-0.5 font-mono text-2xs text-slate-100 ring-1 ring-sky-500" />
               ) : (

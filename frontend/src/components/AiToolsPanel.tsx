@@ -121,7 +121,7 @@ export default function AiToolsPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hid, isAgent, scope, project, listDir, failMsg])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   function applyProject() {
     const p = projInput.trim().replace(/\/+$/, '') || ''
@@ -230,7 +230,7 @@ export default function AiToolsPanel(props: {
         {form?.kind === kind && (
           // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Escape închide formularul inline fără să închidă drawer-ul (vezi useDrawer)
           <form className="mt-2 grid gap-2 rounded-md border border-sky-700/50 bg-ink-800/60 p-3"
-            onSubmit={(e) => { e.preventDefault(); submitForm() }}
+            onSubmit={(e) => { e.preventDefault(); void submitForm() }}
             onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setForm(null) } }}>
             <label className="text-2xs text-slate-400">
               {t('ai.name')}
@@ -339,7 +339,7 @@ export default function AiToolsPanel(props: {
       {editing && (
         <Suspense fallback={null}>
           <FileEditor hostId={hid} path={editing.path} name={editing.name}
-            onClose={() => setEditing(null)} onSaved={() => { load() }} />
+            onClose={() => setEditing(null)} onSaved={() => { void load() }} />
         </Suspense>
       )}
     </>

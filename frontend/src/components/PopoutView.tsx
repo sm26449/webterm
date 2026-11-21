@@ -59,9 +59,9 @@ export default function PopoutView(props: { sid: string }) {
         /* retry on next tick */
       }
     }
-    load()
+    void load()
     // `t` umbrea funcţia de traducere din componentă
-    const timer = setInterval(() => { if (!document.hidden) load() }, 5000)
+    const timer = setInterval(() => { if (!document.hidden) void load() }, 5000)
     return () => {
       active = false
       clearInterval(timer)

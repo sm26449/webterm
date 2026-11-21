@@ -115,10 +115,10 @@ export function startPolling(tick: () => Promise<number | null>, doc: Visibility
     if (delay === null) { ended = true; return }
     if (!doc.hidden) timer = setTimeout(run, delay)
   }
-  const onVis = () => { if (doc.hidden) clear(); else if (timer === null) run() }
+  const onVis = () => { if (doc.hidden) clear(); else if (timer === null) void run() }
 
   doc.addEventListener('visibilitychange', onVis)
-  run()
+  void run()
   return () => {
     stopped = true
     clear()

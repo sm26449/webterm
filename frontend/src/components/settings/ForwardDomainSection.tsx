@@ -64,7 +64,7 @@ export default function ForwardDomainSection() {
           <Button variant="primary" disabled={fwdBusy} onClick={saveFwd} className="shrink-0">
             {t('settings.save')}
           </Button>
-          <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); loadFwd(true) }} className="shrink-0">
+          <Button variant="secondary" disabled={fwdBusy} onClick={() => { setFwdMsg(''); setFwdErr(''); void loadFwd(true) }} className="shrink-0">
             {t('settings.recheck')}
           </Button>
         </div>

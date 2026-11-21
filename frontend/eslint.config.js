@@ -47,6 +47,13 @@ export default tseslint.config(
     languageOptions: {
       ecmaVersion: 2022,
       globals: globals.browser,
+      // tipuri pentru regulile care au nevoie de ele (no-floating-promises, 3.7.1)
+      // configurările Vite/Vitest stau în afara `include: ["src"]` din tsconfig: fără proiectul
+      // implicit, `eslint .` le raporta ca eroare de parsare (nu le găsea serviciul de proiect)
+      parserOptions: {
+        projectService: { allowDefaultProject: ['vite.config.ts', 'vitest.config.ts'] },
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { 'react-hooks': reactHooks, 'jsx-a11y': jsxA11y },
     rules: {
@@ -66,6 +73,11 @@ export default tseslint.config(
       // Într-un emulator de terminal, `\x1b` în regex e materia primă, nu o greşeală:
       // orice curăţare de secvenţe ANSI îl conţine.
       'no-control-regex': 'off',
+      // O promisiune lăsată în aer (fără await/.catch/void) ascundea erorile: o reîncărcare eşuată
+      // după login lăsa ecranul neschimbat, fără niciun semn (triaj SonarQube S9383, 2026-11-20).
+      // `void` = „am decis: eroarea e tratată în altă parte" (api() şi load-urile îşi pun singure
+      // starea de eroare); altfel .catch care o arată.
+      '@typescript-eslint/no-floating-promises': ['error', { ignoreVoid: true, ignoreIIFE: true }],
     },
   },
 )
