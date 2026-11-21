@@ -174,6 +174,17 @@ async def _target_users(scope: str, user_id, user_email, host_id=None) -> list:
     mai bine vizibil administratorilor decât pierdut."""
     from . import authz
     if scope == "account":
+        if isinstance(user_id, (list, tuple)):
+            # 3.7.1: un eveniment de cont pentru MAI MULTE conturi (sesiune fără proprietar → cei cu
+            # session.manage): o singură alertă, deci un singur email/webhook spre cutia comună
+            out = []
+            for uid in user_id:
+                row = await db.fetchone("SELECT id FROM users WHERE id=?", int(uid))
+                if row and row["id"] not in out:
+                    out.append(row["id"])
+            if out:
+                return out
+            user_id = None
         if user_id:
             row = await db.fetchone("SELECT id FROM users WHERE id=?", int(user_id))
             if row:

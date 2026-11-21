@@ -76,7 +76,13 @@ async def load_policy(fresh: bool = False) -> dict:
 
 async def save_policy(pol: dict) -> dict:
     pol = sanitize(pol)
+    prev = await load_policy(fresh=True)
     await db.set_setting(SETTING_KEY, json.dumps(pol))
+    if pol["autoclose"] and not prev["autoclose"]:
+        # Review 3.7.1: oprit apoi repornit, un termen vechi (deja trecut) închidea sesiunea în 10 minute,
+        # deşi omul văzuse ultima dată „nimic programat". Ştergem termenele: sweep-ul trimite o notificare
+        # nouă, cu termenul de acum, înainte de orice închidere.
+        await db.execute("UPDATE sessions SET idle_close_after=NULL WHERE idle_close_after IS NOT NULL")
     _cache["at"], _cache["policy"] = time.time(), pol
     return dict(pol)
 
@@ -172,9 +178,9 @@ async def _notify(row, hub, pol: dict, uids: list, now: float) -> bool:
         return False
     hub.idle_pending = True
     host = await _host_name(row["host_id"])
-    for uid in uids:
-        email_alerts.notify_session_idle(uid, row["title"] or "", host, row["host_id"], row["id"],
-                                         pol["notify_days"], pol["grace_days"] if close_after else 0)
+    # toţi destinatarii într-o singură alertă (review 3.7.1: câte un email identic per cont)
+    email_alerts.notify_session_idle(list(uids), row["title"] or "", host, row["host_id"], row["id"],
+                                     pol["notify_days"], pol["grace_days"] if close_after else 0)
     return True
 
 
@@ -193,12 +199,27 @@ async def _close(row, hub, pol: dict, uids: list, now: float) -> bool:
         return False
     if hub.activity_at() > float(fresh["idle_notified_at"]):
         return False
+    # Sursa se ia SINCRON şi verificările se refac chiar înainte de kill, fără niciun await între ele
+    # (review 3.7.1: `core.kill_session` citea întâi rândul din DB, iar un browser care se ataşa în
+    # acel await îşi vedea sesiunea închisă imediat după ataşare — exact ce INV-13 interzice).
+    source = core.session_sources.get(sid) or core.source_for(row["host_id"])
+    if source is None:
+        return False                          # host offline: altă dată
+    if hub.closed or not hub.attached or hub.clients or not hub.idle_pending:
+        return False
+    if hub.activity_at() > float(fresh["idle_notified_at"]):
+        return False
     hub.exit_reason = "idle"
     try:
-        await core.kill_session(sid)
+        await source.kill(sid)
     except Exception as e:                    # noqa: BLE001 — host plecat, timeout: altă dată
         hub.exit_reason = "exited"
         log.info("idle session %s not closed: %s", sid, e)
+        # rezultatul e necunoscut (agentul poate să fi închis-o totuşi): urmă în audit, ca o închidere
+        # survenită după timeout să nu rămână fără explicaţie
+        await audit.record(now, "system:idle-sessions", "-", "IDLE", "/api/sessions/%s/kill" % sid, 504,
+                           ("idle close of \"%s\" not confirmed (%s); the session may still be open"
+                            % (row["title"] or "", type(e).__name__))[:480], host_id=row["host_id"])
         return False
     idle_days = int((now - float(fresh["idle_notified_at"])) / DAY) + pol["notify_days"]
     host = await _host_name(row["host_id"])
@@ -206,8 +227,7 @@ async def _close(row, hub, pol: dict, uids: list, now: float) -> bool:
                        ("closed idle session \"%s\" (unused for about %d days, notice sent %d day(s) "
                         "earlier)" % (row["title"] or "", idle_days, pol["grace_days"]))[:480],
                        host_id=row["host_id"])
-    for uid in uids:
-        email_alerts.notify_session_idle_closed(uid, row["title"] or "", host, row["host_id"], sid, idle_days)
+    email_alerts.notify_session_idle_closed(list(uids), row["title"] or "", host, row["host_id"], sid, idle_days)
     return True
 
 
@@ -248,22 +268,24 @@ async def sweep(now: Optional[float] = None) -> dict:
                 continue
             # notificare: prima, sau a doua („se va închide…") când închiderea a fost pornită după prima
             if not notified or (pol["autoclose"] and not row["idle_close_after"]):
+                actions += 1                  # căutarea destinatarilor costă şi ea (review 3.7.1): în buget
                 uids = await recipients(row)
                 if not uids:
                     continue                  # nimeni avertizat → nimic programat, nimic închis
                 if await _notify(row, hub, pol, uids, now):
                     stats["notified"] += 1
-                    actions += 1
                 continue
             deadline = close_deadline(row, pol)
             if deadline is None or now < deadline:
                 continue
             if idle_for < pol["notify_days"] * DAY + (deadline - float(notified)):
                 continue                      # perioada întreagă (prag + grație) fără nicio folosire
+            if actions >= MAX_ACTIONS:
+                continue
+            actions += 1
             uids = await recipients(row)
             if not uids:
                 continue                      # nu mai ştim cui să-i spunem: nu închidem
-            actions += 1
             if await _close(row, hub, pol, uids, now):
                 stats["closed"] += 1
         except Exception:                     # noqa: BLE001 — o sesiune ciudată nu opreşte sweep-ul

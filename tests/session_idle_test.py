@@ -329,6 +329,63 @@ async def body():
     check("notificarea oprită → nicio notificare, nicio închidere",
           st["notified"] == 0 and st["closed"] == 0 and s12 not in src.killed, str(st))
 
+    # ── review 3.7.1 ──
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2})
+    from app import email_alerts as _ea
+    # 1) cursa ataşării: un browser care se ataşează exact cât _close îşi citeşte rândul → nu se închide
+    s13, h13 = await new_session(hid, alice, days_old=20)
+    t0 = time.time()
+    await idlesess.sweep(now=t0)
+    check("cursă: notificarea a plecat", (await srow(s13))["idle_notified_at"] is not None)
+    real_fetchone = db.fetchone
+    joined = []
+
+    async def attach_during_read(sql, *args):
+        r = await real_fetchone(sql, *args)
+        if sql.startswith("SELECT * FROM sessions WHERE id=?") and args and args[0] == s13 and not joined:
+            h13.clients.add(fake_client())       # ataşare „în timpul" citirii
+            joined.append(1)
+        return r
+    db.fetchone = attach_during_read
+    try:
+        await idlesess.sweep(now=t0 + 3 * DAY)
+    finally:
+        db.fetchone = real_fetchone
+    check("cursă: un client ataşat în timpul ultimei citiri → sesiunea NU se închide",
+          joined and s13 not in src.killed and (await srow(s13))["state"] == "live")
+    h13.clients.clear()
+
+    # 2) închiderea oprită apoi repornită: termenul vechi nu mai închide; pleacă o notificare nouă
+    s14, h14 = await new_session(hid, alice, days_old=20)
+    t1 = time.time()
+    await idlesess.sweep(now=t1)
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": False, "grace_days": 2})
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
+                                                         "autoclose": True, "grace_days": 2})
+    check("repornită: termenul vechi a fost şters", (await srow(s14))["idle_close_after"] is None)
+    await idlesess.sweep(now=t1 + 30 * DAY)
+    r14 = await srow(s14)
+    check("…prima trecere trimite o notificare nouă cu termen, NU închide",
+          s14 not in src.killed and r14["idle_close_after"] is not None and r14["state"] == "live")
+
+    # 3) fără proprietar: o singură alertă (un singur email/webhook) pentru toţi destinatarii
+    fired = []
+    real_fire = _ea._fire
+
+    def count_fire(*a, **k):
+        fired.append(k.get("user_id"))
+        return real_fire(*a, **k)
+    _ea._fire = count_fire
+    try:
+        s15, _ = await new_session(hid, None, days_old=20)
+        await idlesess.sweep(now=time.time())
+    finally:
+        _ea._fire = real_fire
+    check("fără proprietar → un singur apel de alertă, cu toţi destinatarii",
+          len(fired) == 1 and isinstance(fired[0], list) and len(fired[0]) >= 2, str(fired))
+
     for c in (owner, ca, cb, cadm):
         await c.aclose()
 

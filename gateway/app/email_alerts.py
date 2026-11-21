@@ -453,7 +453,7 @@ def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: 
                   "masking": bool(redact), "ip": ip})
 
 
-def notify_session_idle(user_id: int, title: str, host_name: str, host_id, sid: str, days: int,
+def notify_session_idle(user_id, title: str, host_name: str, host_id, sid: str, days: int,
                         grace_days: int) -> None:
     """Igiena sesiunilor (3.7.1, idlesess.py): o sesiune n-a mai fost folosită `days` zile. Doar
     proprietarului (sau, fără proprietar, celor cu session.manage — câte un apel per cont). `grace_days`
@@ -473,7 +473,7 @@ def notify_session_idle(user_id: int, title: str, host_name: str, host_id, sid: 
                   "grace": int(grace_days), "sid": sid})
 
 
-def notify_session_idle_closed(user_id: int, title: str, host_name: str, host_id, sid: str,
+def notify_session_idle_closed(user_id, title: str, host_name: str, host_id, sid: str,
                                days: int) -> None:
     """Sesiunea notificată a fost închisă automat (3.7.1). Transcriptul rămâne în istoric."""
     _fire("An unused session was closed automatically",
