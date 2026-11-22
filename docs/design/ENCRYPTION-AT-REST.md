@@ -1,6 +1,6 @@
 # Encryption at rest (design, 3.8)
 
-Status: **proposal v3**, revised after two independent reviews (Codex, 2026-11-22; reports kept
+Status: **proposal v4**, revised after three independent reviews (Codex, 2026-11-22; reports kept
 locally in `.audit/`). §12 is normative and wins over any earlier wording. No code yet. Owner decision 2026-11-22: session recordings and everything
 about clients and users are encrypted at rest, on every installation.
 
@@ -54,8 +54,10 @@ exports, proxy logs, the backup provider's own copies).
 
 ```
 Master key  MK (32 B)                      key file / env / (legacy) volume
- ├─ KWK  = HKDF(MK, "wt/kwk/v1")           wraps every data key below (AES-256-GCM, unique nonce, AAD)
- ├─ SNK  = HKDF(MK, "wt/snapshot/v1")      local snapshot containers (§6)
+ ├─ K_man = HKDF(MK, "wt/v1/manifest")    authenticates keys.wtk (§12.2)
+ ├─ K_mw  = HKDF(MK, "wt/v1/mkwrap")       wraps the stable keys below (AES-KWP, §12.2)
+ ├─ KWK   random 32 B, stable              wraps the data keys and per-session RKs (AES-KWP)
+ ├─ SNK   random 32 B, stable              local snapshot containers (§6, §12.6)
  └─ keyring (in the key manifest file, not in the DB — §12.2):
      ├─ DBK       random 32 B              SQLCipher key (phase 2)
      ├─ FK_legacy = today's data/secret     existing Fernet fields, unchanged until re-encrypted
@@ -71,8 +73,8 @@ Master key  MK (32 B)                      key file / env / (legacy) volume
   forward-token HMAC sub-key keeps its current derivation from `FK_legacy` until then.
 - **Envelope AAD** = installation id ‖ format version ‖ purpose ‖ KWK id ‖ data-key id (‖ sid for
   RK). A wrapped key cannot be replayed into another slot.
-- **Nonce discipline for wrapping:** every wrap uses a fresh random 96-bit nonce; wrap count per
-  KWK is bounded (re-key the KWK, i.e. rotate MK, long before 2^32 wraps).
+- **Wrapping** is AES-KWP (RFC 5649), deterministic, so there is no wrap nonce budget; the exact
+  byte rules are in §12.2.
 
 ### 3.2 Sources and the boot contract
 
@@ -126,12 +128,8 @@ well before 2^32 records. One writer per (sid, kind) at a time, enforced by a pe
 ### 4.2 Byte format (little-endian)
 
 ```
-header  (authenticated as AAD of every record, and by its own tag):
-  magic "WTX1" | ver u8=1 | kind u8 (1=out, 2=cast) | flags u16 | gen_id 16 B | sid 16 B
-  | prev_gen 16 B (zero for the first segment) | created u64 (unix ms) | header_tag 16 B
-record:
-  len u32 (plaintext length, 1..65536) | seq u64 | ciphertext | tag 16 B
-  nonce = seq as 96-bit big-endian;  AAD = H(header) ‖ seq ‖ len
+header: see §12.1 (64 B immutable + HMAC-SHA-256, no AEAD nonce spent on it)
+record: see §12.1 (type u8 | len u32 LE | seq u32 LE | ciphertext | tag)
 seal: a record of type SEAL (superseded in detail by §12.1)
 ```
 
@@ -240,7 +238,9 @@ attempts, including interrupted ones. A reader accepts only a coherent segment s
 prefix. Limits are explicit for legacy data, whole-state rollback, memory captures and existing
 copies; until SQLCipher ships, the DB and WAL are outside this invariant.*
 
-Acceptance tests (summary; the full list is in the review): fixed vectors; crash and resume at every
+Acceptance tests are **gated by phase** (review V2-L1/V3-L1): in phase 1, protected recordings
+and snapshots must not contain the plaintext marker or any key, while DB and WAL are expected to
+still contain metadata markers. Summary (the full list is in the review): fixed vectors; crash and resume at every
 header/record/index/commit boundary; parallel writers and clones after restore; counter limits;
 missing/duplicate/reordered records; cross-sid/kind/gen swaps; stale index and header; downgrade;
 byte-identical downloads; cap and migration concurrent with attach, resume, OSC 133, preview, range
@@ -325,10 +325,15 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   the session is the descriptor MAC (§12.3).
 - **Publication:** write `keys.wtk.tmp` (O_EXCL, 0600, O_NOFOLLOW), fsync, rename over `keys.wtk`,
   fsync the directory. One file = one atomic switch; the epoch increases on every change.
-- **Rotation:** the new file holds envelopes under the new KWK and lists both MK ids until the
-  re-wrap of `session_keys` finishes; boot accepts either MK while `rotating`; when coverage is
-  verified the old id is dropped (new epoch). A crash at any point leaves either the old or the new
-  file, both valid, and the re-wrap resumes.
+- **Routine MK rotation (v4, review V3-H1):** KWK, SNK and the keys derived from KWK (`K_desc`,
+  the journal key) are random and **stable**; only their wrapping under `K_mw` and the manifest MAC
+  depend on the MK. Rotating the MK therefore publishes **one** new `keys.wtk` (new epoch) with the
+  same stable keys re-wrapped under the new MK; descriptors, `session_keys` and the journal do not
+  change. Boot needs exactly one MK: the one whose id the current `keys.wtk` names. A crash leaves
+  the old or the new file, never a mix. Old MK ids stay listed in the recovery-kit inventory for as
+  long as backups made under them are retained.
+- **Rotating KWK itself** (after a suspected compromise of the stable keys) is a separate, offline
+  maintenance protocol with its own design, out of scope for 3.8.0.
 - **Boot order** (before `db.connect`, before any writer): take the **process lock**
   (`fcntl.flock` on `DATA_DIR/.lock`, exclusive, non-blocking: a second process refuses) → resolve
   the key source → verify `keys.wtk` (MAC, MK id, unwrap of every envelope, an open probe of the DB
@@ -409,3 +414,35 @@ and pinning API, INV-14 text with its phase matrix, and the contract tests: wron
 the disk byte-identical; crash at every publication point; vectors; succession, seal and watermark
 rules. Writers, migration, backups and the protection promise stay **inactive** until the next PRs
 pass their own gates.
+
+### 12.8 Open contracts before any writer is enabled (review v3)
+
+The first PR ships the codec and internal types only. These contracts must be written here and
+reviewed before the PR that turns writers, migration, backup or erasure on:
+
+1. **Publication (V3-H2):** private reservation of a generation (not visible to readers) → create
+   with `O_EXCL` → fsync file and directory → publish the authenticated descriptor and the upstream
+   offset in one transaction; exact canonical encoding and list order; at most one live generation
+   per kind; `phys_len` per state (SEAL included once sealed); a recovery table for every
+   interruption point; the rollback guarantee limited to "across a key-manifest epoch change"
+   unless a per-commit monotonic marker outside the restorable set is added.
+2. **Range vs full integrity (V3-H3):** a range read is served only through an authentic index bound
+   to the exact descriptor, or after a verified parse of the needed prefix within a budget; a full
+   integrity check (all records, SEAL, size) is a separate operation (System health, backup,
+   restore); rules for `recovered` generations and for a live prefix inside a backup.
+3. **Erasure continuity (V3-H4):** a journal head attested off-volume, backups bound to the head
+   they contain, continuity checks, tombstones re-applied at every boot before readers; without
+   proof of continuity, the recordings that could be affected stay quarantined; an Owner "recover
+   anyway" is a recovery mode with the erasure guarantee suspended, recent re-auth, restricted
+   access and audit.
+4. **Snapshot container bytes (V3-M1):** per-envelope algorithm and purpose key, canonical AAD,
+   nonce and strict counter, frame and decompression limits, single final frame, new key on retry
+   after an ambiguous write; the passphrase is mandatory for downloads and for any remote profile
+   that promises "two secrets".
+5. **Backup snapshot coherence (V3-M2):** descriptors and keyring read from the same snapshot as the
+   DB; the list of mutations that take the barrier; pins on immutable references (fds), released
+   only after the worker really finished; all I/O off the loop with budgets.
+6. **Boot inventory (V3-M3):** accepted artefacts for bootstrap, lock taken without changing the
+   classification, leftover `keys.wtk.tmp` handled, `fstat` on the same fd, regular file, no
+   symlinks, canonical encodings and size limits for manifest, envelopes and descriptors; the
+   wrong-key refusal also with a restore in staging.
