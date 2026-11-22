@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security — EverShell</title>
+<meta name="description" content="How EverShell is protected: passkeys, per-host step-up, roles and SSO, signed agent updates, an audit log, and an honest threat model.">
+<link rel="canonical" href="https://evershell.dev/security.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/security.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/security.html">
+<meta property="og:title" content="EverShell — security">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell home"><img src="assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="tour.html">Tour</a>
+      <a href="security.html" aria-current="page">Security</a>
+      <a href="install.html">Install</a>
+      <a href="about.html">About</a>
+      <a class="lang" href="ro/security.html" hreflang="ro" lang="ro">RO</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="s-title">
+  <div class="wrap">
+    <p class="eyebrow">Security</p>
+    <h1 id="s-title" style="font-size: clamp(40px, 6vw, 72px)">Built to sit <b>on the internet.</b></h1>
+    <p class="lede">A browser terminal for your servers is a powerful thing to put online. Here is what protects it, and what it cannot protect you from.</p>
+  </div>
+</section>
+
+<section aria-labelledby="s-honest">
+  <div class="wrap">
+    <h2 id="s-honest">Start with the <b>honest part.</b></h2>
+    <div class="callout">
+      <strong>Anyone who gets all the way past the login gets, on every host their account reaches, the access of the user its agent runs as</strong>, much like holding an SSH key for that user. Roles limit which hosts an account reaches and whether it gets a shell there, not what a shell can do. So the work goes into making “all the way past the login” hard: below is what a stolen password alone does <em>not</em> get you.
+    </div>
+    <p class="sub">That is why the defaults are strict: HTTPS on a real domain, passkeys, and an agent that runs as a dedicated, unprivileged <code>webterm</code> user unless you decide otherwise.</p>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/THREAT-MODEL.md">Read the full threat model →</a>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="s-pw">
+  <div class="wrap">
+    <h2 id="s-pw">A stolen password <b>is not enough.</b></h2>
+    <ul class="list">
+      <li><b>Accounts with 2FA</b><p>Signing in also asks for the authenticator code, or is done with a passkey. A new passkey cannot be added without that second factor, so the password cannot be turned into a key of its own.</p></li>
+      <li><b>Hosts marked “Require 2FA”</b><p>Every session, file action, command or update there needs a fresh passkey, authenticator code or SSO re-authentication; the account password alone is refused. Automation tokens are refused outright.</p></li>
+      <li><b>The window stays short</b><p>After the second factor, the host stays open for 5 idle minutes and at most 60 minutes in all; then the terminal locks, shared viewers included, until you present a factor again.</p></li>
+      <li><b>What it cannot cover</b><p>An account without any second factor, and hosts without the flag, are protected by the password alone; the Security card on the dashboard points out both. A device that is already signed in and inside its window is, for that window, you.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="s-login">
+  <div class="wrap">
+    <h2 id="s-login">Getting in</h2>
+    <ul class="list">
+      <li><b>Passkeys</b><p>WebAuthn sign-in, with TOTP and recovery codes as alternatives.</p></li>
+      <li><b>Step-up per host</b><p>Flag a host and everything there asks for a fresh second factor, never the password alone.</p></li>
+      <li><b>Single sign-on</b><p>OIDC (Authentik bundled or your own) and SCIM provisioning; group-to-role mapping.</p></li>
+      <li><b>Lockout and alerts</b><p>Failed sign-ins are throttled; new sign-ins and security changes are emailed.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="s-after">
+  <div class="wrap">
+    <h2 id="s-after">After the login</h2>
+    <ul class="list">
+      <li><b>Roles and scopes</b><p>Owner, Admin, Operator, Viewer or your own roles; per host or folder; time-bound grants; crown-jewel hosts.</p></li>
+      <li><b>Command guardrail</b><p>Admin rules that block a command, or ask for confirmation, before it runs, including in split views and Run on hosts.</p></li>
+      <li><b>Shares that cannot outgrow you</b><p>A share or replay link never gives more than its creator still has, and dies when that access ends.</p></li>
+      <li><b>Audit log</b><p>Who did what, from which IP. Tokens and secrets are kept out of it.</p></li>
+      <li><b>Security card</b><p>The dashboard tells you what needs attention: a missing passkey, an open share, an old agent.</p></li>
+      <li><b>Scoped automation tokens</b><p>Read or run only, expiring, capped by a role and a host scope, refused on 2FA hosts.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="dark" aria-labelledby="s-hosts">
+  <div class="wrap">
+    <h2 id="s-hosts">On your hosts</h2>
+    <ul class="list">
+      <li><b>Nothing to expose</b><p>The agent dials out. No port opens on the server, and the gateway stores no login for it.</p></li>
+      <li><b>One token per machine</b><p>Bound to that host and individually revocable. Reinstalling an agent issues a new one.</p></li>
+      <li><b>A client certificate per agent</b><p>From 3.7.0, each agent also proves itself with a certificate from your installation's own authority, checked during the TLS handshake. A client without one never reaches the gateway, and a copied token alone opens nothing.</p></li>
+      <li><b>Signed updates</b><p>An agent only runs an update signed with your own key.</p></li>
+      <li><b>SSH host keys pinned</b><p>A changed key raises an alarm instead of connecting.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="s-ops">
+  <div class="wrap">
+    <h2 id="s-ops">Running it</h2>
+    <ul class="list">
+      <li><b>Encrypted backups</b><p>Daily, encrypted, and optionally off-host: Google Drive, Dropbox, SFTP or FTPS.</p></li>
+      <li><b>Pinned releases</b><p>The upgrade script takes a version tag, not <code>latest</code>, and pins it to an immutable image digest before it switches.</p></li>
+      <li><b>Release checks</b><p>The publish pipeline requires unit, browser and accessibility tests, a secret scan and a Python dependency audit. The image and npm scans run weekly, separately.</p></li>
+      <li><b>Reporting a vulnerability</b><p>Privately, through GitHub. See the <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">security policy</a>.</p></li>
+    </ul>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · MIT licensed · Self-hosted</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentation</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Made by <a href="about.html#a-team">Stefan, Claude and Codex</a>, much of it written inside an EverShell session.</p>
+</footer>
+</body>
+</html>

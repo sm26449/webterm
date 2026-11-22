@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tur — EverShell</title>
+<meta name="description" content="Un tur ghidat al EverShell: sesiuni persistente cu nume, lansatorul de sesiuni, adăugarea hosturilor, fișiere, ecrane împărțite, rulare pe hosturi, port forwarding, update-uri, diagnostic, partajare și replay, setări cu căutare și tema EverShell.">
+<link rel="canonical" href="https://evershell.dev/ro/tour.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/tour.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/tour.html">
+<meta property="og:title" content="EverShell — turul ghidat">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="../assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script src="../assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Sari la conținut</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell, prima pagină"><img src="../assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Meniu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Principal">
+      <a href="tour.html" aria-current="page">Tur</a>
+      <a href="security.html">Securitate</a>
+      <a href="install.html">Instalare</a>
+      <a href="about.html">Despre</a>
+      <a class="lang" href="../tour.html" hreflang="en" lang="en">EN</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 72px" aria-labelledby="t-title">
+  <div class="wrap">
+    <p class="eyebrow">Tur</p>
+    <h1 id="t-title" style="font-size: clamp(40px, 6vw, 72px)">Ce poți face <b>odată intrat.</b></h1>
+    <p class="lede">Capturile și clipurile scurte de mai jos arată aplicația în acțiune pe o flotă demonstrativă. Capturile urmează tema luminoasă sau întunecată a sistemului tău; clipurile rulează cât sunt pe ecran și rămân nemișcate dacă ai cerut mișcare redusă.</p>
+    <nav class="toc" aria-label="Pe această pagină">
+      <a href="#sessions">Sesiuni</a><a href="#names">Nume pentru sesiuni</a><a href="#launcher">Lansatorul de sesiuni</a><a href="#add-host">Adăugarea unui host</a><a href="#dashboard">Panou principal</a>
+      <a href="#split">Ecrane împărțite</a><a href="#files">Fișiere</a><a href="#transfers">Upload</a>
+      <a href="#run">Rulare pe hosturi</a><a href="#forwards">Port forwarding</a><a href="#updates">Update-uri</a>
+      <a href="#diagnostics">Diagnostic</a><a href="#share">Partajare și replay</a><a href="#settings">Setări</a><a href="#theme">Temă</a><a href="#phone">Telefon</a>
+    </nav>
+  </div>
+</section>
+
+<div class="wrap">
+
+<article class="feature" id="sessions" aria-labelledby="f-sessions">
+  <div>
+    <p class="eyebrow">Sesiuni</p>
+    <h2 id="f-sessions">Un terminal care <b>supraviețuiește tab-ului.</b></h2>
+    <p class="sub">Sesiunile deschise prin agent rulează în tmux pe host. Poți închide browserul, reporni gateway-ul sau trece pe telefon și revii la același proces, cu istoricul terminalului.</p>
+    <ul class="points">
+      <li><b>Comenzile ca obiecte.</b> Cu integrarea de shell, fiecare comandă își are codul de ieșire, durata și ieșirea într-un panou lateral.</li>
+      <li>Poți copia comanda în format Markdown sau poți alege <b>Rulează din nou</b> ca să o readuci la prompt și să o verifici înainte de execuție.</li>
+      <li><b>Mai multe dispozitive deodată</b> pe aceeași sesiune, live.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/02-terminal-light.png"><img src="../assets/shots/02-terminal-dark.png" alt="O sesiune de terminal cu panoul Commands, fiecare comandă cu exit code și durată" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="names" aria-labelledby="f-names">
+  <div>
+    <p class="eyebrow">Nume pentru sesiuni</p>
+    <h2 id="f-names">Dă fiecărei sesiuni <b>un nume.</b></h2>
+    <p class="sub">Dai clic pe titlul din antetul sesiunii și scrii: import-job, top, health check. Numele însoțește sesiunea în panoul principal, în lansator, în alegerea pentru ecrane împărțite și pe celelalte dispozitive.</p>
+    <ul class="points">
+      <li><b>Nume, nu numere.</b> Nu mai ghicești care „Session 3” rulează importul.</li>
+      <li><b>Enter</b> salvează; numele e păstrat cu sesiunea, pe gateway.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-rename.jpg" aria-label="Redenumirea unei sesiuni din antet, apoi panoul principal care o arată după nume"><source src="../assets/video/clip-rename.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="launcher" aria-labelledby="f-launcher">
+  <div>
+    <p class="eyebrow">Lansatorul de sesiuni</p>
+    <h2 id="f-launcher">Continui de unde ai rămas <b>sau pornești din nou.</b></h2>
+    <p class="sub">Când dai clic pe New session pe un host unde ai deja sesiuni active, EverShell ți le arată întâi, ca să continui una în loc să aduni shell-uri.</p>
+    <ul class="points">
+      <li><b>Shift+clic sau Shift+Enter</b> pe New session sare peste el și deschide direct un shell nou.</li>
+      <li><b>Sesiunile deja deschise într-un tab</b> apar și ele; dacă alegi una, treci la tab-ul ei.</li>
+      <li><b>Close idle…</b> oprește dintr-odată sesiunile nefolosite de peste o zi.</li>
+      <li><b>Notificări de inactivitate:</b> după numărul de zile ales, proprietarul unei sesiuni nefolosite e întrebat dacă o păstrează sau o închide. Nimic nu se închide automat.</li>
+      <li>Lansatorul se poate opri pentru un host sau peste tot, din Settings → Terminal &amp; workspace.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-launcher.jpg" aria-label="Lansatorul New session cu sesiunile deschise pe web-01, apoi Shift+clic care deschide un shell nou"><source src="../assets/video/clip-launcher.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="add-host" aria-labelledby="f-add">
+  <div>
+    <p class="eyebrow">Adăugarea unui host</p>
+    <h2 id="f-add">O comandă <b>pe mașina nouă.</b></h2>
+    <p class="sub">Adaugi un host și EverShell îți dă un installer de o linie pentru agent. Agentul se conectează spre gateway-ul tău cu un token legat de mașina aceea: niciun port deschis, niciun login stocat.</p>
+    <ul class="points">
+      <li><b>Linux cu Python 3.6+.</b> Sistemele mai vechi primesc, doar pentru agent, un Python portabil fixat și verificat prin checksum.</li>
+      <li><b>Multe mașini deodată</b> cu un token de înrolare de grup: expiră, se revocă, are plafon de utilizări și e auditat.</li>
+      <li>Dacă nu poți instala agentul pe o mașină, adaug-o prin SSH sau Telnet.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/11-addhost-light.png"><img src="../assets/shots/11-addhost-dark.png" alt="Dialogul Add host cu comanda de o linie pentru instalarea agentului" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="dashboard" aria-labelledby="f-dash">
+  <div>
+    <p class="eyebrow">Panou principal și hosturi</p>
+    <h2 id="f-dash">Toată flota, <b>dintr-o privire.</b></h2>
+    <p class="sub">Sesiuni de reluat, hosturi grupate pe foldere și tag-uri, metrici live și un card de securitate care îți spune ce cere atenție.</p>
+    <ul class="points">
+      <li><b>Pagina de host</b> cu CPU, memorie și disc, previzualizări live ale sesiunilor și starea agentului.</li>
+      <li><b>Alerte la praguri</b> pentru CPU, RAM și disc, pe email sau webhook.</li>
+      <li><b>Wake-on-LAN</b> pentru o mașină oprită, printr-un agent vecin.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/01-dashboard-light.png"><img src="../assets/shots/01-dashboard-dark.png" alt="Panoul principal cu cardul de securitate, sesiunile de reluat și flota grupată pe foldere" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="split" aria-labelledby="f-split">
+  <div>
+    <p class="eyebrow">Ecrane împărțite</p>
+    <h2 id="f-split">Mai multe hosturi, <b>unul lângă altul.</b></h2>
+    <p class="sub">Pui două până la patru sesiuni într-o vedere, în cinci aranjări, cu separatoare pe care le tragi. O salvezi cu nume și revine pe orice dispozitiv.</p>
+    <ul class="points">
+      <li><b>Scrii în mai multe panouri deodată,</b> cu o barieră care oprește o comandă periculoasă înainte să ajungă în vreunul.</li>
+      <li><b>Scoți</b> o vedere împărțită în propria fereastră.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-split.jpg" aria-label="O vedere împărțită cu trei sesiuni: top pe web-02, un deploy de probă și o verificare de sănătate"><source src="../assets/video/clip-split.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="files" aria-labelledby="f-files">
+  <div>
+    <p class="eyebrow">Fișiere și editor</p>
+    <h2 id="f-files">Managerul de fișiere <b>îți urmărește shell-ul.</b></h2>
+    <p class="sub">Deschizi Files lângă terminal și urmează directorul în care ești. Selectezi, redenumești, muți, arhivezi, descarci; deschizi un fișier într-un editor de cod complet.</p>
+    <ul class="points">
+      <li><b>Editorul Monaco</b>, cel din VS Code, cu evidențiere de sintaxă pentru fișierele de pe host.</li>
+      <li><b>Panou git</b> pentru repository-ul în care ești: status, commit-uri, branch-uri.</li>
+      <li><b>Copiere între hosturi</b> fără să treacă prin laptopul tău.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-files.jpg" aria-label="Panoul Files lângă terminal: selecția fișierelor, apoi editarea lui deploy.sh"><source src="../assets/video/clip-files.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="transfers" aria-labelledby="f-up">
+  <div>
+    <p class="eyebrow">Upload și download</p>
+    <h2 id="f-up">Tragi un fișier <b>pe terminal.</b></h2>
+    <p class="sub">Ajunge în directorul în care e shell-ul tău, iar calea lui apare scrisă la prompt. Upload-urile mari se reiau de unde s-au oprit, și fiecare bucată e verificată.</p>
+    <ul class="points">
+      <li><b>Un singur widget plutitor</b> arată toate transferurile și se deschide singur când unul cere o decizie.</li>
+      <li><b>Lipești o captură de ecran</b> într-un CLI de AI care rulează pe host: imaginea ajunge acolo și calea ei e scrisă pentru tine.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/15-upload-light.png"><img src="../assets/shots/15-upload-dark.png" alt="Widget-ul Transfers cu un upload spre host" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="run" aria-labelledby="f-run">
+  <div>
+    <p class="eyebrow">Rulare pe hosturi</p>
+    <h2 id="f-run">O comandă, <b>multe mașini.</b></h2>
+    <p class="sub">Alegi hosturile după nume sau tag, confirmi și vezi cum se umple o grilă cu starea, codul de ieșire și ieșirea comenzii fiecăruia.</p>
+    <ul class="points">
+      <li><b>Comenzile salvate</b> sunt aceleași cu snippet-urile din terminal, pe orice dispozitiv.</li>
+      <li><b>Copiază raportul</b> în format Markdown, gata pentru un tichet.</li>
+      <li><b>Bariera de comenzi:</b> regulile puse de un admin blochează o comandă sau cer confirmare înainte să ruleze.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-run.jpg" aria-label="Run on hosts: o comandă salvată pe patru hosturi, câte un rezultat pentru fiecare"><source src="../assets/video/clip-run.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="forwards" aria-labelledby="f-fwd">
+  <div>
+    <p class="eyebrow">Port forwarding</p>
+    <h2 id="f-fwd">Interfețe web interne, <b>în spatele login-ului tău.</b></h2>
+    <p class="sub">Grafana, Proxmox, pagina de admin a unui container legată doar de localhost: fiecare primește propriul subdomeniu, prin tunelul agentului. Fără <code>ssh -L</code>, și merge și de pe iPad.</p>
+    <ul class="points">
+      <li><b>HTTP, HTTPS și WebSocket</b>, pe hosturi cu agent sau SSH.</li>
+      <li><b>Izolat pe fiecare forward:</b> subdomeniu și cookie proprii, un token legat de el și protecție ca să nu ajungă unde nu trebuie.</li>
+      <li><b>Bastion telnet:</b> consola unui echipament la care ajunge doar hostul.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/12-forward-light.png"><img src="../assets/shots/12-forward-dark.png" alt="Lista de port forwarding cu un forward spre un serviciu web intern" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="updates" aria-labelledby="f-upd">
+  <div>
+    <p class="eyebrow">Update-uri</p>
+    <h2 id="f-upd">Update-uri pe care le vezi, <b>upgrade-uri pe care le controlezi.</b></h2>
+    <p class="sub">Fiecare agent numără pachetele de sistem în așteptare, iar hostul primește o insignă, roșie dacă sunt și fix-uri de securitate. Un click deschide un terminal cu comanda de upgrade potrivită, iar tu apeși Enter.</p>
+    <ul class="points">
+      <li><b>apt, dnf, zypper, pacman, apk.</b> Verificat la câteva ore, doar citire.</li>
+      <li><b>Agenții se actualizează singuri</b> din gateway, doar cu un update semnat cu cheia ta, și așteaptă cât timp hostul are sesiuni deschise.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/13-updates-light.png"><img src="../assets/shots/13-updates-dark.png" alt="Un host cu update-uri de sistem în așteptare și acțiunea de upgrade" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="diagnostics" aria-labelledby="f-diag">
+  <div>
+    <p class="eyebrow">Diagnostic</p>
+    <h2 id="f-diag">Depanare <b>fără SSH.</b></h2>
+    <p class="sub">O fotografie a hostului cu sistemul, CPU-ul, memoria, fiecare sistem de fișiere, interfețele de rețea și rutele, păstrată chiar și când hostul e oprit. Poți verifica la cerere porturile pe care ascultă serviciile, starea conexiunii și jurnalul agentului.</p>
+    <ul class="points">
+      <li><b>Servicii:</b> unitățile systemd cu starea live, loguri și pornire, oprire sau repornire.</li>
+      <li><b>Docker:</b> containere, imagini, loguri și statistici live.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/14-diagnostics-light.png"><img src="../assets/shots/14-diagnostics-dark.png" alt="Panoul de diagnostic al unui host" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="share" aria-labelledby="f-share">
+  <div>
+    <p class="eyebrow">Partajare și replay</p>
+    <h2 id="f-share">Arăți cuiva, <b>fără să-i faci cont.</b></h2>
+    <p class="sub">Un link de partajare îi permite unui invitat să urmărească o sesiune live, sau să scrie în ea dacă îi dai voie. Link-ul expiră și îl poți revoca pe loc: ecranul invitatului se golește.</p>
+    <ul class="points">
+      <li><b>Link-urile de replay</b> partajează înregistrarea unei sesiuni încheiate, cu secretele probabile mascate.</li>
+      <li><b>Fiecare deschidere e jurnalizată</b> și primești o alertă.</li>
+      <li>Înregistrările salvează ieșirea terminalului, care poate include textul tastat dacă shell-ul îl afișează.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-share.jpg" aria-label="Crearea unui link de partajare doar pentru citire, care expiră într-o oră"><source src="../assets/video/clip-share.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="settings" aria-labelledby="f-settings">
+  <div>
+    <p class="eyebrow">Setări</p>
+    <h2 id="f-settings">Orice setare, <b>la o căutare distanță.</b></h2>
+    <p class="sub">Scrii un cuvânt ca backup, SMTP sau passkey și ajungi direct la secțiune. Căutarea înțelege engleza și româna.</p>
+    <ul class="points">
+      <li><b>Trei grupuri:</b> Personal (cont și securitate, aspect, terminal, notificări), Administrare (oameni și roluri, acces, politici, rețea, alerte, backup, update-uri) și Operare (starea sistemului, jurnalul de audit).</li>
+      <li>Secțiunile pe care nu ai voie să le schimbi nici nu apar.</li>
+      <li><b>Pe telefon,</b> setările se deschid ca listă, cu căutarea sus, și fiecare secțiune ocupă tot ecranul.</li>
+    </ul>
+    <figure class="shot phone" style="margin-top: 28px">
+      <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/17-settings-phone-light.png"><img src="../assets/shots/17-settings-phone-dark.png" alt="Setările pe telefon: grupurile Personal, Administration și Operations sub câmpul de căutare" width="390" height="844" loading="lazy"></picture>
+    </figure>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="../assets/video/clip-settings-search.jpg" aria-label="Căutarea în setări după backup și SMTP, cu saltul la fiecare secțiune"><source src="../assets/video/clip-settings-search.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="theme" aria-labelledby="f-theme">
+  <div>
+    <p class="eyebrow">Tema EverShell</p>
+    <h2 id="f-theme">Un aspect propriu, <b>luminos sau întunecat.</b></h2>
+    <p class="sub">Tema EverShell e cea implicită începând cu 3.7.1: petrol, crem și un accent fosforescent, în variantă luminoasă și întunecată, după tema sistemului.</p>
+    <ul class="points">
+      <li>Dacă ai ales o temă înainte, o păstrezi.</li>
+      <li><b>Midnight</b> și familiile <b>macOS, Windows 11, GNOME și KDE</b> rămân la un clic distanță, în Settings → Appearance.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/10-themes-light.png"><img src="../assets/shots/10-themes-dark.png" alt="Settings, Appearance, cu tema EverShell aleasă" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="phone" aria-labelledby="f-phone">
+  <div>
+    <p class="eyebrow">Pe telefon</p>
+    <h2 id="f-phone">Aceeași sesiune, <b>în buzunar.</b></h2>
+    <p class="sub">O instalezi ca aplicație și continui sesiunea lăsată la birou. O bară de taste pe două rânduri îți dă Esc, Tab, Ctrl și săgeți; o apăsare lungă selectează text.</p>
+    <ul class="points">
+      <li><b>Notificări</b> când se termină o comandă lungă.</li>
+      <li><b>Teme</b> care arată ca macOS, Windows 11, GNOME sau KDE, luminoase sau întunecate.</li>
+    </ul>
+  </div>
+  <figure class="shot phone">
+    <picture><source media="(prefers-color-scheme: light)" srcset="../assets/shots/08-phone-light.png"><img src="../assets/shots/08-phone-dark.png" alt="O sesiune pe telefon, cu bara de taste pe două rânduri" width="390" height="844" loading="lazy"></picture>
+  </figure>
+</article>
+
+</div>
+
+<section class="dark" aria-labelledby="t-next">
+  <div class="wrap split2">
+    <div>
+      <h2 id="t-next">Încearcă-l pe <b>propriul server.</b></h2>
+      <p class="sub">Open source, sub licența MIT. Citește întâi installer-ul: e făcut să fie citit.</p>
+    </div>
+    <div class="ctas" style="margin-top: 0; align-self: center">
+      <a class="btn btn-primary" href="install.html">Instalare</a>
+      <a class="btn btn-ghost" href="security.html">Despre securitate</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · licență MIT · găzduit de tine</span>
+    <nav aria-label="Subsol">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Politica de securitate</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentație</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Creat de <a href="about.html#a-team">Stefan, Claude și Codex</a>. O mare parte din proiect a fost scrisă chiar într-o sesiune EverShell.</p>
+</footer>
+</body>
+</html>

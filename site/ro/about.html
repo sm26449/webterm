@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Despre — EverShell</title>
+<meta name="description" content="De ce există EverShell, cum e construit și echipa din spatele lui.">
+<link rel="canonical" href="https://evershell.dev/ro/about.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/about.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/about.html">
+<meta property="og:title" content="Despre — EverShell">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="../assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script src="../assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Sari la conținut</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell, prima pagină"><img src="../assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Meniu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Principal">
+      <a href="tour.html">Tur</a>
+      <a href="security.html">Securitate</a>
+      <a href="install.html">Instalare</a>
+      <a href="about.html" aria-current="page">Despre</a>
+      <a class="lang" href="../about.html" hreflang="en" lang="en">EN</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="a-title">
+  <div class="wrap">
+    <p class="eyebrow">Despre</p>
+    <h1 id="a-title" style="font-size: clamp(40px, 6vw, 72px)">Un shell care <b>rămâne unde l-ai lăsat.</b></h1>
+    <p class="lede">EverShell e open source, găzduit de tine și construit de o echipă mică ce ține la un lucru mai presus de rest: să nu-ți pierzi munca și să nu-ți pierzi serverele.</p>
+  </div>
+</section>
+
+<section aria-labelledby="a-why">
+  <div class="wrap split2">
+    <div>
+      <p class="eyebrow">De ce există</p>
+      <h2 id="a-why">Un job lung, un laptop închis, <b>o sesiune pierdută.</b></h2>
+    </div>
+    <div>
+      <p class="sub" style="margin-top: 0">Oricine administrează servere a pierdut muncă așa: o migrare la jumătate, pică Wi-Fi-ul, iar sesiunea SSH ia procesul cu ea. tmux rezolvă asta, dacă ți-ai amintit să-l pornești, pe acel host, de pe o mașină care are cheia ta.</p>
+      <p class="sub">EverShell face din sesiunea persistentă regula, o pune în orice browser, inclusiv pe telefon, fără nimic de deschis pe servere. Apoi adaugă ce cauți imediat după: fișiere, mai multe hosturi unul lângă altul, o comandă pe mai multe și un mod de a-i arăta cuiva ce vezi.</p>
+      <p class="sub">Prima versiune publică: august 2026. De atunci, peste o sută de versiuni, fiecare cu motivele ei în <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">changelog</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="a-how">
+  <div class="wrap">
+    <p class="eyebrow">Cum e construit</p>
+    <h2 id="a-how">Securitatea întâi, <b>și scrisă negru pe alb.</b></h2>
+    <ul class="list">
+      <li><b>Refuz la îndoială</b><p>Când o verificare nu poate decide, răspunsul e nu. Orice schimbare care atinge securitatea trece printr-o revizie independentă înainte de lansare.</p></li>
+      <li><b>Agenți semnați offline</b><p>Versiunile agentului sunt rare, grupate și semnate cu o cheie care nu atinge niciodată o mașină din rețea.</p></li>
+      <li><b>Verificări înainte de publicare</b><p>Publicarea imaginii depinde de testele unitare, de browser și de accesibilitate, de o scanare de secrete și de auditul dependențelor Python. Scanările imaginii și ale pachetelor npm rulează săptămânal, separat.</p></li>
+      <li><b>Reguli pe hârtie</b><p>Regulile produsului stau în repository, lângă codul care le aplică, ca aceeași greșeală să nu se repete.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="a-team">
+  <div class="wrap">
+    <p class="eyebrow">Echipa</p>
+    <h2 id="a-team">Echipă mică, <b>echipă fantastică.</b></h2>
+    <p class="sub">EverShell e construit în EverShell. Claude lucrează într-o sesiune persistentă pe același server pe care rulează produsul, Stefan urmărește și intervine din browser sau de pe telefon, iar când se închide un laptop sau cade o conexiune, munca în curs merge mai departe. Primul utilizator al produsului e echipa care îl scrie.</p>
+    <div class="grid">
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">SM</span>
+        <h3>Stefan Maldaianu</h3>
+        <p class="role">Creator și responsabil de întreținerea proiectului</p>
+        <p>Decide ce se lansează și ce nu, revizuiește fiecare schimbare, îl rulează în producție și păstrează cheia offline cu care e semnat fiecare agent.</p>
+      </article>
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">C</span>
+        <h3>Claude</h3>
+        <p class="role">Programare în pereche · Anthropic</p>
+        <p>Scrie cod și testează cum funcționează, face auditurile și reviziile independente și ține documentația cinstită.</p>
+      </article>
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">&gt;_</span>
+        <h3>Codex</h3>
+        <p class="role">Brand și identitate · OpenAI</p>
+        <p>A dat formă brandului împreună cu Stefan: logo-ul, culorile și cursorul phosphor de la capătul cuvântului.</p>
+      </article>
+    </div>
+    <p class="sub">Vrei să contribui? Issue-urile și pull request-urile sunt binevenite pe <a href="https://github.com/sm26449/webterm">GitHub</a>; citește întâi ghidul de contribuție.</p>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · licență MIT · găzduit de tine</span>
+    <nav aria-label="Subsol">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Politica de securitate</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentație</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Creat de <a href="about.html#a-team">Stefan, Claude și Codex</a>. O mare parte din proiect a fost scrisă chiar într-o sesiune EverShell.</p>
+</footer>
+</body>
+</html>

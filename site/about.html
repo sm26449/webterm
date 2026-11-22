@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About — EverShell</title>
+<meta name="description" content="Why EverShell exists, how it is built, and the team behind it.">
+<link rel="canonical" href="https://evershell.dev/about.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/about.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/about.html">
+<meta property="og:title" content="About — EverShell">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell home"><img src="assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="tour.html">Tour</a>
+      <a href="security.html">Security</a>
+      <a href="install.html">Install</a>
+      <a href="about.html" aria-current="page">About</a>
+      <a class="lang" href="ro/about.html" hreflang="ro" lang="ro">RO</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="a-title">
+  <div class="wrap">
+    <p class="eyebrow">About</p>
+    <h1 id="a-title" style="font-size: clamp(40px, 6vw, 72px)">A shell that <b>stays where you left it.</b></h1>
+    <p class="lede">EverShell is open source, self-hosted, and built by a small team that cares about one thing above the rest: not losing your work, and not losing your servers.</p>
+  </div>
+</section>
+
+<section aria-labelledby="a-why">
+  <div class="wrap split2">
+    <div>
+      <p class="eyebrow">Why it exists</p>
+      <h2 id="a-why">A long job, a closed laptop, <b>a lost session.</b></h2>
+    </div>
+    <div>
+      <p class="sub" style="margin-top: 0">Everyone who runs servers has lost work this way: a migration halfway through, the Wi-Fi drops, and the SSH session takes the process with it. tmux fixes that, if you remembered to start it, on that host, from a machine that has your key.</p>
+      <p class="sub">EverShell makes the persistent session the default, and puts it in any browser, phone included, with nothing to open on your servers. Then it adds what you reach for next: files, several hosts side by side, one command on many, and a way to show someone what you see.</p>
+      <p class="sub">First public release: August 2026. More than a hundred releases since, each with its reasons in the <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">changelog</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="a-how">
+  <div class="wrap">
+    <p class="eyebrow">How it is built</p>
+    <h2 id="a-how">Security first, <b>and written down.</b></h2>
+    <ul class="list">
+      <li><b>Fail closed</b><p>When a check cannot decide, the answer is no. Every change that touches security gets an independent review before it ships.</p></li>
+      <li><b>Agents signed offline</b><p>Agent releases are rare, bundled, and signed with a key that never touches a networked machine.</p></li>
+      <li><b>Release checks</b><p>The publish pipeline requires unit, browser and accessibility tests, a secret scan and a Python dependency audit. The image and npm scans run weekly, separately.</p></li>
+      <li><b>Rules on paper</b><p>The product's business rules live in the repository, next to the code that enforces them, so the same mistake is not made twice.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="a-team">
+  <div class="wrap">
+    <p class="eyebrow">The team</p>
+    <h2 id="a-team">Small team, <b>fantastic team.</b></h2>
+    <p class="sub">EverShell is built inside EverShell. Claude works in a persistent session on the same server that runs the product, Stefan watches and steps in from a browser or a phone, and when a laptop closes or a connection drops, the work in progress keeps going. The product's first user is the team that writes it.</p>
+    <div class="grid">
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">SM</span>
+        <h3>Stefan Maldaianu</h3>
+        <p class="role">Creator and maintainer</p>
+        <p>Decides what ships and what does not, reviews every change, runs it in production, and keeps the offline key that signs every agent.</p>
+      </article>
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">C</span>
+        <h3>Claude</h3>
+        <p class="role">Pair programmer · Anthropic</p>
+        <p>Writes code and tests its behavior, runs the audits and the independent reviews, and keeps the documentation honest.</p>
+      </article>
+      <article class="card team">
+        <span class="avatar" aria-hidden="true">&gt;_</span>
+        <h3>Codex</h3>
+        <p class="role">Brand and identity · OpenAI</p>
+        <p>Shaped the brand with Stefan: the wordmark, the colours and the phosphor cursor at the end of the word.</p>
+      </article>
+    </div>
+    <p class="sub">Want to join in? Issues and pull requests are welcome on <a href="https://github.com/sm26449/webterm">GitHub</a>; please read the contributing guide first.</p>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · MIT licensed · Self-hosted</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentation</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Made by <a href="about.html#a-team">Stefan, Claude and Codex</a>, much of it written inside an EverShell session.</p>
+</footer>
+</body>
+</html>

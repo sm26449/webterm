@@ -1,0 +1,34 @@
+[
+  {
+    "t": 0,
+    "label": "Your fleet"
+  },
+  {
+    "t": 3.2,
+    "label": "Persistent sessions"
+  },
+  {
+    "t": 18.8,
+    "label": "New session launcher"
+  },
+  {
+    "t": 27.3,
+    "label": "Files"
+  },
+  {
+    "t": 31.9,
+    "label": "Split view"
+  },
+  {
+    "t": 55.7,
+    "label": "Run on hosts"
+  },
+  {
+    "t": 67.7,
+    "label": "Share link"
+  },
+  {
+    "t": 74.5,
+    "label": "Settings search"
+  }
+]

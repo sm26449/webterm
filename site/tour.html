@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tour — EverShell</title>
+<meta name="description" content="A guided tour of EverShell: persistent named sessions, the New session launcher, adding hosts, files, split views, run on hosts, port forwards, updates, diagnostics, sharing and replay, searchable settings and the EverShell theme.">
+<link rel="canonical" href="https://evershell.dev/tour.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/tour.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/tour.html">
+<meta property="og:title" content="EverShell — a guided tour">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell home"><img src="assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="tour.html" aria-current="page">Tour</a>
+      <a href="security.html">Security</a>
+      <a href="install.html">Install</a>
+      <a href="about.html">About</a>
+      <a class="lang" href="ro/tour.html" hreflang="ro" lang="ro">RO</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 72px" aria-labelledby="t-title">
+  <div class="wrap">
+    <p class="eyebrow">Tour</p>
+    <h1 id="t-title" style="font-size: clamp(40px, 6vw, 72px)">What you can do <b>once you are in.</b></h1>
+    <p class="lede">These screenshots and short clips show EverShell running on a demo fleet. Screenshots follow your system’s light or dark theme; clips play while they are on screen, and stay still if you prefer reduced motion.</p>
+    <nav class="toc" aria-label="On this page">
+      <a href="#sessions">Sessions</a><a href="#names">Session names</a><a href="#launcher">New session launcher</a><a href="#add-host">Adding a host</a><a href="#dashboard">Dashboard</a>
+      <a href="#split">Split views</a><a href="#files">Files</a><a href="#transfers">Uploads</a>
+      <a href="#run">Run on hosts</a><a href="#forwards">Port forwards</a><a href="#updates">Updates</a>
+      <a href="#diagnostics">Diagnostics</a><a href="#share">Share and replay</a><a href="#settings">Settings</a><a href="#theme">Theme</a><a href="#phone">Phone</a>
+    </nav>
+  </div>
+</section>
+
+<div class="wrap">
+
+<article class="feature" id="sessions" aria-labelledby="f-sessions">
+  <div>
+    <p class="eyebrow">Sessions</p>
+    <h2 id="f-sessions">A terminal that <b>outlives the tab.</b></h2>
+    <p class="sub">Sessions opened through the agent run in tmux on the host. You can close the browser, restart the gateway, or switch to your phone and return to the same process and scrollback.</p>
+    <ul class="points">
+      <li><b>Commands as objects.</b> With shell integration, every command gets its exit code, duration and output in a side panel.</li>
+      <li>Copy a command as Markdown or choose <b>Run again</b> to put it back at the prompt for review before execution.</li>
+      <li><b>Several devices at once</b> on the same session, live.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/02-terminal-light.png"><img src="assets/shots/02-terminal-dark.png" alt="A terminal session with the Commands panel listing each command with its exit code and duration" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="names" aria-labelledby="f-names">
+  <div>
+    <p class="eyebrow">Session names</p>
+    <h2 id="f-names">Give every session <b>a name.</b></h2>
+    <p class="sub">Click the title in the session header and type: import-job, top, health check. The name follows the session to the dashboard, the launcher, the split view picker and your other devices.</p>
+    <ul class="points">
+      <li><b>Named, not numbered.</b> No more guessing which “Session 3” runs the import.</li>
+      <li>Press <b>Enter</b> to save; the name is stored with the session on the gateway.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-rename.jpg" aria-label="Renaming a session from its header, then the dashboard listing it by name"><source src="assets/video/clip-rename.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="launcher" aria-labelledby="f-launcher">
+  <div>
+    <p class="eyebrow">New session launcher</p>
+    <h2 id="f-launcher">Continue where you left off, <b>or start fresh.</b></h2>
+    <p class="sub">Click New session on a host where you already have live sessions and EverShell lists them first, so you pick one up instead of piling up shells.</p>
+    <ul class="points">
+      <li><b>Shift+click or Shift+Enter</b> on New session skips it and opens a fresh shell.</li>
+      <li><b>Sessions already open in a tab</b> are listed too; picking one switches to that tab.</li>
+      <li><b>Close idle…</b> stops the sessions nobody has used for over a day, in one go.</li>
+      <li><b>Idle notices:</b> after the number of days you set, the owner of an unused session is asked to keep it open or close it. Nothing is closed automatically.</li>
+      <li>Turn the launcher off for one host, or everywhere in Settings → Terminal &amp; workspace.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-launcher.jpg" aria-label="The New session launcher listing the open sessions on web-01, then Shift+click opening a fresh shell"><source src="assets/video/clip-launcher.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="add-host" aria-labelledby="f-add">
+  <div>
+    <p class="eyebrow">Adding a host</p>
+    <h2 id="f-add">One command <b>on the new machine.</b></h2>
+    <p class="sub">Add a host and EverShell gives you a one-line installer for its agent. The agent dials out to your gateway with a token bound to that machine: no open port, no stored login.</p>
+    <ul class="points">
+      <li><b>Linux with Python 3.6+.</b> Older systems get a pinned, checksum-verified portable Python for the agent alone.</li>
+      <li><b>Many machines at once</b> with a group enrollment token: expiring, revocable, use-capped and audited.</li>
+      <li><b>No agent possible?</b> Add it as an SSH or telnet host instead.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/11-addhost-light.png"><img src="assets/shots/11-addhost-dark.png" alt="The Add host dialog with the one-line agent install command" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="dashboard" aria-labelledby="f-dash">
+  <div>
+    <p class="eyebrow">Dashboard and hosts</p>
+    <h2 id="f-dash">The whole fleet, <b>at a glance.</b></h2>
+    <p class="sub">Sessions to resume, hosts grouped by folder and tag, live metrics, and a security card that tells you what needs attention.</p>
+    <ul class="points">
+      <li><b>Host page</b> with CPU, memory and disk, live previews of its sessions, and agent status.</li>
+      <li><b>Threshold alerts</b> for CPU, RAM and disk, by email or webhook.</li>
+      <li><b>Wake-on-LAN</b> for an offline machine, through a neighbouring agent.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/01-dashboard-light.png"><img src="assets/shots/01-dashboard-dark.png" alt="Dashboard with the security card, sessions to resume and the fleet grouped by folder" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="split" aria-labelledby="f-split">
+  <div>
+    <p class="eyebrow">Split views</p>
+    <h2 id="f-split">Several hosts, <b>side by side.</b></h2>
+    <p class="sub">Put two to four sessions in one view, in five layouts with draggable dividers. Save it by name and it comes back on any device.</p>
+    <ul class="points">
+      <li><b>Type into several panes at once,</b> with a guardrail that stops a dangerous command before it reaches any of them.</li>
+      <li><b>Pop out</b> a split view into its own window.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-split.jpg" aria-label="A split view of three sessions: top on web-02, a deploy dry run and a health check"><source src="assets/video/clip-split.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="files" aria-labelledby="f-files">
+  <div>
+    <p class="eyebrow">Files and editor</p>
+    <h2 id="f-files">The file manager <b>follows your shell.</b></h2>
+    <p class="sub">Open Files next to the terminal and it follows the directory you are in. Select, rename, move, archive, download; open a file in a full code editor.</p>
+    <ul class="points">
+      <li><b>Monaco editor</b>, the one inside VS Code, with syntax highlighting for the files you edit on the host.</li>
+      <li><b>Git panel</b> for the repository you are in: status, commits, branches.</li>
+      <li><b>Copy between hosts</b> without going through your laptop.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-files.jpg" aria-label="The Files panel next to the terminal: selecting files, then editing deploy.sh"><source src="assets/video/clip-files.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="transfers" aria-labelledby="f-up">
+  <div>
+    <p class="eyebrow">Uploads and downloads</p>
+    <h2 id="f-up">Drop a file <b>on the terminal.</b></h2>
+    <p class="sub">It lands in the directory your shell is in, and its path is typed at the prompt. Large uploads resume where they stopped, and every chunk is checked.</p>
+    <ul class="points">
+      <li><b>One floating widget</b> shows every transfer, and opens by itself when one needs a decision.</li>
+      <li><b>Paste a screenshot</b> into an AI CLI running on the host: the image lands there and its path is typed for you.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/15-upload-light.png"><img src="assets/shots/15-upload-dark.png" alt="The Transfers widget with an upload to the host" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="run" aria-labelledby="f-run">
+  <div>
+    <p class="eyebrow">Run on hosts</p>
+    <h2 id="f-run">One command, <b>many machines.</b></h2>
+    <p class="sub">Pick hosts by name or tag, confirm, and watch a grid fill with the state, exit code and output of each one.</p>
+    <ul class="points">
+      <li><b>Saved commands</b> are shared with the terminal's snippets, on every device.</li>
+      <li><b>Copy report</b> as Markdown, ready for a ticket.</li>
+      <li><b>Command guardrail:</b> rules an admin sets block or ask for confirmation before a command runs.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-run.jpg" aria-label="Run on hosts: a saved command on four hosts, a result per host"><source src="assets/video/clip-run.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="forwards" aria-labelledby="f-fwd">
+  <div>
+    <p class="eyebrow">Port forwards</p>
+    <h2 id="f-fwd">Internal web UIs, <b>behind your login.</b></h2>
+    <p class="sub">Grafana, Proxmox, a container's admin page bound to localhost: each gets its own subdomain, reached through the agent's tunnel. No <code>ssh -L</code>, and it works from an iPad.</p>
+    <ul class="points">
+      <li><b>HTTP, HTTPS and WebSocket</b>, on agent and SSH hosts.</li>
+      <li><b>Isolated per forward:</b> its own subdomain and cookie, a token bound to it, and protection against reaching hosts it should not.</li>
+      <li><b>Telnet bastion:</b> the console of a device that only the host can reach.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/12-forward-light.png"><img src="assets/shots/12-forward-dark.png" alt="The port forwards list with a forward to an internal web service" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="updates" aria-labelledby="f-upd">
+  <div>
+    <p class="eyebrow">Updates</p>
+    <h2 id="f-upd">Updates you can see, <b>upgrades you control.</b></h2>
+    <p class="sub">Each agent counts pending OS packages and the host gets a badge, red when any are security fixes. One click opens a terminal with the right upgrade command, and you press Enter.</p>
+    <ul class="points">
+      <li><b>apt, dnf, zypper, pacman, apk.</b> Checked every few hours, read-only.</li>
+      <li><b>Agents update themselves</b> from the gateway, only with an update signed with your own key, and wait while the host has sessions open.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/13-updates-light.png"><img src="assets/shots/13-updates-dark.png" alt="A host with pending OS updates and the upgrade action" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="diagnostics" aria-labelledby="f-diag">
+  <div>
+    <p class="eyebrow">Diagnostics</p>
+    <h2 id="f-diag">Debugging <b>without SSH.</b></h2>
+    <p class="sub">A host snapshot with OS, CPU, memory, every filesystem, network interfaces and routes, kept even when the host is down. Listening ports on demand, the link's health, and the agent's own log.</p>
+    <ul class="points">
+      <li><b>Services:</b> systemd units with their live state, logs and start, stop or restart.</li>
+      <li><b>Docker:</b> containers, images, live logs and stats.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/14-diagnostics-light.png"><img src="assets/shots/14-diagnostics-dark.png" alt="The host diagnostics panel" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="share" aria-labelledby="f-share">
+  <div>
+    <p class="eyebrow">Share and replay</p>
+    <h2 id="f-share">Show someone, <b>without an account.</b></h2>
+    <p class="sub">A share link lets a guest watch a live session, or type in it if you allow. It expires, and you can revoke it at once: their screen is wiped.</p>
+    <ul class="points">
+      <li><b>Replay links</b> share the recording of a finished session, with likely secrets masked.</li>
+      <li><b>Every open is logged</b> and you get an alert.</li>
+      <li>Recordings capture terminal output, which may include text echoed by the shell.</li>
+    </ul>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-share.jpg" aria-label="Creating a read-only share link that expires in an hour"><source src="assets/video/clip-share.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="settings" aria-labelledby="f-settings">
+  <div>
+    <p class="eyebrow">Settings</p>
+    <h2 id="f-settings">Every setting, <b>one search away.</b></h2>
+    <p class="sub">Type a word such as backup, SMTP or passkey and jump straight to the section. Search understands English and Romanian.</p>
+    <ul class="points">
+      <li><b>Three groups:</b> Personal (account and security, appearance, terminal, notifications), Administration (people and roles, access, policy, network, alerts, backup, updates) and Operations (system health, audit log).</li>
+      <li>Sections you are not allowed to change are not shown at all.</li>
+      <li><b>On a phone,</b> Settings opens as a list with the search on top, and each section gets the full screen.</li>
+    </ul>
+    <figure class="shot phone" style="margin-top: 28px">
+      <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/17-settings-phone-light.png"><img src="assets/shots/17-settings-phone-dark.png" alt="Settings on a phone: the Personal, Administration and Operations groups under the search box" width="390" height="844" loading="lazy"></picture>
+    </figure>
+  </div>
+  <figure class="shot clip">
+    <video data-clip muted loop playsinline preload="none" controls width="1440" height="900" poster="assets/video/clip-settings-search.jpg" aria-label="Searching the settings for backup and SMTP and landing on each section"><source src="assets/video/clip-settings-search.mp4" type="video/mp4"></video>
+  </figure>
+</article>
+
+<article class="feature" id="theme" aria-labelledby="f-theme">
+  <div>
+    <p class="eyebrow">EverShell theme</p>
+    <h2 id="f-theme">A look of its own, <b>light or dark.</b></h2>
+    <p class="sub">The EverShell theme is the default from 3.7.1: petrol, cream and a phosphor accent, in a light and a dark variant that follow your system.</p>
+    <ul class="points">
+      <li>If you picked a theme before, you keep it.</li>
+      <li><b>Midnight</b> and the <b>macOS, Windows 11, GNOME and KDE</b> families are still one click away in Settings → Appearance.</li>
+    </ul>
+  </div>
+  <figure class="shot">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/10-themes-light.png"><img src="assets/shots/10-themes-dark.png" alt="Settings, Appearance, with the EverShell theme selected" width="1440" height="900" loading="lazy"></picture>
+  </figure>
+</article>
+
+<article class="feature" id="phone" aria-labelledby="f-phone">
+  <div>
+    <p class="eyebrow">On your phone</p>
+    <h2 id="f-phone">The same session, <b>in your pocket.</b></h2>
+    <p class="sub">Install it as an app, and pick up the session you left on your desk. A two-row key bar gives you Esc, Tab, Ctrl and arrows; long-press selects text.</p>
+    <ul class="points">
+      <li><b>Notifications</b> when a long command finishes.</li>
+      <li><b>Themes</b> that look like macOS, Windows 11, GNOME or KDE, light or dark.</li>
+    </ul>
+  </div>
+  <figure class="shot phone">
+    <picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/08-phone-light.png"><img src="assets/shots/08-phone-dark.png" alt="A session on a phone, with the two-row key bar" width="390" height="844" loading="lazy"></picture>
+  </figure>
+</article>
+
+</div>
+
+<section class="dark" aria-labelledby="t-next">
+  <div class="wrap split2">
+    <div>
+      <h2 id="t-next">Try it on <b>your own server.</b></h2>
+      <p class="sub">Open source under MIT. Read the installer first: it is meant to be read.</p>
+    </div>
+    <div class="ctas" style="margin-top: 0; align-self: center">
+      <a class="btn btn-primary" href="install.html">Install</a>
+      <a class="btn btn-ghost" href="security.html">Read about security</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · MIT licensed · Self-hosted</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentation</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Made by <a href="about.html#a-team">Stefan, Claude and Codex</a>, much of it written inside an EverShell session.</p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# evershell.dev — site static în spatele Traefik-ului maşinii (aceeaşi VM ca klopot.dev şi
+# multibus.dev). Intră în reţeaua Docker `web`; nu publică niciun port.
+#
+#   docker compose up -d --build        # din /home/website/sites/evershell/deploy
+#
+# Nume de proiect propriu: compose-urile celorlalte site-uri stau tot în foldere `deploy`, iar
+# numele implicit (al folderului) făcea ca un `up` să înlocuiască containerele altui site.
+name: evershell-site
+
+services:
+  website:
+    build: ..
+    image: evershell-site:latest
+    container_name: evershell-site
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks: [web]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.evershell.rule=Host(`evershell.dev`) || Host(`www.evershell.dev`)
+      - traefik.http.routers.evershell.entrypoints=websecure
+      - traefik.http.routers.evershell.tls.certresolver=cf
+      - traefik.http.routers.evershell.tls.domains[0].main=evershell.dev
+      - traefik.http.routers.evershell.tls.domains[0].sans=*.evershell.dev
+      - traefik.http.routers.evershell.middlewares=evershell-www,evershell-hsts
+      - traefik.http.middlewares.evershell-www.redirectregex.regex=^https://www\.evershell\.dev/(.*)
+      - traefik.http.middlewares.evershell-www.redirectregex.replacement=https://evershell.dev/$${1}
+      - traefik.http.middlewares.evershell-www.redirectregex.permanent=true
+      - traefik.http.middlewares.evershell-hsts.headers.stsSeconds=31536000
+      - traefik.http.services.evershell.loadbalancer.server.port=8080
+
+networks:
+  web:
+    external: true

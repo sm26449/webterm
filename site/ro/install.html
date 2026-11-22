@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Instalare — EverShell</title>
+<meta name="description" content="Instalează EverShell pe propriul server: cerințe, installer-ul, primul cont și adăugarea hosturilor.">
+<link rel="canonical" href="https://evershell.dev/ro/install.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/install.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/install.html">
+<meta property="og:title" content="Instalează EverShell">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="../assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script src="../assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Sari la conținut</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell, prima pagină"><img src="../assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Meniu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Principal">
+      <a href="tour.html">Tur</a>
+      <a href="security.html">Securitate</a>
+      <a href="install.html" aria-current="page">Instalare</a>
+      <a href="about.html">Despre</a>
+      <a class="lang" href="../install.html" hreflang="en" lang="en">EN</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="i-title">
+  <div class="wrap">
+    <p class="eyebrow">Instalare</p>
+    <h1 id="i-title" style="font-size: clamp(40px, 6vw, 72px)">Serverul tău, <b>sesiunile tale.</b></h1>
+    <p class="lede">EverShell rulează ca un singur container Docker în spatele lui Traefik, pe un server al tău. Scriptul de instalare se ocupă de restul.</p>
+  </div>
+</section>
+
+<section aria-labelledby="i-need">
+  <div class="wrap split2">
+    <div>
+      <h2 id="i-need">De ce ai nevoie</h2>
+      <ul class="list" style="grid-template-columns: 1fr">
+        <li><b>Un server Linux cu Docker</b><p>Orice distribuție care rulează Docker Compose, cu porturile 80 și 443 libere. Comanda de instalare de mai jos este pentru un server cu Ubuntu sau Debian proaspăt instalat; în rest, <code>deploy.sh</code> folosește Docker-ul pe care îl ai deja. Imaginea publicată e amd64; pe ARM o construiești din sursă.</p></li>
+        <li><b>Un domeniu care indică spre server</b><p>Pentru HTTPS. Un token Cloudflare adaugă un certificat wildcard, care acoperă subdomeniile de port forwarding și numele agenților. Fără el, îndreaptă și <code>agents.</code>&lt;domeniul tău&gt; spre server.</p></li>
+        <li><b>Hosturi la care să ajungi</b><p>Pentru agent: Linux cu Python 3.6+ și, ideal, tmux. Hosturile mai vechi primesc un Python portabil. Restul: SSH sau telnet.</p></li>
+      </ul>
+    </div>
+    <div>
+      <h2>Instalare pe Ubuntu sau Debian</h2>
+      <pre><code><span class="c-dim">$</span> git clone https://github.com/sm26449/webterm.git
+<span class="c-dim">$</span> cd webterm
+<span class="c-dim">$</span> git checkout v3.7.1
+<span class="c-dim">$</span> less install.sh    <span class="c-dim"># rulează ca root: citește-l</span>
+<span class="c-dim">$</span> sudo ./install.sh --domain term.example.com \
+      --email you@example.com</code></pre>
+      <p class="sub" style="font-size: 16px">Pune Docker, stack-ul în <code>/opt/webterm</code>, un certificat Let's Encrypt, firewall-ul și un backup zilnic criptat, apoi afișează adresa și un token de configurare de unică folosință.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="i-first">
+  <div class="wrap">
+    <h2 id="i-first">Primele zece minute</h2>
+    <div class="grid">
+      <article class="card">
+        <p class="step-no">01</p>
+        <h3>Îți faci contul</h3>
+        <p>Deschizi adresa, folosești tokenul de configurare și adaugi un passkey din <b>Settings → Sign-in &amp; 2FA</b>.</p>
+      </article>
+      <article class="card">
+        <p class="step-no">02</p>
+        <h3>Adaugi un host</h3>
+        <p><b>+ Add host</b> îți dă o comandă de o linie. O rulezi pe server: creează un utilizator neprivilegiat <code>webterm</code>, iar hostul apare online.</p>
+      </article>
+      <article class="card">
+        <p class="step-no">03</p>
+        <h3>Deschizi o sesiune</h3>
+        <p>Pornești ceva, închizi tab-ul și o redeschizi de pe telefon.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="i-other">
+  <div class="wrap">
+    <h2 id="i-other">Alte variante</h2>
+    <ul class="list">
+      <li><b>Alte distribuții Linux cu Docker</b><p>Copiezi <code>.env.prod.example</code> în <code>.env</code>, îl completezi și rulezi <code>./deploy.sh</code>.</p></li>
+      <li><b>Single sign-on</b><p>Cu Authentik, inclus sau al tău: <code>deploy.sh --with-authentik</code>.</p></li>
+      <li><b>Multe hosturi deodată</b><p>Un token de înrolare de grup: o singură comandă, rulată pe fiecare mașină.</p></li>
+      <li><b>Upgrade-uri</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> în <code>/opt/webterm</code>, cu rollback dacă ai nevoie.</p></li>
+    </ul>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md">Ghidul complet de instalare (în engleză) →</a>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · licență MIT · găzduit de tine</span>
+    <nav aria-label="Subsol">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Politica de securitate</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentație</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Creat de <a href="about.html#a-team">Stefan, Claude și Codex</a>. O mare parte din proiect a fost scrisă chiar într-o sesiune EverShell.</p>
+</footer>
+</body>
+</html>
