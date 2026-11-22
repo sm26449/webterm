@@ -1,0 +1,344 @@
+"""WTX1 codec (gateway/app/txformat.py, ENCRYPTION-AT-REST.md §12.1): fixed test vectors, an
+independent re-derivation of every byte with raw primitives, and the reader rules (succession,
+watermark, SEAL, limits, index). Pure: no DB, no gateway process, files only in memory.
+
+Vectorii sunt şi în docs/design/ENCRYPTION-AT-REST.md, "Appendix: Test vectors (v1)": o
+schimbare de octet aici e o schimbare de format pe disc, deci trebuie făcută în ambele locuri."""
+import hashlib
+import hmac
+import io
+import os
+import struct
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
+from app import txformat as tx  # noqa: E402
+from cryptography.hazmat.primitives import hashes  # noqa: E402
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF  # noqa: E402
+
+results = []
+
+
+def check(name, cond):
+    results.append((name, bool(cond)))
+    print(f"  {'PASS' if cond else 'FAIL'} {name}")
+
+
+def raises(fn, exc, reason=None):
+    try:
+        fn()
+    except exc as e:
+        return reason is None or getattr(e, "reason", None) == reason
+    except Exception as e:  # noqa: BLE001
+        print(f"      (unexpected {type(e).__name__}: {e})")
+        return False
+    return False
+
+
+# ── fixed inputs (Appendix: Test vectors (v1)) ──
+RK = bytes(range(32))
+GEN = bytes(range(0x10, 0x20))
+SID = bytes.fromhex("00112233445566778899aabbccddeeff")
+CREATED = 1795305600000
+P0, P1 = b"hello\r\n", b"$ ls\r\n"
+
+V_K_HDR = "98614479f133a6f48d9474d9b18b32c6629e5523d5695e6e06a68fd56dec24c1"
+V_K_REC = "cc213e3065fa21cfa24a4d84c53470c50aeea39e37e4c05040cc4cd61ca3e6cc"
+V_K_IDX = "e7e93680d905ca244d72c0644a416f312075221060263a1fed418a154d2d763d"
+V_PREFIX = ("5754583101010000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff"
+            "00748d00a201000000000000000000000000000000000000"
+            "bba285dcda26b655a9f417b309c4cda2ff8d317dca59ed35b7278f8612f7d304")
+V_REC0 = "010700000000000000783d8f7570bd6378c394721f88db2f579d9755a88dc4e7"
+V_REC1 = "01060000000100000056ae7534a5ee15608a5306ee3be7eb3240d764b7d95a"
+V_SEAL = ("023000000002000000ecf2a2207beb5e68abd6e36b09d2357a84609519de2ef0f48cba731ebedf29a5"
+          "078aeacbe294bb286be63aeb32653aa8fff6ae47f122908b04b44595f25d057a")
+V_EMPTY = ("5754583101020000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff"
+           "00748d00a201000000000000000000000000000000000000"
+           "b431b09f12712547f8d74193369016de7b8b883dad7a3ceeba47335213466b5c"
+           "0230000000000000001f49d8f9d7956aadb2c7207cce695467662a48cd8359662e0287d2205e2e1322"
+           "c8e8a9dc5f178b3305a6540d98895fe535262c337f54526386817f15925faf89")
+
+
+def make(kind=1, payloads=(P0, P1), seal=True, gen=GEN, sid=SID, **kw):
+    f = io.BytesIO()
+    w = tx.Writer(f, RK, kind=kind, sid=sid, gen_id=gen, created_ms=CREATED, **kw)
+    for p in payloads:
+        w.append(p)
+    info = w.seal() if seal else None
+    return f.getvalue(), w, info
+
+
+def read(blob, data_count, kind=1, gen=GEN, sid=SID, **kw):
+    r = tx.Reader(io.BytesIO(blob), RK, kind=kind, sid=sid, gen_id=gen, data_count=data_count, **kw)
+    return list(r.records())
+
+
+def full(blob, kind=1, gen=GEN, sid=SID, **kw):
+    return tx.verify_full(io.BytesIO(blob), RK, kind=kind, sid=sid, gen_id=gen, **kw)
+
+
+print("== vectors ==")
+keys = tx.generation_keys(RK, 1, GEN)
+check("K_hdr vector", keys.hdr.hex() == V_K_HDR)
+check("K_rec vector", keys.rec.hex() == V_K_REC)
+check("K_idx vector", keys.idx.hex() == V_K_IDX)
+blob, w, info = make()
+check("header + hdr_mac vector (96 B)", blob[:96].hex() == V_PREFIX)
+check("DATA record seq 0 vector", blob[96:128].hex() == V_REC0)
+check("DATA record seq 1 vector", blob[128:159].hex() == V_REC1)
+check("SEAL vector", blob[159:].hex() == V_SEAL)
+check("total length 232 = 96 + (25+7) + (25+6) + 73", len(blob) == 232 == tx.phys_len(2, 13, True))
+check("writer phys_len matches the file", w.phys_len == len(blob) == info.phys_len)
+e_blob, _, e_info = make(kind=2, payloads=())
+check("zero-DATA generation vector (kind 2, SEAL only)", e_blob.hex() == V_EMPTY)
+check("zero-DATA SEAL carries count 0, len 0, SHA-256('')",
+      (e_info.data_count, e_info.plain_len, e_info.tags_hash) == (0, 0, hashlib.sha256().digest()))
+
+print("== independent re-derivation with raw primitives ==")
+
+
+def hk(label, kind):
+    info = label + b"\x00" + bytes([kind]) + GEN
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"\x00" * 32, info=info).derive(RK)
+
+
+check("HKDF info = label ‖ 00 ‖ kind ‖ gen_id, salt 32×00",
+      (hk(b"wt/v1/hdr", 1), hk(b"wt/v1/rec", 1), hk(b"wt/v1/idx", 1)) == (keys.hdr, keys.rec, keys.idx))
+check("kind changes every key", tx.generation_keys(RK, 2, GEN).rec != keys.rec)
+check("gen_id changes every key", tx.generation_keys(RK, 1, bytes(16)).hdr != keys.hdr)
+hdr = b"WTX1" + bytes([1, 1]) + b"\x00\x00" + GEN + SID + CREATED.to_bytes(8, "little") + bytes(16)
+check("header layout: 64 B, created u64 LE", blob[:64] == hdr and len(hdr) == 64)
+mac = hmac.new(keys.hdr, hdr, hashlib.sha256).digest()
+check("hdr_mac = HMAC-SHA-256(K_hdr, header)", blob[64:96] == mac)
+check("nonce = 8×00 ‖ seq u32 BE", tx.nonce(0x01020304) == bytes(8) + b"\x01\x02\x03\x04")
+rh = bytes([1]) + (7).to_bytes(4, "little") + (0).to_bytes(4, "little")
+check("record head: type u8 | len u32 LE | seq u32 LE", blob[96:105] == rh)
+ct = AESGCM(keys.rec).encrypt(bytes(12), P0, mac + rh)
+check("record 0 = AES-GCM(nonce(0), AAD = hdr_mac ‖ head)", blob[105:128] == ct)
+rh1 = bytes([1]) + (6).to_bytes(4, "little") + (1).to_bytes(4, "little")
+check("record 1 nonce counter is big-endian (00..00 00000001)",
+      blob[137:159] == AESGCM(keys.rec).encrypt(bytes(11) + b"\x01", P1, mac + rh1))
+tags = blob[128 - 16:128] + blob[159 - 16:159]
+seal_pt = struct.pack("<QQ", 2, 13) + hashlib.sha256(tags).digest()
+sh = bytes([2]) + (48).to_bytes(4, "little") + (2).to_bytes(4, "little")
+check("SEAL: seq = data_count, pt = count u64 LE ‖ len u64 LE ‖ SHA-256(tags)",
+      blob[159:] == sh + AESGCM(keys.rec).encrypt(bytes(8) + (2).to_bytes(4, "big"), seal_pt, mac + sh))
+dec = AESGCM(keys.rec).decrypt(tx.nonce(2), blob[168:], mac + sh)
+check("SEAL plaintext round-trips", struct.unpack("<QQ32s", dec) == (2, 13, info.tags_hash))
+
+print("== round trip ==")
+recs = read(blob, 2, plain_len=13, hdr_mac=info.hdr_mac)
+check("reader returns both DATA records", [r.data for r in recs] == [P0, P1])
+check("logical and file offsets", [(r.seq, r.logical_offset, r.file_offset) for r in recs] == [(0, 0, 96), (1, 7, 128)])
+check("verify_full ok + matches descriptor values",
+      full(blob, data_count=2, plain_len=13, phys_len=232, hdr_mac=info.hdr_mac) == info)
+check("zero-DATA generation: verify_full ok", full(e_blob, kind=2) == e_info)
+check("zero-DATA generation: reader with watermark 0 returns nothing", read(e_blob, 0, kind=2) == [])
+big = os.urandom(150000)
+f = io.BytesIO()
+bw = tx.Writer(f, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+bw.write(big)
+check("write() splits into 65 536-byte records", bw.data_count == 3 and read(f.getvalue(), 3)[0].data == big[:65536])
+check("write() bytes come back identical", b"".join(r.data for r in read(f.getvalue(), 3)) == big)
+
+print("== header tamper and identity ==")
+for name, pos, reason in (("magic", 0, "bad-magic"), ("version", 4, "bad-version"), ("kind", 5, "wrong-kind"),
+                          ("reserved u16", 6, "bad-reserved"), ("gen_id", 8, "wrong-gen"), ("sid", 24, "wrong-sid"),
+                          ("created", 40, "bad-hdr-mac"), ("reserved 16 B", 50, "bad-reserved"),
+                          ("hdr_mac", 70, "bad-hdr-mac")):
+    t = bytearray(blob)
+    t[pos] ^= 0x01
+    check(f"header {name} flipped → {reason}", raises(lambda: read(bytes(t), 2), tx.CorruptError, reason))
+check("short header → short-header", raises(lambda: read(blob[:95], 0), tx.CorruptError, "short-header"))
+check("expected hdr_mac from descriptor differs → hdr-mac-mismatch",
+      raises(lambda: read(blob, 2, hdr_mac=bytes(32)), tx.CorruptError, "hdr-mac-mismatch"))
+other_gen = bytes(range(0x20, 0x30))
+other_sid = bytes(16)
+g2, _, _ = make(gen=other_gen)
+check("another generation's file under this gen_id → wrong-gen", raises(lambda: read(g2, 2), tx.CorruptError, "wrong-gen"))
+s2, _, _ = make(sid=other_sid)
+check("another session's file under this sid → wrong-sid", raises(lambda: read(s2, 2), tx.CorruptError, "wrong-sid"))
+k2, _, _ = make(kind=2)
+check("the .cast file read as .out → wrong-kind", raises(lambda: read(k2, 2, kind=1), tx.CorruptError, "wrong-kind"))
+# Antetul unei generaţii + recordurile alteia (acelaşi sid/kind): tagurile pică, AAD şi cheia diferă.
+spliced = blob[:96] + g2[96:]
+check("records of another generation spliced under this header → bad-tag",
+      raises(lambda: read(spliced, 1), tx.CorruptError, "bad-tag"))
+spliced_k = blob[:96] + k2[96:]
+check("records of the other kind spliced under this header → bad-tag",
+      raises(lambda: read(spliced_k, 1), tx.CorruptError, "bad-tag"))
+wrong_rk = bytes(32)
+check("wrong RK → bad-hdr-mac", raises(lambda: tx.Reader(io.BytesIO(blob), wrong_rk, kind=1, sid=SID, gen_id=GEN, data_count=2),
+                                       tx.CorruptError, "bad-hdr-mac"))
+
+print("== records: reorder, duplicate, drop, tamper ==")
+h, r0, r1, sl = blob[:96], blob[96:128], blob[128:159], blob[159:]
+check("swapped records → bad-seq", raises(lambda: read(h + r1 + r0 + sl, 2), tx.CorruptError, "bad-seq"))
+check("duplicated record → bad-seq", raises(lambda: read(h + r0 + r0 + r1, 2), tx.CorruptError, "bad-seq"))
+check("dropped record → bad-seq", raises(lambda: read(h + r1 + sl, 1), tx.CorruptError, "bad-seq"))
+# seq rescris în antetul recordului: AAD-ul îl include, deci tagul pică.
+r1_as0 = r1[:5] + struct.pack("<I", 0) + r1[9:]
+check("record 1 relabelled as seq 0 → bad-tag", raises(lambda: read(h + r1_as0, 1), tx.CorruptError, "bad-tag"))
+t = bytearray(blob)
+t[110] ^= 0x80
+check("ciphertext bit flip → bad-tag", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-tag"))
+t = bytearray(blob)
+t[127] ^= 0x01
+check("tag bit flip → bad-tag", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-tag"))
+t = bytearray(blob)
+t[96] = 3
+check("unknown record type → bad-type", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-type"))
+t = bytearray(blob)
+t[96:97] = b"\x02"
+check("DATA relabelled as SEAL (len 7) → bad-len", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-len"))
+t = bytearray(blob)
+t[97:101] = struct.pack("<I", 0)
+check("DATA len 0 → bad-len", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-len"))
+t = bytearray(blob)
+t[97:101] = struct.pack("<I", 65537)
+check("DATA len 65 537 → bad-len", raises(lambda: read(bytes(t), 2), tx.CorruptError, "bad-len"))
+
+print("== watermark ==")
+live, lw, _ = make(payloads=(P0, P1, b"third"), seal=False)
+check("reader stops at the watermark (2 of 3)", [r.data for r in read(live, 2)] == [P0, P1])
+check("authentic records after the watermark ignored", [r.data for r in read(live + os.urandom(50), 1)] == [P0])
+check("torn last record beyond the watermark ignored", [r.data for r in read(live[:-5], 2)] == [P0, P1])
+check("garbage beyond the watermark ignored", [r.data for r in read(live[:128] + b"\xff" * 40, 1)] == [P0])
+check("watermark 0 reads nothing even with data present", read(live, 0) == [])
+check("truncation inside the watermark → short-record",
+      raises(lambda: read(live[:-5], 3), tx.CorruptError, "short-record"))
+check("file ends exactly at a record boundary inside the watermark → short-record",
+      raises(lambda: read(live[:128], 2), tx.CorruptError, "short-record"))
+check("SEAL below the watermark → bad-type (descriptor claims more than the generation has)",
+      raises(lambda: read(blob, 3), tx.CorruptError, "bad-type"))
+check("descriptor plain_len differs → plain-len-mismatch",
+      raises(lambda: read(blob, 2, plain_len=14), tx.CorruptError, "plain-len-mismatch"))
+check("negative watermark refused", raises(lambda: read(blob, -1), tx.CorruptError, "bad-watermark"))
+check("watermark above the record limit refused",
+      raises(lambda: read(blob, tx.MAX_DATA_RECORDS + 1), tx.CorruptError, "bad-watermark"))
+check("plain_len impossible for the count refused", raises(lambda: read(blob, 2, plain_len=1), tx.CorruptError, "bad-watermark"))
+r = tx.Reader(io.BytesIO(blob), RK, kind=1, sid=SID, gen_id=GEN, data_count=2)
+check("read_all = concatenated plaintext", r.read_all() == P0 + P1)
+check("a reader cannot be consumed twice", raises(lambda: list(r.records()), tx.StateError, "consumed"))
+
+print("== SEAL rules (verify_full) ==")
+check("unsealed generation → missing-seal", raises(lambda: full(live), tx.CorruptError, "missing-seal"))
+check("byte after SEAL → trailing-bytes", raises(lambda: full(blob + b"\x00"), tx.CorruptError, "trailing-bytes"))
+check("second SEAL appended → trailing-bytes", raises(lambda: full(blob + sl), tx.CorruptError, "trailing-bytes"))
+check("truncated SEAL → short-record", raises(lambda: full(blob[:-1]), tx.CorruptError, "short-record"))
+check("truncated mid-DATA → short-record", raises(lambda: full(blob[:100]), tx.CorruptError, "short-record"))
+
+
+def forge_seal(count, plain, th, seq=None):
+    head = bytes([2]) + struct.pack("<II", 48, count if seq is None else seq)
+    return head + AESGCM(keys.rec).encrypt(tx.nonce(count if seq is None else seq),
+                                           struct.pack("<QQ", count, plain) + th, mac + head)
+
+
+check("forged SEAL with wrong count → bad-seal", raises(lambda: full(h + r0 + r1 + forge_seal(3, 13, info.tags_hash, 2)), tx.CorruptError, "bad-seal"))
+check("forged SEAL with wrong plain_len → bad-seal", raises(lambda: full(h + r0 + r1 + forge_seal(2, 12, info.tags_hash)), tx.CorruptError, "bad-seal"))
+check("forged SEAL with wrong tag hash → bad-seal", raises(lambda: full(h + r0 + r1 + forge_seal(2, 13, bytes(32))), tx.CorruptError, "bad-seal"))
+check("valid forge reference passes (the forger is correct)", full(h + r0 + r1 + forge_seal(2, 13, info.tags_hash)).data_count == 2)
+check("SEAL after a dropped record → bad-seq", raises(lambda: full(h + r0 + sl), tx.CorruptError, "bad-seq"))
+check("descriptor count differs from SEAL → count-mismatch", raises(lambda: full(blob, data_count=3), tx.CorruptError, "count-mismatch"))
+check("descriptor phys_len differs → phys-len-mismatch", raises(lambda: full(blob, phys_len=231), tx.CorruptError, "phys-len-mismatch"))
+check("descriptor plain_len differs → plain-len-mismatch", raises(lambda: full(blob, plain_len=12), tx.CorruptError, "plain-len-mismatch"))
+check("the watermark reader ignores the SEAL itself", [x.data for x in read(blob, 2)] == [P0, P1])
+
+print("== writer state ==")
+check("append after SEAL refused", raises(lambda: w.append(b"x"), tx.StateError, "sealed"))
+check("second SEAL refused", raises(lambda: w.seal(), tx.StateError, "sealed"))
+_, w3, _ = make(seal=False)
+check("empty append refused", raises(lambda: w3.append(b""), tx.StateError, "bad-argument"))
+check("65 537-byte append refused", raises(lambda: w3.append(b"x" * 65537), tx.StateError, "bad-argument"))
+check("65 536-byte append accepted", w3.append(b"x" * 65536) == 2)
+
+
+class Failing(io.BytesIO):
+    def __init__(self):
+        super().__init__()
+        self.fail = False
+
+    def write(self, b):
+        if self.fail:
+            return len(b) // 2  # scriere parţială
+        return super().write(b)
+
+
+ff = Failing()
+w4 = tx.Writer(ff, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+ff.fail = True
+check("short write raises", raises(lambda: w4.append(b"abc"), OSError))
+ff.fail = False
+check("after a write error the writer is broken (no append)", raises(lambda: w4.append(b"abc"), tx.StateError, "broken"))
+check("after a write error the writer is broken (no SEAL)", raises(lambda: w4.seal(), tx.StateError, "broken"))
+check("limits can only be lowered", raises(lambda: tx.Writer(io.BytesIO(), RK, kind=1, sid=SID, gen_id=GEN, created_ms=0,
+                                                              max_records=tx.MAX_DATA_RECORDS + 1), tx.StateError))
+check("unknown kind refused", raises(lambda: tx.Writer(io.BytesIO(), RK, kind=3, sid=SID, gen_id=GEN, created_ms=0), tx.StateError))
+check("short gen_id refused", raises(lambda: tx.Writer(io.BytesIO(), RK, kind=1, sid=SID, gen_id=b"x" * 15, created_ms=0), tx.StateError))
+check("spec limits: 1 048 576 records, 64 GiB", (tx.MAX_DATA_RECORDS, tx.MAX_PLAIN_BYTES) == (1048576, 64 * 2 ** 30))
+
+print("== limits and should_roll ==")
+f5 = io.BytesIO()
+w5 = tx.Writer(f5, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED, max_records=10)
+for i in range(8):
+    w5.append(b"r")
+check("should_roll false at 80 %", not w5.should_roll())
+w5.append(b"r")
+check("should_roll true at 90 % of records", w5.should_roll())
+w5.append(b"r")
+check("append past the record limit refused", raises(lambda: w5.append(b"r"), tx.LimitError))
+check("a full generation can still be sealed and verified", (w5.seal(), full(f5.getvalue()).data_count)[1] == 10)
+f6 = io.BytesIO()
+w6 = tx.Writer(f6, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED, max_plain=100)
+w6.append(b"x" * 89)
+check("should_roll false at 89 % of bytes", not w6.should_roll())
+w6.append(b"x")
+check("should_roll true at 90 % of bytes", w6.should_roll())
+before = w6.phys_len
+check("write() past the byte limit refused, all or nothing", raises(lambda: w6.write(b"x" * 11), tx.LimitError) and w6.phys_len == before)
+w6.write(b"x" * 10)
+check("writing exactly up to the limit is allowed", w6.plain_len == 100)
+
+print("== index ==")
+ents = [tx.IndexEntry(r.seq, r.logical_offset, r.file_offset) for r in read(live, 3)]
+idx = tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=ents)
+check("index round trip", tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3) == ents)
+check("index size = 36 + 20×n + 32", len(idx) == 36 + 20 * 3 + 32)
+check("index for another watermark → stale-index (MAC still ok)", raises(lambda: tx.verify_index(
+    tx.encode_index(RK, kind=1, gen_id=GEN, data_count=2, entries=ents[:2]), RK, kind=1, gen_id=GEN, data_count=3),
+    tx.CorruptError, "stale-index"))
+check("index under another gen_id → bad-index-mac", raises(lambda: tx.verify_index(idx, RK, kind=1, gen_id=other_gen, data_count=3),
+                                                             tx.CorruptError, "bad-index-mac"))
+check("index under another kind → bad-index-mac", raises(lambda: tx.verify_index(idx, RK, kind=2, gen_id=GEN, data_count=3),
+                                                           tx.CorruptError, "bad-index-mac"))
+t = bytearray(idx)
+t[40] ^= 1
+check("entry byte flipped → bad-index-mac", raises(lambda: tx.verify_index(bytes(t), RK, kind=1, gen_id=GEN, data_count=3),
+                                                   tx.CorruptError, "bad-index-mac"))
+check("truncated index → bad-index-mac", raises(lambda: tx.verify_index(idx[:-1], RK, kind=1, gen_id=GEN, data_count=3),
+                                                tx.CorruptError, "bad-index-mac"))
+check("index with wrong RK → bad-index-mac", raises(lambda: tx.verify_index(idx, bytes(32), kind=1, gen_id=GEN, data_count=3),
+                                                    tx.CorruptError, "bad-index-mac"))
+check("sparse index accepted", tx.verify_index(tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=[ents[0], ents[2]]),
+                                               RK, kind=1, gen_id=GEN, data_count=3) == [ents[0], ents[2]])
+bad = [tx.IndexEntry(1, 7, 128 + 1)]
+check("encode refuses an inconsistent file offset", raises(lambda: tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=bad), tx.StateError))
+check("encode refuses an entry at/after the watermark",
+      raises(lambda: tx.encode_index(RK, kind=1, gen_id=GEN, data_count=1, entries=ents[:2]), tx.StateError))
+check("encode refuses unordered entries",
+      raises(lambda: tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=[ents[1], ents[0]]), tx.StateError))
+# Un index cu MAC valid dar intrări incoerente (cheie compromisă / bug) e prins de verificarea
+# structurală de după MAC.
+body = idx[:36] + struct.pack("<IQQ", 0, 0, 96) + struct.pack("<IQQ", 1, 7, 999) + idx[76:96]
+forged = body + hmac.new(keys.idx, body, hashlib.sha256).digest()
+check("authentic MAC but impossible offsets → bad-index", raises(lambda: tx.verify_index(forged, RK, kind=1, gen_id=GEN, data_count=3),
+                                                                 tx.CorruptError, "bad-index"))
+check("oversized index refused before the MAC", raises(lambda: tx.verify_index(b"\x00" * (36 + 20 * (tx.MAX_DATA_RECORDS + 1) + 32),
+                                                                                RK, kind=1, gen_id=GEN, data_count=3),
+                                                        tx.CorruptError, "bad-index"))
+
+failed = [n for n, ok in results if not ok]
+print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+sys.exit(1 if failed else 0)

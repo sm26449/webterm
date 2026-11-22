@@ -71,8 +71,10 @@ Master key  MK (32 B)                      key file / env / (legacy) volume
   re-derived: existing secrets keep decrypting; they are re-encrypted under `FK` by a verified,
   resumable migration and `FK_legacy` is retired only after a full coverage check. The
   forward-token HMAC sub-key keeps its current derivation from `FK_legacy` until then.
-- **Envelope AAD** = installation id ‖ format version ‖ purpose ‖ KWK id ‖ data-key id (‖ sid for
-  RK). A wrapped key cannot be replayed into another slot.
+- **Envelope binding:** AES-KWP has no AAD, so the key type and the wrapping-key id are wrapped
+  together with the key (§12.2); the binding to the installation comes from the manifest MAC, and
+  for a session's RK from the descriptor MAC (`rk_hash`). A wrapped key cannot be replayed into
+  another slot.
 - **Wrapping** is AES-KWP (RFC 5649), deterministic, so there is no wrap nonce budget; the exact
   byte rules are in §12.2.
 
@@ -119,13 +121,11 @@ Sources, by precedence: `WEBTERM_MASTER_KEY_FILE` (default `/run/secrets/webterm
 
 A recording is a sequence of **segments**. Each writer start (session start, reattach after a
 gateway restart, after a crash, after a restore, after the size cap, after any ambiguous write
-error) opens a **new segment** with a fresh random 128-bit `gen_id` and its own key
-`HKDF(RK, "wt/seg/v1" ‖ kind ‖ gen_id)`. A segment is never reopened for writing. Inside a segment
-the nonce is the 96-bit record counter starting at 0; a segment is sealed and a new one started
-well before 2^32 records. One writer per (sid, kind) at a time, enforced by a per-session lease
+error) opens a **new segment** with a fresh random 128-bit `gen_id` and its own keys (§12.1). A
+segment is never reopened for writing. Nonces, limits and the roll-over point are fixed in §12.1. One writer per (sid, kind) at a time, enforced by a per-session lease
 (§5).
 
-### 4.2 Byte format (little-endian)
+### 4.2 Byte format (overview; the bytes are in §12.1)
 
 ```
 header: see §12.1 (64 B immutable + HMAC-SHA-256, no AEAD nonce spent on it)
@@ -313,6 +313,15 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   descriptor and the records they return, and rebuild by a bounded length scan when it is missing
   or stale.
 - **Test vectors** (fixed RK, gen_id, plaintexts → exact bytes) are part of the first PR.
+- **Implementation notes (first PR, `gateway/app/txformat.py`):** the AAD's record fields are the
+  9 record-header bytes exactly as written (type u8, len u32 LE, seq u32 LE). SEAL integers are
+  u64 LE; a generation with zero DATA records is valid and sealed with count 0, length 0 and
+  SHA-256 of the empty string. Physical length = 96 + Σ(25 + len) over DATA, + 73 once sealed.
+  Kinds: 1 = `.out`, 2 = `.cast`; any other value is refused. Index file: `"WTI1"` | ver u8 = 1 |
+  kind u8 | reserved u16 = 0 | gen_id 16 B | data_count u64 LE | n u32 LE | n × (seq u32,
+  logical offset u64, file offset u64, all LE) | HMAC-SHA-256(K_idx, all bytes before); entries
+  strictly ascending, below the watermark, with file offset = 96 + logical offset + 25 × seq.
+  Vectors: Appendix "Test vectors (v1)".
 
 ### 12.2 Key manifest, bootstrap and boot
 
@@ -323,6 +332,20 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   authenticated by HMAC-SHA-256 under `K_man = HKDF(MK, "wt/v1/manifest")` (a key used for nothing
   else). Per-session RKs stay in the `session_keys` table, wrapped the same way; their binding to
   the session is the descriptor MAC (§12.3).
+- **Encodings (first PR, `gateway/app/keyring.py`; draft until §12.8 contracts 1 and 6 are
+  closed, nothing is written to disk yet):** MK-level and KWK-level derivations use the §12.1 HKDF
+  with `info` = label ‖ 0x00 (`K_man` "wt/v1/manifest", `K_mw` "wt/v1/mkwrap", `K_desc`
+  "wt/v1/desc", journal "wt/v1/erase"). Key id = HMAC-SHA-256(key, "id")[:16] (the MK id of §3.2,
+  also used for wrapping keys). Envelope = ver u8 = 1 | type u8 | kek_id 16 B | wlen u16 LE = 64 |
+  AES-KWP(KEK, ver ‖ type ‖ kek_id ‖ key 32 B); the inner copy binds type and wrapping key, so a
+  relabelled or moved envelope fails to unwrap. Types: 1 KWK, 2 SNK (under `K_mw`), 3 FK_legacy,
+  4 FK, 5 DBK, 6 RK (under KWK). Manifest = `"WTKM"` | ver u8 = 1 | 3 reserved zero bytes |
+  installation id 16 B | epoch u64 LE (≥ 1) | current MK id 16 B | n u8 + retired MK ids
+  (strictly ascending, ≤ 64) | n u8 + (len u16 LE ‖ envelope) strictly ascending by type, one per
+  type, KWK required, RK forbidden (≤ 16) | HMAC-SHA-256(K_man, all bytes before); at most 16 KiB.
+  Decoding compares the MK id first (a wrong key is reported as such), then the MAC, then parses
+  strictly (trailing bytes, order, reserved bits refused). The manifest does not yet carry
+  migration or format state (§3.2 lists them); that is part of contract 6.
 - **Publication:** write `keys.wtk.tmp` (O_EXCL, 0600, O_NOFOLLOW), fsync, rename over `keys.wtk`,
   fsync the directory. One file = one atomic switch; the epoch increases on every change.
 - **Routine MK rotation (v4, review V3-H1):** KWK, SNK and the keys derived from KWK (`K_desc`,
@@ -355,6 +378,14 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   `{gen_id, state live|sealed|recovered, data_count, plain_len, phys_len, hdr_mac}`, the hash of the
   session's wrapped RK, authenticated with HMAC-SHA-256 under `K_desc = HKDF(KWK, "wt/v1/desc")`
   over (installation id, sid, kind, everything above).
+- **Encoding (first PR, `gateway/app/txdesc.py`; draft until §12.8 contract 1 is closed):**
+  `"WTD1"` | ver u8 = 1 | kind u8 | reserved u16 = 0 | installation id 16 B | sid 16 B (the uuid4
+  bytes) | version u64 LE | SHA-256 of the wrapped-RK envelope | n u16 LE (≤ 4096) | n ×
+  (gen_id 16 B | state u8: 1 live, 2 sealed, 3 recovered | data_count u64 | plain_len u64 |
+  phys_len u64 | hdr_mac 32 B) | HMAC-SHA-256(K_desc, all bytes before). The list is in recording
+  order; gen_ids unique; at most one `live`, and only last; phys_len is the committed prefix for
+  live and recovered, the whole file with its SEAL for sealed. The decoder also checks the
+  expected installation, sid and kind and, when given, the RK envelope hash.
 - **Commit order per checkpoint:** append records to `.out` and `.cast` → fsync both → one DB
   transaction that updates both descriptors (`data_count` = exclusive watermark) **and** the
   upstream agent offset. A reader trusts exactly the committed prefix: bytes after it are ignored,
@@ -446,3 +477,35 @@ reviewed before the PR that turns writers, migration, backup or erasure on:
    classification, leftover `keys.wtk.tmp` handled, `fstat` on the same fd, regular file, no
    symlinks, canonical encodings and size limits for manifest, envelopes and descriptors; the
    wrong-key refusal also with a restore in staging.
+
+## Appendix: Test vectors (v1)
+
+The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
+any byte here is a change of the on-disk format. All values hex.
+
+Inputs: RK = `000102…1f`; gen_id = `101112…1f`; sid = `00112233445566778899aabbccddeeff`;
+created = 1795305600000 ms; DATA 0 = `"hello\r\n"`, DATA 1 = `"$ ls\r\n"`; kind 1. MK = `404142…5f`;
+KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
+
+| Value | Bytes |
+|---|---|
+| K_hdr (kind 1) | `98614479f133a6f48d9474d9b18b32c6629e5523d5695e6e06a68fd56dec24c1` |
+| K_rec (kind 1) | `cc213e3065fa21cfa24a4d84c53470c50aeea39e37e4c05040cc4cd61ca3e6cc` |
+| K_idx (kind 1) | `e7e93680d905ca244d72c0644a416f312075221060263a1fed418a154d2d763d` |
+| header ‖ hdr_mac | `5754583101010000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff00748d00a201000000000000000000000000000000000000bba285dcda26b655a9f417b309c4cda2ff8d317dca59ed35b7278f8612f7d304` |
+| DATA seq 0 | `010700000000000000783d8f7570bd6378c394721f88db2f579d9755a88dc4e7` |
+| DATA seq 1 | `01060000000100000056ae7534a5ee15608a5306ee3be7eb3240d764b7d95a` |
+| SEAL seq 2 | `023000000002000000ecf2a2207beb5e68abd6e36b09d2357a84609519de2ef0f48cba731ebedf29a5078aeacbe294bb286be63aeb32653aa8fff6ae47f122908b04b44595f25d057a` |
+| zero-DATA generation (kind 2, whole file) | `5754583101020000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff00748d00a201000000000000000000000000000000000000b431b09f12712547f8d74193369016de7b8b883dad7a3ceeba47335213466b5c0230000000000000001f49d8f9d7956aadb2c7207cce695467662a48cd8359662e0287d2205e2e1322c8e8a9dc5f178b3305a6540d98895fe535262c337f54526386817f15925faf89` |
+| MK id | `52062057e5bbb03e34bb12c0d05de434` |
+| K_man | `071c9f0dce956063b924440880505ea8f4df662d9a0395e4a984ec344e3f8933` |
+| K_mw | `09f2a4c3196240724b7d9582a2b26e088c0db5320a2d2000eff8d46627b9c19b` |
+| K_desc (from KWK) | `804e4639edacf6eb3b2d9f2316c4c8745bebc186c47e44ef3ab62a2881b9f3f5` |
+| K_erase (from KWK) | `ee47abe8074d9cf1b1afcd0bb95415e16a0efd293e5a9c78b2ba9cb1e0687774` |
+| envelope KWK under K_mw | `01017614b7d76f52d1a0fbd2299ee87b3ac54000d93a0b9a73b07151fcca76e53d94d458583c1e9e012ba35c38d5023aae6a2fab369e007273298558513fd30cb7cb57ef2ffe18e7931c53f120c4b223d2b4526b` |
+| envelope FK under KWK | `0104f11f697470f59679fa2294223bae52cd4000a7d79b9971b751f4048a96b74ae41e2f5d2ca92750ef2b3b732c1714d705a675d7a0f10283ffd3a95a45dad3768582c67283c799ae55b9fd8d5684bcb35bb8b8` |
+| envelope RK under KWK | `0106f11f697470f59679fa2294223bae52cd40009cab90a76f09514cc0cbc9713a516f12470584239e7c0702a63c4de1adfe146bfc0413330f3b724ade21506857c85af97be734dee47f2e1f1b5c8bf75baf5c53` |
+| manifest (epoch 1, no retired ids, KWK + FK) MAC | `b1e621dcef08ec41607f045a18e1d345c3a5a10235d73ecbb757907b4827080b` |
+| descriptor (sid above, kind 1, version 3, the sealed generation above) MAC | `d9cff1271b174d9e23ad93253030e9438c64226d3f2ceff045b8134cfcf16716` |
+
+The manifest and descriptor bytes in full are in `tests/keyring_test.py` (`V_MANIFEST`, `V_DESC`).
