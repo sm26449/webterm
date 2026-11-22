@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml"><img alt="CI" src="https://github.com/sm26449/webterm/actions/workflows/docker-publish.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <a href="https://github.com/sm26449/webterm/tags"><img alt="Version" src="https://img.shields.io/badge/version-v3.7.0-blue"></a>
+  <a href="https://github.com/sm26449/webterm/tags"><img alt="Version" src="https://img.shields.io/badge/version-v3.7.1-blue"></a>
 </p>
 
 # EverShell
@@ -150,7 +150,7 @@ On a fresh **Ubuntu/Debian** server (amd64) with a domain pointing at it and por
 ```sh
 git clone https://github.com/sm26449/webterm.git
 cd webterm
-git checkout v3.7.0          # the release tag from the version badge; a tag cannot move under you
+git checkout v3.7.1          # the release tag from the version badge; a tag cannot move under you
 less install.sh             # it is meant to be read: it runs as root
 sudo ./install.sh --domain term.example.com --email you@example.com
 ```
@@ -289,7 +289,7 @@ passphrase and `.env` are **not** in it. Backups from the UI and the scheduled t
 ## Upgrade and rollback
 
 ```sh
-cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.7.0
+cd /opt/webterm && sudo ./upgrade.sh     # latest release; or pass a tag: sudo ./upgrade.sh v3.7.1
 ./rollback.sh                           # back to the previous image, any time afterwards
 ```
 

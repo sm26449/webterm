@@ -23,7 +23,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "http://localhost:8000"
 os.environ["WEBTERM_AGENT_RL_METRICS_URL"] = "http://traefik:8082/metrics"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app import api, audit, core, db, edgeguard, syshealth  # noqa: E402
+from app import api, core, db, edgeguard, syshealth  # noqa: E402
 
 ok = 0
 total = 0

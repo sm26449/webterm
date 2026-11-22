@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.7.1] — 2026-11-22 · agent (61)
+
 ### Added
 - **"New session" first shows the sessions you already have open on that host.** Closing a tab leaves
   the session running, so people ended up with six or eight forgotten shells per host. Now, when you

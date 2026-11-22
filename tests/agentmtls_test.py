@@ -21,7 +21,7 @@ os.environ["WEBTERM_PUBLIC_URL"] = "https://wt.example.org"
 os.environ["WEBTERM_AGENT_LISTS_DIR"] = EDGE
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app import agentca, agentgate, api, config, core, db, edgemtls, security  # noqa: E402
+from app import agentca, api, config, core, db, edgemtls, security  # noqa: E402
 
 ok = 0
 total = 0
@@ -88,7 +88,7 @@ async def main():
         await db.execute("INSERT INTO hosts(name, token_hash, token_encrypted, created) VALUES(?,?,'',0)",
                          name, security.sha256_hex(tok))
     h1 = (await db.fetchone("SELECT id FROM hosts WHERE name='h1'"))["id"]
-    h2 = (await db.fetchone("SELECT id FROM hosts WHERE name='h2'"))["id"]
+    (await db.fetchone("SELECT id FROM hosts WHERE name='h2'"))["id"]
 
     print("== Traefik configuration")
     await edgemtls.startup()
