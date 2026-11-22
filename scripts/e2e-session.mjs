@@ -2641,13 +2641,21 @@ try {
     const palShown = await visible(launcher, 8000)
     const palFocus = await pollValue(() => page.evaluate(() => document.activeElement?.getAttribute('data-testid') ?? ''),
       (v) => v === 'launcher-new', 3000)
+    // lista arată TOATE sesiunile mele de pe host: `extra` (deja tab aici) cu insigna „Open in a tab here",
+    // după `extra2` (încă neîn tab) — rc5 le ascundea pe cele deschise
+    // după testid, nu după aria-expanded: „?"-ul de lângă titlu are şi el aria-expanded (popover)
+    const viewAll = launcher.locator('[data-testid="launcher-view-all"]')
+    if (await viewAll.count()) await viewAll.first().click().catch(() => {})
+    const cardOrder = await launcher.locator('button[data-card]').evaluateAll((els) => els.map((e) => e.getAttribute('data-card')))
+    const hereBadge = await launcher.locator(`button[data-card="${extra}"] [data-open-here]`).count()
     await page.keyboard.press('Escape')
     const escHash = await pollValue(() => page.evaluate(() => location.hash), (h) => !h.startsWith('#/new/'), 5000)
     const n5 = await liveCount()
     check('lansator: paleta (Enter pe host) deschide lansatorul; Escape îl închide fără sesiune nouă',
       palShown && palFocus === 'launcher-new' && !escHash.startsWith('#/new/') && (await hidden(launcher, 3000))
-        && (await launcherTab.count()) === 0 && n5 === n4,
-      `shown=${palShown} focus=${palFocus} hash=${escHash} n4=${n4} n5=${n5}`)
+        && (await launcherTab.count()) === 0 && n5 === n4
+        && hereBadge === 1 && cardOrder.indexOf(extra2) >= 0 && cardOrder.indexOf(extra2) < cardOrder.indexOf(extra),
+      `shown=${palShown} focus=${palFocus} hash=${escHash} n4=${n4} n5=${n5} badge=${hereBadge} order=${cardOrder.join(',')}`)
   }
 
   // ── 3.5.13: download File System Access întrerupt de un reload → „Interrupted — Resume / Discard" ──

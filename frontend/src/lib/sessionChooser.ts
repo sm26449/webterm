@@ -95,12 +95,23 @@ export function chooserNavTarget(count: number, current: number, key: string): n
 
 /* ── Tab-ul de lansare (3.7.1, decizia proprietarului) ──────────────────────────────────────────
    „New session" pe un host unde ai deja sesiuni VII ale tale, care NU sunt deja într-un tab aici,
-   deschide un tab opac de alegere; shell-ul se creează abia după alegere. Ce e deja într-un tab îl
-   vezi oricum, deci nu întrebăm pentru el. */
+   deschide un tab opac de alegere; shell-ul se creează abia după alegere. Dacă toate sunt deja în
+   tab-uri aici, nu întrebăm (le vezi oricum). Odată deschis, lansatorul le arată pe TOATE (rc5:
+   proprietarul vedea 2 carduri pe un host cu mult mai multe şi credea că lista e greşită); cele
+   deschise deja aici poartă insigna „Open in a tab here" şi doar comută pe tab-ul existent. */
 
-/** Cardurile lansatorului: refolosibilele de pe host, minus cele deschise deja ca tab aici. */
+/** Cardurile lansatorului: TOATE refolosibilele de pe host — întâi cele care nu sunt încă într-un tab
+    aici, apoi cele deschise deja aici; în fiecare grup, după activitate (ordinea din reusableSessions). */
 export function launcherSessions(hostId: number, sessions: readonly Session[], userId: number | null | undefined,
                                  openTabIds: readonly string[]): Session[] {
+  const open = new Set(openTabIds)
+  const all = reusableSessions(hostId, sessions, userId)
+  return [...all.filter((s) => !open.has(s.id)), ...all.filter((s) => open.has(s.id))]
+}
+
+/** Refolosibilele care NU sunt deja într-un tab aici — doar ele decid dacă lansatorul apare. */
+export function launcherPending(hostId: number, sessions: readonly Session[], userId: number | null | undefined,
+                                openTabIds: readonly string[]): Session[] {
   const open = new Set(openTabIds)
   return reusableSessions(hostId, sessions, userId).filter((s) => !open.has(s.id))
 }
@@ -120,7 +131,7 @@ export function launcherDecision(opts: {
   askHost?: boolean
 }): 'launcher' | 'direct' {
   if (opts.direct || !opts.online) return 'direct'
-  const reusable = launcherSessions(opts.hostId, opts.sessions, opts.userId, opts.openTabIds)
+  const reusable = launcherPending(opts.hostId, opts.sessions, opts.userId, opts.openTabIds)
   return shouldAskBeforeNew({
     hostId: opts.hostId, reusable, canOpen: opts.canOpen, askGlobal: opts.askGlobal, askHost: opts.askHost,
   }) ? 'launcher' : 'direct'
@@ -166,9 +177,11 @@ export function cardFacts(s: Session, now: number, openHere = false): {
 
 /** Candidatele pentru „Close idle…": inactive de peste o zi, VII. Lăsăm deoparte (fail-safe — închiderea
     omoară shell-ul) cele marcate „Keep open", cele cu link de share activ (cineva poate urmări) şi cele
-    ataşate acum în alt browser/dispozitiv (cineva le foloseşte, chiar fără output). */
-export function idleCandidates(list: readonly Session[], now: number): Session[] {
-  return list.filter((s) => s.state === 'live' && !s.keep_open && !s.shared
+    ataşate acum în alt browser/dispozitiv (cineva le foloseşte, chiar fără output). Şi cele deschise
+    într-un tab AICI (`openTabIds`): le vezi, nu le închidem pe la spate. */
+export function idleCandidates(list: readonly Session[], now: number, openTabIds: readonly string[] = []): Session[] {
+  const open = new Set(openTabIds)
+  return list.filter((s) => s.state === 'live' && !open.has(s.id) && !s.keep_open && !s.shared
     && (s.connected_clients || 0) === 0 && now - lastActivity(s) >= IDLE_SECS)
 }
 

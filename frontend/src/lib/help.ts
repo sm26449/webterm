@@ -18,6 +18,9 @@ export const HELP = {
   enrollGroups: { doc: 'docs/FLEET.md#bulk-enrollment' },
   deployKeyPolicy: { doc: 'docs/SSH-KEYS.md#deploy-key-policy-settings--security-policy' },
   idleSessions: { doc: 'docs/FEATURES.md#idle-sessions' },
+  // 3.7.1: tab-ul de lansare „New session” şi comutatorul lui din Terminal & workspace
+  launcher: { doc: 'docs/FEATURES.md#new-session-launcher' },
+  askNewSession: { doc: 'docs/FEATURES.md#turning-the-launcher-off' },
   smtp: { doc: 'docs/ALERTS.md#events' },
   webhook: { doc: 'docs/ALERTS.md#channels-email-and-webhook' },
   resourceAlerts: { doc: 'docs/ALERTS.md#resource-thresholds' },

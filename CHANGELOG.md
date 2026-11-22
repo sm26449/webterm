@@ -14,13 +14,17 @@ back.
   the session running, so people ended up with six or eight forgotten shells per host. Now, when you
   have at least one live session of your own on the host that is not already open in a tab here, New
   session opens a launcher tab instead of a shell: **New session** is selected (Enter does what the
-  click did before), and below it your sessions, most recently active first, with when they were last
-  active and whether they are open on another device, shared or kept open. Picking one switches to it;
-  nothing new is created. *Close idle…* stops the ones idle for over a day (not those kept open,
-  shared or open elsewhere). Shift+click or Shift+Enter skips the launcher, a checkbox turns it off
-  per host, and *Settings → Terminal & workspace → New sessions* turns it off everywhere (per
-  browser). Other people's sessions never appear there. On a phone it is a full-screen sheet. The
-  command palette follows the same rule: Enter on a host no longer always opens a new shell.
+  click did before), and below it all your live sessions on that host: first those not open here,
+  most recently active first, then those already open in a tab here (marked *Open in a tab here*),
+  with when they were last active and whether they are open on another device, shared or kept open.
+  Picking one attaches to it, or switches to its tab; nothing new is created. *Close idle…* stops the
+  ones idle for over a day (not those kept open, shared, open elsewhere or open in a tab here).
+  **Shift+click or Shift+Enter** on New session (sidebar, host page, Dashboard, command palette)
+  skips the launcher, a checkbox turns it off per host, and the switch in *Settings → Terminal &
+  workspace → New sessions* turns it off everywhere (per browser). Other people's sessions never
+  appear there. On a phone it is a full-screen sheet. The command palette follows the same rule:
+  Enter on a host no longer always opens a new shell. See
+  [docs/FEATURES.md](docs/FEATURES.md#new-session-launcher).
 - **Idle sessions are announced.** Sessions survive closing the tab, so shells pile up for weeks.
   When a session has had no typing, no output and no browser attached for 7 days (*Settings →
   Security policy → Idle sessions*, 1–90 days, or off), its owner gets one notice in the alert bell
@@ -42,7 +46,8 @@ back.
   roles, Access & automation, Security policy, Network & certificates, Alert delivery, Backup, Updates)
   and *Operations* (System health, Audit log). Your password, passkeys, 2FA, devices and access are now
   in one place; the old *Infrastructure & tokens* drawer is split by topic. Nothing changes in who sees
-  what, and links saved from older versions still open the right place.
+  what, and links saved from older versions still open the right place. Where each setting moved:
+  see [docs/FEATURES.md](docs/FEATURES.md#where-settings-moved-in-371).
 - **Settings work on a phone.** They open full screen with a list of categories, then the category
   with a Back button; Connected agents shows cards instead of a wide table; controls are at least 44 px
   on touch screens.

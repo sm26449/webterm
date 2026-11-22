@@ -1882,7 +1882,9 @@ function MainApp() {
     setPendingSearch(null)
     openTab(s.id)
     replaceRoute(s.id)
-    if (otherClients(live, false) > 0) notifyToast(t('launcher.alsoElsewhere'), 'info', 'wt-launch-elsewhere')
+    // deja într-un tab aici: doar comutăm (openTab nu dublează); tab-ul ăsta nu e „alt dispozitiv”
+    const wasOpen = openTabs.includes(s.id)
+    if (otherClients(live, wasOpen) > 0) notifyToast(t('launcher.alsoElsewhere'), 'info', 'wt-launch-elsewhere')
   }
   // „Close idle…": aceeaşi rută şi aceleaşi porţi ca Stop (require_session_control + step-up pe un
   // host 2FA, o singură ceremonie pentru toate), după o confirmare care le numeşte
@@ -2315,6 +2317,7 @@ function MainApp() {
           <NewSessionLauncher
             host={launchHost}
             cards={launchCards}
+            openHere={openTabs}
             loadError={fleet.sessionsErr}
             canOpen={(launchHost.connection_type !== 'agent' || !!launchHost.online) && canOn(getPerms(), launchHost.id, 'session.open')}
             focusNonce={launch.nonce}

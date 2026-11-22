@@ -113,7 +113,8 @@ export default function PreferencesTab() {
       </SettingsSection>
 
       {/* ── Sesiuni noi: întrebarea dinaintea unei sesiuni noi pe un host cu sesiuni deschise ── */}
-      <SettingsSection data-setting-id="askNewSession" title={t('settings.askNewSessionTitle')}>
+      <SettingsSection data-setting-id="askNewSession" title={t('settings.askNewSessionTitle')}
+        titleExtra={<HelpTip id="askNewSession" />}>
         <Switch checked={askNew} label={t('settings.askNewSession')} hint={t('settings.askNewSessionHint')}
           onChange={(v) => { setAskNew(v); setAskGlobal(v) }} />
         {optOuts > 0 && (

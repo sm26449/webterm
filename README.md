@@ -186,6 +186,8 @@ everything in one page.
 **Terminal & sessions**
 - Persistent tmux sessions with titles, notes and searchable history, open on several devices at
   once — [how persistence works](docs/FEATURES.md#persistence)
+- New session first offers the sessions you already have on that host, so shells don't pile up —
+  [the launcher](docs/FEATURES.md#new-session-launcher)
 - Replay closed sessions (player or plain text) — [session lifecycle](docs/design/SESSION-LIFECYCLE.md)
 - Commands as objects (OSC 133): exit code, duration and output per command, jump between them —
   [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)

@@ -455,6 +455,63 @@ never written to a transcript, so a password typed at an echo-off prompt cannot
 leak into a recording or a backup of one. Closed sessions
 stay in the sidebar until you delete them.
 
+## New session launcher
+
+Closing a tab leaves the session running, so it is easy to end up with six or eight forgotten
+shells on the same host. From 3.7.1, **New session** first shows you what you already have there.
+
+**When it appears.** When you ask for a new session on a host (sidebar, host page, Dashboard, or
+Enter on a host in the command palette) and you have at least one live session of your own on that
+host that is **not** already open in a tab in this window. If every session you have there is
+already a tab here, or you have none, a new shell opens straight away, as before. It never appears
+for an offline host or when you may not open sessions there. Other people's sessions never appear
+in it, even if your role lets you watch them.
+
+**What you see.** The launcher opens as a tab of its own (`#/new/<host>`); nothing is created
+until you choose.
+
+- **New session** at the top, already selected: Enter does exactly what the click did before.
+- Below it, a card for **every** live session of yours on the host: first the ones not open in a
+  tab here, most recently active first, then the ones already open here. The heading counts all of
+  them. Each card shows the title, when it was last active (or how long it has been idle), when it
+  was opened, and badges:
+
+  | Badge | Meaning |
+  |---|---|
+  | *Open in a tab here* | already a tab in this window; picking it switches to that tab |
+  | *open on N other devices* | another browser or device is attached right now |
+  | *shared link* | a live share link is active |
+  | *kept open* | marked **Keep open** (no idle notices) |
+  | *idle notice* | the session has had an idle notice |
+
+- Picking a card attaches to that session (or switches to its tab); the launcher tab becomes the
+  session's tab, and the browser's Back does not bring the launcher back. If the session ended in
+  the meantime, you stay in the launcher with a message.
+- More than five cards (four on a phone) collapse behind **View all N**.
+
+**Keyboard.** ↑/↓ move between New session and the cards (Home/End jump to the ends), Enter or
+Space picks, **Esc** closes the launcher and returns where you were without creating anything.
+**Shift+click** or **Shift+Enter** on any New session button (sidebar, host page, Dashboard,
+command palette) skips the launcher and opens a new shell directly.
+
+**Close idle…** Under the list, the launcher counts sessions idle for over a day and offers
+**Close idle…**. It asks for confirmation, naming each session, and then stops them (their
+processes end), with step-up on a host that requires 2FA. It leaves alone sessions marked Keep
+open, sessions with an active share link, sessions attached in another browser or device, and
+sessions open in a tab in this window.
+
+**On a phone** the launcher is a full-screen sheet with a **Back** button at the top (the phone's
+own Back closes it too); the keyboard hints are hidden and badges sit under each card's title.
+
+### Turning the launcher off
+
+- **Per host:** tick **Don't ask again on &lt;host&gt;** at the bottom of the launcher.
+- **Everywhere:** *Settings → Terminal & workspace → New sessions* has the global switch, and
+  **Ask again on all hosts** (shown once at least one host has been turned off) clears the
+  per-host choices. Shift+click or Shift+Enter still skips it for one session.
+
+Both are saved in this browser only, so another browser or device still asks.
+
 ## Idle sessions
 
 Because sessions survive closing the tab, it is easy to leave shells running for weeks. WebTerm
@@ -489,3 +546,33 @@ or a `tail -f` is never idle. A command that runs silently for days does look id
 **Keep a session.** In the session's **⋯** menu, choose **Keep open (no idle notices)**.
 It is no longer notified; the same menu turns it back off. Only someone who may control
 the session (its owner, or a role with `session.manage` on the host) can change it.
+
+## Where settings moved in 3.7.1
+
+Settings are grouped by who they are for: **Personal** (your account and this browser),
+**Administration** (instance settings, hidden without the permission) and **Operations** (what is
+happening now). Nothing changed in who may see or change what, and links or bookmarks to the old
+categories still open the right place.
+
+| Before 3.7.1 | From 3.7.1 |
+|---|---|
+| Account; Sign-in & 2FA (devices, passkeys, authenticator) | Personal → **Account & security** |
+| Users & roles → *Your access* | Personal → **Account & security** |
+| Appearance → watermark | Administration → **Security policy** |
+| Preferences (time zone, accessibility, tour, tips, terminal, transfers, OS-updates badge) | Personal → **Terminal & workspace** |
+| Preferences → task notifications; Notifications → your alert preferences | Personal → **My notifications** |
+| Preferences → app update | Administration → **Updates** |
+| Users & roles | Administration → **People & roles** |
+| Infrastructure & tokens → signing key, tokens, enrollment groups | Administration → **Access & automation** |
+| Infrastructure & tokens → command guardrail, deploy-key policy | Administration → **Security policy** |
+| Infrastructure & tokens → certificates, forward domain | Administration → **Network & certificates** |
+| Notifications → email (SMTP), webhook, resource thresholds | Administration → **Alert delivery** |
+| Backup; System health; Audit | unchanged (Administration → Backup; Operations → System health, Audit log) |
+
+New in 3.7.1: *Terminal & workspace → New sessions* (the launcher above) and *Security policy →
+Idle sessions*.
+
+- **Search** at the top of Settings finds a section by its name, its description or common
+  synonyms in English and Romanian, and jumps straight to it.
+- **On a phone** Settings open full screen: first the list of categories, then the chosen
+  category with a **Back** button.

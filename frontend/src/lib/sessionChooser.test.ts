@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from './api'
 import {
   askGlobalEnabled, askHostEnabled, cardFacts, chooserNavTarget, durationParts, hostOptOutKeys, IDLE_SECS,
-  idleCandidates, lastActivity, launcherDecision, launcherSessions, newSessionOpts, otherClients, resetHostOptOuts,
+  idleCandidates, lastActivity, launcherDecision, launcherPending, launcherSessions, newSessionOpts, otherClients, resetHostOptOuts,
   reusableSessions, setAskGlobal, setAskHost, shouldAskBeforeNew,
 } from './sessionChooser'
 
@@ -111,9 +111,17 @@ describe('tab-ul de lansare', () => {
     ses({ id: 'other-host', host_id: 2 }),
   ]
   const base = { hostId: 1, sessions: list, userId: 7, openTabIds: [] as string[], canOpen: true, online: true }
-  it('cardurile: fără ce e deja într-un tab aici, fără ale altora, cele active întâi', () => {
+  it('cardurile: toate ale mele de pe host (fără ale altora), întâi cele neîn tab, apoi cele deschise aici', () => {
     expect(launcherSessions(1, list, 7, []).map((s) => s.id)).toEqual(['b', 'a'])
-    expect(launcherSessions(1, list, 7, ['b']).map((s) => s.id)).toEqual(['a'])
+    expect(launcherSessions(1, list, 7, ['b']).map((s) => s.id)).toEqual(['a', 'b'])
+    expect(launcherSessions(1, list, 7, ['a', 'b']).map((s) => s.id)).toEqual(['b', 'a'])
+    const more = [...list, ses({ id: 'c', last_output: 500 }), ses({ id: 'd', last_output: 100 })]
+    expect(launcherSessions(1, more, 7, ['b', 'd']).map((s) => s.id)).toEqual(['c', 'a', 'b', 'd'])
+    expect(launcherSessions(1, list, null, [])).toEqual([])
+  })
+  it('launcherPending: doar cele care nu sunt deja într-un tab aici', () => {
+    expect(launcherPending(1, list, 7, ['b']).map((s) => s.id)).toEqual(['a'])
+    expect(launcherPending(1, list, 7, ['a', 'b'])).toEqual([])
   })
   it('lansatorul doar cu ≥1 sesiune a mea care nu e deja deschisă aici', () => {
     expect(launcherDecision(base)).toBe('launcher')
@@ -154,6 +162,8 @@ describe('tab-ul de lansare', () => {
       ses({ id: 'starting', state: 'creating', created: old }),
     ]
     expect(idleCandidates(cands, now).map((s) => s.id)).toEqual(['idle'])
+    // deschisă într-un tab aici: nu o închidem pe la spate, chiar dacă tab-ul nu e ataşat acum
+    expect(idleCandidates([...cands, ses({ id: 'idle2', last_output: old })], now, ['idle']).map((s) => s.id)).toEqual(['idle2'])
   })
 })
 

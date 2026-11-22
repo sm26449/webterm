@@ -6,6 +6,7 @@ import { sessionTitle } from '../lib/sessionTitle'
 import {
   askHostEnabled, cardFacts, chooserNavTarget, durationParts, idleCandidates, LAUNCHER_VISIBLE, setAskHost,
 } from '../lib/sessionChooser'
+import HelpTip from './HelpTip'
 import { ArrowLeftIcon, PlusIcon, TerminalPromptIcon } from './Icons'
 import { Badge, Button, ErrorState, cardClass, eyebrow } from './ui'
 
@@ -21,8 +22,11 @@ import { Badge, Button, ErrorState, cardClass, eyebrow } from './ui'
 
 export default function NewSessionLauncher(props: {
   host: Host
-  /** sesiunile tale vii de pe host, care nu sunt deja într-un tab aici (ordinea: activitate) */
+  /** TOATE sesiunile tale vii de pe host: întâi cele care nu sunt într-un tab aici, apoi cele deschise
+      deja aici (lib/sessionChooser.launcherSessions) */
   cards: Session[]
+  /** id-urile deschise deja ca tab în fereastra asta: insignă, alegerea doar comută pe tab */
+  openHere: readonly string[]
   /** lista de sesiuni n-a putut fi încărcată: eroare ≠ gol */
   loadError: string | null
   /** hostul poate primi o sesiune nouă acum (online + drept) */
@@ -38,6 +42,7 @@ export default function NewSessionLauncher(props: {
   const { t } = useI18n()
   const sheet = useSheetMode()
   const { host, cards } = props
+  const openHere = new Set(props.openHere)
   const newRef = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const [busy, setBusy] = useState(false)
@@ -64,7 +69,7 @@ export default function NewSessionLauncher(props: {
 
   const limit = sheet ? LAUNCHER_VISIBLE.phone : LAUNCHER_VISIBLE.desktop
   const shown = all ? cards : cards.slice(0, limit)
-  const idle = idleCandidates(cards, now)
+  const idle = idleCandidates(cards, now, props.openHere)
   const dur = (secs: number) => {
     const d = durationParts(secs)
     return d.unit === 'min' ? t('launcher.dur.min', { count: d.n })
@@ -120,7 +125,10 @@ export default function NewSessionLauncher(props: {
 
   const body = (
     <div className={`mx-auto flex w-full max-w-2xl flex-col ${sheet ? 'px-4 pb-6 pt-4' : 'px-6 pb-10 pt-10'}`}>
-      <h1 className={`text-lg font-semibold text-slate-100 ${sheet ? 'leading-snug' : ''}`}>{heading}</h1>
+      <div className="flex items-start gap-2">
+        <h1 className={`min-w-0 flex-1 text-lg font-semibold text-slate-100 ${sheet ? 'leading-snug' : ''}`}>{heading}</h1>
+        <HelpTip id="launcher" className="mt-0.5 shrink-0" />
+      </div>
       <p className="mt-1 text-sm text-slate-400">{t('launcher.sub')}</p>
       {!props.canOpen && (
         <p role="status" className="wt-warn mt-3 text-sm">{t('launcher.offline', { host: host.name })}</p>
@@ -143,7 +151,8 @@ export default function NewSessionLauncher(props: {
       ) : (
         <ul ref={listRef} aria-label={t('launcher.listAria', { host: host.name })} className="mt-2 flex flex-col gap-2">
           {shown.map((s) => {
-            const f = cardFacts(s, now)
+            const here = openHere.has(s.id)
+            const f = cardFacts(s, now, here)
             const title = sessionTitle(s.title, t) || t('app.untitledSession')
             const activity = f.starting ? t('launcher.starting')
               : f.idle ? t('launcher.idleFor', { ago: dur(f.idleSecs) })
@@ -151,16 +160,18 @@ export default function NewSessionLauncher(props: {
             const opened = f.ageSecs < 60 ? t('launcher.openedNow') : t('launcher.openedAgo', { ago: dur(f.ageSecs) })
             const badges = (
               <>
+                {here && <Badge tone="info" data-open-here="">{t('launcher.badge.openHere')}</Badge>}
                 {f.others > 0 && <Badge tone="info">{t('launcher.others', { count: f.others })}</Badge>}
                 {f.shared && <Badge tone="warn">{t('launcher.shared')}</Badge>}
                 {f.keepOpen && <Badge>{t('launcher.keepOpen')}</Badge>}
                 {f.idleNotice && <Badge tone="warn">{t('launcher.idleNotice')}</Badge>}
               </>
             )
-            const hasBadges = f.others > 0 || f.shared || f.keepOpen || f.idleNotice
+            const hasBadges = here || f.others > 0 || f.shared || f.keepOpen || f.idleNotice
             return (
               <li key={s.id}>
-                <button type="button" data-card={s.id} disabled={!props.canOpen}
+                {/* deja tab aici: comutarea pe el nu creează/ataşează nimic, deci merge şi cu hostul offline */}
+                <button type="button" data-card={s.id} disabled={!props.canOpen && !here}
                   onClick={() => props.onPick(s)}
                   className={`${cardClass} wt-touch flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-ink-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgb(var(--focus))] ${sheet ? 'min-h-[56px]' : 'min-h-[60px]'}`}>
                   {!sheet && (
@@ -185,7 +196,7 @@ export default function NewSessionLauncher(props: {
 
       <div className={`mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm ${sheet ? 'flex-col items-stretch' : 'justify-between'}`}>
         {cards.length > limit ? (
-          <button type="button" onClick={() => setAll((v) => !v)} aria-expanded={all}
+          <button type="button" data-testid="launcher-view-all" onClick={() => setAll((v) => !v)} aria-expanded={all}
             className="wt-touch min-h-[44px] rounded-md text-left wt-link hover:underline">
             {all ? t('launcher.showFewer') : t('launcher.viewAll', { count: cards.length })}
           </button>
