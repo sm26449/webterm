@@ -443,16 +443,18 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
         # Recheck 3, Medium 7: sweep-ul anulat (oprire, task anulat) cu hub-ul încă viu. Rezervarea nu
         # rămâne agăţată: ataşările nu mai sunt refuzate. Dacă frame-ul poate să fi plecat, rezultatul e
         # necunoscut → aceeaşi cale ca un timeout (audit 504 + backoff), pe un task separat.
-        hub.idle_closing = False
         if not armed["go"]:
+            hub.idle_closing = False
             if not hub.closed:
                 hub.exit_reason = "exited"
             log.info("idle session %s: close cancelled before it was sent", sid)
         else:
+            # review 4ec916d: frame-ul poate fi deja pe drum — ataşările rămân refuzate până se lămureşte
+            # (ieşire confirmată sau CLOSE_CONFIRM expirat → _unconfirmed eliberează rezervarea)
             try:
-                bgtasks.spawn(_unconfirmed(row, hub, now, "cancelled after it may have been sent"),
-                              "idle close unconfirmed")
+                bgtasks.spawn(_await_exit(row, fresh, hub, uids, now), "idle close after cancel")
             except RuntimeError:
+                hub.idle_closing = False
                 if not hub.closed:
                     hub.exit_reason = "exited"
         raise
@@ -490,10 +492,14 @@ async def _host_active(row, hub, now: float, notified, detail: str) -> None:
     await db.execute("UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL, idle_close_gen=NULL,"
                      " last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=? AND idle_notified_at=?",
                      hub.last_host_activity_at, sid, notified)
-    log.info("idle session %s not closed: activity on the host (%s)", sid, detail or "active")
+    # review 4ec916d: un refuz pentru că hostul nu POATE închide condiţionat (PTY direct, tmux vechi) nu e
+    # „activitate" — auditul spune ce s-a întâmplat de fapt
+    cannot = detail.startswith(("not a tmux session", "tmux too old", "tmux format unsupported"))
+    what = "this session cannot be closed automatically on this host" if cannot else "activity on the host"
+    log.info("idle session %s not closed: %s (%s)", sid, what, detail or "active")
     await audit.record(now, "system:idle-sessions", "-", "IDLE", "/api/sessions/%s/kill" % sid, 409,
-                       ("idle close of \"%s\" skipped: activity on the host%s"
-                        % (row["title"] or "", " (%s)" % detail if detail else ""))[:480],
+                       ("idle close of \"%s\" skipped: %s%s"
+                        % (row["title"] or "", what, " (%s)" % detail if detail else ""))[:480],
                        host_id=row["host_id"])
 
 

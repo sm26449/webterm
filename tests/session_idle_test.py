@@ -1024,6 +1024,9 @@ async def agent62_fixes(hid, src, owner, alice):
             waiting.set()
             await asyncio.sleep(3600)
         setattr(src, attr, hang)
+        real_cc = idlesess.CLOSE_CONFIRM
+        if attr == "after_send":
+            idlesess.CLOSE_CONFIRM = 0.8        # confirmarea pe fundal expiră repede în test
         task = asyncio.create_task(sweep_at(t6 + 3 * DAY))
         try:
             await asyncio.wait_for(waiting.wait(), 10)
@@ -1043,9 +1046,14 @@ async def agent62_fixes(hid, src, owner, alice):
                   and len(src.quiet_asked) == n_asked and sG not in src.killed and rG["state"] == "live"
                   and not await audit_rows(sG, 504) and not idlesess._backed_off(sG), (got_cancel, dict(rG)))
         else:
-            check("Recheck 3: CancelledError %s → re-ridicată, idle_closing şters, rezultat necunoscut (504 + backoff)" % label,
-                  got_cancel and hG.idle_closing is False and hG.exit_reason != "idle"
-                  and len(await audit_rows(sG, 504)) == 1 and idlesess._backed_off(sG), (got_cancel, dict(rG)))
+            # review 4ec916d: frame-ul poate fi pe drum → ataşările rămân refuzate până la confirmare/expirare
+            check("Recheck 3: CancelledError %s → re-ridicată, rezervarea PĂSTRATĂ cât rezultatul e necunoscut" % label,
+                  got_cancel and hG.idle_closing is True, (got_cancel, dict(rG)))
+            await asyncio.sleep(2.0)
+            check("…după CLOSE_CONFIRM fără ieşire: rezervarea eliberată, rezultat necunoscut (504 + backoff)",
+                  hG.idle_closing is False and hG.exit_reason != "idle"
+                  and len(await audit_rows(sG, 504)) == 1 and idlesess._backed_off(sG))
+        idlesess.CLOSE_CONFIRM = real_cc
         idlesess._backoff.pop(sG, None)
         await close_all_live()
 
