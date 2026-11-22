@@ -8,7 +8,7 @@ const base: Session = {
 }
 
 describe('idle session notices', () => {
-  const notified = { ...base, idle_notice: { at: 1000.4, days: 7, close_at: null } }
+  const notified = { ...base, idle_notice: { at: 1000.4, days: 7 } }
 
   it('keys a notice by session and time', () => {
     expect(noticeKey(notified)).toBe('a@1000')

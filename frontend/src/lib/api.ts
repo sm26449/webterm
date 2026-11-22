@@ -271,21 +271,22 @@ export interface Session {
   last_output?: number | null
   /** 3.7.1: are un link de share live activ (doar booleanul; niciodată tokenul) */
   shared?: boolean
-  /** 3.7.1: „Păstrează deschisă" — fără notificări de inactivitate, fără închidere automată */
+  /** 3.7.1: „Păstrează deschisă" — fără notificări de inactivitate */
   keep_open?: boolean
-  /** 3.7.1: notificarea de inactivitate în curs (null = niciuna); `close_at` = închiderea automată programată */
+  /** 3.7.1: notificarea de inactivitate în curs (null = niciuna); fără dată de închidere (doar notificare) */
   idle_notice?: IdleNotice | null
 }
 
-export interface IdleNotice { at: number; days: number; close_at: number | null }
+export interface IdleNotice { at: number; days: number }
 
 /** Politica instanţei pentru sesiunile inactive (GET/POST /api/settings/idle-sessions, 3.7.1) */
 export interface IdleSessionsPolicy {
   notify: boolean
   notify_days: number
+  /** 3.7.1: mereu false (închiderea automată nu există încă); `autoclose_available` false → UI-ul o ascunde */
   autoclose: boolean
-  grace_days: number
-  bounds?: { notify_days: [number, number]; grace_days: [number, number] }
+  autoclose_available?: boolean
+  bounds?: { notify_days: [number, number] }
 }
 
 /* Rezumatul de securitate (GET /api/security/summary, 3.5.4). Serverul NU trimite proză: doar

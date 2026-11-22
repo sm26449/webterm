@@ -2190,14 +2190,8 @@ class SmtpIn(BaseModel):
 class IdleSessionsIn(BaseModel):
     notify: bool = True
     notify_days: int = 7
+    # închiderea automată nu există în 3.7.1: `true` → 400 (câmpul rămâne ca refuzul să fie explicit)
     autoclose: bool = False
-    grace_days: int = 2
-    # re-auth la PORNIREA închiderii automate (auditul Codex 3.7.1): e o acţiune distructivă pe
-    # sesiunile tuturor, deci aceeaşi poartă ca o schimbare de acces
-    current_password: str = ""
-    totp_code: str = ""
-    email_code: str = ""
-    stepup_grant: str = ""
 
 
 class WatermarkIn(BaseModel):
@@ -2284,38 +2278,34 @@ async def save_watermark(body: WatermarkIn, user=Depends(authz.perm('settings.ma
     return cfg
 
 
+def _idle_settings_json(pol: dict) -> dict:
+    return dict(pol, autoclose_available=idlesess.AUTOCLOSE_AVAILABLE,
+                bounds={"notify_days": list(idlesess.NOTIFY_DAYS)})
+
+
 @router.get("/api/settings/idle-sessions")
 async def get_idle_sessions(user=Depends(authz.perm('settings.manage'))):
-    """Igiena sesiunilor inactive (3.7.1, idlesess.py): notificare după N zile, închidere opţională."""
-    pol = await idlesess.load_policy(fresh=True)
-    return dict(pol, bounds={"notify_days": list(idlesess.NOTIFY_DAYS), "grace_days": list(idlesess.GRACE_DAYS)})
+    """Igiena sesiunilor inactive (3.7.1, idlesess.py): notificare după N zile (fără închidere automată)."""
+    return _idle_settings_json(await idlesess.load_policy(fresh=True))
 
 
 @router.post("/api/settings/idle-sessions")
 async def save_idle_sessions(body: IdleSessionsIn, request: Request,
                              user=Depends(authz.perm('settings.manage'))):
-    # valori în afara limitelor = refuz explicit (nu le tăiem în tăcere: un „0 zile" tastat din
-    # greşeală nu trebuie să devină „o zi" şi să închidă sesiunile tuturor a doua zi)
-    for name, (lo, hi) in (("notify_days", idlesess.NOTIFY_DAYS), ("grace_days", idlesess.GRACE_DAYS)):
-        v = getattr(body, name)
-        if not lo <= v <= hi:
-            raise ApiError(400, "settings.idleDaysRange", "%s must be between %d and %d" % (name, lo, hi),
-                           vars={"field": name, "min": lo, "max": hi})
-    old = await idlesess.load_policy(fresh=True)
-
-    async def _reauth():
-        # Auditul Codex 3.7.1 (constatarea 7): pornirea închiderii automate cere re-autentificare
-        # proaspătă — un cookie furat nu trebuie să poată programa închiderea sesiunilor tuturor.
-        # Chemată de save_policy SUB lacăt, doar dacă pornirea e reală faţă de starea de atunci.
-        await stepup.reauth_for_access_change(user, request, body,
-                                              "turn on automatic closing of idle sessions")
-    pol = await idlesess.save_policy({k: getattr(body, k) for k in ("notify", "notify_days",
-                                                                     "autoclose", "grace_days")},
-                                     reauth=_reauth)
-    audit.detail(request, "idle sessions: notify %s after %d day(s), auto-close %s after %d more day(s)%s" % (
-        "on" if pol["notify"] else "off", pol["notify_days"], "ON" if pol["autoclose"] else "off",
-        pol["grace_days"], " (auto-close was off)" if pol["autoclose"] and not old["autoclose"] else ""))
-    return dict(pol, bounds={"notify_days": list(idlesess.NOTIFY_DAYS), "grace_days": list(idlesess.GRACE_DAYS)})
+    # INV-13 (docs/design/INVARIANTS.md): închiderea automată nu e disponibilă în 3.7.1 — o cerere care
+    # o porneşte e refuzată explicit, nu ignorată în tăcere (omul ar crede că e pornită)
+    if body.autoclose and not idlesess.AUTOCLOSE_AVAILABLE:
+        raise ApiError(400, "settings.autocloseUnavailable",
+                       "automatic closing of idle sessions is not available in this version")
+    # valori în afara limitelor = refuz explicit (nu le tăiem în tăcere)
+    lo, hi = idlesess.NOTIFY_DAYS
+    if not lo <= body.notify_days <= hi:
+        raise ApiError(400, "settings.idleDaysRange", "notify_days must be between %d and %d" % (lo, hi),
+                       vars={"field": "notify_days", "min": lo, "max": hi})
+    pol = await idlesess.save_policy({"notify": body.notify, "notify_days": body.notify_days})
+    audit.detail(request, "idle sessions: notify %s after %d day(s)" % (
+        "on" if pol["notify"] else "off", pol["notify_days"]))
+    return _idle_settings_json(pol)
 
 
 @router.get("/api/settings/smtp")
@@ -5165,8 +5155,8 @@ async def reconnect_session(sid: str, request: Request,
 @router.post("/api/sessions/{sid}/keep-open")
 async def session_keep_open(sid: str, body: KeepOpenIn, request: Request,
                             user=Depends(authz.perm('session.open', host='sid'))):
-    """„Păstrează deschisă" (3.7.1): sesiunea nu mai primeşte notificări de inactivitate şi nu se
-    închide automat niciodată; anulează şi o notificare/închidere în curs. Cine controlează sesiunea."""
+    """„Păstrează deschisă" (3.7.1): sesiunea nu mai primeşte notificări de inactivitate; anulează şi o
+    notificare în curs. Cine controlează sesiunea."""
     row = await db.fetchone("SELECT state FROM sessions WHERE id=?", sid)
     if not row:
         raise ApiError(404, "session.missing", "no such session")
@@ -5177,7 +5167,8 @@ async def session_keep_open(sid: str, body: KeepOpenIn, request: Request,
         raise ApiError(409, "session.keepNotLive", "the session is no longer running")
     hub = core.hubs.get(sid)
     if body.keep and hub is not None and getattr(hub, "idle_closing", False):
-        # re-review 3.7.1: închiderea e deja trimisă — nu răspundem „păstrată" pentru o sesiune care moare
+        # o închidere de inactivitate deja trimisă (3.8; în 3.7.1 `idle_closing` e mereu False) —
+        # nu răspundem „păstrată" pentru o sesiune care moare
         raise ApiError(409, "session.keepTooLate", "the session is already being closed for inactivity")
     await idlesess.set_keep_open(sid, body.keep)
     audit.detail(request, "keep open %s" % ("on" if body.keep else "off"))
@@ -6228,7 +6219,8 @@ async def _send_osc133(client, hub, span: Optional[dict]) -> None:
 
 # ── [ws] /ws/shared/{token} — share-link guest websocket ──────────────────────────────────────────
 
-# 4410: sesiunea e închisă chiar acum pentru inactivitate (idlesess); o reîncărcare o arată închisă
+# 4410: sesiunea e închisă chiar acum pentru inactivitate. În 3.7.1 nimic nu se închide automat
+# (`hub.idle_closing` e mereu False), deci refuzul nu apare; rămâne pregătit pentru 3.8.
 IDLE_CLOSING_REASON = "session is being closed for inactivity; reload"
 
 
@@ -6323,9 +6315,7 @@ async def shared_ws(ws: WebSocket, token: str):
         # live unui invitat încă nemarcat blocat (review lot 1, F1).
         if start_locked:
             client.lock()
-        # INV-13 (docs/design/INVARIANTS.md): un kill de inactivitate e în zbor — refuzăm SINCRON cu
-        # adăugarea (fără await între verificare şi `clients.add`), altfel invitatul s-ar ataşa la o
-        # sesiune care se închide sub el (auditul Codex 3.7.1, constatarea 3)
+        # un kill de inactivitate în zbor (3.8; mereu False în 3.7.1) — refuz SINCRON cu adăugarea
         if hub.idle_closing:
             await ws.close(code=4410, reason=IDLE_CLOSING_REASON)
             return
@@ -6583,7 +6573,7 @@ async def browser_ws(ws: WebSocket, sid: str):
         # (`has_operator`) — un invitat ataşat în fereastra asta trecea de poarta lui (review lot 1, F2).
         if start_locked:
             client.lock()
-        # INV-13 (docs/design/INVARIANTS.md): kill de inactivitate în zbor → refuz, sincron cu adăugarea
+        # kill de inactivitate în zbor (3.8; mereu False în 3.7.1) → refuz, sincron cu adăugarea
         if hub.idle_closing:
             await ws.close(code=4410, reason=IDLE_CLOSING_REASON)
             return

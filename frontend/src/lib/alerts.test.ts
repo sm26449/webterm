@@ -54,7 +54,7 @@ describe('prefs', () => {
     const kinds = ['new_login', 'session_attach', 'account_change', 'host_unlocked', 'admin_change', 'ssh_key',
       'host_key_changed', 'agent_relocation', 'host_enrolled', 'lockout', 'host_offline', 'resource',
       'agent_ip_change', 'update_refused', 'gateway_disk', 'signing_locked', 'backup_failed', 'tls_cert',
-      'session_idle', 'session_idle_closed']
+      'session_idle']
     for (const lang of [en.strings, ro.strings]) {
       for (const k of kinds) expect(lang[`alerts.kind.${k}`], k).toBeTruthy()
       for (const g of ['account', 'security', 'hosts', 'gateway']) expect(lang[`alerts.group.${g}`], g).toBeTruthy()
@@ -127,7 +127,7 @@ describe('localizeAlert (3.5.15)', () => {
       'replay_created_label', 'replay_opened', 'resource_high', 'resource_ok', 'host_offline', 'host_offline_uninstall',
       'host_online', 'gateway_disk', 'signing_locked', 'update_refused', 'backup_failed', 'backup_local_failed',
       'cert_expiring', 'cert_expiring_soon', 'cert_expired', 'cert_default', 'cert_mismatch', 'cert_ok',
-      'session_idle', 'session_idle_close', 'session_idle_closed']
+      'session_idle']
     for (const lang of [en.strings, ro.strings]) {
       for (const k of keys) {
         expect(lang[`alertmsg.${k}.title`], k).toBeTruthy()

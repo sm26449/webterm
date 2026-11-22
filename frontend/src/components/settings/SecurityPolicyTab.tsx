@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { errText, api, CommandGuard, DeployKeyPolicy, IdleSessionsPolicy, WatermarkConfig, withSecondFactor } from '../../lib/api'
+import { errText, api, CommandGuard, DeployKeyPolicy, IdleSessionsPolicy, WatermarkConfig } from '../../lib/api'
 import { parseDays } from '../../lib/idleSessions'
 import { useI18n } from '../../lib/i18n'
 import { useSectionVisible } from '../../lib/perms'
@@ -9,7 +9,6 @@ import HelpTip from '../HelpTip'
 import { Button, Field, IconButton, SettingsSection, Switch } from '../ui'
 import { canSave, type LoadState } from '../../lib/loadable'
 import NotLoaded from './NotLoaded'
-import { useAccessReauth, useSelfRow } from './users/shared'
 
 // Politici de securitate (3.7.1, auditul UX Setări C2/M2): regulile care se aplică TUTUROR — guardrail-ul
 // de comenzi, politica cheilor de deploy şi watermark-ul. Primele două erau în „Infrastructure &
@@ -105,28 +104,22 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
     }
   }
 
-  // ── Sesiuni inactive (3.7.1): notificare după N zile, închidere automată opţională ──
-  // Câmpurile de zile se ţin ca TEXT (ce tastează omul) şi se validează la salvare, cu aceleaşi
-  // limite ca serverul; un fetch picat nu arată formularul (U04: un Save peste implicite ar fi
-  // schimbat politica instanţei).
-  const [idle, setIdle] = useState<IdleSessionsPolicy>({ notify: true, notify_days: 7, autoclose: false, grace_days: 2 })
-  const [idleDays, setIdleDays] = useState({ notify: '7', grace: '2' })
+  // ── Sesiuni inactive (3.7.1): DOAR notificare după N zile ──
+  // Închiderea automată nu există în 3.7.1 (`autoclose_available: false`): nici comutatorul, nici
+  // grația nu se arată, doar o notă. Câmpul de zile se ţine ca TEXT (ce tastează omul) şi se validează
+  // la salvare, cu aceleaşi limite ca serverul; un fetch picat nu arată formularul (U04: un Save peste
+  // implicite ar fi schimbat politica instanţei).
+  const [idle, setIdle] = useState<IdleSessionsPolicy>({ notify: true, notify_days: 7, autoclose: false })
+  const [idleDays, setIdleDays] = useState('7')
   const [idleBase, setIdleBase] = useState('')
   const [idleMsg, setIdleMsg] = useState('')
   const [idleErr, setIdleErr] = useState(false)
   const [idleState, setIdleState] = useState<LoadState>({ status: 'loading' })
-  // auditul Codex 3.7.1: PORNIREA închiderii automate cere re-autentificare (parolă / passkey / SSO),
-  // ca orice schimbare de acces; `idleWasOn` = starea salvată pe server
-  const [idleWasOn, setIdleWasOn] = useState(false)
-  const idleMe = useSelfRow()
-  const { reauth: idleReauth } = useAccessReauth(idleMe, { returnTo: { cat: 'politici', section: 'idleSessions' } })
   const nb = idle.bounds?.notify_days ?? [1, 90]
-  const gb = idle.bounds?.grace_days ?? [1, 30]
-  const idleSnapshot = (p: IdleSessionsPolicy, d: { notify: string; grace: string }) =>
-    JSON.stringify([p.notify, p.autoclose, d.notify.trim(), d.grace.trim()])
+  const idleSnapshot = (p: IdleSessionsPolicy, d: string) => JSON.stringify([p.notify, d.trim()])
   const applyIdle = (p: IdleSessionsPolicy) => {
-    const d = { notify: String(p.notify_days), grace: String(p.grace_days) }
-    setIdle(p); setIdleDays(d); setIdleBase(idleSnapshot(p, d)); setIdleWasOn(p.autoclose)
+    const d = String(p.notify_days)
+    setIdle(p); setIdleDays(d); setIdleBase(idleSnapshot(p, d))
   }
   const loadIdle = () => {
     setIdleState({ status: 'loading' })
@@ -136,23 +129,16 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
   }
   const saveIdle = async () => {
     if (!canSave(idleState)) return
-    const nd = parseDays(idleDays.notify, nb[0], nb[1])
-    const gd = parseDays(idleDays.grace, gb[0], gb[1])
-    if (nd == null || gd == null) {
+    const nd = parseDays(idleDays, nb[0], nb[1])
+    if (nd == null) {
       setIdleErr(true)
-      setIdleMsg(nd == null ? t('settings.idle.badDays', { min: nb[0], max: nb[1] }) : t('settings.idle.badDays', { min: gb[0], max: gb[1] }))
+      setIdleMsg(t('settings.idle.badDays', { min: nb[0], max: nb[1] }))
       return
     }
     try {
-      const body = { notify: idle.notify, notify_days: nd, autoclose: idle.autoclose, grace_days: gd }
-      const send = (cred: object) => api<IdleSessionsPolicy>('/api/settings/idle-sessions', {
-        method: 'POST', body: JSON.stringify({ ...body, ...cred }),
+      const saved = await api<IdleSessionsPolicy>('/api/settings/idle-sessions', {
+        method: 'POST', body: JSON.stringify({ notify: idle.notify, notify_days: nd }),
       })
-      const saved = idle.autoclose && !idleWasOn
-        ? await idleReauth(t('settings.idle.reauth'),
-          (cred) => withSecondFactor(t, (extra) => send({ ...cred, ...extra })))
-        : await send({})
-      if (saved === null) return
       applyIdle(saved)
       setIdleErr(false); setIdleMsg(t('settings.saved'))
       setTimeout(() => setIdleMsg(''), 1500)
@@ -275,20 +261,12 @@ export default function SecurityPolicyTab(props: { onAccountChanged: () => void 
             onChange={(v) => setIdle({ ...idle, notify: v })} />
           {idle.notify && (<>
             <Field label={t('settings.idle.notifyDays')} hint={t('settings.idle.range', { min: nb[0], max: nb[1] })}>
-              <input type="number" inputMode="numeric" min={nb[0]} max={nb[1]} step={1} value={idleDays.notify}
-                onChange={(e) => setIdleDays({ ...idleDays, notify: e.target.value })}
+              <input type="number" inputMode="numeric" min={nb[0]} max={nb[1]} step={1} value={idleDays}
+                onChange={(e) => setIdleDays(e.target.value)}
                 className={fieldBase + ' w-24'} />
             </Field>
-            <Switch checked={idle.autoclose} label={t('settings.idle.autoclose')} hint={t('settings.idle.autocloseHint')}
-              onChange={(v) => setIdle({ ...idle, autoclose: v })} />
-            {idle.autoclose && (
-              <Field label={t('settings.idle.graceDays')} hint={t('settings.idle.range', { min: gb[0], max: gb[1] })}>
-                <input type="number" inputMode="numeric" min={gb[0]} max={gb[1]} step={1} value={idleDays.grace}
-                  onChange={(e) => setIdleDays({ ...idleDays, grace: e.target.value })}
-                  className={fieldBase + ' w-24'} />
-              </Field>
-            )}
           </>)}
+          <p className="text-xs text-slate-400">{t('settings.idle.autoclosePlanned')}</p>
         </div>)}
       </SettingsSection>
 

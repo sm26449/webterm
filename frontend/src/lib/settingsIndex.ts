@@ -149,8 +149,8 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
   { id: 'deployKeyPolicy', cat: 'politici', titleKey: 'settings.dkpolicy.title', hintKey: 'settings.dkpolicy.hint',
     keywords: 'deploy key ssh policy restrict host to host chei politica', perm: 'settings.manage' },
   { id: 'idleSessions', cat: 'politici', titleKey: 'settings.idle.title', hintKey: 'settings.idle.desc',
-    keywords: 'idle inactive stale unused abandoned sessions cleanup close automatically keep open '
-      + 'inactiv inactive nefolosite sesiuni curatenie inchidere automata pastreaza deschisa', perm: 'settings.manage' },
+    keywords: 'idle inactive stale unused abandoned sessions notify notice keep open '
+      + 'inactiv inactive nefolosite sesiuni notificare anunt pastreaza deschisa', perm: 'settings.manage' },
   { id: 'watermark', cat: 'politici', titleKey: 'settings.watermark', hintKey: 'settings.watermarkHint',
     keywords: 'watermark screenshot traceability filigran captura', perm: 'settings.manage' },
   // ── Reţea şi certificate ──

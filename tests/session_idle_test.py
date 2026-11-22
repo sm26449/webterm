@@ -1,73 +1,61 @@
-"""Igiena sesiunilor inactive (3.7.1, idlesess.py; INV-13).
+"""Igiena sesiunilor inactive (3.7.1, idlesess.py; INV-13) — DOAR notificare.
 
   * inactivă = fără input, fără output, fără client — fiecare dintre ele reporneşte ceasul;
   * o singură notificare per perioadă, proprietarului (fără proprietar → session.manage; terminal root
-    fără proprietar → nimeni, deci nimic);
-  * închiderea automată oprită → nu închide niciodată; pornită → doar după grație, doar dacă notificarea
-    a fost trimisă cu închiderea pornită, doar fără nicio folosire după ea;
-  * Keep open, client ataşat, host offline, hub neataşat, eroare la kill → nu închide;
-  * rutele: keep-open (al tău / session.manage), setările (settings.manage), validarea zilelor;
+    fără proprietar → nimeni, deci nimic); o nouă perioadă de inactivitate aduce o notificare nouă;
+  * nimic nu se închide automat: `autoclose: true` → 400, un `autoclose: true` stocat se citeşte oprit,
+    sweep-ul nu trimite niciodată un kill, iar notificarea nu poartă nicio dată de închidere;
+  * Keep open, rutele (keep-open: al tău / session.manage; setările: settings.manage), validarea zilelor;
+  * tokenurile nu primesc metadatele de inactivitate; `shared` doar ca boolean;
+  * notificarea neînregistrată nu marchează sesiunea (reîncercare după backoff); bugetul şi cursorul;
   * migraţiile rulează de două ori fără eroare.
 """
 import asyncio
+import json
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbac_util as U  # noqa: E402  (pune mediul şi DB-ul temporar înainte de `app`)
-from app import core, db, idlesess  # noqa: E402
+from app import alert_history, core, db, idlesess  # noqa: E402
 
 check = U.Checker()
 DAY = 86400.0
 
 
 class FakeSource(core.AgentConnection):
-    """Sursa unui host: un agent ≥ 62 (închidere condiţionată `kill_if_quiet`); kill-ul închide sesiunea ca
-    agentul (on_exit), sau eşuează la cerere. Fără `super().__init__`: nu există websocket."""
+    """Sursa unui host: un agent care ar ACCEPTA orice închidere (kill, kill_checked, kill_if_quiet) — dacă
+    gateway-ul i-ar cere vreuna, testul ar vedea-o în `killed`. Fără `super().__init__`: nu există websocket."""
     backend = "tmux"
     epoch = "e1"
 
-    def __init__(self, version=62):
+    def __init__(self):
         self.killed = []
-        self.fail = False
-        self.agent_version = version
-        self.quiet_asked = []         # `quiet_secs` primit la fiecare kill_if_quiet
-        self.quiet_reply = None       # un răspuns impus (ex. {"ok": False, "code": "active"})
-        self.before_send = None       # coroutine rulată între rezervare şi trimitere (aşteptarea lock-ului)
-        self.cancelled = 0            # câte cereri a oprit `still_ok` înainte de trimitere
-        self.after_send = None        # coroutine rulată DUPĂ ce still_ok a spus da (frame-ul „a plecat")
+        self.agent_version = 99
 
     async def request(self, op, timeout=20.0, **fields):
+        if op.startswith("kill"):
+            self.killed.append((op, fields.get("sid")))
+            return {"ok": True}
         raise core.AgentGone("fake source: no websocket")
 
-    async def kill_if_quiet(self, sid, quiet_secs, still_ok=None):
-        if not self.can_kill_if_quiet():
-            return {"ok": False, "code": "unsupported"}
-        if self.before_send is not None:
-            await self.before_send()
-        # ca AgentConnection.kill_if_quiet: `still_ok` decide chiar înainte de trimitere
-        if still_ok is not None and not still_ok():
-            self.cancelled += 1
-            return {"ok": False, "code": "cancelled"}
-        if self.after_send is not None:
-            await self.after_send()
-        self.quiet_asked.append(quiet_secs)
-        if self.quiet_reply is not None:
-            return dict(self.quiet_reply)
-        return await self.kill_checked(sid)
+    async def kill(self, sid):
+        self.killed.append(("kill", sid))
+        hub = core.hubs.get(sid)
+        if hub is not None:
+            await hub.on_exit(0, None)
 
     async def kill_checked(self, sid):
         await self.kill(sid)
         return {"ok": True}
 
-    async def kill(self, sid):
-        if self.fail:
-            raise core.AgentGone("host offline")
-        self.killed.append(sid)
-        hub = core.hubs.get(sid)
-        if hub is not None:
-            await hub.on_exit(0, None)
+    async def kill_if_quiet(self, sid, quiet_secs, still_ok=None):
+        await self.kill(sid)
+        return {"ok": True}
+
+    def can_kill_if_quiet(self):
+        return True
 
     async def reap(self, sid):
         pass
@@ -86,10 +74,6 @@ class FakeClient:
         pass
 
 
-def fake_client(owner=True):
-    return FakeClient(owner)
-
-
 async def new_session(hid, by, days_old=10.0, origin="web"):
     """O sesiune vie cu hub ataşat, folosită ultima oară acum `days_old` zile."""
     sid = await U.add_session(hid, created_by=by)
@@ -97,14 +81,8 @@ async def new_session(hid, by, days_old=10.0, origin="web"):
     row = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
     hub = core.get_or_create_hub(row)
     hub.attached = True
-    hub.attached_mono = time.monotonic() - 3600     # ataşat la sursă de o oră, replay terminat
     await backdate(sid, days_old)
     return sid, hub
-
-
-async def sweep_at(now):
-    """Un sweep la momentul `now` pe AMBELE ceasuri: timpul simulat trece şi pe cel monoton."""
-    return await idlesess.sweep(now=now, mono=time.monotonic() + (now - time.time()))
 
 
 async def backdate(sid, days):
@@ -123,14 +101,22 @@ async def srow(sid):
     return await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
 
 
-async def alerts_for(uid, kind):
-    await asyncio.sleep(0.05)            # _fire înregistrează pe un task
-    return await db.fetchall("SELECT * FROM alerts WHERE user_id=? AND kind=?", uid, kind)
+async def alerts_for(uid, kind="session_idle", sid=None):
+    await asyncio.sleep(0.05)
+    rows = await db.fetchall("SELECT * FROM alerts WHERE user_id=? AND kind=?", uid, kind)
+    return [r for r in rows if sid is None or sid in (r["msg_params"] or "")]
 
 
 async def settle():
     for _ in range(5):
         await asyncio.sleep(0.02)        # bgtasks (anularea notificării, persistarea)
+
+
+async def close_all_live():
+    await db.execute("UPDATE sessions SET state='closed' WHERE state='live'")
+    for sid in list(core.hubs):
+        core.hubs.pop(sid, None)
+    idlesess._backoff.clear()
 
 
 async def main():
@@ -157,69 +143,94 @@ async def body():
     await db.connect()
     cols = {r["name"] for r in await db.fetchall("PRAGMA table_info(sessions)")}
     check("migraţiile rulează de două ori; coloanele există",
-          {"last_active", "idle_notified_at", "idle_close_after", "keep_open"} <= cols, str(cols))
+          {"last_active", "idle_notified_at", "keep_open"} <= cols, str(cols))
+
+    # ── 3.7.1 nu are închidere automată ──
+    check("AUTOCLOSE_AVAILABLE = False", idlesess.AUTOCLOSE_AVAILABLE is False)
+    check("gateway-ul nu mai ştie să trimită kill_if_quiet",
+          not hasattr(core.AgentConnection, "kill_if_quiet") and not hasattr(core, "KILL_IF_QUIET_MIN_AGENT"))
 
     # ── setări: implicite, permisiuni, validare ──
     r = await owner.get("/api/settings/idle-sessions")
     j = r.json()
-    check("implicit: notificare pornită 7 zile, închidere OPRITĂ, grație 2",
+    check("implicit: notificare pornită 7 zile, închidere oprită şi indisponibilă",
           r.status_code == 200 and j["notify"] is True and j["notify_days"] == 7
-          and j["autoclose"] is False and j["grace_days"] == 2, r.text)
+          and j["autoclose"] is False and j["autoclose_available"] is False and "grace_days" not in j, r.text)
     check("setările: Operator → 403", (await cb.get("/api/settings/idle-sessions")).status_code == 403)
-    r = await cb.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                          "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    check("setările: Operator nu poate porni închiderea", r.status_code == 403)
-    r = await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 0,
-                                                             "autoclose": False, "grace_days": 2})
+    r = await cb.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7})
+    check("setările: Operator nu poate salva → 403", r.status_code == 403)
+    r = await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 0})
     check("zile în afara limitelor → 400 settings.idleDaysRange",
           r.status_code == 400 and U.code(r) == "settings.idleDaysRange", r.text)
-    r = await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                             "autoclose": False, "grace_days": 31})
-    check("grație > 30 → 400", r.status_code == 400)
-    r = await cadm.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                            "autoclose": False, "grace_days": 2})
-    check("setările: Admin poate salva", r.status_code == 200, r.text)
-    check("politica stocată corupt → implicit (închidere oprită)",
+    r = await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 91})
+    check("zile > 90 → 400", r.status_code == 400 and U.code(r) == "settings.idleDaysRange", r.text)
+    for who, c in (("Owner", owner), ("Admin", cadm)):
+        r = await c.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7, "autoclose": True,
+                                                             "grace_days": 2, "current_password": U.OWNER_PW})
+        check("autoclose: true (%s) → 400 settings.autocloseUnavailable, politica neschimbată" % who,
+              r.status_code == 400 and U.code(r) == "settings.autocloseUnavailable"
+              and idlesess.current_policy()["autoclose"] is False, r.text)
+    r = await cadm.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7})
+    check("setările: Admin poate salva", r.status_code == 200 and r.json()["autoclose"] is False, r.text)
+    r = await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7, "autoclose": False,
+                                                             "grace_days": 99})
+    check("un `grace_days` vechi trimis de un client rc e ignorat (nu mai există)", r.status_code == 200, r.text)
+    check("politica stocată corupt → implicit",
           idlesess.sanitize({"autoclose": "yes", "notify_days": "x"})["autoclose"] is False
           and idlesess.sanitize({"notify_days": 999})["notify_days"] == 90)
+    check("sanitize: un `autoclose: true` explicit se citeşte OPRIT",
+          idlesess.sanitize({"autoclose": True})["autoclose"] is False)
+    # un DB de la un rc 3.7.1 cu închiderea pornită
+    await db.set_setting(idlesess.SETTING_KEY, json.dumps({"notify": True, "notify_days": 7, "autoclose": True,
+                                                           "grace_days": 2, "gen": 5}))
+    pol = await idlesess.load_policy(fresh=True)
+    check("`autoclose: true` stocat (rc) → citit oprit", pol["autoclose"] is False, str(pol))
+    j = (await owner.get("/api/settings/idle-sessions")).json()
+    check("…şi ruta raportează oprit", j["autoclose"] is False and j["autoclose_available"] is False, str(j))
 
-    # ── detecţie: notificare o dată, doar proprietarului ──
+    # ── detecţie: notificare o dată, doar proprietarului; nicio închidere, nicio dată ──
     s1, h1 = await new_session(hid, alice, days_old=6)
     st = await idlesess.sweep()
     check("6 zile < 7 → nicio notificare", st["notified"] == 0 and not (await srow(s1))["idle_notified_at"], str(st))
     await backdate(s1, 8)
     st = await idlesess.sweep()
     check("8 zile → notificat", st["notified"] == 1 and (await srow(s1))["idle_notified_at"], str(st))
-    check("închidere oprită → fără termen de închidere", (await srow(s1))["idle_close_after"] is None)
-    check("alerta session_idle ajunge la proprietar", len(await alerts_for(alice, "session_idle")) == 1)
-    check("…şi nu la alt Operator", len(await alerts_for(bob, "session_idle")) == 0)
-    check("…nici la Owner (sesiunea are proprietar)", len(await alerts_for(owner_id, "session_idle")) == 0)
+    got = await alerts_for(alice, sid=s1)
+    check("alerta session_idle (rândul) e înregistrată la proprietar", len(got) == 1)
+    if got:
+        params = json.loads(got[0]["msg_params"] or "{}")
+        check("notificarea nu poartă nicio dată/grație de închidere",
+              got[0]["msg_key"] == "session_idle" and "grace" not in params and "close" not in json.dumps(params)
+              and "closed automatically" not in (got[0]["details"] or ""), dict(got[0]))
+    check("…şi nu la alt Operator", len(await alerts_for(bob)) == 0)
+    check("…nici la Owner (sesiunea are proprietar)", len(await alerts_for(owner_id)) == 0)
     st = await idlesess.sweep()
     check("a doua trecere: nu notifică din nou", st["notified"] == 0, str(st))
-    check("o singură alertă", len(await alerts_for(alice, "session_idle")) == 1)
-    st = await sweep_at(time.time() + 60 * DAY)
-    check("închidere OPRITĂ → nu închide niciodată", st["closed"] == 0 and not src.killed
-          and (await srow(s1))["state"] == "live", str(st))
+    st = await idlesess.sweep(now=time.time() + 60 * DAY)
+    check("60 de zile mai târziu, cu `autoclose: true` stocat: NICIUN kill, nicio notificare repetată",
+          not src.killed and (await srow(s1))["state"] == "live" and st["notified"] == 0
+          and len(await alerts_for(alice, sid=s1)) == 1, "%s %s" % (st, src.killed))
     lst = (await ca.get("/api/sessions")).json()
     me = next((x for x in lst if x["id"] == s1), {})
-    check("lista de sesiuni arată notificarea (fără dată de închidere)",
-          me.get("idle_notice") and me["idle_notice"]["close_at"] is None and me["keep_open"] is False, str(me))
+    check("lista de sesiuni arată notificarea, fără dată de închidere",
+          me.get("idle_notice") and set(me["idle_notice"]) == {"at", "days"} and me["keep_open"] is False, str(me))
 
-    # ── fiecare activitate anulează notificarea şi reporneşte ceasul ──
-    await h1.handle_input(fake_client(), b"x")
+    # ── fiecare activitate anulează notificarea; o perioadă nouă aduce o notificare nouă ──
+    await h1.handle_input(FakeClient(), b"x")
     await settle()
     check("input → notificarea anulată imediat", (await srow(s1))["idle_notified_at"] is None)
     check("input → nu mai e inactivă", (await idlesess.sweep())["notified"] == 0)
     await backdate(s1, 8)
     await idlesess.sweep()
-    check("din nou inactivă → notificată", (await srow(s1))["idle_notified_at"] is not None)
+    check("din nou inactivă → notificată din nou", (await srow(s1))["idle_notified_at"] is not None
+          and len(await alerts_for(alice, sid=s1)) == 2)
     await h1._process_output(b"build line\r\n")
     await settle()
     check("output → notificarea anulată", (await srow(s1))["idle_notified_at"] is None)
     check("output → nu mai e inactivă", (await idlesess.sweep())["notified"] == 0)
     await backdate(s1, 8)
     await idlesess.sweep()
-    c = fake_client()
+    c = FakeClient()
     h1.clients.add(c)
     h1.note_presence()
     await settle()
@@ -231,490 +242,165 @@ async def body():
     await settle()
     check("plecarea se persistă (last_active)", ((await srow(s1))["last_active"] or 0) > time.time() - 60)
     check("după plecare ceasul porneşte de la zero", (await idlesess.sweep())["notified"] == 0)
-
-    # ── închidere automată pornită ──
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    s2, h2 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
-    r2 = await srow(s2)
-    check("notificare cu închiderea pornită → termen fixat la +2 zile",
-          r2["idle_notified_at"] and abs(r2["idle_close_after"] - (now + 2 * DAY)) < 5, dict(r2))
-    st = await sweep_at(now + 1 * DAY)
-    check("înainte de grație → nu închide", st["closed"] == 0 and s2 not in src.killed, str(st))
-    st = await sweep_at(now + 2 * DAY + 60)
-    r2 = await srow(s2)
-    check("după grație, nefolosită → închisă pe calea Stop", st["closed"] == 1 and s2 in src.killed
-          and r2["state"] == "closed" and r2["close_reason"] == "idle", "%s %s" % (st, dict(r2)))
-    check("hub-ul curăţat", s2 not in core.hubs)
-    aud = await db.fetchone("SELECT * FROM audit_log WHERE actor='system:idle-sessions'")
-    check("închiderea e în audit", aud is not None)
-    check("alerta session_idle_closed la proprietar", len(await alerts_for(alice, "session_idle_closed")) == 1)
-
-    # activitate după notificare → nu închide
-    s3, h3 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
-    await h3._process_output(b"tick\r\n")
-    await settle()
-    st = await sweep_at(now + 3 * DAY)
-    check("output după notificare → nu închide", s3 not in src.killed and (await srow(s3))["state"] == "live", str(st))
-
     # activitate pe care hub-ul n-a semnalat-o (idle_pending pierdut) → sweep-ul o vede şi anulează
-    s3b, h3b = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
-    h3b.idle_pending = False
-    h3b.last_input_at = now + 60
-    st = await sweep_at(now + 3 * DAY)
-    check("activitate după notificare văzută de sweep → anulată, nu închisă",
-          s3b not in src.killed and (await srow(s3b))["idle_notified_at"] is None, str(st))
+    s3, h3 = await new_session(hid, alice, days_old=10)
+    await idlesess.sweep()
+    h3.idle_pending = False
+    h3.last_input_at = time.time() + 60
+    st = await idlesess.sweep(now=time.time() + 120)
+    check("activitate după notificare văzută de sweep → anulată",
+          (await srow(s3))["idle_notified_at"] is None and st["cleared"] >= 1, str(st))
 
-    # client ataşat la momentul închiderii → nu închide
-    s4, h4 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
-    h4.clients.add(fake_client())          # fără note_presence: plasa sweep-ului
-    await sweep_at(now + 3 * DAY)
-    check("client ataşat → nu închide", s4 not in src.killed and (await srow(s4))["state"] == "live")
-    h4.clients.clear()
-
-    # Keep open: rutele + efectul
-    s5, h5 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
+    # ── Keep open: rutele + efectul ──
+    s5, _ = await new_session(hid, alice, days_old=10)
+    await idlesess.sweep()
     r = await cb.post(f"/api/sessions/{s5}/keep-open", json={"keep": True})
     check("keep-open: alt Operator → 403", r.status_code == 403, r.text)
     r = await ca.post(f"/api/sessions/{s5}/keep-open", json={"keep": True})
     check("keep-open: proprietarul → 200", r.status_code == 200, r.text)
     r5 = await srow(s5)
     check("keep-open anulează notificarea în curs", r5["keep_open"] == 1 and r5["idle_notified_at"] is None)
-    st = await sweep_at(now + 30 * DAY)
-    check("Keep open → nu notifică, nu închide", s5 not in src.killed and (await srow(s5))["idle_notified_at"] is None)
+    await idlesess.sweep(now=time.time() + 30 * DAY)
+    check("Keep open → nu notifică", (await srow(s5))["idle_notified_at"] is None)
     r = await cadm.post(f"/api/sessions/{s5}/keep-open", json={"keep": False})
     check("keep-open: session.manage (Admin) → 200", r.status_code == 200, r.text)
     check("keep-open oprit", (await srow(s5))["keep_open"] == 0)
-    r = await ca.post("/api/sessions/%s/keep-open" % s2, json={"keep": True})
+    await db.execute("UPDATE sessions SET state='closed' WHERE id=?", s3)
+    r = await ca.post("/api/sessions/%s/keep-open" % s3, json={"keep": True})
     check("keep-open pe o sesiune închisă → 409", r.status_code == 409 and U.code(r) == "session.keepNotLive", r.text)
     r = await ca.post("/api/sessions/%s/keep-open" % ("0" * 32), json={"keep": True})
     check("keep-open pe o sesiune inexistentă → 404", r.status_code == 404, r.text)
 
-    # host offline / hub neataşat / kill eşuat → nu închide
+    # ── fail-closed: host offline / hub neataşat / fără hub → nimic ──
+    await close_all_live()
     s6, h6 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
     core.sources.pop(hid)
-    st = await sweep_at(now + 3 * DAY)
-    check("host offline → nu închide", st["closed"] == 0 and (await srow(s6))["state"] == "live", str(st))
+    await idlesess.sweep()
+    check("host offline → nicio notificare", (await srow(s6))["idle_notified_at"] is None)
     core.sources[hid] = src
     h6.attached = False
-    st = await sweep_at(now + 3 * DAY)
-    check("hub neataşat (output nevăzut) → nu închide", s6 not in src.killed, str(st))
+    await idlesess.sweep()
+    check("hub neataşat (output nevăzut) → nicio notificare", (await srow(s6))["idle_notified_at"] is None)
     h6.attached = True
-    src.fail = True
-    real_cc = idlesess.CLOSE_CONFIRM
-    idlesess.CLOSE_CONFIRM = 0.5
-    try:
-        st = await sweep_at(now + 3 * DAY)
-        # Codex Recheck 4, High 1: AgentGone DUPĂ armare = rezultat necunoscut → rezervarea rămâne
-        check("Recheck 4: kill eşuat după armare (AgentGone) → vie, rezervarea PĂSTRATĂ până la confirmare",
-              s6 not in src.killed and (await srow(s6))["state"] == "live" and h6.idle_closing is True
-              and not await audit_rows(s6, 504), str(st))
-        await asyncio.sleep(1.5)
-        check("…după CLOSE_CONFIRM: rezervarea eliberată, motivul de ieşire resetat, 504 + backoff",
-              h6.idle_closing is False and h6.exit_reason == "exited" and len(await audit_rows(s6, 504)) == 1
-              and idlesess._backed_off(s6))
-    finally:
-        idlesess.CLOSE_CONFIRM = real_cc
-        src.fail = False
-        idlesess._backoff.pop(s6, None)
     s7 = await U.add_session(hid, created_by=alice)
     await db.execute("UPDATE sessions SET created=? WHERE id=?", time.time() - 30 * DAY, s7)
-    st = await sweep_at(time.time() + 30 * DAY)
+    await idlesess.sweep(now=time.time() + 30 * DAY)
     check("sesiune fără hub (fluxul nu trece prin gateway) → nimic", not (await srow(s7))["idle_notified_at"])
 
-    # notificare trimisă cu închiderea OPRITĂ → pornirea ulterioară trimite întâi o notificare nouă
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
-    s8, h8 = await new_session(hid, alice, days_old=10)
-    now = time.time()
-    await sweep_at(now)
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    st = await sweep_at(now + 5 * DAY)
-    r8 = await srow(s8)
-    check("închidere pornită după notificare → notificare nouă, nu închidere",
-          st["closed"] == 0 and r8["idle_close_after"] and s8 not in src.killed, "%s %s" % (st, dict(r8)))
-    check("a doua notificare anunţă închiderea", len(await alerts_for(alice, "session_idle")) >= 2)
-    st = await sweep_at(now + 7 * DAY + 60)
-    check("…apoi închide după grație", s8 in src.killed, str(st))
+    # ── notificarea neînregistrată nu marchează sesiunea; se reîncearcă după backoff ──
+    await close_all_live()
+    sA, _ = await new_session(hid, alice, days_old=20)
+    real_req = alert_history.record_required
 
-    # destinatari: fără proprietar → session.manage; terminal root fără proprietar → nimeni
-    s9, h9 = await new_session(hid, None, days_old=10)
-    row9 = await srow(s9)
-    rec = await idlesess.recipients(row9)
+    async def broken(*a, **k):
+        raise OSError(28, "no space left on device")
+    alert_history.record_required = broken
+    try:
+        st = await idlesess.sweep()
+    finally:
+        alert_history.record_required = real_req
+    check("alerta nu s-a putut scrie → sesiunea NU rămâne marcată notificată, backoff",
+          st["notified"] == 0 and (await srow(sA))["idle_notified_at"] is None and idlesess._backed_off(sA), str(st))
+    st = await idlesess.sweep()
+    check("…în backoff nu se reîncearcă", st["notified"] == 0)
+    idlesess._backoff.clear()
+    st = await idlesess.sweep()
+    check("…după backoff, notificarea pleacă şi rândul e înregistrat",
+          st["notified"] == 1 and len(await alerts_for(alice, sid=sA)) == 1, str(st))
+    # preferinţa „fără alerte în aplicaţie": sesiunea e marcată (fără buclă), niciun rând
+    await db.execute("INSERT OR REPLACE INTO alert_prefs(user_id, kind, email, inapp) VALUES(?,?,0,0)",
+                     alice, "session_idle")
+    sA2, _ = await new_session(hid, alice, days_old=20)
+    st = await idlesess.sweep()
+    check("preferinţa în aplicaţie oprită → respectată (niciun rând), sesiunea marcată (fără reîncercări)",
+          (await srow(sA2))["idle_notified_at"] is not None and len(await alerts_for(alice, sid=sA2)) == 0, str(st))
+    await db.execute("DELETE FROM alert_prefs WHERE user_id=?", alice)
+
+    # ── destinatari: fără proprietar → session.manage; terminal root fără proprietar → nimeni ──
+    await close_all_live()
+    s9, _ = await new_session(hid, None, days_old=10)
+    rec = await idlesess.recipients(await srow(s9))
     check("fără proprietar → cei cu session.manage (Owner + Admin), nu Operatorii",
           set(rec) == {owner_id, adm}, str(rec))
-    s10, h10 = await new_session(hid, None, days_old=10, origin="cert-renew")
+    s10, _ = await new_session(hid, None, days_old=10, origin="cert-renew")
     check("terminal root fără proprietar → nimeni", await idlesess.recipients(await srow(s10)) == [])
-    now = time.time()
-    await sweep_at(now)
-    st = await sweep_at(now + 30 * DAY)
-    check("…deci nicio notificare şi nicio închidere",
-          not (await srow(s10))["idle_notified_at"] and s10 not in src.killed)
+    fired = []
+
+    async def count_req(*a, **k):
+        fired.append(k.get("user_id"))
+        return await real_req(*a, **k)
+    alert_history.record_required = count_req
+    try:
+        await idlesess.sweep()
+    finally:
+        alert_history.record_required = real_req
+    check("fără proprietar → un singur apel de alertă, cu toţi destinatarii",
+          len(fired) == 1 and isinstance(fired[0], list) and set(fired[0]) == {owner_id, adm}, str(fired))
+    check("terminal root fără proprietar → nicio notificare", not (await srow(s10))["idle_notified_at"])
     await db.execute("UPDATE users SET disabled=1 WHERE id=?", alice)
     s11, _ = await new_session(hid, alice, days_old=10)
     check("proprietar dezactivat → cei cu session.manage",
           set(await idlesess.recipients(await srow(s11))) == {owner_id, adm})
     await db.execute("UPDATE users SET disabled=0 WHERE id=?", alice)
 
-    # notificarea oprită → nimic nou, nimic închis
-    await owner.post("/api/settings/idle-sessions", json={"notify": False, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
+    # ── notificarea oprită → nimic ──
+    await close_all_live()
+    await owner.post("/api/settings/idle-sessions", json={"notify": False, "notify_days": 7})
     s12, _ = await new_session(hid, alice, days_old=30)
-    st = await sweep_at(time.time() + 30 * DAY)
-    check("notificarea oprită → nicio notificare, nicio închidere",
-          st["notified"] == 0 and st["closed"] == 0 and s12 not in src.killed, str(st))
+    st = await idlesess.sweep(now=time.time() + 30 * DAY)
+    check("notificarea oprită → nicio notificare", st["notified"] == 0 and not (await srow(s12))["idle_notified_at"])
+    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7})
 
-    # ── review 3.7.1 ──
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    # 1) cursa ataşării: un browser care se ataşează exact cât _close îşi citeşte rândul → nu se închide
-    s13, h13 = await new_session(hid, alice, days_old=20)
-    t0 = time.time()
-    await sweep_at(t0)
-    check("cursă: notificarea a plecat", (await srow(s13))["idle_notified_at"] is not None)
-    real_fetchone = db.fetchone
-    joined = []
+    # ── tokenuri: fără metadate de inactivitate; `shared` doar boolean ──
+    await idlesess.sweep()
+    await db.execute("UPDATE sessions SET keep_open=1, share_token='h', share_expires=? WHERE id=?",
+                     time.time() + 600, s12)
+    r = await owner.post("/api/tokens", json={"name": "auto", "scopes": ["read"], "days": 1, "role": "viewer",
+                                              "scope_kind": "all", "scope_value": "", "current_password": U.OWNER_PW})
+    tok = r.json().get("token") if r.status_code == 200 else None
+    check("token creat", bool(tok), r.text[:160])
+    if tok:
+        tc = U.client(headers={"authorization": "Bearer " + tok})
+        rows = (await tc.get("/api/sessions")).json()
+        me = next((x for x in rows if x["id"] == s12), {})
+        check("token: idle_notice null, keep_open false, last_output null, shared false",
+              me and me["idle_notice"] is None and me["keep_open"] is False and me["last_output"] is None
+              and me["shared"] is False, str(me))
+        r = await tc.get("/api/hosts/%d/sessions" % hid)
+        if r.status_code == 200:
+            me = next((x for x in r.json() if x["id"] == s12), {})
+            check("token, lista per host: la fel", me and me["idle_notice"] is None and me["keep_open"] is False, str(me))
+        else:
+            check("token, lista per host: refuzată (deci nimic expus)", r.status_code in (401, 403), r.text[:120])
+        await tc.aclose()
+    me = next((x for x in (await ca.get("/api/sessions")).json() if x["id"] == s12), {})
+    check("browser: `shared` adevărat ca boolean, fără token", me.get("shared") is True and "share_token" not in me
+          and "h" not in me.values(), str(me))
+    check("browser: keep_open vizibil", me.get("keep_open") is True, str(me))
+    await db.execute("UPDATE sessions SET keep_open=0, share_token=NULL, share_expires=NULL WHERE id=?", s12)
 
-    async def attach_during_read(sql, *args):
-        r = await real_fetchone(sql, *args)
-        if sql.startswith("SELECT * FROM sessions WHERE id=?") and args and args[0] == s13 and not joined:
-            h13.clients.add(fake_client())       # ataşare „în timpul" citirii
-            joined.append(1)
-        return r
-    db.fetchone = attach_during_read
-    try:
-        await sweep_at(t0 + 3 * DAY)
-    finally:
-        db.fetchone = real_fetchone
-    check("cursă: un client ataşat în timpul ultimei citiri → sesiunea NU se închide",
-          joined and s13 not in src.killed and (await srow(s13))["state"] == "live")
-    h13.clients.clear()
-
-    # 2) închiderea oprită apoi repornită: termenul vechi nu mai închide; pleacă o notificare nouă
-    s14, h14 = await new_session(hid, alice, days_old=20)
-    t1 = time.time()
-    await sweep_at(t1)
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    check("repornită: termenul vechi a fost şters", (await srow(s14))["idle_close_after"] is None)
-    await sweep_at(t1 + 30 * DAY)
-    r14 = await srow(s14)
-    check("…prima trecere trimite o notificare nouă cu termen, NU închide",
-          s14 not in src.killed and r14["idle_close_after"] is not None and r14["state"] == "live")
-
-    # 3) fără proprietar: o singură alertă (un singur email/webhook) pentru toţi destinatarii
-    from app import alert_history as _ah
-    fired = []
-    real_req = _ah.record_required
-
-    async def count_req(*a, **k):
-        fired.append(k.get("user_id"))
-        return await real_req(*a, **k)
-    _ah.record_required = count_req
-    try:
-        s15, _ = await new_session(hid, None, days_old=20)
-        await sweep_at(time.time())
-    finally:
-        _ah.record_required = real_req
-    check("fără proprietar → un singur apel de alertă, cu toţi destinatarii",
-          len(fired) == 1 and isinstance(fired[0], list) and len(fired[0]) >= 2, str(fired))
-
-    await audit_fixes(hid, src, owner, alice)
-    await rereview_fixes(hid, src, owner, alice)
-    await agent62_fixes(hid, src, owner, alice)
-    await recheck4_fixes(hid, src, owner, alice)
-
-    for c in (owner, ca, cb, cadm):
-        await c.aclose()
-
-
-class IdleWS:
-    """WebSocket fals pentru `browser_ws` / `shared_ws` (ca în share_presence_test)."""
-    class _C:
-        host = "127.0.0.1"
-
-    def __init__(self, cookie_token=None):
-        from app import security
-        self.headers = {"origin": os.environ["WEBTERM_PUBLIC_URL"], "user-agent": "test"}
-        self.cookies = {security.COOKIE_NAME: cookie_token} if cookie_token else {}
-        self.query_params = {}
-        self.client = self._C()
-        self.inbox: asyncio.Queue = asyncio.Queue()
-        self.closed = None
-        self.reason = ""
-        self.accepted = False
-
-    async def accept(self):
-        self.accepted = True
-
-    async def close(self, code=1000, reason=""):
-        self.closed, self.reason = code, reason
-        await self.inbox.put({"type": "websocket.disconnect"})
-
-    async def send_text(self, t):
-        pass
-
-    async def send_bytes(self, b):
-        pass
-
-    async def receive(self):
-        return await self.inbox.get()
-
-
-async def close_all_live():
-    await db.execute("UPDATE sessions SET state='closed' WHERE state='live'")
-    idlesess._backoff.clear()
-
-
-async def audit_rows(sid, status):
-    return await db.fetchall("SELECT * FROM audit_log WHERE actor='system:idle-sessions' AND path=? AND status=?",
-                             "/api/sessions/%s/kill" % sid, status)
-
-
-async def audit_fixes(hid, src, owner, alice):
-    """Auditul Codex 3.7.1 (constatările 1–3, 5, 6, 8): fiecare caz reprodus întâi, apoi reparat."""
-    from app import alert_history, api, security
-    pol_on = {"notify": True, "notify_days": 7, "autoclose": True, "grace_days": 2,
-              "current_password": U.OWNER_PW}
+    # ── buget: cel mult MAX_ACTIONS notificări pe sweep; cursorul rotativ ──
     await close_all_live()
-
-    # ── 1) notificarea neînregistrată nu programează nimic ──
-    sA, hA = await new_session(hid, alice, days_old=20)
-    real_req = alert_history.record_required
-
-    async def broken(*a, **k):
-        raise OSError(28, "no space left on device")
-    alert_history.record_required = broken
-    t0 = time.time()
+    real_act, real_rows = idlesess.MAX_ACTIONS, idlesess.MAX_ROWS
+    idlesess.MAX_ACTIONS = 2
     try:
-        st = await sweep_at(t0)
+        many = [(await new_session(hid, alice, days_old=20))[0] for _ in range(5)]
+        st = await idlesess.sweep()
+        check("buget: cel mult MAX_ACTIONS notificări într-o trecere", st["notified"] == 2, str(st))
+        for _ in range(3):
+            await idlesess.sweep()
+        check("…restul în trecerile următoare",
+              all([(await srow(s))["idle_notified_at"] for s in many]))
     finally:
-        alert_history.record_required = real_req
-    rA = await srow(sA)
-    check("C1: alerta nu s-a putut scrie → nicio notificare, niciun termen",
-          st["notified"] == 0 and rA["idle_notified_at"] is None and rA["idle_close_after"] is None, dict(rA))
-    idlesess._backoff.clear()
-    await sweep_at(t0 + 3 * DAY)
-    rA = await srow(sA)
-    check("C1: …după grație nu închide; abia acum pleacă notificarea (cu termen nou)",
-          sA not in src.killed and rA["idle_close_after"] and rA["idle_close_after"] > t0 + 4 * DAY, dict(rA))
-    # preferinţa „fără alerte în aplicaţie" nu ascunde notificarea care programează o închidere
-    await db.execute("INSERT OR REPLACE INTO alert_prefs(user_id, kind, email, inapp) VALUES(?,?,0,0)",
-                     alice, "session_idle")
-    sA2, _ = await new_session(hid, alice, days_old=20)
-    await sweep_at(time.time())
-    got = await db.fetchall("SELECT * FROM alerts WHERE user_id=? AND msg_key='session_idle_close'"
-                            " AND msg_params LIKE ?", alice, '%' + sA2 + '%')
-    check("C1: notificarea cu închidere se păstrează în aplicaţie chiar cu preferinţa oprită",
-          len(got) == 1 and (await srow(sA2))["idle_close_after"] is not None)
-    await db.execute("DELETE FROM alert_prefs WHERE user_id=?", alice)
-    # dovada lipsă la închidere (istoricul de alerte golit) → nu închide; termenul cade, notificare nouă
-    sA3, _ = await new_session(hid, alice, days_old=20)
-    t0b = time.time()
-    await sweep_at(t0b)
-    await db.execute("DELETE FROM alerts WHERE user_id=? AND msg_params LIKE ?", alice, '%' + sA3 + '%')
-    await sweep_at(t0b + 3 * DAY)
-    check("C1: fără rândul de notificare pentru un destinatar curent → nu închide, termenul şters",
-          sA3 not in src.killed and (await srow(sA3))["idle_close_after"] is None)
+        idlesess.MAX_ACTIONS = real_act
     await close_all_live()
-
-    # ── 2) politica oprită în timpul unui sweep câştigă ──
-    sB, hB = await new_session(hid, alice, days_old=20)
-    t1 = time.time()
-    await sweep_at(t1)
-    check("C2: precondiţie — termen fixat", (await srow(sB))["idle_close_after"] is not None)
-    real_rec = idlesess.recipients
-    for flag, label in (("autoclose", "închiderea"), ("notify", "notificarea")):
-        async def turn_off(row, flag=flag):
-            if row["id"] == sB:
-                pol = {"notify": True, "notify_days": 7, "autoclose": True, "grace_days": 2}
-                pol[flag] = False
-                await idlesess.save_policy(pol)
-            return await real_rec(row)
-        idlesess.recipients = turn_off
-        try:
-            await sweep_at(t1 + 3 * DAY)
-        finally:
-            idlesess.recipients = real_rec
-        check("C2: %s oprită cât sweep-ul căuta destinatarii → nu închide" % label,
-              sB not in src.killed and (await srow(sB))["state"] == "live")
-        r = await owner.post("/api/settings/idle-sessions", json=pol_on)
-        check("C2: repornită (cu parola)", r.status_code == 200 and r.json()["autoclose"] is True, r.text)
-    # memoria înaintea DB-ului: cât se scrie setarea, politica din memorie e deja oprită
-    real_set = db.set_setting
-    seen_mem = []
-
-    async def spy_set(key, value):
-        if key == idlesess.SETTING_KEY:
-            seen_mem.append(idlesess.current_policy()["autoclose"])
-        return await real_set(key, value)
-    db.set_setting = spy_set
-    try:
-        await idlesess.save_policy({"notify": True, "notify_days": 7, "autoclose": False, "grace_days": 2})
-    finally:
-        db.set_setting = real_set
-    check("C2: oprirea e în memorie ÎNAINTE de scrierea în DB", seen_mem == [False], str(seen_mem))
-    gen_before = idlesess.current_policy()["gen"]
-    r = await owner.post("/api/settings/idle-sessions", json={k: v for k, v in pol_on.items()
-                                                              if k != "current_password"})
-    check("C7: pornirea închiderii fără re-autentificare → 401, politica neschimbată",
-          r.status_code == 401 and idlesess.current_policy()["autoclose"] is False, r.text)
-    r = await owner.post("/api/settings/idle-sessions", json=dict(pol_on, current_password="gresita123"))
-    check("C7: parolă greşită → 401", r.status_code == 401, r.text)
-    r = await owner.post("/api/settings/idle-sessions", json=pol_on)
-    check("C7: cu parola → pornită", r.status_code == 200 and idlesess.current_policy()["autoclose"] is True)
-    check("C2: comutarea măreşte generaţia", idlesess.current_policy()["gen"] > gen_before)
-    r = await owner.post("/api/settings/idle-sessions", json=dict(pol_on, grace_days=3, current_password=""))
-    check("C7: o modificare care nu porneşte închiderea nu cere parola", r.status_code == 200, r.text)
-    await owner.post("/api/settings/idle-sessions", json=pol_on)
-    # un termen dintr-o generaţie mai veche nu închide
-    sB2, _ = await new_session(hid, alice, days_old=20)
-    t1b = time.time()
-    await sweep_at(t1b)
-    await db.execute("UPDATE sessions SET idle_close_gen=idle_close_gen-1 WHERE id=?", sB2)
-    await sweep_at(t1b + 3 * DAY)
-    r2 = await srow(sB2)
-    check("C2: termen din generaţia veche → nu închide, pleacă o notificare nouă",
-          sB2 not in src.killed and r2["idle_close_gen"] == idlesess.current_policy()["gen"]
-          and r2["idle_notified_at"] > t1b + DAY, dict(r2))
-    await close_all_live()
-
-    # ── 3) ataşarea cât kill-ul e în zbor e refuzată; replay / ataşare recentă → nu închide ──
-    sC, hC = await new_session(hid, alice, days_old=20)
-    t2 = time.time()
-    await sweep_at(t2)
-    gate, started = asyncio.Event(), asyncio.Event()
-
-    class SlowSource(FakeSource):
-        async def kill(self, sid):
-            started.set()
-            await gate.wait()
-            await FakeSource.kill(self, sid)
-    slow = SlowSource()
-    core.sources[hid] = slow
-    try:
-        task = asyncio.create_task(sweep_at(t2 + 3 * DAY))
-        await asyncio.wait_for(started.wait(), 10)
-        check("C3: kill în zbor → idle_closing setat", hC.idle_closing is True)
-        ws = IdleWS(await security.create_web_session(alice))
-        await asyncio.wait_for(api.browser_ws(ws, sC), 10)
-        check("C3: browser_ws cât se închide → 4410, niciun client în hub",
-              ws.closed == 4410 and not hC.clients and "inactivity" in ws.reason, (ws.closed, ws.reason))
-        tok = security.new_token()
-        await db.execute("UPDATE sessions SET share_token=?, share_expires=? WHERE id=?",
-                         security.sha256_hex(tok), time.time() + 3600, sC)
-        g = IdleWS(None)
-        await asyncio.wait_for(api.shared_ws(g, tok), 10)
-        check("C3: shared_ws cât se închide → 4410", g.closed == 4410 and not hC.clients, g.closed)
-        gate.set()
-        st = await asyncio.wait_for(task, 10)
-    finally:
-        gate.set()
-        core.sources[hid] = src
-    check("C3: …apoi închisă şi confirmată", st["closed"] == 1 and (await srow(sC))["state"] == "closed", str(st))
-
-    sD, hD = await new_session(hid, alice, days_old=20)
-    t3 = time.time()
-    await sweep_at(t3)
-    hD._replay_expected = True
-    hD._replay_end.clear()
-    await sweep_at(t3 + 3 * DAY)
-    check("C3: replay-ul după reconectare încă în curs → nu închide", sD not in src.killed)
-    hD._replay_end.set()
-    hD.attached_mono = time.monotonic() + 3 * DAY - 60     # re-ataşat acum un minut (timp simulat)
-    await sweep_at(t3 + 3 * DAY)
-    check("C3: hub re-ataşat de mai puţin de 10 minute → nu închide", sD not in src.killed)
-    hD.attached_mono = time.monotonic() - 3600
-    await sweep_at(t3 + 3 * DAY)
-    check("C3: replay terminat + ataşat de o oră → închide", sD in src.killed)
-    await close_all_live()
-
-    # ── 5) ceasul monoton: saltul ceasului de perete şi restartul nu scurtează grația ──
-    sE, hE = await new_session(hid, alice, days_old=20)
-    t4 = time.time()
-    await sweep_at(t4)
-    await idlesess.sweep(now=t4 + 3 * DAY, mono=time.monotonic())
-    check("C5: ceasul de perete sare 3 zile înainte, cel monoton nu → nu închide", sE not in src.killed)
-    core.hubs.pop(sE, None)                                # „restart": un hub nou, fără observaţia veche
-    hE2 = core.get_or_create_hub(await srow(sE))
-    hE2.attached, hE2.attached_mono = True, time.monotonic() - 3600
-    await sweep_at(t4 + 3 * DAY)
-    check("C5: după restart grația reîncepe → nu închide la termenul vechi", sE not in src.killed)
-    await sweep_at(t4 + 5 * DAY + 60)
-    check("C5: …închide după o grație întreagă văzută de procesul nou", sE in src.killed)
-    await close_all_live()
-
-    # ── 6) răspunsul agentului contează; succesul vine doar după on_exit ──
-    class RefusingSource(FakeSource):
-        calls = 0
-
-        async def kill_checked(self, sid):
-            RefusingSource.calls += 1
-            return {"ok": False, "code": "no_session"}
-    closed_before = len(await alerts_for(alice, "session_idle_closed"))
-    sF, hF = await new_session(hid, alice, days_old=20)
-    t5 = time.time()
-    await sweep_at(t5)
-    core.sources[hid] = RefusingSource()
-    try:
-        st = await sweep_at(t5 + 3 * DAY)
-        check("C6: agentul răspunde no_session → nu e închisă, fără alerta „închisă”",
-              st["closed"] == 0 and (await srow(sF))["state"] == "live"
-              and len(await alerts_for(alice, "session_idle_closed")) == closed_before, str(st))
-        check("C6: …audit „not confirmed” (504), niciun 200",
-              len(await audit_rows(sF, 504)) == 1 and not await audit_rows(sF, 200))
-        check("C6: …idle_closing şters, motivul de ieşire resetat",
-              hF.idle_closing is False and hF.exit_reason == "exited")
-        await sweep_at(t5 + 3 * DAY)
-        check("C6: …şi nicio reîncercare imediată (backoff)", RefusingSource.calls == 1, RefusingSource.calls)
-    finally:
-        core.sources[hid] = src
-
-    class SilentSource(FakeSource):
-        async def kill_checked(self, sid):
-            return {"ok": True}                       # agentul zice ok, dar exit-ul nu mai vine
-    sG, hG = await new_session(hid, alice, days_old=20)
-    t6 = time.time()
-    await sweep_at(t6)
-    real_wait = idlesess.CLOSE_CONFIRM
-    idlesess.CLOSE_CONFIRM = 0.3
-    core.sources[hid] = SilentSource()
-    try:
-        st = await sweep_at(t6 + 3 * DAY)
-        check("C6: ok fără exit → „pending”, nu „closed”", st["closed"] == 0 and st["pending"] == 1, str(st))
-        await asyncio.sleep(1.2)
-        check("C6: …după fereastra de confirmare: audit 504, fără 200, ataşarea permisă din nou",
-              len(await audit_rows(sG, 504)) == 1 and not await audit_rows(sG, 200)
-              and hG.idle_closing is False)
-    finally:
-        idlesess.CLOSE_CONFIRM = real_wait
-        core.sources[hid] = src
-    await close_all_live()
-
-    # ── 8) cursorul rotativ ajunge la sesiunile de după primul lot ──
-    real_rows = idlesess.MAX_ROWS
     idlesess.MAX_ROWS = 2
     try:
         many = [(await new_session(hid, alice, days_old=20))[0] for _ in range(5)]
         for _ in range(6):
-            await sweep_at(time.time())
+            await idlesess.sweep()
         notified = [s for s in many if (await srow(s))["idle_notified_at"]]
-        check("C8: cu plafonul de 2 rânduri, toate cele 5 sesiuni sunt notificate în câteva treceri",
+        check("cursor: cu plafonul de 2 rânduri, toate cele 5 sesiuni sunt notificate în câteva treceri",
               len(notified) == 5, "%d/5" % len(notified))
     finally:
         idlesess.MAX_ROWS = real_rows
@@ -735,483 +421,16 @@ async def audit_fixes(hid, src, owner, alice):
             pass
     finally:
         db.execute = real_exec
-    check("C8: scriere eşuată → watermark-ul nu avansează", hX._persisted_active < hX.last_input_at)
+    check("persist: scriere eşuată → watermark-ul nu avansează", hX._persisted_active < hX.last_input_at)
     await hX.persist_activity()
-    check("C8: …reîncercarea reuşeşte", hX._persisted_active >= hX.last_input_at)
-    await close_all_live()
+    check("persist: …reîncercarea reuşeşte", hX._persisted_active >= hX.last_input_at)
 
+    check("nicio cerere de închidere n-a ajuns vreodată la sursă", not src.killed, str(src.killed))
+    audit = await db.fetchall("SELECT * FROM audit_log WHERE actor='system:idle-sessions'")
+    check("nicio închidere de inactivitate în audit", not audit)
 
-async def rereview_fixes(hid, src, owner, alice):
-    """Re-review 3.7.1 (după b54e658)."""
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    # 1) Keep apăsat cât _close aşteaptă dovada notificării → nu se închide
-    sK, hK = await new_session(hid, alice, days_old=20)
-    t0 = time.time()
-    await sweep_at(t0)
-    real_proof = idlesess._notice_recorded
-
-    async def keep_meanwhile(*a, **k):
-        await idlesess.set_keep_open(sK, True)
-        return await real_proof(*a, **k)
-    idlesess._notice_recorded = keep_meanwhile
-    try:
-        await sweep_at(t0 + 3 * DAY)
-    finally:
-        idlesess._notice_recorded = real_proof
-    check("re-review: Keep apăsat în timpul închiderii → sesiunea NU se închide",
-          sK not in src.killed and (await srow(sK))["state"] == "live")
-    # …iar Keep cerut cât închiderea e deja trimisă → 409, nu „păstrată"
-    sL, hL = await new_session(hid, alice, days_old=20)
-    hL.idle_closing = True
-    r = await owner.post("/api/sessions/%s/keep-open" % sL, json={"keep": True})
-    check("re-review: Keep după ce închiderea e trimisă → 409 session.keepTooLate",
-          r.status_code == 409 and r.headers.get("X-WebTerm-Error") == "session.keepTooLate", r.text)
-    hL.idle_closing = False
-    # 2) pornirea fără re-autentificare e refuzată şi direct (sub lacăt)
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
-    try:
-        await idlesess.save_policy({"notify": True, "notify_days": 7, "autoclose": True, "grace_days": 2})
-        refused = False
-    except PermissionError:
-        refused = True
-    check("re-review: save_policy nu porneşte închiderea fără re-autentificare", refused
-          and not idlesess.current_policy()["autoclose"])
-    # 3) o oprire care nu s-a putut scrie rămâne oprită şi după o recitire din DB
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    real_set = db.set_setting
-
-    async def failing_set(*a, **k):
-        raise OSError("disk full")
-    db.set_setting = failing_set
-    try:
-        try:
-            await idlesess.save_policy({"notify": True, "notify_days": 7, "autoclose": False, "grace_days": 2})
-        except OSError:
-            pass
-    finally:
-        db.set_setting = real_set
-    pol = await idlesess.load_policy(fresh=True)
-    check("re-review: oprirea nescrisă rămâne în vigoare după recitirea din DB", not pol["autoclose"], str(pol))
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
-    check("…iar o salvare reuşită ridică suprascrierea", idlesess._state.get("strict") is None)
-
-
-class SshLikeSource:
-    """O sursă care NU e un agent (SSH / telnet / serial): nu poate închide condiţionat."""
-    backend = "pty"
-    epoch = "s1"
-
-    def __init__(self):
-        self.killed = []
-
-    async def kill(self, sid):
-        self.killed.append(sid)
-
-    async def reap(self, sid):
-        pass
-
-    async def send_data(self, sid, data):
-        pass
-
-
-async def still_ok_send_path():
-    """Codex Recheck 2, High 2: AgentConnection.kill_if_quiet evaluează `still_ok` SUB lock-ul de trimitere,
-    chiar înainte de frame: False / excepţie → nimic pe fir, `cancelled`; True → frame trimis."""
-    import json as _json
-
-    class WS:
-        def __init__(self, conn):
-            self.sent, self.conn = [], conn
-
-        async def send_bytes(self, b):
-            self.sent.append(b)
-            msg = _json.loads(b[len(core.FRAME_CTRL):])
-            self.conn._pending[msg["id"]].set_result({"ok": True, "id": msg["id"]})
-
-    def conn():
-        c = object.__new__(core.AgentConnection)
-        c.agent_version, c._req_id, c._pending = 62, 0, {}
-        c._send_lock = asyncio.Lock()
-        c.ws = WS(c)
-        return c
-
-    c = conn()
-    seen_locked = []
-
-    def gate():
-        seen_locked.append(c._send_lock.locked())
-        return False
-    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=gate)
-    check("Recheck 2: still_ok False → `cancelled`, nimic pe fir, evaluat SUB lock-ul de trimitere",
-          r == {"ok": False, "code": "cancelled"} and not c.ws.sent and seen_locked == [True] and not c._pending,
-          (r, c.ws.sent, seen_locked))
-
-    def boom():
-        raise RuntimeError("x")
-    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=boom)
-    check("Recheck 2: still_ok care aruncă → fail-closed, nimic trimis", r.get("code") == "cancelled" and not c.ws.sent)
-    # o cerere care aşteaptă lock-ul: politica se schimbă cât aşteaptă → decide starea de LA trimitere
-    flag = {"ok": True}
-    await c._send_lock.acquire()
-    task = asyncio.create_task(c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: flag["ok"]))
-    await asyncio.sleep(0.01)
-    flag["ok"] = False                        # Adminul opreşte închiderea cât cererea e la coadă
-    c._send_lock.release()
-    r = await task
-    check("Recheck 2: oprire cât cererea aşteaptă lock-ul → nu pleacă", r.get("code") == "cancelled" and not c.ws.sent, r)
-    # Recheck 3, Medium 7: lock-ul ţinut peste termen → `cancelled`, nimic trimis, lock-ul altcuiva neatins
-    saved_wait = core.KILL_IF_QUIET_LOCK_WAIT
-    core.KILL_IF_QUIET_LOCK_WAIT = 0.05
-    await c._send_lock.acquire()
-    try:
-        r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: True)
-        check("Recheck 3: lock-ul de trimitere neobţinut la termen → `cancelled`, nimic trimis, lock-ul rămâne al deţinătorului",
-              r.get("code") == "cancelled" and not c.ws.sent and c._send_lock.locked() and not c._pending,
-              (r, c.ws.sent))
-    finally:
-        c._send_lock.release()
-        core.KILL_IF_QUIET_LOCK_WAIT = saved_wait
-    r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: True)
-    sent = _json.loads(c.ws.sent[0][len(core.FRAME_CTRL):]) if c.ws.sent else {}
-    check("Recheck 2: still_ok True → frame kill_if_quiet trimis, răspunsul agentului întors",
-          r.get("ok") is True and sent.get("op") == "kill_if_quiet" and sent.get("quiet_secs") == 3 * DAY, (r, sent))
-
-
-async def agent62_fixes(hid, src, owner, alice):
-    """Agentul 62: închidere CONDIŢIONATĂ (`kill_if_quiet`); doar sursele care o ştiu sunt închise automat."""
-    await still_ok_send_path()
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-    await close_all_live()
-    for label, other in (("agent 61", FakeSource(version=61)), ("SSH", SshLikeSource())):
-        core.sources[hid] = other
-        try:
-            sA, hA = await new_session(hid, alice, days_old=20)
-            t0 = time.time()
-            await sweep_at(t0)
-            rA = await srow(sA)
-            al = [a for a in await alerts_for(alice, "session_idle") if ('"sid":"%s"' % sA) in (a["msg_params"] or "")]
-            check("v62: %s → notificare FĂRĂ termen de închidere" % label,
-                  rA["idle_notified_at"] and rA["idle_close_after"] is None
-                  and idlesess.notice_json(rA, idlesess.current_policy())["close_at"] is None, dict(rA))
-            check("v62: %s → mesajul nu promite închiderea (session_idle, grace 0)" % label,
-                  len(al) == 1 and al[0]["msg_key"] == "session_idle" and '"grace":0' in al[0]["msg_params"],
-                  [dict(a) for a in al])
-            await sweep_at(t0 + 3 * DAY)
-            await sweep_at(t0 + 30 * DAY)
-            rA2 = await srow(sA)
-            killed = getattr(other, "killed", [])
-            check("v62: %s → niciodată închisă, nicio notificare repetată" % label,
-                  sA not in killed and rA2["state"] == "live" and rA2["idle_notified_at"] == rA["idle_notified_at"]
-                  and not getattr(other, "quiet_asked", []), (killed, dict(rA2)))
-        finally:
-            core.sources[hid] = src
-        await close_all_live()
-
-    # agentul vede activitate pe care gateway-ul n-a văzut-o → refuză: notificarea anulată, fără alertă
-    closed_before = len(await alerts_for(alice, "session_idle_closed"))
-    sB, hB = await new_session(hid, alice, days_old=20)
-    t1 = time.time()
-    await sweep_at(t1)
-    check("v62: agent 62 → notificarea are termen", (await srow(sB))["idle_close_after"] is not None)
-    src.quiet_reply = {"ok": False, "code": "active", "msg": "tmux activity"}
-    try:
-        st = await sweep_at(t1 + 3 * DAY)
-    finally:
-        src.quiet_reply = None
-    rB = await srow(sB)
-    check("v62: gateway-ul cere kill_if_quiet cu fereastra de linişte (≥ 3 zile)",
-          len(src.quiet_asked) >= 1 and src.quiet_asked[-1] >= 3 * DAY - 60, src.quiet_asked[-1:])
-    check("v62: răspuns `active` → nu e închisă, notificarea şi termenul şterse",
-          sB not in src.killed and rB["state"] == "live" and rB["idle_notified_at"] is None
-          and rB["idle_close_after"] is None and st["closed"] == 0, (str(st), dict(rB)))
-    check("v62: …fără alerta „închisă”, idle_closing şters, audit 409 (nu 504, nu 200)",
-          len(await alerts_for(alice, "session_idle_closed")) == closed_before and hB.idle_closing is False
-          and hB.idle_pending is False and len(await audit_rows(sB, 409)) == 1
-          and not await audit_rows(sB, 504) and not await audit_rows(sB, 200))
-    check("v62: …o perioadă nouă începe acum (activitatea hub-ului şi last_active avansează)",
-          hB.activity_at() >= t1 and (rB["last_active"] or 0) >= t1, (hB.activity_at(), rB["last_active"]))
-    await sweep_at(t1 + 3 * DAY + 60)
-    check("v62: …nicio notificare nouă imediat după refuz", (await srow(sB))["idle_notified_at"] is None)
-    # review agent 62: după un refuz nu mai promitem închiderea (altfel un email „se închide” la fiecare ciclu)
-    await sweep_at(t1 + 3 * DAY + 30 * DAY)
-    rB2 = await srow(sB)
-    check("v62: după un refuz, notificarea următoare NU mai are termen de închidere",
-          rB2["idle_notified_at"] is not None and rB2["idle_close_after"] is None, dict(rB2))
-    await close_all_live()
-
-    # agent 62 care răspunde ok → închisă pe calea confirmată (on_exit)
-    n_before = len(src.quiet_asked)
-    sC, hC = await new_session(hid, alice, days_old=20)
-    t2 = time.time()
-    await sweep_at(t2)
-    st = await sweep_at(t2 + 3 * DAY)
-    check("v62: agent 62 + ok → închisă şi confirmată",
-          sC in src.killed and st["closed"] == 1 and (await srow(sC))["state"] == "closed"
-          and len(src.quiet_asked) == n_before + 1 and len(await audit_rows(sC, 200)) == 1, str(st))
-    await close_all_live()
-
-    # Codex Recheck 2, High 2: Adminul opreşte închiderea cât cererea aşteaptă lock-ul de trimitere →
-    # `still_ok` (evaluat sub lock, chiar înainte de frame) o opreşte: nimic trimis, nimic închis, fără alertă
-    sE, hE = await new_session(hid, alice, days_old=20)
-    t4 = time.time()
-    await sweep_at(t4)
-    check("Recheck 2: termen fixat înainte de oprire", (await srow(sE))["idle_close_after"] is not None)
-    n_asked, closed_before = len(src.quiet_asked), len(await alerts_for(alice, "session_idle_closed"))
-
-    async def disable_now():
-        await idlesess.save_policy(dict(idlesess.current_policy(), autoclose=False))
-    src.before_send = disable_now
-    try:
-        st = await sweep_at(t4 + 3 * DAY)
-    finally:
-        src.before_send = None
-    rE = await srow(sE)
-    check("Recheck 2: oprit între rezervare şi trimitere → nimic trimis, sesiunea vie",
-          src.cancelled >= 1 and len(src.quiet_asked) == n_asked and sE not in src.killed
-          and rE["state"] == "live" and st["closed"] == 0, (src.cancelled, str(st), dict(rE)))
-    check("Recheck 2: …fără alertă „închisă”, fără audit 504/409/200, ataşările nu mai sunt refuzate",
-          len(await alerts_for(alice, "session_idle_closed")) == closed_before and hE.idle_closing is False
-          and hE.exit_reason != "idle" and not await audit_rows(sE, 504) and not await audit_rows(sE, 409)
-          and not await audit_rows(sE, 200))
-    check("Recheck 2: …fără backoff (un „skip”, nu un eşec)", not idlesess._backed_off(sE))
-    await close_all_live()
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
-
-    # Codex Recheck 3, High 3: între rezervare şi trimitere se schimbă grația sau starea fluxului → still_ok
-    # refăcut COMPLET (politica de acum, ceasurile de acum, ataşare / replay) opreşte trimiterea
-    async def grace_10():
-        await idlesess.save_policy(dict(idlesess.current_policy(), grace_days=10))
-
-    def detach(h):
-        async def f():
-            h.attached = False
-        return f
-
-    def reattach(h):
-        async def f():
-            # tocmai re-ataşat, pe ceasul simulat al sweep-ului (+3 zile): output-ul din pauză încă poate curge
-            h.attached_mono = time.monotonic() + 3 * DAY
-        return f
-
-    def replay(h):
-        async def f():
-            h._replay_expected = True               # o ataşare nouă aşteaptă replay-ul agentului
-            h._replay_end.clear()
-        return f
-    for label, mk in (("grația mărită 2→10 zile", lambda h: grace_10),
-                      ("detaşat de sursă", detach), ("re-ataşat chiar acum", reattach),
-                      ("replay reluat, neterminat", replay)):
-        sF, hF = await new_session(hid, alice, days_old=20)
-        t5 = time.time()
-        await sweep_at(t5)
-        n_asked, n_cancel = len(src.quiet_asked), src.cancelled
-        src.before_send = mk(hF)
-        try:
-            st = await sweep_at(t5 + 3 * DAY)
-        finally:
-            src.before_send = None
-        rF = await srow(sF)
-        check("Recheck 3: %s între rezervare şi trimitere → nimic trimis, sesiunea vie, rezervarea eliberată" % label,
-              src.cancelled == n_cancel + 1 and len(src.quiet_asked) == n_asked and sF not in src.killed
-              and rF["state"] == "live" and st["closed"] == 0 and hF.idle_closing is False and hF.exit_reason != "idle",
-              (label, src.cancelled, str(st), dict(rF)))
-        await close_all_live()
-        await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7, "autoclose": True,
-                                                             "grace_days": 2, "current_password": U.OWNER_PW})
-
-    # Codex Recheck 3, Medium 7: sweep-ul anulat (CancelledError) cât cererea aşteaptă → rezervarea eliberată
-    for label, attr in (("înainte de trimitere", "before_send"), ("după o trimitere posibilă", "after_send")):
-        sG, hG = await new_session(hid, alice, days_old=20)
-        t6 = time.time()
-        await sweep_at(t6)
-        n_asked = len(src.quiet_asked)
-        waiting = asyncio.Event()
-
-        async def hang():
-            waiting.set()
-            await asyncio.sleep(3600)
-        setattr(src, attr, hang)
-        real_cc = idlesess.CLOSE_CONFIRM
-        if attr == "after_send":
-            idlesess.CLOSE_CONFIRM = 0.8        # confirmarea pe fundal expiră repede în test
-        task = asyncio.create_task(sweep_at(t6 + 3 * DAY))
-        try:
-            await asyncio.wait_for(waiting.wait(), 10)
-            task.cancel()
-            try:
-                await task
-                got_cancel = False
-            except asyncio.CancelledError:
-                got_cancel = True
-        finally:
-            setattr(src, attr, None)
-        await asyncio.sleep(0.2)                    # task-ul de fundal (calea „neconfirmat")
-        rG = await srow(sG)
-        if attr == "before_send":
-            check("Recheck 3: CancelledError %s → re-ridicată, idle_closing şters, exit_reason ≠ idle, nimic trimis" % label,
-                  got_cancel and hG.idle_closing is False and hG.exit_reason != "idle"
-                  and len(src.quiet_asked) == n_asked and sG not in src.killed and rG["state"] == "live"
-                  and not await audit_rows(sG, 504) and not idlesess._backed_off(sG), (got_cancel, dict(rG)))
-        else:
-            # review 4ec916d: frame-ul poate fi pe drum → ataşările rămân refuzate până la confirmare/expirare
-            check("Recheck 3: CancelledError %s → re-ridicată, rezervarea PĂSTRATĂ cât rezultatul e necunoscut" % label,
-                  got_cancel and hG.idle_closing is True, (got_cancel, dict(rG)))
-            await asyncio.sleep(2.0)
-            check("…după CLOSE_CONFIRM fără ieşire: rezervarea eliberată, rezultat necunoscut (504 + backoff)",
-                  hG.idle_closing is False and hG.exit_reason != "idle"
-                  and len(await audit_rows(sG, 504)) == 1 and idlesess._backed_off(sG))
-        idlesess.CLOSE_CONFIRM = real_cc
-        idlesess._backoff.pop(sG, None)
-        await close_all_live()
-
-    # termen fixat sub agentul 62, apoi agentul e înlocuit cu unul vechi → nimic închis, termenul dispare
-    sD, hD = await new_session(hid, alice, days_old=20)
-    t3 = time.time()
-    await sweep_at(t3)
-    old = FakeSource(version=61)
-    core.sources[hid] = old
-    try:
-        await sweep_at(t3 + 3 * DAY)
-    finally:
-        core.sources[hid] = src
-    rD = await srow(sD)
-    check("v62: agent retrogradat la 61 după notificare → nu închide, termenul şters, notificarea rămâne",
-          sD not in old.killed and rD["state"] == "live" and rD["idle_close_after"] is None
-          and rD["idle_notified_at"], dict(rD))
-    await close_all_live()
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
-
-
-async def recheck4_fixes(hid, src, owner, alice):
-    """Codex Recheck 4 (a170805): orice schimbare de politică măreşte generaţia; pragul curent verificat sub
-    lock; un eşec DUPĂ armare păstrează rezervarea; fereastra trimisă agentului include aşteptarea."""
-    pol_on = {"notify": True, "notify_days": 7, "autoclose": True, "grace_days": 2}
-    await owner.post("/api/settings/idle-sessions", json=dict(pol_on, current_password=U.OWNER_PW))
-    await close_all_live()
-
-    # 1) High 2: ORICE schimbare (prag, grație, comutări) măreşte generaţia; o salvare identică nu
-    g = idlesess.current_policy()["gen"]
-    await idlesess.save_policy(dict(pol_on))
-    check("Recheck 4: salvare fără nicio schimbare → aceeaşi generaţie", idlesess.current_policy()["gen"] == g)
-    for label, change in (("pragul 7→8 zile", {"notify_days": 8}), ("grația 2→3 zile", {"grace_days": 3}),
-                          ("notificarea oprită", {"notify": False})):
-        g = idlesess.current_policy()["gen"]
-        await idlesess.save_policy(dict(pol_on, **change))
-        check("Recheck 4: %s → generaţia creşte" % label, idlesess.current_policy()["gen"] == g + 1,
-              idlesess.current_policy())
-        await idlesess.save_policy(dict(pol_on))
-    await owner.post("/api/settings/idle-sessions", json=dict(pol_on, current_password=U.OWNER_PW))
-
-    # 2) High 2: pragul mărit 7→30 cât cererea aşteaptă lock-ul → nimic trimis, rezervarea eliberată
-    sA, hA = await new_session(hid, alice, days_old=9)
-    tA = time.time()
-    await sweep_at(tA)
-    rA = await srow(sA)
-    check("Recheck 4: notificare cu termen (9 zile de linişte)", rA["idle_close_after"] is not None, dict(rA))
-    # plasa din `_eligible`: cu ACEEAŞI generaţie, pragul curent (30 de zile) refuză; 7 zile acceptă
-    pol = idlesess.current_policy()
-    last = await idlesess.last_activity(rA, hA)
-    mono3 = time.monotonic() + 3 * DAY
-    check("Recheck 4: _eligible cu pragul 7 zile → da (după grație)",
-          idlesess._eligible(rA, hA, pol, tA + 3 * DAY, mono3, reserved=False, last=last))
-    check("Recheck 4: _eligible cu pragul 30 de zile, aceeaşi generaţie → nu (prag + grație nedepăşite)",
-          not idlesess._eligible(rA, hA, dict(pol, notify_days=30), tA + 3 * DAY, mono3, reserved=False, last=last))
-    check("Recheck 4: _eligible fără ultima activitate cunoscută → nu",
-          not idlesess._eligible(rA, hA, pol, tA + 3 * DAY, mono3, reserved=False, last=None))
-    n_asked, n_cancel = len(src.quiet_asked), src.cancelled
-
-    async def threshold_30():
-        await idlesess.save_policy(dict(idlesess.current_policy(), notify_days=30))
-    src.before_send = threshold_30
-    try:
-        st = await sweep_at(tA + 3 * DAY)
-    finally:
-        src.before_send = None
-    rA = await srow(sA)
-    check("Recheck 4: prag 7→30 între rezervare şi trimitere → nimic trimis, vie, rezervarea eliberată",
-          src.cancelled == n_cancel + 1 and len(src.quiet_asked) == n_asked and sA not in src.killed
-          and rA["state"] == "live" and st["closed"] == 0 and hA.idle_closing is False, (str(st), dict(rA)))
-    await close_all_live()
-    await owner.post("/api/settings/idle-sessions", json=dict(pol_on, current_password=U.OWNER_PW))
-
-    # 3) High 2: grația mărită anulează ŞI duce la o notificare nouă, sub generaţia nouă, cu grație întreagă
-    sB, hB = await new_session(hid, alice, days_old=20)
-    tB = time.time()
-    await sweep_at(tB)
-    n_cancel = src.cancelled
-
-    async def grace_10():
-        await idlesess.save_policy(dict(idlesess.current_policy(), grace_days=10))
-    src.before_send = grace_10
-    try:
-        await sweep_at(tB + 3 * DAY)
-    finally:
-        src.before_send = None
-    check("Recheck 4: grația 2→10 între rezervare şi trimitere → anulat (generaţie nouă)",
-          src.cancelled == n_cancel + 1 and sB not in src.killed)
-    await sweep_at(tB + 3 * DAY + 60)
-    rB = await srow(sB)
-    check("Recheck 4: …sweep-ul următor trimite o notificare NOUĂ, sub generaţia nouă, cu grația de 10 zile",
-          rB["idle_notified_at"] and float(rB["idle_notified_at"]) >= tB + 3 * DAY
-          and rB["idle_close_gen"] == idlesess.current_policy()["gen"]
-          and abs(float(rB["idle_close_after"]) - float(rB["idle_notified_at"]) - 10 * DAY) < 1, dict(rB))
-    await close_all_live()
-    await owner.post("/api/settings/idle-sessions", json=dict(pol_on, current_password=U.OWNER_PW))
-
-    # 4) High 1: orice eşec DUPĂ armare (AgentGone, timeout, kill_failed) păstrează rezervarea până la
-    #    CLOSE_CONFIRM, apoi 504 + backoff + eliberare
-    async def gone():
-        raise core.AgentGone("send timed out")
-
-    async def timeout():
-        raise asyncio.TimeoutError()
-    for label, attr, val in (("AgentGone la trimitere", "after_send", gone),
-                             ("timeout la răspuns", "after_send", timeout),
-                             ("agentul: kill_failed", "quiet_reply", {"ok": False, "code": "kill_failed"})):
-        sC, hC = await new_session(hid, alice, days_old=20)
-        tC = time.time()
-        await sweep_at(tC)
-        real_cc = idlesess.CLOSE_CONFIRM
-        idlesess.CLOSE_CONFIRM = 0.6
-        setattr(src, attr, val)
-        try:
-            st = await sweep_at(tC + 3 * DAY)
-        finally:
-            setattr(src, attr, None)
-        try:
-            check("Recheck 4: %s după armare → rezervarea PĂSTRATĂ (ataşările refuzate), fără 504 încă" % label,
-                  hC.idle_closing is True and hC.exit_reason == "idle" and not await audit_rows(sC, 504)
-                  and sC not in src.killed, (str(st), hC.idle_closing))
-            await asyncio.sleep(1.6)
-            check("Recheck 4: …după CLOSE_CONFIRM fără ieşire → eliberată, 504 + backoff, fără alertă „închisă”",
-                  hC.idle_closing is False and hC.exit_reason != "idle" and len(await audit_rows(sC, 504)) == 1
-                  and idlesess._backed_off(sC) and not await audit_rows(sC, 200))
-        finally:
-            idlesess.CLOSE_CONFIRM = real_cc
-            idlesess._backoff.pop(sC, None)
-        await close_all_live()
-
-    # 5) Medium 3: fereastra trimisă agentului = linişte văzută + aşteptarea maximă la lock + trimitere
-    sD, hD = await new_session(hid, alice, days_old=20)
-    tD = time.time()
-    await sweep_at(tD)
-    act = hD.activity_at()
-    n_asked = len(src.quiet_asked)
-    await sweep_at(tD + 3 * DAY)
-    pad = core.KILL_IF_QUIET_LOCK_WAIT + core.KILL_IF_QUIET_SEND_WAIT
-    q = src.quiet_asked[-1] if len(src.quiet_asked) > n_asked else None
-    check("Recheck 4: quiet_secs = linişte văzută + %ds (lock + trimitere)" % int(pad),
-          q is not None and pad == 20.0 and abs(q - ((tD + 3 * DAY) - act) - pad) < 2, (q, act))
-    await close_all_live()
-    await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
-                                                         "autoclose": False, "grace_days": 2})
+    for c in (owner, ca, cb, cadm):
+        await c.aclose()
 
 
 if __name__ == "__main__":

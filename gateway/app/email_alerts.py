@@ -459,49 +459,30 @@ def notify_replay_created(title: str, label: str, hours: int, redact: bool, ip: 
 
 
 async def notify_session_idle(user_ids, title: str, host_name: str, host_id, sid: str, days: int,
-                              grace_days: int, ts=None) -> list:
+                              ts=None) -> list:
     """Igiena sesiunilor (3.7.1, idlesess.py): o sesiune n-a mai fost folosită `days` zile. Doar
     proprietarului (sau, fără proprietar, celor cu session.manage — o singură alertă pentru toţi).
-    `grace_days` > 0 = închiderea automată e pornită şi o va închide după atâtea zile dacă rămâne
-    nefolosită. `sid` merge în parametri ca UI-ul să ofere „Păstrează deschisă" / „Închide acum".
+    `sid` merge în parametri ca UI-ul să ofere „Păstrează deschisă" / „Închide acum". Nu promite nicio
+    închidere: în 3.7.1 nimic nu se închide automat.
 
-    Auditul Codex 3.7.1 (INV-13): AŞTEPTATĂ, nu „fire-and-forget". Întoarce conturile pentru care
-    notificarea a fost scrisă în aplicaţie (`ts` = momentul rândului, căutat ca dovadă la închidere);
-    o eroare de scriere ridică excepţia, iar apelantul nu programează nicio închidere. Emailul şi
-    webhook-ul rămân best-effort, după preferinţe, pe un task separat."""
-    closing = grace_days > 0
+    AŞTEPTATĂ, nu „fire-and-forget": o eroare de scriere ridică excepţia, iar apelantul nu marchează
+    sesiunea drept notificată (reîncearcă mai târziu). Întoarce conturile pentru care s-a scris rândul
+    în aplicaţie (după preferinţe). Emailul şi webhook-ul rămân best-effort, pe un task separat."""
     subject = "A session has not been used for %d days" % days
     body = (f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
             f"Nobody has typed in it, it has printed nothing and no browser has been attached for "
-            f"{days} days. "
-            # Recheck 3, Low 8: o posibilitate, nu o certitudine — agentul poate refuza închiderea
-            + (f"It may be closed automatically after {grace_days} day(s) if it stays unused (EverShell "
-               f"closes it only if the host confirms it is idle). To prevent this, keep it open from the "
-               f"session menu (Keep open)." if closing else
-               "Close it if you no longer need it, or keep it open from the session menu (Keep open)."))
+            f"{days} days. Close it if you no longer need it, or keep it open from the session menu "
+            f"(Keep open).")
     uids, want_email = await alert_history.record_required(
-        "session_idle", "warning" if closing else "info", subject, body, host_id=host_id,
-        user_id=list(user_ids), key="session_idle_close" if closing else "session_idle",
-        params={"session": title or "", "host": host_name, "days": int(days),
-                "grace": int(grace_days), "sid": sid}, ts=ts)
-    if uids and want_email:
+        "session_idle", "info", subject, body, host_id=host_id,
+        user_id=list(user_ids), key="session_idle",
+        params={"session": title or "", "host": host_name, "days": int(days), "sid": sid}, ts=ts)
+    if want_email:
         try:
             asyncio.get_running_loop().create_task(_send_external(subject, body))
         except RuntimeError:
             pass
     return uids
-
-
-def notify_session_idle_closed(user_id, title: str, host_name: str, host_id, sid: str,
-                               days: int) -> None:
-    """Sesiunea notificată a fost închisă automat (3.7.1). Transcriptul rămâne în istoric."""
-    _fire("An unused session was closed automatically",
-          f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
-          f"It had not been used for about {days} days after a notice. Its recording stays in the "
-          f"session history.",
-          kind="session_idle_closed", severity="info", host_id=host_id, user_id=user_id,
-          key="session_idle_closed",
-          params={"session": title or "", "host": host_name, "days": int(days), "sid": sid})
 
 
 def notify_replay_opened(link_id: int, title: str, label: str, ip: str, user_agent: str,

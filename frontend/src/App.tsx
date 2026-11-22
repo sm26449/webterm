@@ -637,9 +637,8 @@ function MainApp() {
       if (k) seen.add(k)
       const host = hosts.find((h) => h.id === s.host_id)?.name ?? '?'
       const vars = { title: sessionTitle(s.title, t), host, days: s.idle_notice?.days ?? 0 }
-      const msg = s.idle_notice?.close_at
-        ? t('idle.toastClose', { ...vars, date: fmtTs(s.idle_notice.close_at) })
-        : t('idle.toast', vars)
+      // 3.7.1: doar notificare — nimic nu se închide automat, deci mesajul nu promite nicio dată
+      const msg = t('idle.toast', vars)
       notifyToast(msg, 'warn', `idle-${s.id}`, () => {
         withStepup(s.host_id, () => api(`/api/sessions/${s.id}/keep-open`, { method: 'POST', body: JSON.stringify({ keep: true }) }))
           .then(() => notifyToast(t('idle.kept', { title: vars.title })))

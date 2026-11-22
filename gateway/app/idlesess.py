@@ -1,36 +1,21 @@
-"""Igiena sesiunilor inactive (3.7.1): notificare după N zile nefolosite, închidere automată opţională.
+"""Igiena sesiunilor inactive (3.7.1): NOTIFICARE după N zile nefolosite. Nimic nu se închide automat.
 
-Decizia proprietarului (2026-11-21):
+Decizia proprietarului (2026-11-22): 3.7.1 livrează doar notificarea. Închiderea automată cere o garanţie
+pe partea agentului (închidere condiţionată, atomică, în tmux) care nu e gata; designul şi codul sunt
+păstrate pe ramura `feat/agent62-autoclose`, pentru 3.8. Până atunci:
+  * `AUTOCLOSE_AVAILABLE = False`: politica nu poate porni închiderea (`sanitize` o forţează oprită,
+    inclusiv un `autoclose: true` rămas în DB de la un rc), ruta refuză cu 400, sweep-ul nu trimite
+    niciodată un kill, iar notificările nu poartă nicio dată de închidere;
   * „inactivă" = fără input, fără output ŞI fără niciun client ataşat pe toată perioada. Un `tail -f`
-    sau un build care scrie nu e niciodată inactiv; o comandă tăcută zile întregi pare inactivă —
-    pentru ea există notificarea şi „Păstrează deschisă";
-  * implicit: notificarea PORNITĂ (7 zile), închiderea automată OPRITĂ până o porneşte un Owner/Admin
-    pentru instanţă; închiderea vine la `grace_days` (2) după notificare;
+    sau un build care scrie nu e niciodată inactiv;
   * notificarea merge proprietarului sesiunii (`created_by_id`); sesiunile fără proprietar → cei cu
     `session.manage` pe host. Terminalele root de pe gateway (ROOT_TERMINAL_ORIGINS): doar proprietarul;
-  * închiderea foloseşte calea sursei (ca butonul Stop): tmux omorât pe host, transcript păstrat, hub
-    curăţat de `on_exit`, plus un rând de audit „system:idle-sessions".
+  * o notificare pe perioadă de inactivitate: prima folosire o anulează (hub-ul, imediat), iar o nouă
+    perioadă de N zile aduce o notificare nouă. „Păstrează deschisă" opreşte notificările.
 
-Fail-closed (ce NU închide niciodată): orice eroare, o sesiune al cărei flux nu-l vedem (fără hub,
-hub neataşat la sursă, replay neterminat, ataşat de prea puţin timp, host offline), un client ataşat,
-„Păstrează deschisă", o sesiune fără destinatar, o notificare care nu s-a putut ÎNREGISTRA (nimeni n-a
-fost avertizat dovedit), o notificare trimisă cât închiderea era oprită sau sub o generaţie mai veche a
-politicii, activitate după notificare, o grație care n-a trecut şi pe ceasul monoton al procesului.
-
-Auditul Codex 3.7.1 (constatările 1–3, 5, 6, 8):
-  * notificarea se scrie în aplicaţie AŞTEPTAT, înainte de termen; termenul se fixează doar după o
-    scriere reuşită, iar la închidere se caută rândul acela (dovada) pentru un destinatar curent;
-  * politica are o generaţie, actualizată în memorie ÎNAINTE de scrierea în DB; termenul o poartă, iar
-    ultima verificare (sincronă, fără await până la trimiterea kill-ului) citeşte politica din memorie;
-  * `hub.idle_closing` se pune sincron înainte de kill; ataşările îl văd şi refuză;
-  * răspunsul agentului se verifică, iar succesul (audit 200, alerta „închisă") vine doar după `on_exit`;
-  * cursor rotativ, backoff per sesiune, buget de timp pe ciclu, `stat()` pe thread.
-
-Reziduul #3 (agentul 62): între ultima verificare şi momentul în care agentul execută kill-ul pot apărea
-output, input sau un om ataşat direct la tmux pe host — gateway-ul nu le vede. De aceea închiderea
-merge prin op-ul CONDIŢIONAT `kill_if_quiet`: gateway-ul spune cât timp n-a văzut nimic, iar agentul
-refuză (`active`) dacă el are dovezi de activitate în fereastra aceea. Doar sesiunile unui agent ≥ 62 pot
-fi închise automat; agenţii mai vechi, SSH, telnet şi serial primesc doar notificarea (fără termen).
+Fail-closed: orice lucru necunoscut (fără hub, hub neataşat, host offline, transcript ilizibil, nimeni
+de anunţat, o eroare) = nicio notificare. Notificarea se scrie AŞTEPTAT în aplicaţie: dacă scrierea
+eşuează, rândul sesiunii nu rămâne marcat „notificat" şi se reîncearcă după un backoff.
 """
 import asyncio
 import json
@@ -38,24 +23,24 @@ import logging
 import time
 from typing import Optional
 
-from . import audit, authz, bgtasks, core, db, email_alerts, sessctl
+from . import authz, core, db, email_alerts, sessctl
 
 log = logging.getLogger("webterm")
 
+# INV-13 (docs/design/INVARIANTS.md): în 3.7.1 nicio sesiune nu se închide automat — doar notificare.
+AUTOCLOSE_AVAILABLE = False
+
 SETTING_KEY = "idle_sessions"
 DAY = 86400.0
-DEFAULTS = {"notify": True, "notify_days": 7, "autoclose": False, "grace_days": 2, "gen": 0}
+DEFAULTS = {"notify": True, "notify_days": 7, "autoclose": False}
 NOTIFY_DAYS = (1, 90)
-GRACE_DAYS = (1, 30)
 SWEEP_INTERVAL = 600.0           # şi cadenţa cu care se persistă `last_active` (~10 min)
 SWEEP_STARTUP_GRACE = 600.0      # după pornire: reconcilierea agenţilor re-ataşează hub-urile întâi
 SWEEP_BUDGET = 120.0             # secunde de lucru pe ciclu (restul la următorul, de unde a rămas)
 MAX_ROWS = 2000                  # sesiuni vii citite pe sweep (plafon de lucru; cursorul se roteşte)
-MAX_ACTIONS = 20                 # notificări + închideri pe sweep (restul la următorul)
+MAX_ACTIONS = 20                 # notificări pe sweep (restul la următorul)
 MAX_RECIPIENT_SCAN = 500         # conturi verificate pentru `session.manage` (sesiune fără proprietar)
-MIN_ATTACHED = 600.0             # hub ataşat la sursa curentă de ≥10 min: output-ul din întrerupere a sosit
-CLOSE_CONFIRM = 30.0             # cât aşteptăm `on_exit` după kill (pe un task, nu în sweep)
-BACKOFF_FAILED = 3600.0          # după un kill eşuat / neconfirmat / o notificare neînregistrată
+BACKOFF_FAILED = 3600.0          # după o notificare care nu s-a putut scrie
 BACKOFF_NO_RECIPIENT = 6 * 3600.0
 _CACHE_TTL = 30.0
 
@@ -63,7 +48,7 @@ _CACHE_TTL = 30.0
 _state: dict = {"policy": dict(DEFAULTS), "at": 0.0, "loaded": False, "ver": 0}
 _save_lock = asyncio.Lock()
 _cursor: dict = {"start": ""}    # primul sid de la care citeşte următorul sweep (rotaţie)
-_backoff: dict = {}              # sid → time.monotonic() până la care nu mai încercăm o acţiune
+_backoff: dict = {}              # sid → time.monotonic() până la care nu mai încercăm o notificare
 
 
 def _clamp(v, lo, hi, default) -> int:
@@ -75,21 +60,20 @@ def _clamp(v, lo, hi, default) -> int:
 
 
 def sanitize(raw) -> dict:
-    """Politica stocată → valori sigure. Orice lucru necitibil cade pe implicit (închidere OPRITĂ)."""
+    """Politica stocată → valori sigure. Orice lucru necitibil cade pe implicit."""
     d = raw if isinstance(raw, dict) else {}
     return {
         # notificarea e inofensivă: doar un `false` explicit o opreşte
         "notify": d.get("notify") is not False,
         "notify_days": _clamp(d.get("notify_days"), *NOTIFY_DAYS, DEFAULTS["notify_days"]),
-        # doar un `true` explicit porneşte închiderea — nimic „truthy" (fail-closed)
-        "autoclose": d.get("autoclose") is True,
-        "grace_days": _clamp(d.get("grace_days"), *GRACE_DAYS, DEFAULTS["grace_days"]),
-        "gen": _clamp(d.get("gen"), 0, 2 ** 53, 0),
+        # INV-13 (docs/design/INVARIANTS.md): închiderea nu e disponibilă în 3.7.1 — un `true` stocat
+        # (DB de la un rc 3.7.1) se citeşte OPRIT; doar un `true` explicit ar conta când va exista
+        "autoclose": AUTOCLOSE_AVAILABLE and d.get("autoclose") is True,
     }
 
 
 def current_policy() -> dict:
-    """Politica din memorie, SINCRON (ultima verificare dinaintea kill-ului nu are voie la await)."""
+    """Politica din memorie, SINCRON."""
     return dict(_state["policy"])
 
 
@@ -103,14 +87,8 @@ async def load_policy(fresh: bool = False) -> dict:
     except ValueError:
         raw = {}
     pol = sanitize(raw)
-    # o oprire salvată în memorie dar nescrisă în DB (scrierea a eşuat) rămâne în vigoare până la o
-    # salvare reuşită (re-review 3.7.1: altfel sweep-ul următor reînvia termenele vechi)
-    ov = _state.get("strict")
-    if ov:
-        pol = dict(pol, autoclose=pol["autoclose"] and ov["autoclose"], notify=pol["notify"] and ov["notify"],
-                   gen=max(pol["gen"], ov["gen"]))
     if _state["ver"] == ver:
-        # nicio salvare cât citeam; altfel memoria (scrisă de `save_policy` înaintea DB-ului) câştigă
+        # nicio salvare cât citeam; altfel memoria (scrisă de `save_policy`) câştigă
         _state.update(policy=pol, at=now, loaded=True)
     return current_policy()
 
@@ -120,36 +98,14 @@ def _publish(pol: dict) -> None:
     _state.update(policy=dict(pol), at=time.time(), loaded=True)
 
 
-async def save_policy(pol: dict, reauth=None) -> dict:
-    """Salvează politica. Ordinea contează (auditul Codex 3.7.1, constatarea 2): MEMORIA întâi, în
-    varianta strictă — o oprire (închidere sau notificare) are efect imediat, inclusiv pe un sweep în
-    zbor; o pornire devine efectivă abia după ce s-a scris în DB. ORICE schimbare (comutări, prag,
-    grație) măreşte generaţia: termenele fixate sub generaţia veche nu mai închid nimic, iar o închidere
-    rezervată sub ea e anulată de `still_ok` (Codex Recheck 4, High 2: un prag mărit de la 7 la 30 de zile
-    cât cererea aştepta lock-ul pleca sub aceeaşi generaţie). Sesiunile primesc o notificare nouă, sub
-    politica nouă, cu grație întreagă."""
+async def save_policy(pol: dict) -> dict:
+    """Salvează politica (după `sanitize`: închiderea rămâne oprită). O oprire a notificărilor are
+    efect imediat în memorie, chiar dacă scrierea în DB eşuează; o pornire, doar după scriere."""
     async with _save_lock:
         prev = await load_policy(fresh=True)
         new = sanitize(pol)
-        changed = any(new[k] != prev[k] for k in ("notify", "notify_days", "autoclose", "grace_days"))
-        new["gen"] = prev["gen"] + 1 if changed else prev["gen"]
-        if new["autoclose"] and not prev["autoclose"]:
-            # re-review 3.7.1: decizia „cere re-autentificare" se ia AICI, sub lacăt, faţă de starea
-            # reală (o cerere care citise „pornit" înaintea unei opriri concurente nu mai sare peste ea)
-            if reauth is None:
-                raise PermissionError("enabling automatic closing needs a fresh re-authentication")
-            await reauth()
-        strict = dict(new, autoclose=new["autoclose"] and prev["autoclose"], notify=new["notify"] and prev["notify"])
-        _state["strict"] = strict
-        _publish(strict)
-        if new["autoclose"] and not prev["autoclose"]:
-            # Review 3.7.1: oprit apoi repornit, un termen vechi (deja trecut) închidea sesiunea în 10
-            # minute, deşi omul văzuse ultima dată „nimic programat". Generaţia o împiedică deja;
-            # ştergem şi termenele, ca lista de sesiuni să nu mai arate nimic programat.
-            await db.execute("UPDATE sessions SET idle_close_after=NULL, idle_close_gen=NULL"
-                             " WHERE idle_close_after IS NOT NULL")
+        _publish(dict(new, notify=new["notify"] and prev["notify"]))
         await db.set_setting(SETTING_KEY, json.dumps(new))
-        _state["strict"] = None
         _publish(new)
         return dict(new)
 
@@ -159,42 +115,23 @@ def _row_get(row, key):
 
 
 def notice_json(row, pol: dict) -> Optional[dict]:
-    """Ce vede UI-ul despre notificarea unei sesiuni (lista de sesiuni): None = nicio notificare."""
+    """Ce vede UI-ul despre notificarea unei sesiuni (lista de sesiuni): None = nicio notificare.
+    Nicio dată de închidere: în 3.7.1 nimic nu se închide automat."""
     at = _row_get(row, "idle_notified_at")
     if not at or row["state"] != "live":
         return None
-    close_at = close_deadline(row, pol)
-    return {"at": at, "days": pol["notify_days"], "close_at": close_at}
-
-
-def close_deadline(row, pol: dict) -> Optional[float]:
-    """Momentul închiderii automate, sau None dacă nu e programată: închiderea trebuie să fie pornită
-    ACUM, să fi fost pornită la notificare (`idle_close_after` fixat atunci) ŞI sub aceeaşi generaţie a
-    politicii. O grație mărită între timp amână termenul; una micşorată nu-l aduce mai aproape."""
-    if not pol["autoclose"] or not pol["notify"]:
-        return None                           # funcţia oprită = nimic programat
-    at = _row_get(row, "idle_notified_at")
-    after = _row_get(row, "idle_close_after")
-    gen = _row_get(row, "idle_close_gen")
-    if not at or not after or gen is None or int(gen) != pol["gen"]:
-        return None
-    return max(float(after), float(at) + pol["grace_days"] * DAY)
+    return {"at": at, "days": pol["notify_days"]}
 
 
 async def set_keep_open(sid: str, keep: bool) -> None:
-    """„Păstrează deschisă": anulează şi o notificare/închidere în curs. Memoria ÎNTÂI, sincron (re-review
-    3.7.1): o închidere aflată între citirea rândului şi ultima verificare trebuie să vadă Keep, altfel
-    utilizatorul primea „păstrată" iar sesiunea se închidea oricum."""
+    """„Păstrează deschisă": fără notificări de inactivitate; anulează şi o notificare în curs."""
     hub = core.hubs.get(sid)
     if hub is not None and keep:
         hub.idle_pending = False
-        hub.idle_notice_seen = None
         hub.keep_open = True
-    await db.execute("UPDATE sessions SET keep_open=?, idle_notified_at=NULL, idle_close_after=NULL,"
-                     " idle_close_gen=NULL WHERE id=?", 1 if keep else 0, sid)
+    await db.execute("UPDATE sessions SET keep_open=?, idle_notified_at=NULL WHERE id=?", 1 if keep else 0, sid)
     if hub is not None:
         hub.idle_pending = False
-        hub.idle_notice_seen = None
         hub.keep_open = bool(keep)
 
 
@@ -263,335 +200,35 @@ def _backed_off(sid: str) -> bool:
     return True
 
 
-def _observe_notice(hub, notified: float, mono: float) -> None:
-    """Momentul (monoton) în care ACEST proces a văzut notificarea. După un restart / un hub nou /
-    un restore, grația reîncepe de la prima observare — omul a fost anunţat, doar închiderea e mai
-    târziu. Un salt înainte al ceasului de perete nu scurtează nimic."""
-    seen = getattr(hub, "idle_notice_seen", None)
-    if seen is None or seen[0] != notified:
-        hub.idle_notice_seen = (notified, mono)
-
-
-def _mono_grace_ok(hub, notified: float, deadline: float, mono: float) -> bool:
-    seen = getattr(hub, "idle_notice_seen", None)
-    return seen is not None and seen[0] == notified and mono - seen[1] >= deadline - notified
-
-
-def closing_source(row):
-    """Sursa prin care sesiunea poate fi închisă CONDIŢIONAT (AgentConnection, agent ≥ 62), sau None.
-    SINCRON (folosită şi în ultima verificare dinaintea kill-ului). Orice altă sursă — agent mai vechi,
-    SSH, telnet, serial, host offline — nu poate dovedi că sesiunea e încă liniştită: doar notificare."""
-    hub = core.hubs.get(row["id"])
-    if hub is not None and getattr(hub, "close_refused", False):
-        # review agent 62: agentul a refuzat deja o dată (activitate pe care gateway-ul n-o vede: o
-        # fereastră tmux din fundal, cineva ataşat pe host). Nu mai promitem o închidere care n-ar avea
-        # loc — notificare fără dată, o singură dată, până la repornirea gateway-ului.
-        return None
-    source = core.session_sources.get(row["id"]) or core.source_for(row["host_id"])
-    if isinstance(source, core.AgentConnection) and source.can_kill_if_quiet():
-        return source
-    return None
-
-
-def _source_settled(hub, mono: float) -> bool:
-    """Fluxul sesiunii e la zi: replay-ul ataşării curente s-a terminat şi hub-ul e ataşat la sursa
-    curentă de cel puţin MIN_ATTACHED (output-ul produs cât agentul era deconectat a sosit)."""
-    at = getattr(hub, "attached_mono", None)
-    return hub.replay_settled() and at is not None and mono - at >= MIN_ATTACHED
-
-
-async def _notify(row, hub, pol: dict, uids: list, now: float, mono: float) -> bool:
+async def _notify(row, hub, pol: dict, uids: list, now: float) -> bool:
     sid = row["id"]
-    # notificarea promite o închidere doar dacă sursa o poate face condiţionat (agent ≥ 62)
-    closing = pol["autoclose"] and closing_source(row) is not None
-    # 1) revendicăm notificarea, FĂRĂ termen (nimic programat încă). Condiţionat: o sesiune marcată
-    #    Keep / închisă / deja notificată valid între citire şi acum nu se atinge.
+    # 1) revendicăm notificarea, condiţionat: o sesiune marcată Keep / închisă / deja notificată între
+    #    citire şi acum nu se atinge
     won = await db.execute_returning(
-        "UPDATE sessions SET idle_notified_at=?, idle_close_after=NULL, idle_close_gen=NULL"
-        " WHERE id=? AND state='live' AND COALESCE(keep_open, 0)=0"
-        " AND (idle_notified_at IS NULL OR idle_close_after IS NULL OR COALESCE(idle_close_gen, -1)<>?)"
-        " RETURNING id", now, sid, pol["gen"])
+        "UPDATE sessions SET idle_notified_at=? WHERE id=? AND state='live' AND COALESCE(keep_open, 0)=0"
+        " AND idle_notified_at IS NULL RETURNING id", now, sid)
     if won is None:
         return False
     hub.idle_pending = True                   # prima activitate de acum încolo anulează notificarea
-    # 2) notificarea în aplicaţie, AŞTEPTATĂ (auditul Codex 3.7.1, constatarea 1): fără un rând scris
-    #    pentru un destinatar eligibil nu există notificare şi deci nici termen
+    # 2) notificarea în aplicaţie, AŞTEPTATĂ: o scriere eşuată nu lasă sesiunea marcată „notificată"
+    #    (altfel nu s-ar mai reîncerca niciodată în perioada asta)
     try:
         host = await _host_name(row["host_id"])
-        # toţi destinatarii într-o singură alertă (review 3.7.1: câte un email identic per cont)
-        recorded = await email_alerts.notify_session_idle(
-            list(uids), row["title"] or "", host, row["host_id"], sid, pol["notify_days"],
-            pol["grace_days"] if closing else 0, ts=now)
-    except Exception as e:                    # noqa: BLE001 — fără dovadă: nimic programat
+        # toţi destinatarii într-o singură alertă (un singur email/webhook pentru toţi)
+        await email_alerts.notify_session_idle(
+            list(uids), row["title"] or "", host, row["host_id"], sid, pol["notify_days"], ts=now)
+    except Exception as e:                    # noqa: BLE001 — notificarea nu s-a scris: reîncercăm mai târziu
         log.warning("idle notice for session %s not recorded: %s", sid, e)
-        recorded = []
-    if not recorded:
         hub.idle_pending = False
-        await db.execute("UPDATE sessions SET idle_notified_at=NULL WHERE id=? AND idle_notified_at=?"
-                         " AND idle_close_after IS NULL", sid, now)
+        await db.execute("UPDATE sessions SET idle_notified_at=NULL WHERE id=? AND idle_notified_at=?", sid, now)
         _backoff_set(sid, BACKOFF_FAILED)
         return False
-    _observe_notice(hub, now, mono)
-    if closing:
-        # 3) termenul, sub generaţia cu care a plecat notificarea — doar dacă politica n-a fost
-        #    schimbată între timp (altfel notificarea rămâne una fără închidere)
-        cur = current_policy()
-        if cur["autoclose"] and cur["notify"] and cur["gen"] == pol["gen"]:
-            await db.execute(
-                "UPDATE sessions SET idle_close_after=?, idle_close_gen=? WHERE id=? AND idle_notified_at=?"
-                " AND state='live' AND COALESCE(keep_open, 0)=0",
-                now + pol["grace_days"] * DAY, pol["gen"], sid, now)
     return True
-
-
-async def _notice_recorded(sid: str, notified: float, uids: list) -> bool:
-    """Există, pentru un destinatar CURENT, rândul de alertă care a anunţat închiderea?"""
-    if not uids:
-        return False
-    r = await db.fetchone(
-        "SELECT 1 FROM alerts WHERE kind='session_idle' AND msg_key='session_idle_close' AND ts=?"
-        " AND msg_params LIKE ? AND user_id IN (%s) LIMIT 1" % ",".join("?" * len(uids)),
-        float(notified), '%%"sid":"%s"%%' % sid, *[int(u) for u in uids])
-    return r is not None
-
-
-def _eligible(fresh, hub, pol: dict, now: float, mono: float, reserved: bool, last: Optional[float]) -> bool:
-    """Eligibilitatea COMPLETĂ pentru închidere, SINCRON, cu politica primită şi ceasurile date: termenul
-    (cu grația politicii de ACUM — una mărită amână), ambele ceasuri trecute de el, fluxul la zi (replay
-    terminat, ataşat de destul timp), niciun client, „Păstrează deschisă", activitate după notificare.
-    `reserved`: la rezervare `idle_closing` trebuie să fie încă False; la trimitere, True (al nostru).
-    `last`: ultima activitate cunoscută (`last_activity`, citită înainte de rezervare); None = nu ştim."""
-    deadline = close_deadline(fresh, pol)
-    notified = _row_get(fresh, "idle_notified_at")
-    if deadline is None or not notified or now < deadline or last is None:
-        return False
-    # Codex Recheck 4, High 2 (plasă; generaţia acoperă deja o schimbare de politică): perioada întreagă,
-    # prag + grație, cu politica de ACUM, de la ultima activitate cunoscută (inclusiv cea văzută de hub
-    # între timp) — ca în sweep, dar refăcută la fiecare verificare
-    act = max(float(last), hub.activity_at(), float(_row_get(fresh, "last_active") or 0.0))
-    if now - act < pol["notify_days"] * DAY + (deadline - float(notified)):
-        return False
-    if hub.closed or not hub.attached or hub.clients or not hub.idle_pending:
-        return False
-    if bool(hub.idle_closing) is not bool(reserved):
-        return False
-    if getattr(hub, "keep_open", False) or _row_get(fresh, "keep_open"):
-        return False
-    if hub.activity_at() > float(notified):
-        return False
-    return _source_settled(hub, mono) and _mono_grace_ok(hub, float(notified), deadline, mono)
-
-
-def _closable_now(fresh, hub, pol: dict, now: float, mono: float, last: Optional[float]) -> bool:
-    """Ultima verificare dinaintea rezervării, SINCRONĂ (fără await între ea şi `idle_closing`)."""
-    return _eligible(fresh, hub, pol, now, mono, reserved=False, last=last)
-
-
-# Răspunsuri ale agentului care dovedesc că NIMIC nu e în zbor şi nimic n-a fost omorât: rezervarea se
-# eliberează imediat. Orice alt eşec DUPĂ armare (timeout, AgentGone, `kill_failed`, cod necunoscut) are
-# rezultat necunoscut → rezervarea rămâne până la ieşire sau CLOSE_CONFIRM (Codex Recheck 4, High 1).
-_DEFINITE_NO_KILL = ("no_session", "bad_request", "unsupported", "bad_op")
-
-
-# INV-13 (docs/design/INVARIANTS.md): închiderea automată nu atinge o sesiune folosită, păstrată sau neanunţată.
-async def _close(row, hub, uids: list, now: float, mono: float) -> str:
-    """'closed' (confirmat de `on_exit`), 'pending' (trimis, confirmarea pe un task), 'active' (agentul a
-    văzut activitate: notificarea anulată), 'failed', 'skip'."""
-    sid = row["id"]
-    fresh = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
-    if fresh is None or fresh["state"] != "live" or fresh["keep_open"]:
-        return "skip"
-    notified = fresh["idle_notified_at"]
-    if not notified or notified != row["idle_notified_at"]:
-        return "skip"
-    if not await _notice_recorded(sid, float(notified), uids):
-        # niciun destinatar curent n-a fost anunţat dovedit: nimic închis; următorul sweep trimite o
-        # notificare nouă, cu grație nouă
-        log.info("idle session %s: no recorded notice for a current recipient; not closing", sid)
-        await db.execute("UPDATE sessions SET idle_close_after=NULL, idle_close_gen=NULL"
-                         " WHERE id=? AND idle_notified_at=?", sid, notified)
-        return "skip"
-    # Sursa se ia SINCRON şi verificările se refac chiar înainte de kill, fără niciun await între ele
-    # (review 3.7.1: un browser care se ataşa într-un await îşi vedea sesiunea închisă imediat după).
-    if core.session_sources.get(sid) is None and core.source_for(row["host_id"]) is None:
-        return "skip"                         # host offline: altă dată
-    # Recheck 4, High 2: ultima activitate cunoscută, citită ÎNAINTE de secţiunea sincronă (transcriptul
-    # se citeşte pe un thread); hub-ul o completează live în `_eligible`
-    last = await last_activity(fresh, hub)
-    if last is None:
-        return "skip"
-    source = closing_source(row)
-    if source is None:
-        # agentul a fost înlocuit cu unul care nu ştie `kill_if_quiet` (sau sesiunea nu e pe agent):
-        # termenul dispare, UI-ul nu mai promite închiderea; notificarea rămâne
-        await db.execute("UPDATE sessions SET idle_close_after=NULL, idle_close_gen=NULL"
-                         " WHERE id=? AND idle_notified_at=?", sid, notified)
-        return "skip"
-    pol = current_policy()
-    if not _closable_now(fresh, hub, pol, now, mono, last):
-        return "skip"
-    # cât n-a văzut ACEST gateway nimic: ceasul de perete (ultima activitate) şi, ca plasă la un salt
-    # înapoi al ceasului, timpul monoton de când procesul a văzut notificarea (orice folosire de atunci
-    # ar fi anulat-o). Maximul e cererea MAI strictă către agent (fereastra lui de verificare e mai lungă).
-    seen = getattr(hub, "idle_notice_seen", None)
-    quiet = max(now - hub.activity_at(), (mono - seen[1]) if seen else 0.0, 0.0)
-    # Codex Recheck 4, Medium 3: fereastra e calculată ACUM, dar cererea poate sta la lock + la trimitere
-    # până la KILL_IF_QUIET_LOCK_WAIT + KILL_IF_QUIET_SEND_WAIT; o fereastră mai mare e mai strictă (agentul
-    # cere linişte pe o perioadă mai lungă), deci o lărgim cu tot timpul acela
-    quiet += core.KILL_IF_QUIET_LOCK_WAIT + core.KILL_IF_QUIET_SEND_WAIT
-    hub.idle_closing = True                   # din acest moment ataşările sunt refuzate (api [ws])
-    hub.exit_reason = "idle"
-    why = ""
-    resp: dict = {}
-    # ceasurile sweep-ului (injectabile în teste) avansate cu timpul real scurs până la trimitere
-    w0, m0 = time.time(), time.monotonic()
-    armed = {"go": False}                     # still_ok a spus „da" → frame-ul poate să fi plecat
-
-    def still_ok() -> bool:
-        # Codex Recheck 2, High 2 + Recheck 3, High 3: evaluată de AgentConnection SUB lock-ul de trimitere,
-        # chiar înainte ca frame-ul să plece: eligibilitatea COMPLETĂ, refăcută cu politica de ACUM (o grație
-        # mărită de la 2 la 10 zile amână termenul → anulare), ceasurile de ACUM, starea ataşării / replay-ului,
-        # plus aceeaşi generaţie şi aceeaşi sursă. Singura diferenţă faţă de rezervare: `idle_closing` e al nostru.
-        cur = current_policy()
-        ok = bool(cur["gen"] == pol["gen"]
-                  and _eligible(fresh, hub, cur, now + (time.time() - w0), mono + (time.monotonic() - m0),
-                                reserved=True, last=last)
-                  and closing_source(row) is source)
-        armed["go"] = ok
-        return ok
-
-    try:
-        resp = await source.kill_if_quiet(sid, quiet, still_ok=still_ok)
-        if not resp.get("ok"):
-            why = str(resp.get("code") or resp.get("msg") or "refused")[:60]
-    except asyncio.CancelledError:
-        # Recheck 3, Medium 7: sweep-ul anulat (oprire, task anulat) cu hub-ul încă viu. Rezervarea nu
-        # rămâne agăţată: ataşările nu mai sunt refuzate. Dacă frame-ul poate să fi plecat, rezultatul e
-        # necunoscut → aceeaşi cale ca un timeout (audit 504 + backoff), pe un task separat.
-        if not armed["go"]:
-            hub.idle_closing = False
-            if not hub.closed:
-                hub.exit_reason = "exited"
-            log.info("idle session %s: close cancelled before it was sent", sid)
-        else:
-            # review 4ec916d: frame-ul poate fi deja pe drum — ataşările rămân refuzate până se lămureşte
-            # (ieşire confirmată sau CLOSE_CONFIRM expirat → _unconfirmed eliberează rezervarea)
-            try:
-                bgtasks.spawn(_await_exit(row, fresh, hub, uids, now), "idle close after cancel")
-            except RuntimeError:
-                hub.idle_closing = False
-                if not hub.closed:
-                    hub.exit_reason = "exited"
-        raise
-    except Exception as e:                    # noqa: BLE001 — host plecat, timeout: rezultat necunoscut
-        why = type(e).__name__ or "error"
-    if why == "cancelled" and not armed["go"]:
-        # nimic trimis: ca un „skip" (fără alertă, fără backoff); ataşările nu mai sunt refuzate
-        hub.idle_closing = False
-        hub.exit_reason = "exited"
-        log.info("idle session %s: close cancelled before it was sent", sid)
-        return "skip"
-    if why == "active":
-        await _host_active(row, hub, now, notified, str(resp.get("msg") or "")[:60])
-        return "active"
-    if why and (not armed["go"] or why in _DEFINITE_NO_KILL):
-        # eşec ştiut ÎNAINTE de trimitere, sau un răspuns al agentului care dovedeşte că nu s-a omorât nimic
-        await _unconfirmed(row, hub, now, why)
-        return "failed"
-    if why:
-        # Codex Recheck 4, High 1: după armare, un timeout / AgentGone / `kill_failed` nu spune dacă frame-ul
-        # a ajuns sau dacă tmux încă execută comanda. Ca la CancelledError: ataşările rămân refuzate până la
-        # ieşirea confirmată sau CLOSE_CONFIRM (apoi _unconfirmed: 504 + backoff + rezervarea eliberată).
-        # Dacă legătura cu agentul cade, un frame neprocesat moare cu ea (o conexiune nouă e alt socket).
-        try:
-            bgtasks.spawn(_await_exit(row, fresh, hub, uids, now, why), "idle close, result unknown")
-        except RuntimeError:
-            await _unconfirmed(row, hub, now, why)
-        return "failed"
-    if hub.closed and await _closed_as_idle(sid):
-        await _confirmed(row, fresh, uids, now)
-        return "closed"
-    bgtasks.spawn(_await_exit(row, fresh, hub, uids, now), "confirm idle close")
-    return "pending"
-
-
-async def _host_active(row, hub, now: float, notified, detail: str) -> None:
-    """Agentul a refuzat: a văzut activitate pe care gateway-ul n-a văzut-o. E folosire: notificarea se
-    anulează, o perioadă nouă de inactivitate începe ACUM (fără alertă — nu s-a închis nimic)."""
-    sid = row["id"]
-    hub.idle_closing = False
-    hub.exit_reason = "exited"
-    hub.idle_pending = False
-    hub.idle_notice_seen = None
-    hub.close_refused = True
-    hub.last_host_activity_at = time.time()
-    await db.execute("UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL, idle_close_gen=NULL,"
-                     " last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=? AND idle_notified_at=?",
-                     hub.last_host_activity_at, sid, notified)
-    # review 4ec916d: un refuz pentru că hostul nu POATE închide condiţionat (PTY direct, tmux vechi) nu e
-    # „activitate" — auditul spune ce s-a întâmplat de fapt
-    cannot = detail.startswith(("not a tmux session", "tmux too old", "tmux format unsupported"))
-    what = "this session cannot be closed automatically on this host" if cannot else "activity on the host"
-    log.info("idle session %s not closed: %s (%s)", sid, what, detail or "active")
-    await audit.record(now, "system:idle-sessions", "-", "IDLE", "/api/sessions/%s/kill" % sid, 409,
-                       ("idle close of \"%s\" skipped: %s%s"
-                        % (row["title"] or "", what, " (%s)" % detail if detail else ""))[:480],
-                       host_id=row["host_id"])
-
-
-async def _await_exit(row, fresh, hub, uids: list, now: float, why: str = "") -> None:
-    """Confirmarea: `on_exit` (hub închis) în cel mult CLOSE_CONFIRM secunde; altfel „neconfirmat"."""
-    t_end = time.monotonic() + CLOSE_CONFIRM
-    while not hub.closed and time.monotonic() < t_end:
-        await asyncio.sleep(0.5)
-    if hub.closed and await _closed_as_idle(row["id"]):
-        await _confirmed(row, fresh, uids, now)
-    else:
-        what = ("no exit within %ds" % int(CLOSE_CONFIRM) if not hub.closed
-                else "the session ended for another reason")
-        await _unconfirmed(row, hub, now, "%s; %s" % (why, what) if why else what)
-
-
-async def _closed_as_idle(sid: str) -> bool:
-    """Re-review 3.7.1: orice `hub.closed` (pierdută, host şters, ieşire naturală în fereastră) nu e o
-    închidere de inactivitate; doar rândul închis cu motivul `idle` o confirmă."""
-    r = await db.fetchone("SELECT state, close_reason FROM sessions WHERE id=?", sid)
-    return bool(r) and r["state"] == "closed" and (r["close_reason"] or "") == "idle"
-
-
-async def _unconfirmed(row, hub, now: float, why: str) -> None:
-    sid = row["id"]
-    if not hub.closed:
-        hub.exit_reason = "exited"
-    hub.idle_closing = False
-    # fără reîncercare până când reconcilierea arată starea reală (heartbeat-ul agentului o face la
-    # zeci de secunde; backoff-ul e mult mai lung)
-    _backoff_set(sid, BACKOFF_FAILED)
-    log.info("idle session %s not closed: %s", sid, why)
-    # rezultatul e necunoscut (agentul poate să fi închis-o totuşi): urmă în audit, ca o închidere
-    # survenită după timeout să nu rămână fără explicaţie
-    await audit.record(now, "system:idle-sessions", "-", "IDLE", "/api/sessions/%s/kill" % sid, 504,
-                       ("idle close of \"%s\" not confirmed (%s); the session may still be open"
-                        % (row["title"] or "", why))[:480], host_id=row["host_id"])
-
-
-async def _confirmed(row, fresh, uids: list, now: float) -> None:
-    sid = row["id"]
-    _backoff.pop(sid, None)
-    pol = current_policy()
-    idle_days = int((now - float(fresh["idle_notified_at"])) / DAY) + pol["notify_days"]
-    grace = int(round((now - float(fresh["idle_notified_at"])) / DAY))
-    host = await _host_name(row["host_id"])
-    await audit.record(now, "system:idle-sessions", "-", "IDLE", "/api/sessions/%s/kill" % sid, 200,
-                       ("closed idle session \"%s\" (unused for about %d days, notice sent %d day(s) "
-                        "earlier)" % (row["title"] or "", idle_days, grace))[:480],
-                       host_id=row["host_id"])
-    email_alerts.notify_session_idle_closed(list(uids), row["title"] or "", host, row["host_id"], sid, idle_days)
 
 
 async def _rows() -> list:
     """Fereastra de lucru: până la MAX_ROWS sesiuni vii, începând de la cursor şi continuând de la
-    început (rotaţie) — peste plafon, fiecare sesiune ajunge la rând (auditul Codex 3.7.1, constatarea 8)."""
+    început (rotaţie) — peste plafon, fiecare sesiune ajunge la rând."""
     start = _cursor["start"]
     rows = list(await db.fetchall("SELECT * FROM sessions WHERE state='live' AND id >= ? ORDER BY id LIMIT ?",
                                   start, MAX_ROWS))
@@ -601,15 +238,14 @@ async def _rows() -> list:
     return rows
 
 
-async def sweep(now: Optional[float] = None, mono: Optional[float] = None) -> dict:
-    """Un ciclu: persistă activitatea hub-urilor, notifică sesiunile inactive, închide (dacă e pornit)
-    pe cele notificate, nefolosite de atunci, după grație. Întoarce contoarele (pentru teste/jurnal).
-    `now` = ceasul de perete (termenele din DB), `mono` = ceasul monoton al procesului (grația văzută)."""
+# INV-13 (docs/design/INVARIANTS.md): sweep-ul doar notifică; nu trimite niciodată un kill.
+async def sweep(now: Optional[float] = None) -> dict:
+    """Un ciclu: persistă activitatea hub-urilor, anulează notificările sesiunilor folosite între timp şi
+    notifică sesiunile nefolosite de `notify_days` zile. Întoarce contoarele (pentru teste/jurnal)."""
     pol = await load_policy(fresh=True)
     now = time.time() if now is None else now
-    mono = time.monotonic() if mono is None else mono
     t_end = time.monotonic() + SWEEP_BUDGET
-    stats = {"notified": 0, "closed": 0, "cleared": 0, "pending": 0}
+    stats = {"notified": 0, "cleared": 0}
     actions = 0
     rows = await _rows()
     resume = None                             # primul sid care a rămas fără buget → următorul sweep
@@ -624,41 +260,21 @@ async def sweep(now: Optional[float] = None, mono: Optional[float] = None) -> di
             # fluxul trebuie să curgă prin hub (altfel n-am vedea output-ul) şi hostul să fie online
             if hub is None or hub.closed or not hub.attached or core.source_for(row["host_id"]) is None:
                 continue
-            if getattr(hub, "idle_closing", False):
-                continue                      # un kill în zbor: confirmarea vine pe taskul ei
             last = await last_activity(row, hub)
             if last is None:
                 continue
             notified = row["idle_notified_at"]
             if notified and (hub.clients or last > float(notified)):
                 # folosită după notificare: anulăm (dacă hub-ul n-a făcut-o deja)
-                await db.execute("UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL,"
-                                 " idle_close_gen=NULL WHERE id=? AND idle_notified_at=?", sid, notified)
+                await db.execute("UPDATE sessions SET idle_notified_at=NULL WHERE id=? AND idle_notified_at=?",
+                                 sid, notified)
                 hub.idle_pending = False
-                hub.idle_notice_seen = None
                 stats["cleared"] += 1
                 continue
-            if notified:
-                _observe_notice(hub, float(notified), mono)
-            if hub.clients or not pol["notify"]:
+            if notified or hub.clients or not pol["notify"]:
+                continue                      # o singură notificare pe perioadă de inactivitate
+            if now - last < pol["notify_days"] * DAY:
                 continue
-            idle_for = now - last
-            if idle_for < pol["notify_days"] * DAY:
-                continue
-            deadline = close_deadline(row, pol)
-            # notificare: prima, sau una nouă („se va închide…") când închiderea e pornită şi termenul
-            # lipseşte / e dintr-o generaţie mai veche a politicii
-            # (o sesiune care nu poate fi închisă condiţionat — agent < 62, SSH, telnet, serial — rămâne cu
-            # notificarea simplă; altfel ar primi una nouă la fiecare sweep)
-            wants_notice = not notified or (pol["autoclose"] and deadline is None
-                                            and closing_source(row) is not None)
-            if not wants_notice:
-                if deadline is None or now < deadline:
-                    continue
-                if idle_for < pol["notify_days"] * DAY + (deadline - float(notified)):
-                    continue                  # perioada întreagă (prag + grație) fără nicio folosire
-                if not _mono_grace_ok(hub, float(notified), deadline, mono) or not _source_settled(hub, mono):
-                    continue                  # grația n-a trecut şi pe ceasul procesului / flux nesigur
             if _backed_off(sid):
                 continue
             if actions >= MAX_ACTIONS or time.monotonic() >= t_end:
@@ -667,22 +283,13 @@ async def sweep(now: Optional[float] = None, mono: Optional[float] = None) -> di
                 if time.monotonic() >= t_end:
                     break
                 continue
-            actions += 1                      # căutarea destinatarilor costă şi ea (review 3.7.1): în buget
+            actions += 1                      # căutarea destinatarilor costă şi ea: în buget
             uids = await recipients(row)
             if not uids:
                 _backoff_set(sid, BACKOFF_NO_RECIPIENT)
-                continue                      # nimeni de avertizat → nimic programat, nimic închis
-            if wants_notice:
-                if await _notify(row, hub, pol, uids, now, mono):
-                    stats["notified"] += 1
-                continue
-            r = await _close(row, hub, uids, now, mono)
-            if r == "closed":
-                stats["closed"] += 1
-            elif r == "pending":
-                stats["pending"] += 1
-            elif r == "active":
-                stats["cleared"] += 1
+                continue                      # nimeni de avertizat → nimic
+            if await _notify(row, hub, pol, uids, now):
+                stats["notified"] += 1
         except Exception:                     # noqa: BLE001 — o sesiune ciudată nu opreşte sweep-ul
             log.exception("idle-session sweep: session %s skipped", sid)
             _backoff_set(sid, BACKOFF_FAILED)

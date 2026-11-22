@@ -692,7 +692,9 @@ MIGRATIONS = [
     "ALTER TABLE sessions ADD COLUMN idle_close_after REAL",
     "ALTER TABLE sessions ADD COLUMN keep_open INTEGER DEFAULT 0",
     # 3.7.1 (auditul Codex): generaţia politicii sub care s-a fixat termenul — un termen dintr-o
-    # generaţie mai veche (închidere oprită/pornită, notificare oprită între timp) nu închide nimic
+    # generaţie mai veche (închidere oprită/pornită, notificare oprită între timp) nu închide nimic.
+    # 3.7.1 final: doar notificare — `idle_close_after` / `idle_close_gen` rămân (DB-urile rc le au deja,
+    # migraţiile sunt doar aditive), dar nimic nu le mai citeşte sau scrie; rezervate pentru 3.8.
     "ALTER TABLE sessions ADD COLUMN idle_close_gen INTEGER",
 ]
 

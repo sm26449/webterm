@@ -52,12 +52,8 @@ KINDS: dict = {
     "replay_opened":    {"group": "account",  "scope": "account", "security": False},
     # 3.7.1: igiena sesiunilor inactive (idlesess.py). Implicit DOAR în aplicaţie: emailul e cutia
     # comună a instanţei, iar o sesiune uitată nu e un incident (`email: False` = implicitul de email)
-    # Auditul Codex 3.7.1 (INV-13): notificarea care PROGRAMEAZĂ o închidere (`session_idle_close`) se
-    # păstrează MEREU în aplicaţie, ca evenimentele de securitate — preferinţa poate opri emailul, nu şi
-    # dovada că omul a fost anunţat. Notificarea simplă (fără închidere) rămâne la preferinţa lui.
-    "session_idle":        {"group": "account", "scope": "account", "security": False, "email": False,
-                            "inapp_required_keys": ("session_idle_close",)},
-    "session_idle_closed": {"group": "account", "scope": "account", "security": False, "email": False},
+    # (doar notificare în 3.7.1: nimic nu se închide automat, deci nu există o alertă „închisă")
+    "session_idle":        {"group": "account", "scope": "account", "security": False, "email": False},
     # securitatea instanţei
     "admin_change":     {"group": "security", "scope": "fleet", "security": True},
     "ssh_key":          {"group": "security", "scope": "fleet", "security": True},
@@ -270,8 +266,7 @@ async def record_required(kind: str, severity: str, title: str, details: str = "
                           host_id=None, user_id=None, key=None, params=None, ts=None) -> tuple:
     """Ca `record`, dar AŞTEPTAT şi strict (3.7.1, idlesess): întoarce (conturile din `user_id` pentru
     care rândul a fost scris efectiv, vrea_email). Fără DB sau la o eroare de scriere ridică excepţia —
-    apelantul nu programează nimic pe o notificare pe care n-o poate dovedi. `ts` = momentul rândului
-    (dovada se caută după el)."""
+    apelantul nu marchează sesiunea drept notificată şi reîncearcă. `ts` = momentul rândului."""
     if not db.connected():
         raise RuntimeError("database not connected")
     asked = {int(u) for u in (user_id if isinstance(user_id, (list, tuple)) else [user_id]) if u}
@@ -299,7 +294,7 @@ async def _record(kind, severity, title, details, host_id, user_id, user_email, 
     hid = int(host_id) if host_id else None
     mk = key if key and _KEY_RE.match(str(key)) else None
     mp = message_params(params) if mk else ""
-    always = meta["security"] or (mk is not None and mk in meta.get("inapp_required_keys", ()))
+    always = meta["security"]
     written = []
     for u in uids:
         if not (always or prefs.get(u, dflt)[1]):

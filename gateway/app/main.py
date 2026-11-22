@@ -165,15 +165,15 @@ async def _idle_lock_sweep() -> None:
         await asyncio.sleep(_IDLE_LOCK_INTERVAL)
 
 async def _idle_session_sweep() -> None:
-    """Igiena sesiunilor inactive (3.7.1, idlesess.py): la ~10 min persistă activitatea, notifică
-    sesiunile nefolosite şi, dacă instanţa a pornit-o, le închide pe cele notificate după grație.
+    """Igiena sesiunilor inactive (3.7.1, idlesess.py): la ~10 min persistă activitatea şi notifică
+    sesiunile nefolosite (doar notificare; nimic nu se închide automat în 3.7.1).
     Pauză la pornire: reconcilierea agenţilor re-ataşează întâi hub-urile (fără ele nu vedem output-ul)."""
     await asyncio.sleep(idlesess.SWEEP_STARTUP_GRACE)
     while True:
         try:
             stats = await idlesess.sweep()
-            if stats["notified"] or stats["closed"]:
-                log.info("idle sessions: %d notified, %d closed", stats["notified"], stats["closed"])
+            if stats["notified"]:
+                log.info("idle sessions: %d notified", stats["notified"])
         except Exception:
             log.exception("the idle-session sweep failed")
         await asyncio.sleep(idlesess.SWEEP_INTERVAL)

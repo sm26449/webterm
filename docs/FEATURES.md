@@ -470,8 +470,6 @@ or a `tail -f` is never idle. A command that runs silently for days does look id
 | Setting (Settings → Security policy → Idle sessions) | Default |
 |---|---|
 | Notify the owner after N days idle | on, 7 days (1–90) |
-| Close idle sessions automatically | **off** (an Owner or Admin turns it on for the instance) |
-| Close this many days after the notice | 2 days (1–30) |
 
 - The notice goes to the person who opened the session: an entry in the alert bell (with **Keep
   open** and **Close now**), and a toast with the same two buttons while you are in the app. Email
@@ -480,25 +478,14 @@ or a `tail -f` is never idle. A command that runs silently for days does look id
   existed) notify the people allowed to manage sessions on that host. The private root terminals on
   the gateway host notify only their owner.
 - Each idle period gives one notice. Any use afterwards (a key, any output, a browser attaching)
-  cancels it, and the clock starts again.
-- With automatic closing on, a session that is still unused the set number of days after its notice
-  is closed exactly as if its owner pressed **Stop**: the shell on the host ends, the recording stays
-  in the history, and the closing is in the audit log (`system:idle-sessions`). The owner gets a
-  second alert. A notice sent while automatic closing was off never leads to a closing; turning it
-  on later sends a new notice with the closing date first.
-- WebTerm only closes a session it can see. If the host is offline, the session's output is not
-  reaching the gateway, or anything is unclear, it waits for the next check (every ~10 minutes).
-- **Which sessions can be closed automatically:** only **tmux** sessions on an agent host whose
-  agent is version 62 or later and whose tmux is **3.4 or later**. The host's agent makes the final
-  check, and the check and the close happen in a single tmux command: it closes the session only if
-  it has seen no output, no typing and no tmux activity for the whole idle period, and nobody
-  attached to the tmux session directly on the host. If it has, the notice is withdrawn and the idle
-  period starts again. Sessions on older agents, sessions running without tmux (direct PTY) or on
-  older tmux, and SSH, telnet and serial sessions are notified but never closed automatically. The
-  notice therefore says a session *may* be closed after the grace period if it stays unused, never
-  that it will be; once the host has refused a close, later notices give no closing date. Update the
-  agent (Settings → Updates) and tmux to include them.
+  cancels it, and the clock starts again; a new idle period gives a new notice.
+- **WebTerm never closes an idle session on its own.** The notice only tells you; closing is up to
+  you (**Close now**, or **Stop** in the session). Automatic closing is planned for a later release:
+  doing it safely needs the host's agent to confirm, at the moment of closing, that nothing happened
+  in the session, and that part is not ready yet.
+- WebTerm only notifies about a session it can see. If the host is offline, the session's output is
+  not reaching the gateway, or anything is unclear, it waits for the next check (every ~10 minutes).
 
-**Keep a session.** In the session's **⋯** menu, choose **Keep open (never close automatically)**.
-It is never notified or closed again; the same menu turns it back off. Only someone who may control
+**Keep a session.** In the session's **⋯** menu, choose **Keep open (no idle notices)**.
+It is no longer notified; the same menu turns it back off. Only someone who may control
 the session (its owner, or a role with `session.manage` on the host) can change it.

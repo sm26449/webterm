@@ -582,14 +582,6 @@ HISTORY_MIN_AGENT = 57
 # Op-ul `scroll_exit` („întoarce-mă la prompt": scoate pane-ul din copy-mode-ul tmux fără nicio
 # tastă) există din agentul 59. Sub el nu-l trimitem: un agent vechi ar răspunde `bad_op`.
 SCROLL_EXIT_MIN_AGENT = 59
-# Op-ul `kill_if_quiet` (închidere condiţionată, INV-13) există din agentul 62: agentul refuză dacă EL a
-# văzut activitate (output, input, un client tmux străin) în fereastra în care gateway-ul n-a văzut nimic.
-# Sub el, închiderea automată nu se face deloc (doar notificare).
-KILL_IF_QUIET_MIN_AGENT = 62
-# Codex Recheck 3, Medium 7: cât aşteaptă o închidere automată lock-ul de trimitere / trimiterea însăşi.
-# Lock-ul neobţinut la timp = nimic trimis (`cancelled`); o trimitere care nu se termină = rezultat necunoscut.
-KILL_IF_QUIET_LOCK_WAIT = 10.0
-KILL_IF_QUIET_SEND_WAIT = 10.0
 SCROLL_EXIT_MIN_INTERVAL = 0.25      # per hub: fiecare cerere e un subprocess tmux pe loop-ul agentului
 HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
 HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
@@ -1180,30 +1172,17 @@ class SessionHub:
         # Igiena sesiunilor inactive (3.7.1, idlesess.py): „inactivă" = fără input, fără output ŞI fără
         # client ataşat. Ultima tastă (orice client care are voie să scrie) şi ultima schimbare de
         # prezenţă (ataşare/plecare). `idle_pending` = s-a trimis notificarea: PRIMA activitate după ea
-        # o anulează imediat în DB (nu la următorul sweep), ca o închidere programată să nu prindă o
-        # sesiune folosită între timp. `exit_reason` = ce scrie on_exit în close_reason.
+        # o anulează imediat în DB (nu la următorul sweep). `exit_reason` = ce scrie on_exit în close_reason.
         self.last_input_at: Optional[float] = None
         self.last_presence_at: Optional[float] = None
-        # agentul a refuzat o închidere automată pentru că EL a văzut activitate (`kill_if_quiet` →
-        # `active`): o perioadă de inactivitate nouă începe de aici (altfel refuzul s-ar repeta la nesfârşit)
-        self.last_host_activity_at: Optional[float] = None
         keys = row.keys()
         self.idle_pending: bool = bool(row["idle_notified_at"]) if "idle_notified_at" in keys else False
         self._persisted_active: float = (row["last_active"] or 0.0) if "last_active" in keys else 0.0
         self.exit_reason = "exited"
-        # Auditul Codex 3.7.1 (INV-13): `idle_closing` = un kill de inactivitate e în zbor; setat SINCRON
-        # înainte de trimitere, iar browser_ws/shared_ws refuză ataşarea cât e setat (altfel un client
-        # ataşat cât aştepta kill-ul îşi vedea sesiunea închisă sub el). `idle_notice_seen` =
-        # (idle_notified_at, momentul MONOTON în care ACEST proces a văzut notificarea): grația trebuie
-        # să fi trecut şi pe ceasul monoton, deci un salt al ceasului de perete sau un restart nu o
-        # scurtează (după restart reîncepe). `attached_mono` = când s-a ataşat hub-ul la sursa curentă;
-        # `_replay_expected` = sursa (agentul) trimite `replay_end`, iar până atunci output-ul din
-        # întrerupere poate fi încă pe drum.
+        # `idle_closing`: în 3.7.1 nimic nu se închide automat, deci rămâne mereu False. Refuzul ataşării
+        # (4410) din browser_ws/shared_ws rămâne pregătit pentru închiderea automată din 3.8.
         self.idle_closing = False
         self.keep_open = bool(row["keep_open"]) if "keep_open" in row.keys() else False   # sincron (re-review 3.7.1)
-        self.idle_notice_seen: Optional[tuple] = None
-        self.attached_mono: Optional[float] = None
-        self._replay_expected = False
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
@@ -1558,8 +1537,6 @@ class SessionHub:
             self.agent_epoch = source.epoch
             self.agent_offset = replay_start
             self.attached = True
-            self.attached_mono = time.monotonic()
-            self._replay_expected = isinstance(source, AgentConnection)
             # Drenăm replay-ul bufferat ÎNAINTE de await-ul de resize (o RTT la agent):
             # `_attach_buffer` e deja None, deci output live sosit în fereastra acelui await
             # ar merge direct în _process_output — scris în transcript ÎNAINTEA acestor chunk-uri
@@ -1585,11 +1562,6 @@ class SessionHub:
 
     def on_replay_end(self) -> None:
         self._replay_end.set()
-
-    def replay_settled(self) -> bool:
-        """Replay-ul ataşării curente s-a terminat (agentul a trimis `replay_end`)? Sursele fără ring
-        (SSH, telnet) nu trimit replay, deci pentru ele nu e nimic de aşteptat."""
-        return not getattr(self, "_replay_expected", False) or self._replay_end.is_set()
 
     def on_detached(self) -> None:
         self.attached = False
@@ -1721,8 +1693,7 @@ class SessionHub:
         if self.clients:
             return time.time()
         return max(v for v in (self.created, self.last_output_at, self.last_input_at,
-                               self.last_presence_at, self._persisted_active,
-                               getattr(self, "last_host_activity_at", None)) if v)
+                               self.last_presence_at, self._persisted_active) if v)
 
     def note_presence(self) -> None:
         """Un client s-a ataşat sau a plecat (apelat după `clients.add` / `clients.discard`). Plecarea
@@ -1735,15 +1706,15 @@ class SessionHub:
         bgtasks.spawn(self.persist_activity(), "persist session activity")
 
     def _idle_activity(self) -> None:
-        """Prima activitate după o notificare de inactivitate: anulează notificarea şi închiderea
-        programată, în DB, acum (sincron doar flag-ul — calea de output e fierbinte)."""
+        """Prima activitate după o notificare de inactivitate: anulează notificarea în DB, acum
+        (sincron doar flag-ul — calea de output e fierbinte)."""
         self.idle_pending = False
         bgtasks.spawn(self._idle_cancel(), "cancel idle notice")
 
     async def _idle_cancel(self) -> None:
         at = self.activity_at()
         await db.execute(
-            "UPDATE sessions SET idle_notified_at=NULL, idle_close_after=NULL,"
+            "UPDATE sessions SET idle_notified_at=NULL,"
             " last_active=MAX(COALESCE(last_active, 0), ?) WHERE id=?", at, self.sid)
 
     async def persist_activity(self) -> None:
@@ -2533,59 +2504,6 @@ class AgentConnection(SessionSource):
 
     async def kill(self, sid) -> None:
         await self.request("kill", sid=sid)
-
-    async def kill_checked(self, sid) -> dict:
-        """Ca `kill`, dar întoarce răspunsul agentului (`ok` / `code`, ex. `no_session`): închiderea
-        automată (idlesess) nu numără un refuz drept succes."""
-        r = await self.request("kill", sid=sid)
-        return r if isinstance(r, dict) else {}
-
-    def can_kill_if_quiet(self) -> bool:
-        return (self.agent_version or 0) >= KILL_IF_QUIET_MIN_AGENT
-
-    async def kill_if_quiet(self, sid, quiet_secs: float, still_ok=None) -> dict:
-        """Închidere CONDIŢIONATĂ (agent ≥ 62, INV-13): agentul omoară sesiunea doar dacă nu are dovezi de
-        activitate în ultimele `quiet_secs` secunde; altfel `{"ok": False, "code": "active"}`. Un agent mai
-        vechi nu primeşte op-ul (ar răspunde `bad_op`): răspundem noi `unsupported`, fără nimic trimis.
-
-        `still_ok` (sincron): ultima verificare a gateway-ului, făcută SUB lock-ul de trimitere, chiar înainte
-        ca frame-ul să plece (Codex Recheck 2, High 2: între rezervare şi trimitere cererea poate aştepta
-        lock-ul, timp în care un Admin opreşte închiderea). False / excepţie → nimic trimis,
-        `{"ok": False, "code": "cancelled"}`. Punctul fără întoarcere e `send_bytes`: după el, o dezactivare
-        nu mai anulează ACEA închidere (agentul tot re-verifică liniştea).
-
-        Recheck 3, Medium 7: aşteptarea lock-ului are termen (KILL_IF_QUIET_LOCK_WAIT) → `cancelled`, nimic
-        trimis; trimiterea are termen (KILL_IF_QUIET_SEND_WAIT) → AgentGone (poate a plecat: necunoscut)."""
-        if not self.can_kill_if_quiet():
-            return {"ok": False, "code": "unsupported"}
-        self._req_id += 1
-        rid = self._req_id
-        fut = asyncio.get_running_loop().create_future()
-        self._pending[rid] = fut
-        frame = FRAME_CTRL + json.dumps({"sid": sid, "quiet_secs": max(0.0, float(quiet_secs)),
-                                         "op": "kill_if_quiet", "id": rid}).encode()
-        try:
-            try:
-                await asyncio.wait_for(self._send_lock.acquire(), KILL_IF_QUIET_LOCK_WAIT)
-            except asyncio.TimeoutError:
-                return {"ok": False, "code": "cancelled"}
-            try:
-                try:
-                    go = still_ok is None or bool(still_ok())
-                except Exception:              # noqa: BLE001 — fail-closed: nu ştim → nu trimitem
-                    go = False
-                if not go:
-                    return {"ok": False, "code": "cancelled"}
-                try:
-                    await asyncio.wait_for(self.ws.send_bytes(frame), KILL_IF_QUIET_SEND_WAIT)
-                except Exception:
-                    raise AgentGone()
-            finally:
-                self._send_lock.release()
-            r = await asyncio.wait_for(fut, 20.0)
-            return r if isinstance(r, dict) else {}
-        finally:
-            self._pending.pop(rid, None)
 
     async def wake(self, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> dict:
         """Cere ACESTUI agent (vecin în LAN cu ţinta) să trimită un magic packet WoL."""

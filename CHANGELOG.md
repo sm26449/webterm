@@ -21,6 +21,14 @@ back.
   per host, and *Settings → Terminal & workspace → New sessions* turns it off everywhere (per
   browser). Other people's sessions never appear there. On a phone it is a full-screen sheet. The
   command palette follows the same rule: Enter on a host no longer always opens a new shell.
+- **Idle sessions are announced.** Sessions survive closing the tab, so shells pile up for weeks.
+  When a session has had no typing, no output and no browser attached for 7 days (*Settings →
+  Security policy → Idle sessions*, 1–90 days, or off), its owner gets one notice in the alert bell
+  and a toast, with **Keep open** and **Close now**; sessions with no owner notify the people who
+  manage sessions on that host. Any use cancels the notice. **Keep open** in the session's ⋯ menu
+  stops the notices for that session. Nothing is closed automatically: closing a session safely needs
+  the host's agent to confirm, at the moment of closing, that nothing happened in it, and that part is
+  not ready, so automatic closing is planned for a later release.
 
 ### Changed
 - **A new default look in the brand colours: EverShell.** Petrol surfaces, cream text and the
@@ -52,21 +60,6 @@ back.
   main button.
 
 ### Fixed
-- **Closing idle sessions automatically can no longer close one that was used at the last moment
-  (agent 62).** The gateway decides that a session is idle, but between its last check and the moment
-  the agent ended the session, new output, a key or a person attached to tmux directly on the host
-  could slip in unseen. The close is now conditional on the host: the gateway says how long it has
-  seen nothing, and the agent closes the session only if it saw nothing either (no output read, no
-  input written, no tmux activity, no other tmux client attached; a tmux query that fails counts as
-  use). When the agent says "used", the notice is withdrawn and a new idle period starts, with no
-  alert. Only sessions on agents 62 and later are closed automatically; sessions on older agents and
-  SSH, telnet or serial sessions still get the notice, without a closing date. Found by an external
-  review of 3.7.1.
-- **Automatic closing is now limited to sessions where the host can prove the session is idle when it
-  closes it: tmux sessions on tmux 3.4 or later.** A session without tmux could print something
-  between the agent's last check and the close, so it now gets the notice only, and the notice says a
-  session *may* be closed if it stays unused instead of promising a date; a grace period raised (or a
-  reconnect) just before the close also cancels it. Found by the third external re-check of 3.7.1.
 - **Search in Settings** finds mTLS, client certificates, connected agents and refused connections, and
   "email alerts" finds the per-event choices as well as the mail server; partial words match.
 - **A false critical alarm** "Agent mTLS is not working" on installs without the shared edge directory

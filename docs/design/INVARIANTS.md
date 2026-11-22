@@ -25,7 +25,7 @@ The rules are ordered from "a mistake leaks a secret or grants access" to "a mis
 | [INV-10](#inv-10) | The gateway never gains new powers on a host |
 | [INV-11](#inv-11) | Every forwarded request is authenticated |
 | [INV-12](#inv-12) | An agent host that has connected with its client certificate never goes back to the token alone |
-| [INV-13](#inv-13) | Closing an idle session automatically never touches a session that is in use, kept, or unannounced |
+| [INV-13](#inv-13) | Idle sessions are only announced, never closed automatically (3.7.1) |
 
 ---
 
@@ -270,98 +270,28 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 **Tests**: `agentmtls`, `agentca`.
 
 <a id="inv-13"></a>
-## INV-13: closing an idle session automatically never touches a session that is in use, kept, or unannounced
+## INV-13: idle sessions are only announced, never closed automatically (3.7.1)
 
 **Rule.**
 - A session is idle only when, for the whole period, nobody typed in it, it printed nothing and no
   browser (owner, other account or share-link guest) was attached. Output counts as use: a build or a
-  `tail -f` is never closed.
-- Automatic closing is off until an Owner or Admin turns it on for the instance. It only closes a
-  session whose owner (or, with no owner, a `session.manage` holder) was notified **while automatic
-  closing was on**, and only after the grace period, with no use at all since the notice. Any use
-  cancels the notice immediately, not at the next check.
-- A session marked **Keep open** is never notified and never closed.
+  `tail -f` is never idle.
+- After the configured number of days (default 7, 1–90) the session's owner is notified (with no
+  owner, the accounts with `session.manage` on the host, in one alert; a root terminal on the gateway
+  host with no owner notifies nobody). One notice per idle period: any use cancels it at once, and a
+  new idle period brings a new notice. A session marked **Keep open** is never notified.
+- **Nothing is closed automatically in 3.7.1.** `idlesess.AUTOCLOSE_AVAILABLE` is `False`: the
+  settings route answers `autoclose_available: false` and refuses `autoclose: true` with 400
+  `settings.autocloseUnavailable`; a stored `autoclose: true` (from a 3.7.1 release candidate's
+  database) is read as off; the sweep never sends a kill; a notice never carries a closing date or
+  promises a close. The gateway has no code that sends the agent's conditional kill.
 - When anything is unknown it does nothing: no hub watching the session's output, the host offline,
-  an unreadable transcript, no one to notify, an error. A missing answer is "don't close".
-- A notice counts only once it is **recorded** in the app for an eligible recipient (awaited, not
-  fire-and-forget); the close deadline is set only after that, and at close time the recorded
-  notice must still exist for a current recipient. A notice that schedules a close is always kept
-  in the app, whatever the account's alert preferences (email stays optional).
-- Policy changes win at once: turning automatic closing or notices off takes effect in memory
-  before it is saved, and **every** change (either switch, the idle threshold or the grace period)
-  bumps a policy generation; a deadline set under an older generation never closes anything, and
-  the session gets a fresh notice under the new policy, with a full grace period. Turning automatic
-  closing on needs a fresh re-authentication.
-- The grace period must also have passed on the gateway process's monotonic clock since it saw the
-  notice: a wall-clock jump, a restart or a restore never shortens it (after a restart it starts
-  again). The hub must have finished the replay of its current attach and been attached for at
-  least 10 minutes, so output produced while the agent was away has arrived.
-- While the kill is in flight, new attaches (owner or share guest) are refused (close code 4410).
-  The close counts as done only when the session's exit arrives; an agent error or no exit within
-  30 s is audited as "not confirmed", sends no "closed" alert and is not retried for an hour.
-- Closing goes through the source's **conditional** kill (`kill_if_quiet`, agent 62+), so the
-  recording is kept like with the Stop button, and is audited as `system:idle-sessions`. The gateway
-  sends how long it has seen no activity (at least 60 s, or the agent answers `bad_request`), padded
-  by the longest time the request may wait for the send lock and the send (10 s + 10 s), so the
-  window also covers the time it spent queued (a longer window is stricter); the
-  agent refuses (`active`) if, within that window **plus** a 65 s margin, it read output from the
-  session, received input for it, has input still queued, has output waiting unread on the session's
-  PTY, tmux reports activity (`session_activity` or any `window_activity`), or a tmux client other
-  than its own is attached. It also refuses when the wall clock moved more than 30 s against the
-  continuous clock since the session started (checked at the start and again right before the final
-  tmux command), or a tmux timestamp lies in the future (tmux epochs can no longer be trusted). The
-  margin covers twice the 30 s tolerance plus 5 s (offset −30 s when tmux stamped the activity and
-  +30 s at the check), so an undetected jump cannot hide activity inside the window. Anything it cannot check is a refusal, and the whole check has a 6 s budget.
-- Only **tmux** sessions can be closed automatically. A direct-PTY session (no tmux) is always
-  refused (`active`, "not a tmux session: cannot close atomically"): its child can write from another
-  process between the last check and the signal, and nothing ties the check to the kill. It gets the
-  notice only; after the first refusal later notices no longer promise a close.
-- On tmux the final check and the kill are **one** tmux command (`if-shell -F` with the condition
-  as a format; its true branch is `run-shell "touch <marker>" ; kill-session`), so nothing can happen
-  between them. The marker is a file in the agent's private state directory (0700), named only from
-  the session's hex id, removed before and after; `run-shell` without `-b` finishes before
-  `kill-session` runs, so the marker is explicit proof that the kill branch ran. It needs **tmux 3.4 or
-  later** (older tmux: always refused, notice only). Before it, one capability probe must evaluate
-  every loop and comparison of the condition separately to a known answer: the window loop prints
-  one mark per window (counted with `list-windows`) and nothing when the comparison is true, the
-  client loop prints one mark per attached client and one per client with our pid, `session_attached`
-  matches, the condition is `0` on an impossible threshold. Any mismatch is a refusal: a loop that
-  silently evaluates to nothing must never read as "no activity".
-- The close counts as done only if `if-shell` exited 0, **the marker exists**, and `has-session`
-  then reports the session gone ("can't find session", or "no server running" when it was the
-  server's last session). No marker with the session alive is `active` (the condition was false); no
-  marker with the session or server gone, a marker with the session still alive, a failed `if-shell`
-  or any unclear result is `kill_failed`, with no signal. The agent then signals its own client only if
-  that pid is still its own, running child (not yet reaped; `waitpid(WNOHANG)` returns nothing), so a
-  reaped and reused pid is never signalled.
-- Accepted residuals: the tmux queries are subprocess calls that block the agent's loop (all PTYs and
-  the heartbeat) for up to the 6 s budget; output produced in the microseconds while the tmux server
-  itself processes the `if-shell` is covered only by the tmux server's own atomicity.
-- A refusal is use: the notice is withdrawn, the hub's activity moves to now (a new idle period), no
-  alert, audit 409.
-- **Point of no return:** right before the request leaves, under the agent connection's send lock,
-  the gateway recomputes the **full** eligibility with the current policy and clocks (the same
-  function as the check before reserving): same generation, the deadline with the *current* grace (a
-  grace raised from 2 to 10 days cancels), the current idle threshold plus grace elapsed since the
-  last known activity (a threshold raised from 7 to 30 days cancels), the deadline passed on both clocks, the hub attached, its
-  replay finished and attached long enough, no client, not kept, no activity since the notice, still
-  reserved, same source. If any of it changed, nothing is sent and nothing is recorded. Waiting for
-  the send lock is limited to 10 s (then nothing is sent); a send that does not finish in 10 s is an
-  unknown result. If the closing task is cancelled, or fails in any way, **before** the frame could
-  leave, the reservation is released at once (attaches are accepted again). Once the frame may have
-  left, any failure (cancel, send timeout, lost connection, no answer, `kill_failed`, an unknown
-  answer) keeps the reservation: attaches stay refused until the session's exit confirms the close
-  or 30 s pass, and only then is it audited as "not confirmed" and released. Only agent answers that
-  prove nothing was killed (`no_session`, `bad_request`) release it at once. If the agent connection
-  drops, a frame the agent has not processed dies with it (a new connection is a new socket), so the
-  30 s confirm window bounds the time a close can still be in flight. Once the frame has been written, turning automatic closing off no longer cancels that
-  one close; the agent still re-checks that the session is quiet.
-- The notice never promises a close as a certainty: it says the session *may* be closed after the
-  grace period if it stays unused, and only if the host confirms it is idle.
-- Only sessions whose source is an agent of version 62 or later are ever closed automatically. Older
-  agents, SSH, telnet and serial sessions get the notice without a closing date (no deadline is
-  stored, the message does not promise a close), and a deadline whose source no longer supports the
-  conditional kill is dropped without closing.
+  an unreadable transcript, no one to notify, an error. A notice whose alert row could not be written
+  does not mark the session as notified; it is retried after an hour.
+- Why: closing a session safely needs a guarantee on the **agent** side that nothing happened between
+  the gateway's last check and the kill (an atomic, conditional close inside tmux). That work is not
+  ready. Its design and code are kept on branch `feat/agent62-autoclose` for 3.8; turning automatic
+  closing on before it ships would close sessions that were in use.
 
-**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_eligible`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, `tmux_kill_if_quiet`, `tmux_probe_format`, `pty_output_pending`, `Agent._own_child_running`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
-**Tests**: `session_idle`, `agent_v62`.
+**Enforced in**: `idlesess.py` `AUTOCLOSE_AVAILABLE`, `sanitize`, `sweep`, `_notify`, `notice_json`, `last_activity`; `core.py` `[hub]` `_idle_activity`; `api.py` `save_idle_sessions`; `alert_history.py` `record_required`.
+**Tests**: `session_idle`.
