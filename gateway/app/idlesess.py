@@ -123,13 +123,16 @@ def _publish(pol: dict) -> None:
 async def save_policy(pol: dict, reauth=None) -> dict:
     """Salvează politica. Ordinea contează (auditul Codex 3.7.1, constatarea 2): MEMORIA întâi, în
     varianta strictă — o oprire (închidere sau notificare) are efect imediat, inclusiv pe un sweep în
-    zbor; o pornire devine efectivă abia după ce s-a scris în DB. Orice comutare a închiderii sau a
-    notificării măreşte generaţia: termenele fixate sub generaţia veche nu mai închid nimic."""
+    zbor; o pornire devine efectivă abia după ce s-a scris în DB. ORICE schimbare (comutări, prag,
+    grație) măreşte generaţia: termenele fixate sub generaţia veche nu mai închid nimic, iar o închidere
+    rezervată sub ea e anulată de `still_ok` (Codex Recheck 4, High 2: un prag mărit de la 7 la 30 de zile
+    cât cererea aştepta lock-ul pleca sub aceeaşi generaţie). Sesiunile primesc o notificare nouă, sub
+    politica nouă, cu grație întreagă."""
     async with _save_lock:
         prev = await load_policy(fresh=True)
         new = sanitize(pol)
-        switched = new["autoclose"] != prev["autoclose"] or new["notify"] != prev["notify"]
-        new["gen"] = prev["gen"] + 1 if switched else prev["gen"]
+        changed = any(new[k] != prev[k] for k in ("notify", "notify_days", "autoclose", "grace_days"))
+        new["gen"] = prev["gen"] + 1 if changed else prev["gen"]
         if new["autoclose"] and not prev["autoclose"]:
             # re-review 3.7.1: decizia „cere re-autentificare" se ia AICI, sub lacăt, faţă de starea
             # reală (o cerere care citise „pornit" înaintea unei opriri concurente nu mai sare peste ea)
@@ -352,14 +355,21 @@ async def _notice_recorded(sid: str, notified: float, uids: list) -> bool:
     return r is not None
 
 
-def _eligible(fresh, hub, pol: dict, now: float, mono: float, reserved: bool) -> bool:
+def _eligible(fresh, hub, pol: dict, now: float, mono: float, reserved: bool, last: Optional[float]) -> bool:
     """Eligibilitatea COMPLETĂ pentru închidere, SINCRON, cu politica primită şi ceasurile date: termenul
     (cu grația politicii de ACUM — una mărită amână), ambele ceasuri trecute de el, fluxul la zi (replay
     terminat, ataşat de destul timp), niciun client, „Păstrează deschisă", activitate după notificare.
-    `reserved`: la rezervare `idle_closing` trebuie să fie încă False; la trimitere, True (al nostru)."""
+    `reserved`: la rezervare `idle_closing` trebuie să fie încă False; la trimitere, True (al nostru).
+    `last`: ultima activitate cunoscută (`last_activity`, citită înainte de rezervare); None = nu ştim."""
     deadline = close_deadline(fresh, pol)
     notified = _row_get(fresh, "idle_notified_at")
-    if deadline is None or not notified or now < deadline:
+    if deadline is None or not notified or now < deadline or last is None:
+        return False
+    # Codex Recheck 4, High 2 (plasă; generaţia acoperă deja o schimbare de politică): perioada întreagă,
+    # prag + grație, cu politica de ACUM, de la ultima activitate cunoscută (inclusiv cea văzută de hub
+    # între timp) — ca în sweep, dar refăcută la fiecare verificare
+    act = max(float(last), hub.activity_at(), float(_row_get(fresh, "last_active") or 0.0))
+    if now - act < pol["notify_days"] * DAY + (deadline - float(notified)):
         return False
     if hub.closed or not hub.attached or hub.clients or not hub.idle_pending:
         return False
@@ -372,9 +382,15 @@ def _eligible(fresh, hub, pol: dict, now: float, mono: float, reserved: bool) ->
     return _source_settled(hub, mono) and _mono_grace_ok(hub, float(notified), deadline, mono)
 
 
-def _closable_now(fresh, hub, pol: dict, now: float, mono: float) -> bool:
+def _closable_now(fresh, hub, pol: dict, now: float, mono: float, last: Optional[float]) -> bool:
     """Ultima verificare dinaintea rezervării, SINCRONĂ (fără await între ea şi `idle_closing`)."""
-    return _eligible(fresh, hub, pol, now, mono, reserved=False)
+    return _eligible(fresh, hub, pol, now, mono, reserved=False, last=last)
+
+
+# Răspunsuri ale agentului care dovedesc că NIMIC nu e în zbor şi nimic n-a fost omorât: rezervarea se
+# eliberează imediat. Orice alt eşec DUPĂ armare (timeout, AgentGone, `kill_failed`, cod necunoscut) are
+# rezultat necunoscut → rezervarea rămâne până la ieşire sau CLOSE_CONFIRM (Codex Recheck 4, High 1).
+_DEFINITE_NO_KILL = ("no_session", "bad_request", "unsupported", "bad_op")
 
 
 # INV-13 (docs/design/INVARIANTS.md): închiderea automată nu atinge o sesiune folosită, păstrată sau neanunţată.
@@ -399,6 +415,11 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
     # (review 3.7.1: un browser care se ataşa într-un await îşi vedea sesiunea închisă imediat după).
     if core.session_sources.get(sid) is None and core.source_for(row["host_id"]) is None:
         return "skip"                         # host offline: altă dată
+    # Recheck 4, High 2: ultima activitate cunoscută, citită ÎNAINTE de secţiunea sincronă (transcriptul
+    # se citeşte pe un thread); hub-ul o completează live în `_eligible`
+    last = await last_activity(fresh, hub)
+    if last is None:
+        return "skip"
     source = closing_source(row)
     if source is None:
         # agentul a fost înlocuit cu unul care nu ştie `kill_if_quiet` (sau sesiunea nu e pe agent):
@@ -407,13 +428,17 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
                          " WHERE id=? AND idle_notified_at=?", sid, notified)
         return "skip"
     pol = current_policy()
-    if not _closable_now(fresh, hub, pol, now, mono):
+    if not _closable_now(fresh, hub, pol, now, mono, last):
         return "skip"
     # cât n-a văzut ACEST gateway nimic: ceasul de perete (ultima activitate) şi, ca plasă la un salt
     # înapoi al ceasului, timpul monoton de când procesul a văzut notificarea (orice folosire de atunci
     # ar fi anulat-o). Maximul e cererea MAI strictă către agent (fereastra lui de verificare e mai lungă).
     seen = getattr(hub, "idle_notice_seen", None)
     quiet = max(now - hub.activity_at(), (mono - seen[1]) if seen else 0.0, 0.0)
+    # Codex Recheck 4, Medium 3: fereastra e calculată ACUM, dar cererea poate sta la lock + la trimitere
+    # până la KILL_IF_QUIET_LOCK_WAIT + KILL_IF_QUIET_SEND_WAIT; o fereastră mai mare e mai strictă (agentul
+    # cere linişte pe o perioadă mai lungă), deci o lărgim cu tot timpul acela
+    quiet += core.KILL_IF_QUIET_LOCK_WAIT + core.KILL_IF_QUIET_SEND_WAIT
     hub.idle_closing = True                   # din acest moment ataşările sunt refuzate (api [ws])
     hub.exit_reason = "idle"
     why = ""
@@ -430,7 +455,7 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
         cur = current_policy()
         ok = bool(cur["gen"] == pol["gen"]
                   and _eligible(fresh, hub, cur, now + (time.time() - w0), mono + (time.monotonic() - m0),
-                                reserved=True)
+                                reserved=True, last=last)
                   and closing_source(row) is source)
         armed["go"] = ok
         return ok
@@ -459,8 +484,8 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
                     hub.exit_reason = "exited"
         raise
     except Exception as e:                    # noqa: BLE001 — host plecat, timeout: rezultat necunoscut
-        why = type(e).__name__
-    if why == "cancelled":
+        why = type(e).__name__ or "error"
+    if why == "cancelled" and not armed["go"]:
         # nimic trimis: ca un „skip" (fără alertă, fără backoff); ataşările nu mai sunt refuzate
         hub.idle_closing = False
         hub.exit_reason = "exited"
@@ -469,8 +494,19 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
     if why == "active":
         await _host_active(row, hub, now, notified, str(resp.get("msg") or "")[:60])
         return "active"
-    if why:
+    if why and (not armed["go"] or why in _DEFINITE_NO_KILL):
+        # eşec ştiut ÎNAINTE de trimitere, sau un răspuns al agentului care dovedeşte că nu s-a omorât nimic
         await _unconfirmed(row, hub, now, why)
+        return "failed"
+    if why:
+        # Codex Recheck 4, High 1: după armare, un timeout / AgentGone / `kill_failed` nu spune dacă frame-ul
+        # a ajuns sau dacă tmux încă execută comanda. Ca la CancelledError: ataşările rămân refuzate până la
+        # ieşirea confirmată sau CLOSE_CONFIRM (apoi _unconfirmed: 504 + backoff + rezervarea eliberată).
+        # Dacă legătura cu agentul cade, un frame neprocesat moare cu ea (o conexiune nouă e alt socket).
+        try:
+            bgtasks.spawn(_await_exit(row, fresh, hub, uids, now, why), "idle close, result unknown")
+        except RuntimeError:
+            await _unconfirmed(row, hub, now, why)
         return "failed"
     if hub.closed and await _closed_as_idle(sid):
         await _confirmed(row, fresh, uids, now)
@@ -503,7 +539,7 @@ async def _host_active(row, hub, now: float, notified, detail: str) -> None:
                        host_id=row["host_id"])
 
 
-async def _await_exit(row, fresh, hub, uids: list, now: float) -> None:
+async def _await_exit(row, fresh, hub, uids: list, now: float, why: str = "") -> None:
     """Confirmarea: `on_exit` (hub închis) în cel mult CLOSE_CONFIRM secunde; altfel „neconfirmat"."""
     t_end = time.monotonic() + CLOSE_CONFIRM
     while not hub.closed and time.monotonic() < t_end:
@@ -511,8 +547,9 @@ async def _await_exit(row, fresh, hub, uids: list, now: float) -> None:
     if hub.closed and await _closed_as_idle(row["id"]):
         await _confirmed(row, fresh, uids, now)
     else:
-        await _unconfirmed(row, hub, now, "no exit within %ds" % int(CLOSE_CONFIRM) if not hub.closed
-                           else "the session ended for another reason")
+        what = ("no exit within %ds" % int(CLOSE_CONFIRM) if not hub.closed
+                else "the session ended for another reason")
+        await _unconfirmed(row, hub, now, "%s; %s" % (why, what) if why else what)
 
 
 async def _closed_as_idle(sid: str) -> bool:

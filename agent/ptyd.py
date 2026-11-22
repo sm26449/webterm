@@ -834,13 +834,26 @@ def encode_history(data, max_reply=HISTORY_MAX_REPLY):
 # succesul cere if-shell reuşit + sesiunea dispărută, iar pid-ul clientului trebuie să fie încă copilul
 # nostru; (4) toleranţa ceasului (30 s) e acoperită de marjă (35 s) şi re-verificată chiar înaintea
 # if-shell-ului.
-QUIET_MARGIN = 35.0            # secunde ADĂUGATE ferestrei: latenţă + granularitatea tmux + toleranţa ceasului
+
+# Recheck 4 Codex (a170805): (3) toleranţa se poate consuma în AMBELE sensuri (offset −30 s când tmux a pus
+# marcajul, +30 s la verificare = marcaj care pare cu 60 s mai vechi) → marja acoperă de două ori toleranţa,
+# plus rezervă; (4) „no server running" după un if-shell reuşit nu dovedea că ramura kill a rulat → ramura
+# lasă un marcaj explicit (fişier privat) ÎNAINTE de kill-session.
+
+# |Δperete − Δcontinuu| de la crearea sesiunii peste asta = epoch tmux nesigur.
+QUIET_CLOCK_DRIFT_MAX = 30.0
+# secunde ADĂUGATE ferestrei: de 2 × toleranţa ceasului (abaterea dintre două observaţii) + latenţă şi
+# granularitatea tmux. Un salt nedetectat (≤ toleranţa, în orice sens, la marcaj şi la verificare) nu poate
+# ascunde activitate în fereastră.
+QUIET_MARGIN = 2 * QUIET_CLOCK_DRIFT_MAX + 5.0
 QUIET_MIN_SECS = 60            # sub asta fereastra nu dovedeşte nimic (sweep-urile trimit zile) → bad_request
 QUIET_TMUX_TIMEOUT = 3         # plafon per comandă tmux
 QUIET_BUDGET = 6.0             # buget TOTAL al op-ului (loop-ul e single-threaded); depăşit = refuz
-# |Δperete − Δcontinuu| de la crearea sesiunii peste asta = epoch tmux nesigur. MAI MIC decât marja: un
-# salt înainte nedetectat (≤ toleranţa) poate ascunde cel mult atâtea secunde, iar marja le acoperă.
-QUIET_CLOCK_DRIFT_MAX = 30.0
+# Recheck 4, Medium 4: directorul privat (0700) al marcajelor „ramura kill a rulat"; numele marcajului vine
+# DOAR din sid-ul hex, iar calea întreagă trebuie să fie din caractere sigure pentru parserul tmux şi sh
+QUIET_MARK_DIR = os.path.join(WEBTERM_DIR, "idle-close")
+_QUIET_MARK_SAFE = re.compile(r"[A-Za-z0-9/._-]+\Z")
+_QUIET_SID_HEX = re.compile(r"[0-9a-f]{1,64}\Z")
 # Formatele folosite de verificarea atomică (`#{e|<:…}`, `#{&&:…}`, `#{W:…}`, `#{L:…}`) le-am verificat
 # pozitiv şi negativ pe 3.4; sub 3.4 nu închidem niciodată automat (doar notificare).
 TMUX_ATOMIC_MIN = (3, 4)
@@ -989,14 +1002,60 @@ def tmux_probe_expected(windows, attached):
     return [b"x" * windows, b"", b"y" * attached, b"p" * attached, str(attached).encode(), b"0"]
 
 
+def quiet_marker_path(sid):
+    """Calea marcajului pentru sesiunea `sid`, sau None dacă nu putem garanta una sigură (sid ne-hex,
+    director care nu e al nostru / nu e director, caractere pe care tmux sau sh le-ar interpreta)."""
+    if not isinstance(sid, str) or not _QUIET_SID_HEX.match(sid):
+        return None
+    d = QUIET_MARK_DIR
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            return None
+        if stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(d, 0o700)
+    except OSError:
+        return None
+    path = os.path.join(d, "killed-" + sid)
+    return path if _QUIET_MARK_SAFE.match(path) else None
+
+
+def _quiet_unmark(path):
+    """Şterge marcajul; True dacă nu mai există (lipsea sau l-am şters)."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def quiet_kill_branch(name, mark):
+    """Ramura adevărată a if-shell-ului: întâi marcajul (run-shell FĂRĂ -b: tmux aşteaptă să se termine
+    înainte de comanda următoare), apoi kill-ul. Un singur şir (argv), parsat de tmux; calea e din
+    [A-Za-z0-9/._-] (verificat), deci ghilimelele simple ale lui tmux şi sh n-au ce interpreta."""
+    if not _QUIET_MARK_SAFE.match(mark) or not _QUIET_SID_HEX.match(name[len(TMUX_SESSION_PREFIX):]):
+        raise ValueError("unsafe marker path")
+    return 'run-shell "touch %s" ; kill-session -t =%s' % (mark, name)
+
+
 def tmux_kill_if_quiet(s, quiet_secs, deadline, now_wall=None, now_steady=None):
     """Verificarea finală şi kill-ul într-O SINGURĂ comandă tmux (`if-shell -F`), ca nimic să nu se poată
     intercala între ele (Recheck 2, High 1). Întoarce ("", "") doar dacă if-shell a reuşit ŞI sesiunea tmux
     a dispărut, altfel (cod, motiv): `active` = condiţia era falsă / tmux nu poate garanta, `kill_failed` =
-    rezultat neconfirmat. NU semnalizează clientul şi NU pune kill_requested: asta e treaba apelantului."""
+    rezultat neconfirmat. NU semnalizează clientul şi NU pune kill_requested: asta e treaba apelantului.
+    Recheck 4, Medium 4: succesul cere şi MARCAJUL lăsat de ramura kill (dovada explicită că a rulat)."""
     if _TMUX_VER is None or _TMUX_VER < TMUX_ATOMIC_MIN:
         return "active", "tmux too old for a conditional close"
     name = TMUX_SESSION_PREFIX + s.sid
+    mark = quiet_marker_path(s.sid)
+    if mark is None:
+        return "active", "no safe marker path for a conditional close"
+    # un marcaj vechi (alt op, crash) n-are voie să treacă drept dovadă: dacă nu-l putem şterge, refuz
+    if not _quiet_unmark(mark):
+        return "active", "stale marker could not be removed"
     target = "=" + name + ":"
     # ceasurile injectate (teste) înaintează odată cu cele reale: re-verificarea de dinaintea if-shell-ului
     # vede timpul de ATUNCI, nu pe cel de la începutul op-ului
@@ -1038,23 +1097,37 @@ def tmux_kill_if_quiet(s, quiet_secs, deadline, now_wall=None, now_steady=None):
     if _clock_jumped(s, wall + (time.time() - real_wall0), steady + (_steady() - real_steady0)):
         return "active", "clock jump"
     try:
-        # decizia: condiţia şi kill-ul în aceeaşi comandă a serverului tmux (argv, fără shell)
-        rk = _quiet_tmux(deadline, "if-shell", "-F", "-t", target,
-                         tmux_quiet_format(name, threshold, s.pid, attached),
-                         "kill-session -t =" + name)
-        rh = _quiet_tmux(deadline, "has-session", "-t", "=" + name)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return "kill_failed", "tmux did not answer"
+        branch = quiet_kill_branch(name, mark)
+    except ValueError:
+        return "active", "no safe marker path for a conditional close"
+    try:
+        try:
+            # decizia: condiţia şi kill-ul în aceeaşi comandă a serverului tmux (argv, fără shell-ul nostru)
+            rk = _quiet_tmux(deadline, "if-shell", "-F", "-t", target,
+                             tmux_quiet_format(name, threshold, s.pid, attached), branch)
+            rh = _quiet_tmux(deadline, "has-session", "-t", "=" + name)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return "kill_failed", "tmux did not answer"
+        marked = os.path.lexists(mark)
+    finally:
+        _quiet_unmark(mark)
     if rh.returncode == 0:
-        # sesiunea trăieşte: condiţia a fost falsă în momentul kill-ului (activitate / client nou) sau
-        # comanda a eşuat. Oricum, nimic omorât şi clientul nostru neatins.
+        if marked:
+            # ramura kill a rulat, dar sesiunea e încă acolo: kill-ul a eşuat → neconfirmat, fără semnal
+            return "kill_failed", "tmux kill did not remove the session"
+        # fără marcaj: condiţia a fost falsă în momentul kill-ului (activitate / client nou) sau comanda a
+        # eşuat. Oricum, nimic omorât şi clientul nostru neatins.
         return ("active", "activity at kill time") if rk.returncode == 0 else ("kill_failed", "tmux kill failed")
     if rk.returncode != 0:
         # Recheck 3, Medium 5: if-shell eşuat + sesiune negăsită nu dovedeşte că ramura kill a rulat (un
         # socket dispărut, un server care a murit din alt motiv) → neconfirmat, fără semnal
         return "kill_failed", "tmux kill not confirmed"
+    if not marked:
+        # Recheck 4, Medium 4: if-shell reuşit (poate cu condiţia FALSĂ) şi apoi serverul / sesiunea
+        # dispărute din alt motiv: nimic nu dovedeşte că ramura noastră a rulat → neconfirmat, fără semnal
+        return "kill_failed", "session gone without proof that the kill ran"
     err = (rh.stderr or b"").lower()
-    # if-shell reuşit + sesiunea negăsită; sau serverul a ieşit (a fost ultima sesiune)
+    # marcaj + sesiunea negăsită; sau serverul a ieşit (a fost ultima sesiune)
     if b"can't find session" in err or b"no server running" in err:
         return "", ""
     return "kill_failed", "tmux state unknown after kill"

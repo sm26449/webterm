@@ -288,8 +288,10 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
   notice must still exist for a current recipient. A notice that schedules a close is always kept
   in the app, whatever the account's alert preferences (email stays optional).
 - Policy changes win at once: turning automatic closing or notices off takes effect in memory
-  before it is saved, and every switch bumps a policy generation; a deadline set under an older
-  generation never closes anything. Turning automatic closing on needs a fresh re-authentication.
+  before it is saved, and **every** change (either switch, the idle threshold or the grace period)
+  bumps a policy generation; a deadline set under an older generation never closes anything, and
+  the session gets a fresh notice under the new policy, with a full grace period. Turning automatic
+  closing on needs a fresh re-authentication.
 - The grace period must also have passed on the gateway process's monotonic clock since it saw the
   notice: a wall-clock jump, a restart or a restore never shortens it (after a restart it starts
   again). The hub must have finished the replay of its current attach and been attached for at
@@ -299,31 +301,37 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
   30 s is audited as "not confirmed", sends no "closed" alert and is not retried for an hour.
 - Closing goes through the source's **conditional** kill (`kill_if_quiet`, agent 62+), so the
   recording is kept like with the Stop button, and is audited as `system:idle-sessions`. The gateway
-  sends how long it has seen no activity (at least 60 s, or the agent answers `bad_request`); the
-  agent refuses (`active`) if, within that window **plus** a 35 s margin, it read output from the
+  sends how long it has seen no activity (at least 60 s, or the agent answers `bad_request`), padded
+  by the longest time the request may wait for the send lock and the send (10 s + 10 s), so the
+  window also covers the time it spent queued (a longer window is stricter); the
+  agent refuses (`active`) if, within that window **plus** a 65 s margin, it read output from the
   session, received input for it, has input still queued, has output waiting unread on the session's
   PTY, tmux reports activity (`session_activity` or any `window_activity`), or a tmux client other
   than its own is attached. It also refuses when the wall clock moved more than 30 s against the
   continuous clock since the session started (checked at the start and again right before the final
   tmux command), or a tmux timestamp lies in the future (tmux epochs can no longer be trusted). The
-  30 s tolerance is smaller than the 35 s margin, so an undetected jump cannot hide activity inside
-  the window. Anything it cannot check is a refusal, and the whole check has a 6 s budget.
+  margin covers twice the 30 s tolerance plus 5 s (offset −30 s when tmux stamped the activity and
+  +30 s at the check), so an undetected jump cannot hide activity inside the window. Anything it cannot check is a refusal, and the whole check has a 6 s budget.
 - Only **tmux** sessions can be closed automatically. A direct-PTY session (no tmux) is always
   refused (`active`, "not a tmux session: cannot close atomically"): its child can write from another
   process between the last check and the signal, and nothing ties the check to the kill. It gets the
   notice only; after the first refusal later notices no longer promise a close.
 - On tmux the final check and the kill are **one** tmux command (`if-shell -F` with the condition
-  as a format, then `kill-session`), so nothing can happen between them. It needs **tmux 3.4 or
+  as a format; its true branch is `run-shell "touch <marker>" ; kill-session`), so nothing can happen
+  between them. The marker is a file in the agent's private state directory (0700), named only from
+  the session's hex id, removed before and after; `run-shell` without `-b` finishes before
+  `kill-session` runs, so the marker is explicit proof that the kill branch ran. It needs **tmux 3.4 or
   later** (older tmux: always refused, notice only). Before it, one capability probe must evaluate
   every loop and comparison of the condition separately to a known answer: the window loop prints
   one mark per window (counted with `list-windows`) and nothing when the comparison is true, the
   client loop prints one mark per attached client and one per client with our pid, `session_attached`
   matches, the condition is `0` on an impossible threshold. Any mismatch is a refusal: a loop that
   silently evaluates to nothing must never read as "no activity".
-- The close counts as done only if `if-shell` exited 0 **and** `has-session` then reports the
-  session gone ("can't find session", or "no server running" when it was the server's last session).
-  A failed `if-shell` with the session gone, a session that still exists, or any unclear result is a
-  refusal (`active`) or `kill_failed`, with no signal. The agent then signals its own client only if
+- The close counts as done only if `if-shell` exited 0, **the marker exists**, and `has-session`
+  then reports the session gone ("can't find session", or "no server running" when it was the
+  server's last session). No marker with the session alive is `active` (the condition was false); no
+  marker with the session or server gone, a marker with the session still alive, a failed `if-shell`
+  or any unclear result is `kill_failed`, with no signal. The agent then signals its own client only if
   that pid is still its own, running child (not yet reaped; `waitpid(WNOHANG)` returns nothing), so a
   reaped and reused pid is never signalled.
 - Accepted residuals: the tmux queries are subprocess calls that block the agent's loop (all PTYs and
@@ -334,12 +342,19 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - **Point of no return:** right before the request leaves, under the agent connection's send lock,
   the gateway recomputes the **full** eligibility with the current policy and clocks (the same
   function as the check before reserving): same generation, the deadline with the *current* grace (a
-  grace raised from 2 to 10 days cancels), the deadline passed on both clocks, the hub attached, its
+  grace raised from 2 to 10 days cancels), the current idle threshold plus grace elapsed since the
+  last known activity (a threshold raised from 7 to 30 days cancels), the deadline passed on both clocks, the hub attached, its
   replay finished and attached long enough, no client, not kept, no activity since the notice, still
   reserved, same source. If any of it changed, nothing is sent and nothing is recorded. Waiting for
   the send lock is limited to 10 s (then nothing is sent); a send that does not finish in 10 s is an
-  unknown result. If the closing task is cancelled, the reservation is released (attaches are
-  accepted again); if the frame may already have left, it is audited as "not confirmed". Once the frame has been written, turning automatic closing off no longer cancels that
+  unknown result. If the closing task is cancelled, or fails in any way, **before** the frame could
+  leave, the reservation is released at once (attaches are accepted again). Once the frame may have
+  left, any failure (cancel, send timeout, lost connection, no answer, `kill_failed`, an unknown
+  answer) keeps the reservation: attaches stay refused until the session's exit confirms the close
+  or 30 s pass, and only then is it audited as "not confirmed" and released. Only agent answers that
+  prove nothing was killed (`no_session`, `bad_request`) release it at once. If the agent connection
+  drops, a frame the agent has not processed dies with it (a new connection is a new socket), so the
+  30 s confirm window bounds the time a close can still be in flight. Once the frame has been written, turning automatic closing off no longer cancels that
   one close; the agent still re-checks that the session is quiet.
 - The notice never promises a close as a certainty: it says the session *may* be closed after the
   grace period if it stays unused, and only if the host confirms it is idle.

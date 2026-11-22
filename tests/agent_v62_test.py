@@ -16,6 +16,7 @@ Acoperă:
 """
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -89,7 +90,7 @@ class FakeTmux:
     """înlocuitor pentru tmux_cmd: răspunde după subcomandă, înregistrează apelurile (şi timeout-urile).
     `display` = răspunsurile la sondă, în ordine; implicit sonda corectă pentru ferestrele / clienţii mockuiţi."""
     def __init__(self, windows=None, clients=None, display=None, ifshell=None, has=None, delay=0.0,
-                 on_display=None):
+                 on_display=None, mark=None):
         old = int(time.time() - 10 * HOUR)
         self.windows = R(0, ("%d %d\n" % (old, old)).encode()) if windows is None else windows
         self.clients = R(0, b"") if clients is None else clients
@@ -98,6 +99,9 @@ class FakeTmux:
         self.has = GONE if has is None else has
         self.delay = delay
         self.on_display = on_display
+        # Recheck 4: if-shell-ul mockuit lasă marcajul ramurii kill (ca tmux-ul real cu condiţia adevărată);
+        # implicit doar când if-shell „reuşeşte" şi nu s-a impus alt răspuns
+        self.mark = (ifshell is None) if mark is None else mark
         self.calls = []
         self.timeouts = []
 
@@ -122,6 +126,10 @@ class FakeTmux:
         else:
             r = {"list-windows": self.windows, "list-clients": self.clients, "if-shell": self.ifshell,
                  "has-session": self.has}.get(args[0], R(0))
+        if args[0] == "if-shell" and self.mark:
+            m = re.search(r'run-shell "touch ([A-Za-z0-9/._-]+)"', args[-1])
+            if m:
+                open(m.group(1), "w").close()
         if isinstance(r, Exception):
             raise r
         return r
@@ -159,14 +167,18 @@ s = FakeSession()
 s.last_out_mono = time.monotonic() - Q - 10
 s = FakeSession()
 s.last_out_mono = time.monotonic() - Q - 30
-check("Recheck 3: marja (35 s) acoperă toleranţa ceasului (activitate la Q+30 s → încă refuz)",
+check("Recheck 3: marja acoperă toleranţa ceasului (activitate la Q+30 s → încă refuz)",
+      reason(s, Q, FakeTmux()) == "output")
+s = FakeSession()
+s.last_out_mono = time.monotonic() - Q - 60
+check("Recheck 4: marja acoperă DE DOUĂ ORI toleranţa (activitate la Q+60 s → încă refuz)",
       reason(s, Q, FakeTmux()) == "output")
 s = FakeSession()
 s.last_out_mono = time.monotonic() - Q - ptyd.QUIET_MARGIN - 5
 check("…dincolo de Q + marjă → ok", reason(s, Q, FakeTmux()) == "")
-check("Recheck 3: toleranţa saltului de ceas (30 s) < marja (35 s)",
-      ptyd.QUIET_CLOCK_DRIFT_MAX == 30.0 and ptyd.QUIET_MARGIN == 35.0
-      and ptyd.QUIET_CLOCK_DRIFT_MAX < ptyd.QUIET_MARGIN, (ptyd.QUIET_CLOCK_DRIFT_MAX, ptyd.QUIET_MARGIN))
+check("Recheck 4: marja = 2 × toleranţa saltului de ceas + 5 s (30 s → 65 s)",
+      ptyd.QUIET_CLOCK_DRIFT_MAX == 30.0 and ptyd.QUIET_MARGIN == 2 * ptyd.QUIET_CLOCK_DRIFT_MAX + 5
+      and ptyd.QUIET_MARGIN == 65.0, (ptyd.QUIET_CLOCK_DRIFT_MAX, ptyd.QUIET_MARGIN))
 s = FakeSession()
 s.created = time.time() - 45                   # salt de 45 s: peste toleranţă → refuz
 check("Recheck 3: salt de ceas de 45 s (> 30) → clock jump", reason(s, Q, FakeTmux()) == "clock jump")
@@ -284,7 +296,8 @@ ifs = [list(c) for c in calls if c[0] == "if-shell"]
 time.sleep(0.1)
 check("op: liniştită → ok: if-shell ATOMIC (condiţie + kill-session pe sesiunea exactă), apoi has-session",
       r.get("ok") is True and s.kill_requested and len(ifs) == 1
-      and ifs[0][:4] == ["if-shell", "-F", "-t", "=" + name + ":"] and ifs[0][5] == "kill-session -t =" + name
+      and ifs[0][:4] == ["if-shell", "-F", "-t", "=" + name + ":"]
+      and ifs[0][5] == 'run-shell "touch %s" ; kill-session -t =%s' % (ptyd.quiet_marker_path(s.sid), name)
       and [c[0] for c in calls][-2:] == ["if-shell", "has-session"]
       and not any(c[0] == "kill-session" for c in calls), (r, calls))
 check("…condiţia: input, toate ferestrele, numărul de clienţi, clienţii străini (L:, tmux ≥ 3.4)",
@@ -297,7 +310,11 @@ check("op: fiecare comandă tmux are timeout ≤ 3 s (în bugetul total)",
       all(t is not None and 0 < t <= ptyd.QUIET_TMUX_TIMEOUT for t in f.timeouts), f.timeouts)
 # Recheck 2, Medium 4 + High 1: kill-ul atomic nu se face → refuz, clientul neatins, kill_requested nepus
 for label, fk, code in (
-        ("condiţie falsă la kill (sesiunea trăieşte)", FakeTmux(has=R(0)), "active"),
+        ("condiţie falsă la kill (sesiunea trăieşte)", FakeTmux(has=R(0), mark=False), "active"),
+        ("Recheck 4: marcaj prezent dar sesiunea trăieşte", FakeTmux(has=R(0), mark=True), "kill_failed"),
+        ("Recheck 4: if-shell reuşit, fără marcaj, sesiunea negăsită", FakeTmux(mark=False), "kill_failed"),
+        ("Recheck 4: if-shell reuşit, fără marcaj, no server running",
+         FakeTmux(mark=False, has=R(1, b"", b"no server running on /tmp/x\n")), "kill_failed"),
         ("if-shell eşuează, sesiunea trăieşte", FakeTmux(ifshell=R(1, b"", b"boom"), has=R(0)), "kill_failed"),
         ("has-session expiră", FakeTmux(has=subprocess.TimeoutExpired("tmux", 3)), "kill_failed"),
         ("has-session: eroare neclară", FakeTmux(has=R(1, b"", b"lost server")), "kill_failed"),
@@ -378,7 +395,41 @@ for label, fk, code in (
 s = FakeSession()
 r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
               FakeTmux(has=R(1, b"", b"no server running on /tmp/x\n")))
-check("Recheck 3: if-shell reuşit + no server running (ultima sesiune) → ok", r.get("ok") is True and s.kill_requested, r)
+check("Recheck 3: if-shell reuşit + marcaj + no server running (ultima sesiune) → ok",
+      r.get("ok") is True and s.kill_requested, r)
+check("Recheck 4: marcajul e şters după decizie", not os.path.lexists(ptyd.quiet_marker_path(s.sid)))
+# Recheck 4, Medium 4: un marcaj vechi nu trece drept dovadă (şters înaintea if-shell-ului)
+s = FakeSession()
+open(ptyd.quiet_marker_path(s.sid), "w").close()
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux(mark=False))
+check("Recheck 4: marcaj vechi lăsat înainte → şters, nu contează: fără marcaj nou → kill_failed",
+      r.get("code") == "kill_failed" and not s.kill_requested, r)
+# calea marcajului: doar din sid hex, director privat 0700, caractere sigure
+st = os.stat(ptyd.QUIET_MARK_DIR)
+check("Recheck 4: directorul marcajelor e 0700 şi al nostru",
+      (st.st_mode & 0o777) == 0o700 and st.st_uid == os.getuid(), oct(st.st_mode))
+check("Recheck 4: sid ne-hex → fără cale de marcaj",
+      ptyd.quiet_marker_path("ab;rm") is None and ptyd.quiet_marker_path("AB") is None
+      and ptyd.quiet_marker_path("") is None and ptyd.quiet_marker_path(None) is None)
+s = FakeSession()
+s.sid = "zz" + s.sid[2:]
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux())
+check("Recheck 4: sid ne-hex → active, fără if-shell", r.get("code") == "active" and not killed(calls), (r, calls))
+saved_dir = ptyd.QUIET_MARK_DIR
+ptyd.QUIET_MARK_DIR = os.path.join(tempfile.mkdtemp(prefix="v62 sp-"), "m")
+try:
+    s = FakeSession()
+    r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux())
+    check("Recheck 4: cale de marcaj cu caractere nesigure (spaţiu) → active, fără if-shell",
+          r.get("code") == "active" and not killed(calls), (r, calls))
+finally:
+    ptyd.QUIET_MARK_DIR = saved_dir
+try:
+    ptyd.quiet_kill_branch("wt-" + "a" * 32, "/tmp/x y")
+    bad = False
+except ValueError:
+    bad = True
+check("Recheck 4: quiet_kill_branch refuză o cale nesigură", bad)
 # Recheck 3, Medium 5: pid-ul clientului trebuie să fie încă copilul nostru, viu
 s = FakeSession()
 cp = child()
@@ -542,6 +593,27 @@ def lie(real, no_clients=False, clients=None):
     return f
 
 
+def spy_mark(sess, seen, after=None):
+    """wrap: notează dacă marcajul există imediat după if-shell-ul REAL; `after` rulează apoi (ex. un kill
+    „din alt motiv" între if-shell şi has-session)"""
+    mark = ptyd.quiet_marker_path(sess.sid)
+
+    def w(real):
+        def f(*args, **kw):
+            r = real(*args, **kw)
+            if args[0] == "if-shell":
+                seen.append(os.path.lexists(mark))
+                if after:
+                    after()
+            return r
+        return f
+    return w
+
+
+def chain(w1, w2):
+    return lambda real: w1(w2(real))
+
+
 def alive(name):
     return ptyd.tmux_cmd("has-session", "-t", "=" + name).returncode == 0
 
@@ -585,9 +657,12 @@ else:
         code, why = atomic(sess, 60)
         check("tmux real ATOMIC: output în fundal → active (sonda validată pe 2 ferestre, decizia „0”), vie",
               code == "active" and why == "tmux activity" and alive(name), (code, why))
-        code, why = atomic(sess, 60, wrap=lambda real: lie(real))
+        seen = []
+        code, why = atomic(sess, 60, wrap=chain(spy_mark(sess, seen), lambda real: lie(real)))
         check("tmux real ATOMIC: sondele mint „linişte”, if-shell-ul vede output-ul din fundal → active, vie",
               code == "active" and why == "activity at kill time" and alive(name), (code, why))
+        check("Recheck 4 tmux real: condiţie falsă → if-shell NU lasă marcaj, sesiunea vie",
+              seen == [False] and alive(name), seen)
         # un om ataşat direct pe host: un client tmux în propriul pty
         pid, fd = pty.fork()
         if pid == 0:
@@ -641,9 +716,21 @@ else:
         code, why = atomic(ghost, HOUR)
         check("tmux real ATOMIC: sesiune inexistentă → refuz", code == "active", (code, why))
         # liniştită: verificarea şi kill-ul în aceeaşi comandă → sesiunea dispare, cealaltă rămâne
-        code, why = atomic(sess, HOUR)
+        seen = []
+        code, why = atomic(sess, HOUR, wrap=spy_mark(sess, seen))
         check("tmux real ATOMIC: liniştită → \"\" şi sesiunea a DISPĂRUT (doar ea)",
               code == "" and not alive(name) and alive(keep_name), (code, why))
+        check("Recheck 4 tmux real: ramura kill a lăsat marcajul (run-shell sincron), apoi şters",
+              seen == [True] and not os.path.lexists(ptyd.quiet_marker_path(sess.sid)), seen)
+        # Recheck 4, Medium 4: condiţie FALSĂ (activitate recentă), iar serverul dispare din alt motiv între
+        # if-shell şi has-session ("no server running") → fără marcaj nu e succes
+        seen = []
+        code, why = atomic(keep, 0, wrap=chain(
+            spy_mark(keep, seen, after=lambda: ptyd.tmux_cmd("kill-session", "-t", "=" + keep_name)),
+            lambda real: lie(real)))
+        check("Recheck 4 tmux real: fără marcaj + no server running → kill_failed (neconfirmat)",
+              code == "kill_failed" and why == "session gone without proof that the kill ran" and seen == [False]
+              and not alive(keep_name), (code, why, seen))
     except RuntimeError:
         print("  SKIP tmux real: serverul de test n-a pornit la timp")
     finally:
