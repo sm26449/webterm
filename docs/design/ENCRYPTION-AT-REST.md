@@ -268,12 +268,15 @@ leaves the disk unchanged across two restarts.
    the keyring (or keeps its passphrase) in the same release.
 2. **3.8.x:** SQLCipher after its supply-chain gate; `vapid.key` and `setup-token` under the keyring.
 
-## 11. Decisions for the owner
+## 11. Owner decisions (2026-11-22)
 
-1. New installations without an external key: **refuse to start** (recommended, opt-out with
-   `WEBTERM_KEY_IN_VOLUME=1`) or only warn?
-2. Should production keep the master key on this host (protects volume copies) or off-host
-   (protects full-host copies too, but needs the key supplied at every boot)?
-3. Recovery kit export from the UI (Owner + re-auth) or CLI only?
-4. Erasure wording: "unreadable through the app at once; copies in backups expire with their
-   retention" is acceptable for the product's privacy page?
+1. **New installations without an external key refuse to start**; the explicit opt-out
+   `WEBTERM_KEY_IN_VOLUME=1` runs with "reduced protection" shown in System health.
+2. **Production keeps the master key in a key file on the same host** (`/opt/webterm/secrets/`,
+   mounted read-only): it protects copies of the data volume and of backups; protection against a
+   copy of the whole host (key off-host, supplied at boot) stays an option documented for
+   operators who need it.
+3. **Recovery kit: both** an Owner export in the UI after re-auth (no-store, never by email) and a
+   CLI export/verify for operators.
+4. **Erasure wording accepted:** "unreadable through the app at once; copies in backups expire with
+   their retention", with the deletion journal re-applied after any restore.
