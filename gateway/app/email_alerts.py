@@ -474,8 +474,10 @@ async def notify_session_idle(user_ids, title: str, host_name: str, host_id, sid
     body = (f"Session: {title or '(untitled)'}\nHost: {host_name}\n\n"
             f"Nobody has typed in it, it has printed nothing and no browser has been attached for "
             f"{days} days. "
-            + (f"It will be closed automatically in {grace_days} day(s) unless it is used, or kept "
-               f"open from the session menu (Keep open)." if closing else
+            # Recheck 3, Low 8: o posibilitate, nu o certitudine — agentul poate refuza închiderea
+            + (f"It may be closed automatically after {grace_days} day(s) if it stays unused (EverShell "
+               f"closes it only if the host confirms it is idle). To prevent this, keep it open from the "
+               f"session menu (Keep open)." if closing else
                "Close it if you no longer need it, or keep it open from the session menu (Keep open)."))
     uids, want_email = await alert_history.record_required(
         "session_idle", "warning" if closing else "info", subject, body, host_id=host_id,

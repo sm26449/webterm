@@ -352,19 +352,29 @@ async def _notice_recorded(sid: str, notified: float, uids: list) -> bool:
     return r is not None
 
 
-def _closable_now(fresh, hub, pol: dict, now: float, mono: float) -> bool:
-    """Ultima verificare, SINCRONĂ (fără await între ea, `idle_closing` şi trimiterea kill-ului)."""
+def _eligible(fresh, hub, pol: dict, now: float, mono: float, reserved: bool) -> bool:
+    """Eligibilitatea COMPLETĂ pentru închidere, SINCRON, cu politica primită şi ceasurile date: termenul
+    (cu grația politicii de ACUM — una mărită amână), ambele ceasuri trecute de el, fluxul la zi (replay
+    terminat, ataşat de destul timp), niciun client, „Păstrează deschisă", activitate după notificare.
+    `reserved`: la rezervare `idle_closing` trebuie să fie încă False; la trimitere, True (al nostru)."""
     deadline = close_deadline(fresh, pol)
-    notified = fresh["idle_notified_at"]
+    notified = _row_get(fresh, "idle_notified_at")
     if deadline is None or not notified or now < deadline:
         return False
-    if hub.closed or not hub.attached or hub.clients or not hub.idle_pending or hub.idle_closing:
+    if hub.closed or not hub.attached or hub.clients or not hub.idle_pending:
+        return False
+    if bool(hub.idle_closing) is not bool(reserved):
         return False
     if getattr(hub, "keep_open", False) or _row_get(fresh, "keep_open"):
         return False
     if hub.activity_at() > float(notified):
         return False
     return _source_settled(hub, mono) and _mono_grace_ok(hub, float(notified), deadline, mono)
+
+
+def _closable_now(fresh, hub, pol: dict, now: float, mono: float) -> bool:
+    """Ultima verificare dinaintea rezervării, SINCRONĂ (fără await între ea şi `idle_closing`)."""
+    return _eligible(fresh, hub, pol, now, mono, reserved=False)
 
 
 # INV-13 (docs/design/INVARIANTS.md): închiderea automată nu atinge o sesiune folosită, păstrată sau neanunţată.
@@ -408,22 +418,44 @@ async def _close(row, hub, uids: list, now: float, mono: float) -> str:
     hub.exit_reason = "idle"
     why = ""
     resp: dict = {}
+    # ceasurile sweep-ului (injectabile în teste) avansate cu timpul real scurs până la trimitere
+    w0, m0 = time.time(), time.monotonic()
+    armed = {"go": False}                     # still_ok a spus „da" → frame-ul poate să fi plecat
 
     def still_ok() -> bool:
-        # Codex Recheck 2, High 2: evaluată de AgentConnection SUB lock-ul de trimitere, chiar înainte ca
-        # frame-ul să plece. Tot ce putea anula închiderea între rezervare şi trimitere: politica (oprită
-        # sau altă generaţie), un client, „Păstrează deschisă", activitate, altă sursă.
+        # Codex Recheck 2, High 2 + Recheck 3, High 3: evaluată de AgentConnection SUB lock-ul de trimitere,
+        # chiar înainte ca frame-ul să plece: eligibilitatea COMPLETĂ, refăcută cu politica de ACUM (o grație
+        # mărită de la 2 la 10 zile amână termenul → anulare), ceasurile de ACUM, starea ataşării / replay-ului,
+        # plus aceeaşi generaţie şi aceeaşi sursă. Singura diferenţă faţă de rezervare: `idle_closing` e al nostru.
         cur = current_policy()
-        return bool(cur["autoclose"] and cur["notify"] and cur["gen"] == pol["gen"]
-                    and hub.idle_closing and hub.idle_pending and not hub.clients and not hub.closed
-                    and not getattr(hub, "keep_open", False)
-                    and hub.activity_at() <= float(notified)
-                    and closing_source(row) is source)
+        ok = bool(cur["gen"] == pol["gen"]
+                  and _eligible(fresh, hub, cur, now + (time.time() - w0), mono + (time.monotonic() - m0),
+                                reserved=True)
+                  and closing_source(row) is source)
+        armed["go"] = ok
+        return ok
 
     try:
         resp = await source.kill_if_quiet(sid, quiet, still_ok=still_ok)
         if not resp.get("ok"):
             why = str(resp.get("code") or resp.get("msg") or "refused")[:60]
+    except asyncio.CancelledError:
+        # Recheck 3, Medium 7: sweep-ul anulat (oprire, task anulat) cu hub-ul încă viu. Rezervarea nu
+        # rămâne agăţată: ataşările nu mai sunt refuzate. Dacă frame-ul poate să fi plecat, rezultatul e
+        # necunoscut → aceeaşi cale ca un timeout (audit 504 + backoff), pe un task separat.
+        hub.idle_closing = False
+        if not armed["go"]:
+            if not hub.closed:
+                hub.exit_reason = "exited"
+            log.info("idle session %s: close cancelled before it was sent", sid)
+        else:
+            try:
+                bgtasks.spawn(_unconfirmed(row, hub, now, "cancelled after it may have been sent"),
+                              "idle close unconfirmed")
+            except RuntimeError:
+                if not hub.closed:
+                    hub.exit_reason = "exited"
+        raise
     except Exception as e:                    # noqa: BLE001 — host plecat, timeout: rezultat necunoscut
         why = type(e).__name__
     if why == "cancelled":

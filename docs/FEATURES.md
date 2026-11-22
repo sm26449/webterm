@@ -488,13 +488,16 @@ or a `tail -f` is never idle. A command that runs silently for days does look id
   on later sends a new notice with the closing date first.
 - WebTerm only closes a session it can see. If the host is offline, the session's output is not
   reaching the gateway, or anything is unclear, it waits for the next check (every ~10 minutes).
-- **Which sessions can be closed automatically:** only sessions on an agent host whose agent is
-  version 62 or later. The host's agent makes the final check: it closes the session only if it has
-  seen no output, no typing and no tmux activity for the whole idle period, and nobody attached to
-  the tmux session directly on the host. If it has, the notice is withdrawn and the idle period
-  starts again. Sessions on older agents, and SSH, telnet and serial sessions, are notified but never
-  closed automatically; their notice says nothing about a closing date. Update the agent (Settings →
-  Updates) to include them.
+- **Which sessions can be closed automatically:** only **tmux** sessions on an agent host whose
+  agent is version 62 or later and whose tmux is **3.4 or later**. The host's agent makes the final
+  check, and the check and the close happen in a single tmux command: it closes the session only if
+  it has seen no output, no typing and no tmux activity for the whole idle period, and nobody
+  attached to the tmux session directly on the host. If it has, the notice is withdrawn and the idle
+  period starts again. Sessions on older agents, sessions running without tmux (direct PTY) or on
+  older tmux, and SSH, telnet and serial sessions are notified but never closed automatically. The
+  notice therefore says a session *may* be closed after the grace period if it stays unused, never
+  that it will be; once the host has refused a close, later notices give no closing date. Update the
+  agent (Settings → Updates) and tmux to include them.
 
 **Keep a session.** In the session's **⋯** menu, choose **Keep open (never close automatically)**.
 It is never notified or closed again; the same menu turns it back off. Only someone who may control

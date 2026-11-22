@@ -300,29 +300,53 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 - Closing goes through the source's **conditional** kill (`kill_if_quiet`, agent 62+), so the
   recording is kept like with the Stop button, and is audited as `system:idle-sessions`. The gateway
   sends how long it has seen no activity (at least 60 s, or the agent answers `bad_request`); the
-  agent refuses (`active`) if, within that window **plus** a 5 s margin, it read output from the
+  agent refuses (`active`) if, within that window **plus** a 35 s margin, it read output from the
   session, received input for it, has input still queued, has output waiting unread on the session's
   PTY, tmux reports activity (`session_activity` or any `window_activity`), or a tmux client other
-  than its own is attached. It also refuses when the wall clock moved more than 120 s against the
-  continuous clock since the session started, or a tmux timestamp lies in the future (tmux epochs can
-  no longer be trusted). Anything it cannot check is a refusal, and the whole check has a 6 s budget.
+  than its own is attached. It also refuses when the wall clock moved more than 30 s against the
+  continuous clock since the session started (checked at the start and again right before the final
+  tmux command), or a tmux timestamp lies in the future (tmux epochs can no longer be trusted). The
+  30 s tolerance is smaller than the 35 s margin, so an undetected jump cannot hide activity inside
+  the window. Anything it cannot check is a refusal, and the whole check has a 6 s budget.
+- Only **tmux** sessions can be closed automatically. A direct-PTY session (no tmux) is always
+  refused (`active`, "not a tmux session: cannot close atomically"): its child can write from another
+  process between the last check and the signal, and nothing ties the check to the kill. It gets the
+  notice only; after the first refusal later notices no longer promise a close.
 - On tmux the final check and the kill are **one** tmux command (`if-shell -F` with the condition
-  as a format, then `kill-session`), so nothing can happen between them; it needs tmux 3.2 or later
-  (3.4 or later also matches attached clients by pid), and a probe of the format must evaluate as
-  expected, or the host never closes automatically. The agent signals its own client only once
-  `has-session` confirms the session is gone; a session that still exists is `active`, an unclear
-  result is `kill_failed` (no signal either way).
+  as a format, then `kill-session`), so nothing can happen between them. It needs **tmux 3.4 or
+  later** (older tmux: always refused, notice only). Before it, one capability probe must evaluate
+  every loop and comparison of the condition separately to a known answer: the window loop prints
+  one mark per window (counted with `list-windows`) and nothing when the comparison is true, the
+  client loop prints one mark per attached client and one per client with our pid, `session_attached`
+  matches, the condition is `0` on an impossible threshold. Any mismatch is a refusal: a loop that
+  silently evaluates to nothing must never read as "no activity".
+- The close counts as done only if `if-shell` exited 0 **and** `has-session` then reports the
+  session gone ("can't find session", or "no server running" when it was the server's last session).
+  A failed `if-shell` with the session gone, a session that still exists, or any unclear result is a
+  refusal (`active`) or `kill_failed`, with no signal. The agent then signals its own client only if
+  that pid is still its own, running child (not yet reaped; `waitpid(WNOHANG)` returns nothing), so a
+  reaped and reused pid is never signalled.
+- Accepted residuals: the tmux queries are subprocess calls that block the agent's loop (all PTYs and
+  the heartbeat) for up to the 6 s budget; output produced in the microseconds while the tmux server
+  itself processes the `if-shell` is covered only by the tmux server's own atomicity.
 - A refusal is use: the notice is withdrawn, the hub's activity moves to now (a new idle period), no
   alert, audit 409.
-- **Point of no return:** the gateway re-checks the policy (on, same generation), the hub (still
-  closing and pending, no client, not kept, no activity) and the source right before the request
-  leaves, under the agent connection's send lock. If any of it changed, nothing is sent and nothing
-  is recorded. Once the frame has been written, turning automatic closing off no longer cancels that
+- **Point of no return:** right before the request leaves, under the agent connection's send lock,
+  the gateway recomputes the **full** eligibility with the current policy and clocks (the same
+  function as the check before reserving): same generation, the deadline with the *current* grace (a
+  grace raised from 2 to 10 days cancels), the deadline passed on both clocks, the hub attached, its
+  replay finished and attached long enough, no client, not kept, no activity since the notice, still
+  reserved, same source. If any of it changed, nothing is sent and nothing is recorded. Waiting for
+  the send lock is limited to 10 s (then nothing is sent); a send that does not finish in 10 s is an
+  unknown result. If the closing task is cancelled, the reservation is released (attaches are
+  accepted again); if the frame may already have left, it is audited as "not confirmed". Once the frame has been written, turning automatic closing off no longer cancels that
   one close; the agent still re-checks that the session is quiet.
+- The notice never promises a close as a certainty: it says the session *may* be closed after the
+  grace period if it stays unused, and only if the host confirms it is idle.
 - Only sessions whose source is an agent of version 62 or later are ever closed automatically. Older
   agents, SSH, telnet and serial sessions get the notice without a closing date (no deadline is
   stored, the message does not promise a close), and a deadline whose source no longer supports the
   conditional kill is dropped without closing.
 
-**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, `tmux_kill_if_quiet`, `pty_output_pending`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
+**Enforced in**: `idlesess.py` `sweep`, `_notify`, `_close`, `_eligible`, `_closable_now`, `closing_source`, `_host_active`, `close_deadline`, `save_policy`, `last_activity`; `core.py` `[hub]` `_idle_activity`, `[agent]` `kill_if_quiet`; `agent/ptyd.py` `session_activity_reason`, `tmux_kill_if_quiet`, `tmux_probe_format`, `pty_output_pending`, `Agent._own_child_running`, op `kill_if_quiet`; `api.py` `[ws]` `browser_ws`, `shared_ws`; `alert_history.py` `record_required`.
 **Tests**: `session_idle`, `agent_v62`.

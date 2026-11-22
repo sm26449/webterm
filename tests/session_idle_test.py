@@ -36,6 +36,7 @@ class FakeSource(core.AgentConnection):
         self.quiet_reply = None       # un răspuns impus (ex. {"ok": False, "code": "active"})
         self.before_send = None       # coroutine rulată între rezervare şi trimitere (aşteptarea lock-ului)
         self.cancelled = 0            # câte cereri a oprit `still_ok` înainte de trimitere
+        self.after_send = None        # coroutine rulată DUPĂ ce still_ok a spus da (frame-ul „a plecat")
 
     async def request(self, op, timeout=20.0, **fields):
         raise core.AgentGone("fake source: no websocket")
@@ -49,6 +50,8 @@ class FakeSource(core.AgentConnection):
         if still_ok is not None and not still_ok():
             self.cancelled += 1
             return {"ok": False, "code": "cancelled"}
+        if self.after_send is not None:
+            await self.after_send()
         self.quiet_asked.append(quiet_secs)
         if self.quiet_reply is not None:
             return dict(self.quiet_reply)
@@ -847,6 +850,18 @@ async def still_ok_send_path():
     c._send_lock.release()
     r = await task
     check("Recheck 2: oprire cât cererea aşteaptă lock-ul → nu pleacă", r.get("code") == "cancelled" and not c.ws.sent, r)
+    # Recheck 3, Medium 7: lock-ul ţinut peste termen → `cancelled`, nimic trimis, lock-ul altcuiva neatins
+    saved_wait = core.KILL_IF_QUIET_LOCK_WAIT
+    core.KILL_IF_QUIET_LOCK_WAIT = 0.05
+    await c._send_lock.acquire()
+    try:
+        r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: True)
+        check("Recheck 3: lock-ul de trimitere neobţinut la termen → `cancelled`, nimic trimis, lock-ul rămâne al deţinătorului",
+              r.get("code") == "cancelled" and not c.ws.sent and c._send_lock.locked() and not c._pending,
+              (r, c.ws.sent))
+    finally:
+        c._send_lock.release()
+        core.KILL_IF_QUIET_LOCK_WAIT = saved_wait
     r = await c.kill_if_quiet("a" * 32, 3 * DAY, still_ok=lambda: True)
     sent = _json.loads(c.ws.sent[0][len(core.FRAME_CTRL):]) if c.ws.sent else {}
     check("Recheck 2: still_ok True → frame kill_if_quiet trimis, răspunsul agentului întors",
@@ -954,6 +969,85 @@ async def agent62_fixes(hid, src, owner, alice):
     await close_all_live()
     await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7,
                                                          "autoclose": True, "grace_days": 2, "current_password": U.OWNER_PW})
+
+    # Codex Recheck 3, High 3: între rezervare şi trimitere se schimbă grația sau starea fluxului → still_ok
+    # refăcut COMPLET (politica de acum, ceasurile de acum, ataşare / replay) opreşte trimiterea
+    async def grace_10():
+        await idlesess.save_policy(dict(idlesess.current_policy(), grace_days=10))
+
+    def detach(h):
+        async def f():
+            h.attached = False
+        return f
+
+    def reattach(h):
+        async def f():
+            # tocmai re-ataşat, pe ceasul simulat al sweep-ului (+3 zile): output-ul din pauză încă poate curge
+            h.attached_mono = time.monotonic() + 3 * DAY
+        return f
+
+    def replay(h):
+        async def f():
+            h._replay_expected = True               # o ataşare nouă aşteaptă replay-ul agentului
+            h._replay_end.clear()
+        return f
+    for label, mk in (("grația mărită 2→10 zile", lambda h: grace_10),
+                      ("detaşat de sursă", detach), ("re-ataşat chiar acum", reattach),
+                      ("replay reluat, neterminat", replay)):
+        sF, hF = await new_session(hid, alice, days_old=20)
+        t5 = time.time()
+        await sweep_at(t5)
+        n_asked, n_cancel = len(src.quiet_asked), src.cancelled
+        src.before_send = mk(hF)
+        try:
+            st = await sweep_at(t5 + 3 * DAY)
+        finally:
+            src.before_send = None
+        rF = await srow(sF)
+        check("Recheck 3: %s între rezervare şi trimitere → nimic trimis, sesiunea vie, rezervarea eliberată" % label,
+              src.cancelled == n_cancel + 1 and len(src.quiet_asked) == n_asked and sF not in src.killed
+              and rF["state"] == "live" and st["closed"] == 0 and hF.idle_closing is False and hF.exit_reason != "idle",
+              (label, src.cancelled, str(st), dict(rF)))
+        await close_all_live()
+        await owner.post("/api/settings/idle-sessions", json={"notify": True, "notify_days": 7, "autoclose": True,
+                                                             "grace_days": 2, "current_password": U.OWNER_PW})
+
+    # Codex Recheck 3, Medium 7: sweep-ul anulat (CancelledError) cât cererea aşteaptă → rezervarea eliberată
+    for label, attr in (("înainte de trimitere", "before_send"), ("după o trimitere posibilă", "after_send")):
+        sG, hG = await new_session(hid, alice, days_old=20)
+        t6 = time.time()
+        await sweep_at(t6)
+        n_asked = len(src.quiet_asked)
+        waiting = asyncio.Event()
+
+        async def hang():
+            waiting.set()
+            await asyncio.sleep(3600)
+        setattr(src, attr, hang)
+        task = asyncio.create_task(sweep_at(t6 + 3 * DAY))
+        try:
+            await asyncio.wait_for(waiting.wait(), 10)
+            task.cancel()
+            try:
+                await task
+                got_cancel = False
+            except asyncio.CancelledError:
+                got_cancel = True
+        finally:
+            setattr(src, attr, None)
+        await asyncio.sleep(0.2)                    # task-ul de fundal (calea „neconfirmat")
+        rG = await srow(sG)
+        if attr == "before_send":
+            check("Recheck 3: CancelledError %s → re-ridicată, idle_closing şters, exit_reason ≠ idle, nimic trimis" % label,
+                  got_cancel and hG.idle_closing is False and hG.exit_reason != "idle"
+                  and len(src.quiet_asked) == n_asked and sG not in src.killed and rG["state"] == "live"
+                  and not await audit_rows(sG, 504) and not idlesess._backed_off(sG), (got_cancel, dict(rG)))
+        else:
+            check("Recheck 3: CancelledError %s → re-ridicată, idle_closing şters, rezultat necunoscut (504 + backoff)" % label,
+                  got_cancel and hG.idle_closing is False and hG.exit_reason != "idle"
+                  and len(await audit_rows(sG, 504)) == 1 and idlesess._backed_off(sG), (got_cancel, dict(rG)))
+        idlesess._backoff.pop(sG, None)
+        await close_all_live()
 
     # termen fixat sub agentul 62, apoi agentul e înlocuit cu unul vechi → nimic închis, termenul dispare
     sD, hD = await new_session(hid, alice, days_old=20)

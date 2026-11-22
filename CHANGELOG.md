@@ -62,6 +62,11 @@ back.
   alert. Only sessions on agents 62 and later are closed automatically; sessions on older agents and
   SSH, telnet or serial sessions still get the notice, without a closing date. Found by an external
   review of 3.7.1.
+- **Automatic closing is now limited to sessions where the host can prove the session is idle when it
+  closes it: tmux sessions on tmux 3.4 or later.** A session without tmux could print something
+  between the agent's last check and the close, so it now gets the notice only, and the notice says a
+  session *may* be closed if it stays unused instead of promising a date; a grace period raised (or a
+  reconnect) just before the close also cancels it. Found by the third external re-check of 3.7.1.
 - **Search in Settings** finds mTLS, client certificates, connected agents and refused connections, and
   "email alerts" finds the per-event choices as well as the mail server; partial words match.
 - **A false critical alarm** "Agent mTLS is not working" on installs without the shared edge directory

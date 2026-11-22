@@ -76,17 +76,28 @@ class R:
 GONE = R(1, b"", b"can't find session: wt-x\n")
 
 
+def probe(windows=1, attached=0, decision=b"1", **fields):
+    """Răspunsul corect al sondei (Recheck 3) pentru `windows` ferestre şi `attached` clienţi (al nostru);
+    `fields` (f0..f6) strică un câmp anume."""
+    vals = ptyd.tmux_probe_expected(windows, attached) + [decision]
+    for k, v in fields.items():
+        vals[int(k[1:])] = v
+    return R(0, b"|".join(vals) + b"\n")
+
+
 class FakeTmux:
     """înlocuitor pentru tmux_cmd: răspunde după subcomandă, înregistrează apelurile (şi timeout-urile).
-    `display` = răspunsurile la cele două sonde (prag 0, prag real), în ordine."""
-    def __init__(self, windows=None, clients=None, display=None, ifshell=None, has=None, delay=0.0):
+    `display` = răspunsurile la sondă, în ordine; implicit sonda corectă pentru ferestrele / clienţii mockuiţi."""
+    def __init__(self, windows=None, clients=None, display=None, ifshell=None, has=None, delay=0.0,
+                 on_display=None):
         old = int(time.time() - 10 * HOUR)
         self.windows = R(0, ("%d %d\n" % (old, old)).encode()) if windows is None else windows
         self.clients = R(0, b"") if clients is None else clients
-        self.display = list(display) if display is not None else [R(0, b"0\n"), R(0, b"1\n")]
+        self.display = list(display) if display is not None else None
         self.ifshell = R(0) if ifshell is None else ifshell
         self.has = GONE if has is None else has
         self.delay = delay
+        self.on_display = on_display
         self.calls = []
         self.timeouts = []
 
@@ -96,7 +107,18 @@ class FakeTmux:
         if self.delay:
             time.sleep(self.delay)
         if args[0] == "display-message":
-            r = self.display.pop(0) if self.display else R(1)
+            if self.on_display:
+                self.on_display()
+            if self.display is None:
+                w = self.windows
+                n = len(w.stdout.splitlines()) if isinstance(w, R) else 1
+                k = len(self.clients.stdout.split()) if isinstance(self.clients, R) else 0
+                r = probe(n, k)
+            else:
+                r = self.display.pop(0) if self.display else R(1)
+        elif args[0] == "list-windows" and "#{window_id}" in args and isinstance(self.windows, R):
+            w = self.windows
+            r = R(w.returncode, b"".join(b"@%d\n" % i for i in range(len(w.stdout.splitlines()))))
         else:
             r = {"list-windows": self.windows, "list-clients": self.clients, "if-shell": self.ifshell,
                  "has-session": self.has}.get(args[0], R(0))
@@ -135,7 +157,19 @@ s.last_out_mono = time.monotonic() - Q - 2
 check("Recheck 2 #3: marja LĂRGEŞTE fereastra (activitate la Q+2 s → încă refuz)", reason(s, Q, FakeTmux()) == "output")
 s = FakeSession()
 s.last_out_mono = time.monotonic() - Q - 10
+s = FakeSession()
+s.last_out_mono = time.monotonic() - Q - 30
+check("Recheck 3: marja (35 s) acoperă toleranţa ceasului (activitate la Q+30 s → încă refuz)",
+      reason(s, Q, FakeTmux()) == "output")
+s = FakeSession()
+s.last_out_mono = time.monotonic() - Q - ptyd.QUIET_MARGIN - 5
 check("…dincolo de Q + marjă → ok", reason(s, Q, FakeTmux()) == "")
+check("Recheck 3: toleranţa saltului de ceas (30 s) < marja (35 s)",
+      ptyd.QUIET_CLOCK_DRIFT_MAX == 30.0 and ptyd.QUIET_MARGIN == 35.0
+      and ptyd.QUIET_CLOCK_DRIFT_MAX < ptyd.QUIET_MARGIN, (ptyd.QUIET_CLOCK_DRIFT_MAX, ptyd.QUIET_MARGIN))
+s = FakeSession()
+s.created = time.time() - 45                   # salt de 45 s: peste toleranţă → refuz
+check("Recheck 3: salt de ceas de 45 s (> 30) → clock jump", reason(s, Q, FakeTmux()) == "clock jump")
 s = FakeSession()
 s.created = time.time() - 1000                 # ceasul de perete a sărit înainte faţă de cel continuu
 check("Recheck 2 #3: salt de ceas de la crearea sesiunii → refuz (epoch tmux nesigur)",
@@ -215,12 +249,13 @@ check("sesiune deja încheiată: tmux neîntrebat", reason(d, Q, f) == "" and f.
 
 
 # ═════════════════════════ 2. op-ul prin handle_ctrl ═════════════════════════
-def op(msg, session=None, fake=None, ver=(3, 4)):
+def op(msg, session=None, fake=None, ver=(3, 4), reaped=None):
     ag = object.__new__(ptyd.Agent)
     ag.replies = []
     ag.send_ctrl = ag.replies.append
     ag._hb_sent_at = {}
     ag.sessions = {session.sid: session} if session else {}
+    ag.reaped = {} if reaped is None else reaped
     fake = fake or FakeTmux()
     saved = ptyd.tmux_cmd, ptyd._TMUX_VER
     ptyd.tmux_cmd, ptyd._TMUX_VER = fake, ver
@@ -279,23 +314,110 @@ for label, fk, code in (
     cp.wait()
 # tmux care nu poate garanta atomicitatea → refuz (niciodată închidere pe acel host)
 for label, fk, ver in (("tmux 3.1", FakeTmux(), (3, 1)),
+                       ("Recheck 3: tmux 3.2 (fără probe validate)", FakeTmux(), (3, 2)),
+                       ("Recheck 3: tmux 3.3 (fără probe validate)", FakeTmux(), (3, 3)),
                        ("versiune tmux necunoscută", FakeTmux(), None),
-                       ("sonda dă gol (modificator necunoscut)", FakeTmux(display=[R(0, b"\n"), R(0, b"1\n")]), (3, 4)),
-                       ("sonda pe prag 0 dă 1", FakeTmux(display=[R(0, b"1\n"), R(0, b"1\n")]), (3, 4)),
-                       ("sonda dă text literal", FakeTmux(display=[R(0, b"0\n"), R(0, b"#{&&:1,1}\n")]), (3, 4))):
+                       ("sonda dă gol (modificator necunoscut)", FakeTmux(display=[R(0, b"\n")]), (3, 4)),
+                       ("sonda pe prag 0 dă 1", FakeTmux(display=[probe(f5=b"1")]), (3, 4)),
+                       ("sonda dă text literal", FakeTmux(display=[probe(decision=b"#{&&:1,1}")]), (3, 4)),
+                       ("Recheck 3: bucla W dă gol (nu iterează)", FakeTmux(display=[probe(f0=b"")]), (3, 4)),
+                       ("Recheck 3: bucla W dă prea puţine x", FakeTmux(
+                           windows=R(0, b"1 1\n1 1\n"), display=[probe(2, f0=b"x")]), (3, 4)),
+                       ("Recheck 3: comparaţia din W nu devine adevărată", FakeTmux(display=[probe(f1=b"x")]), (3, 4)),
+                       ("Recheck 3: câmpuri lipsă", FakeTmux(display=[R(0, b"x|||0|0|1\n")]), (3, 4))):
     s = FakeSession()
     r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, fk, ver=ver)
-    check("Recheck 2: %s → active, nimic omorât" % label,
+    check("%s → active, nimic omorât" % label,
           r.get("code") == "active" and not killed(calls) and not s.kill_requested, (r, calls))
 s = FakeSession()
-r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux(), ver=(3, 2))
+s.pid = 4242
+for label, disp in (("bucla L nu vede clientul nostru", probe(attached=1, f2=b"")),
+                    ("comparaţia pid din L nu se potriveşte", probe(attached=1, f3=b"")),
+                    ("session_attached diferit", probe(attached=1, f4=b"2"))):
+    r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
+                  FakeTmux(clients=R(0, b"4242\n"), display=[disp]))
+    check("Recheck 3: %s → active (tmux format unsupported), nimic omorât" % label,
+          r.get("code") == "active" and r.get("msg") == "tmux format unsupported" and not killed(calls), (r, calls))
+s = FakeSession()
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux(), ver=(3, 4))
 ifs = [c for c in calls if c[0] == "if-shell"]
-check("tmux 3.2–3.3: fără bucla L:, doar numărul de clienţi ataşaţi",
-      r.get("ok") is True and ifs and "#{L:" not in ifs[0][4] and "#{session_attached},0}" in ifs[0][4], calls)
+disp = [c for c in calls if c[0] == "display-message"]
+check("Recheck 3: tmux 3.4 → O singură sondă (W, W, L, L-pid, attached, prag 0, prag real), apoi if-shell",
+      r.get("ok") is True and len(disp) == 1 and disp[0][4].count("|") >= 6 and "#{L:" in ifs[0][4]
+      and "#{session_attached},0}" in ifs[0][4], calls)
+s = FakeSession()
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, FakeTmux(display=[probe(decision=b"0")]))
+check("sonda pe pragul real dă 0 (activitate) → active, fără if-shell", r.get("code") == "active" and not killed(calls), calls)
+# Recheck 3, probe notes: un salt de ceas DUPĂ pre-check (în timpul sondei) → refuz chiar înainte de if-shell
+saved_steady = ptyd._steady
+jump = {"on": False}
+ptyd._steady = lambda: saved_steady() - (100.0 if jump["on"] else 0.0)
+try:
+    s = FakeSession()
+    r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
+                  FakeTmux(on_display=lambda: jump.update(on=True)))
+    check("Recheck 3: salt de ceas între sondă şi decizie → clock jump, fără if-shell",
+          r.get("code") == "active" and r.get("msg") == "clock jump" and not killed(calls), (r, calls))
+finally:
+    ptyd._steady = saved_steady
+# Recheck 3, Medium 5: succesul cere if-shell reuşit + sesiunea dispărută
+for label, fk, code in (
+        ("if-shell eşuează + can't find session", FakeTmux(ifshell=R(1, b"", b"boom")), "kill_failed"),
+        ("if-shell eşuează + no server running",
+         FakeTmux(ifshell=R(1, b"", b"x"), has=R(1, b"", b"no server running on /tmp/x\n")), "kill_failed")):
+    s = FakeSession()
+    cp = child()
+    s.pid = cp.pid
+    fk.clients = R(0, b"%d\n" % cp.pid)
+    r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s, fk)
+    time.sleep(0.05)
+    check("Recheck 3: %s → %s, fără SIGHUP, kill_requested nepus" % (label, code),
+          r.get("code") == code and cp.poll() is None and not s.kill_requested, (r, calls))
+    cp.kill()
+    cp.wait()
 s = FakeSession()
 r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
-              FakeTmux(display=[R(0, b"0\n"), R(0, b"0\n")]))
-check("sonda pe pragul real dă 0 (activitate) → active, fără if-shell", r.get("code") == "active" and not killed(calls), calls)
+              FakeTmux(has=R(1, b"", b"no server running on /tmp/x\n")))
+check("Recheck 3: if-shell reuşit + no server running (ultima sesiune) → ok", r.get("ok") is True and s.kill_requested, r)
+# Recheck 3, Medium 5: pid-ul clientului trebuie să fie încă copilul nostru, viu
+s = FakeSession()
+cp = child()
+s.pid = cp.pid
+reaped = {cp.pid: 0}                               # sweep-ul l-a cules deja: pid-ul poate fi refolosit
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
+              FakeTmux(clients=R(0, b"%d\n" % cp.pid)), reaped=reaped)
+time.sleep(0.05)
+check("Recheck 3: pid deja cules (în `reaped`) → ok, dar FĂRĂ semnal", r.get("ok") is True and cp.poll() is None, (r, cp.poll()))
+cp.kill()
+cp.wait()
+s = FakeSession()
+cp = subprocess.Popen(["true"])
+time.sleep(0.2)                                    # ieşit, încă necules (zombie)
+s.pid = cp.pid
+reaped = {}
+r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
+              FakeTmux(clients=R(0, b"%d\n" % cp.pid)), reaped=reaped)
+check("Recheck 3: copil deja ieşit → ok, cules acum (statusul în `reaped`), fără semnal",
+      r.get("ok") is True and cp.pid in reaped, (r, reaped))
+gc = subprocess.run(["sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], stdout=subprocess.PIPE)
+gpid = int(gc.stdout.strip())                      # nepotul nostru: NU e copilul agentului
+try:
+    s = FakeSession()
+    s.pid = gpid
+    r, calls = op({"op": "kill_if_quiet", "sid": s.sid, "quiet_secs": Q}, s,
+                  FakeTmux(clients=R(0, b"%d\n" % gpid)))
+    time.sleep(0.05)
+    alive_g = True
+    try:
+        os.kill(gpid, 0)
+    except OSError:
+        alive_g = False
+    check("Recheck 3: pid care nu e copilul nostru (ECHILD) → fără semnal", r.get("ok") is True and alive_g, r)
+finally:
+    try:
+        os.kill(gpid, signal.SIGKILL)
+    except OSError:
+        pass
 # Recheck 2, Medium 5: buget TOTAL
 saved_b = ptyd.QUIET_BUDGET
 try:
@@ -350,20 +472,20 @@ try:
     p.master = m
     cp = child()
     p.pid = cp.pid
-    os.write(sl, b"late output\n")
-    time.sleep(0.05)
-    r, calls = op({"op": "kill_if_quiet", "sid": p.sid, "quiet_secs": Q}, p)
-    time.sleep(0.05)
-    check("op: PTY direct cu output necitit → active, procesul neatins",
-          r.get("code") == "active" and cp.poll() is None and not p.kill_requested, r)
-    os.read(m, 4096)
     r, calls = op({"op": "kill_if_quiet", "sid": p.sid, "quiet_secs": Q}, p)
     time.sleep(0.1)
-    check("op: PTY direct liniştit → ok, SIGHUP, tmux neîntrebat",
-          r.get("ok") is True and cp.poll() == -signal.SIGHUP and p.kill_requested and calls == [], (r, calls))
+    check("Recheck 3 High 2: PTY direct liniştit → active (nu poate închide atomic), procesul neatins, tmux neîntrebat",
+          r.get("code") == "active" and "not a tmux session" in (r.get("msg") or "") and cp.poll() is None
+          and not p.kill_requested and calls == [], (r, calls))
+    cp.kill()
+    cp.wait()
 finally:
     os.close(sl)
     os.close(m)
+d = FakeSession()
+d.alive = False
+r, calls = op({"op": "kill_if_quiet", "sid": d.sid, "quiet_secs": Q}, d)
+check("Recheck 3: sesiune tmux deja încheiată → active, nimic trimis", r.get("code") == "active" and calls == [], (r, calls))
 
 # urmărirea pe Session: append_output / write_input mută marcajele monotone
 real = object.__new__(ptyd.Session)
@@ -392,22 +514,30 @@ def atomic(sess, offset, wrap=None):
     if wrap:
         ptyd.tmux_cmd = wrap(saved)
     try:
-        return ptyd.tmux_kill_if_quiet(sess, 600, time.monotonic() + ptyd.QUIET_BUDGET, now_wall=time.time() + offset)
+        return ptyd.tmux_kill_if_quiet(sess, 600, time.monotonic() + ptyd.QUIET_BUDGET, now_wall=time.time() + offset,
+                                       now_steady=ptyd._steady() + offset)
     finally:
         ptyd.tmux_cmd = saved
 
 
-def lie(real, display_ok=True, no_clients=False):
-    """trece totul la tmux-ul real, dar: sondele spun „0"/„1" (ca şi cum pre-check-ul ar fi văzut linişte),
-    iar list-clients poate pretinde că nu e nimeni ataşat → doar if-shell-ul ATOMIC mai poate refuza"""
-    n = {"display": 0}
+def lie(real, no_clients=False, clients=None):
+    """trece totul la tmux-ul real, dar: sonda spune „linişte" pentru clienţii pretinşi (ca şi cum pre-check-ul
+    n-ar fi văzut nimic), iar list-clients poate pretinde alţi clienţi → doar if-shell-ul ATOMIC mai decide.
+    Câmpurile buclei W (ferestrele) rămân cele reale."""
+    claimed = {"k": None}
 
     def f(*args, **kw):
-        if args[0] == "display-message" and display_ok:
-            n["display"] += 1
-            return R(0, b"0\n" if n["display"] == 1 else b"1\n")
-        if args[0] == "list-clients" and no_clients:
-            return R(0, b"")
+        if args[0] == "list-clients" and (no_clients or clients is not None):
+            r = R(0, b"" if no_clients else clients)
+            claimed["k"] = len(r.stdout.split())
+            return r
+        if args[0] == "display-message":
+            r = real(*args, **kw)
+            got = r.stdout.rstrip(b"\n").split(b"|")
+            k = claimed["k"] if claimed["k"] is not None else 0
+            if len(got) == 7:
+                got[2:7] = [b"y" * k, b"p" * k, str(k).encode(), b"0", b"1"]
+            return R(0, b"|".join(got) + b"\n")
         return real(*args, **kw)
     return f
 
@@ -453,8 +583,8 @@ else:
         check("tmux real: output în fereastra din fundal → tmux activity (pre-check)", at(sess, 60) == "tmux activity")
         check("tmux real: …dar nu peste fereastra de linişte", at(sess, 700) == "")
         code, why = atomic(sess, 60)
-        check("tmux real ATOMIC: output în fundal → active (sonda), sesiunea vie", code == "active" and alive(name),
-              (code, why))
+        check("tmux real ATOMIC: output în fundal → active (sonda validată pe 2 ferestre, decizia „0”), vie",
+              code == "active" and why == "tmux activity" and alive(name), (code, why))
         code, why = atomic(sess, 60, wrap=lambda real: lie(real))
         check("tmux real ATOMIC: sondele mint „linişte”, if-shell-ul vede output-ul din fundal → active, vie",
               code == "active" and why == "activity at kill time" and alive(name), (code, why))
@@ -474,17 +604,30 @@ else:
         code, why = atomic(sess, 7200, wrap=lambda real: lie(real, no_clients=True))
         check("tmux real ATOMIC: client străin pe care pre-check-ul nu l-a văzut → if-shell refuză, vie",
               code == "active" and why == "activity at kill time" and alive(name), (code, why))
-        if ptyd._TMUX_VER >= ptyd.TMUX_CLIENT_LOOP_MIN:
-            # numărul de clienţi se potriveşte (1), dar clientul NU e al nostru: doar bucla L: îl prinde
-            sess.pid = 999999
-            def same_count(real):
-                liar = lie(real)
-                return lambda *a, **kw: R(0, b"999999\n") if a[0] == "list-clients" else liar(*a, **kw)
-            code, why = atomic(sess, 7200, wrap=same_count)
-            check("tmux real ATOMIC: client străin cu acelaşi NUMĂR de clienţi → bucla L: refuză, vie",
-                  code == "active" and why == "activity at kill time" and alive(name), (code, why))
+        # numărul de clienţi se potriveşte (1), dar clientul NU e al nostru: doar bucla L: îl prinde
+        sess.pid = 999999
+        code, why = atomic(sess, 7200, wrap=lambda real: lie(real, clients=b"999999\n"))
+        check("tmux real ATOMIC: client străin cu acelaşi NUMĂR de clienţi → bucla L: refuză, vie",
+              code == "active" and why == "activity at kill time" and alive(name), (code, why))
+        # fără minciuni: sonda reală vede clientul străin în bucla L (nu e pid-ul nostru) → refuz
+        sess.pid = 999999
+        saved_r = ptyd.tmux_cmd
+        ptyd.tmux_cmd = lambda *a, **kw: R(0, b"999999\n") if a[0] == "list-clients" else saved_r(*a, **kw)
+        try:
+            code, why = ptyd.tmux_kill_if_quiet(sess, 600, time.monotonic() + ptyd.QUIET_BUDGET,
+                                                now_wall=time.time() + 7200, now_steady=ptyd._steady() + 7200)
+        finally:
+            ptyd.tmux_cmd = saved_r
+        check("tmux real: sonda L-pid prinde clientul străin → tmux format unsupported, vie",
+              code == "active" and why == "tmux format unsupported" and alive(name), (code, why))
         sess.pid = pid                       # acelaşi client, dar al NOSTRU
         check("tmux real: clientul nostru nu contează ca „alt om”", at(sess, 7200) == "")
+        # Recheck 3: sonda pe tmux real, cu clientul NOSTRU ataşat (calea pozitivă a buclelor L şi L-pid)
+        rp = ptyd.tmux_cmd("display-message", "-p", "-t", "=" + name + ":",
+                           ptyd.tmux_probe_format(name, time.time() + 7200 - 635, pid, 1, time.time()))
+        got = rp.stdout.rstrip(b"\n").split(b"|")
+        check("tmux real: sonda = x×2 ferestre, gol, y, p, 1 ataşat, prag 0 → 0, prag real → 1",
+              got == ptyd.tmux_probe_expected(2, 1) + [b"1"], got)
         sess.pid = None
         os.kill(pid, signal.SIGTERM)
         os.waitpid(pid, 0)

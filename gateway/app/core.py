@@ -586,6 +586,10 @@ SCROLL_EXIT_MIN_AGENT = 59
 # văzut activitate (output, input, un client tmux străin) în fereastra în care gateway-ul n-a văzut nimic.
 # Sub el, închiderea automată nu se face deloc (doar notificare).
 KILL_IF_QUIET_MIN_AGENT = 62
+# Codex Recheck 3, Medium 7: cât aşteaptă o închidere automată lock-ul de trimitere / trimiterea însăşi.
+# Lock-ul neobţinut la timp = nimic trimis (`cancelled`); o trimitere care nu se termină = rezultat necunoscut.
+KILL_IF_QUIET_LOCK_WAIT = 10.0
+KILL_IF_QUIET_SEND_WAIT = 10.0
 SCROLL_EXIT_MIN_INTERVAL = 0.25      # per hub: fiecare cerere e un subprocess tmux pe loop-ul agentului
 HISTORY_MAX_LINES = 20000            # plafon server-side pe `sb` (browserul cere 10000 / 3000)
 HISTORY_MAX_BYTES = 4 * 1024 * 1024  # plafon pe captura DECOMPRIMATĂ (agentul taie la fel)
@@ -2548,7 +2552,10 @@ class AgentConnection(SessionSource):
         ca frame-ul să plece (Codex Recheck 2, High 2: între rezervare şi trimitere cererea poate aştepta
         lock-ul, timp în care un Admin opreşte închiderea). False / excepţie → nimic trimis,
         `{"ok": False, "code": "cancelled"}`. Punctul fără întoarcere e `send_bytes`: după el, o dezactivare
-        nu mai anulează ACEA închidere (agentul tot re-verifică liniştea)."""
+        nu mai anulează ACEA închidere (agentul tot re-verifică liniştea).
+
+        Recheck 3, Medium 7: aşteptarea lock-ului are termen (KILL_IF_QUIET_LOCK_WAIT) → `cancelled`, nimic
+        trimis; trimiterea are termen (KILL_IF_QUIET_SEND_WAIT) → AgentGone (poate a plecat: necunoscut)."""
         if not self.can_kill_if_quiet():
             return {"ok": False, "code": "unsupported"}
         self._req_id += 1
@@ -2558,7 +2565,11 @@ class AgentConnection(SessionSource):
         frame = FRAME_CTRL + json.dumps({"sid": sid, "quiet_secs": max(0.0, float(quiet_secs)),
                                          "op": "kill_if_quiet", "id": rid}).encode()
         try:
-            async with self._send_lock:
+            try:
+                await asyncio.wait_for(self._send_lock.acquire(), KILL_IF_QUIET_LOCK_WAIT)
+            except asyncio.TimeoutError:
+                return {"ok": False, "code": "cancelled"}
+            try:
                 try:
                     go = still_ok is None or bool(still_ok())
                 except Exception:              # noqa: BLE001 — fail-closed: nu ştim → nu trimitem
@@ -2566,9 +2577,11 @@ class AgentConnection(SessionSource):
                 if not go:
                     return {"ok": False, "code": "cancelled"}
                 try:
-                    await self.ws.send_bytes(frame)
+                    await asyncio.wait_for(self.ws.send_bytes(frame), KILL_IF_QUIET_SEND_WAIT)
                 except Exception:
                     raise AgentGone()
+            finally:
+                self._send_lock.release()
             r = await asyncio.wait_for(fut, 20.0)
             return r if isinstance(r, dict) else {}
         finally:
