@@ -1,7 +1,7 @@
 # Encryption at rest (design, 3.8)
 
-Status: **proposal v2**, revised after an independent review (Codex, 2026-11-22; report kept
-locally in `.audit/`). No code yet. Owner decision 2026-11-22: session recordings and everything
+Status: **proposal v3**, revised after two independent reviews (Codex, 2026-11-22; reports kept
+locally in `.audit/`). §12 is normative and wins over any earlier wording. No code yet. Owner decision 2026-11-22: session recordings and everything
 about clients and users are encrypted at rest, on every installation.
 
 ## 1. Where we are today (3.7.1)
@@ -31,7 +31,8 @@ state**, not a blanket claim.
 | Capture | Key in the volume (legacy) | Key file on the same host | Key off-host (KMS / mounted at boot from elsewhere) |
 |---|---|---|---|
 | Copy of the data volume only | readable | **protected** | **protected** |
-| Leaked backup / snapshot made by the new scheme | protected by the backup key (§6) | protected | protected |
+| A backup / snapshot archive alone (new scheme) | protected | protected | protected |
+| That archive **plus** a copy of the volume | readable (the MK is in the volume) | protected | protected |
 | Full disk image / VM snapshot of the host | readable | readable (key file is on that disk) | **protected** |
 | VM snapshot including RAM, swap, core dumps | readable | readable | readable (key in memory) |
 | Code running in the gateway / root on the live host (N1) | readable | readable | readable |
@@ -55,12 +56,12 @@ exports, proxy logs, the backup provider's own copies).
 Master key  MK (32 B)                      key file / env / (legacy) volume
  ├─ KWK  = HKDF(MK, "wt/kwk/v1")           wraps every data key below (AES-256-GCM, unique nonce, AAD)
  ├─ SNK  = HKDF(MK, "wt/snapshot/v1")      local snapshot containers (§6)
- └─ keyring (in the DB, wrapped by KWK):
+ └─ keyring (in the key manifest file, not in the DB — §12.2):
      ├─ DBK       random 32 B              SQLCipher key (phase 2)
      ├─ FK_legacy = today's data/secret     existing Fernet fields, unchanged until re-encrypted
      ├─ FK        random 32 B              new Fernet fields
-     └─ per-session RK (random 32 B, row in `session_keys`)
-          └─ segment key  = HKDF(RK, "wt/seg/v1" ‖ kind ‖ gen_id)   (§4)
+     └─ per-session RK (random 32 B, wrapped by KWK, row in `session_keys`)
+          └─ per generation: K_hdr, K_rec, K_idx = HKDF(RK, …)    (§12.1)
 ```
 
 - **Independent keys per purpose**, so DB rekey, Fernet migration and MK rotation are separate
@@ -131,8 +132,7 @@ header  (authenticated as AAD of every record, and by its own tag):
 record:
   len u32 (plaintext length, 1..65536) | seq u64 | ciphertext | tag 16 B
   nonce = seq as 96-bit big-endian;  AAD = H(header) ‖ seq ‖ len
-seal (last record, flags bit 0):
-  plaintext = record_count u64 ‖ plain_length u64 ‖ H(all record tags)
+seal: a record of type SEAL (superseded in detail by §12.1)
 ```
 
 - Readers require `seq` to be exactly the previous seq + 1, starting at 0: a moved, duplicated or
@@ -144,8 +144,8 @@ seal (last record, flags bit 0):
   *below* the watermark is corruption (error, alarm).
 - Once a session has been migrated, a plaintext file for it is **refused** (no downgrade); the
   session row records the format.
-- `.cast`: one asciicast event never spans records. An event over 64 KiB is split into several
-  `o` events of the same timestamp before encryption (lossless for players).
+- `.cast`: records are opaque bytes; readers rebuild lines across records (bounded line length).
+  No event is ever rewritten or split: a download stays byte-identical to the plaintext file.
 
 ### 4.3 Index and readers
 
@@ -280,3 +280,132 @@ leaves the disk unchanged across two restarts.
    CLI export/verify for operators.
 4. **Erasure wording accepted:** "unreadable through the app at once; copies in backups expire with
    their retention", with the deletion journal re-applied after any restore.
+
+## 12. Normative details (v3, after the second review)
+
+These rules close the review's open points. Where an earlier section is vaguer, this one wins.
+
+### 12.1 `WTX1` generation format
+
+- **KDF:** HKDF-SHA-256, salt = 32 zero bytes, `info` = ASCII label ‖ 0x00 ‖ kind (1 B) ‖ gen_id
+  (16 B). Labels: `wt/v1/hdr`, `wt/v1/rec`, `wt/v1/idx`. Three independent keys per generation.
+- **Header** (fixed 64 B, immutable, never rewritten): `"WTX1"` | ver u8 = 1 | kind u8 | reserved
+  u16 = 0 | gen_id 16 B | sid 16 B | created u64 LE (unix ms) | reserved 16 B = 0 ‖ followed by
+  `hdr_mac` = HMAC-SHA-256(K_hdr, header 64 B) (32 B). No AEAD is used for the header, so no nonce
+  is spent on it.
+- **Record:** `type u8` (1 = DATA, 2 = SEAL) | `len u32 LE` (DATA: 1..65 536; SEAL: 48) | `seq u32
+  LE` | ciphertext (`len` bytes) | tag 16 B. Cipher AES-256-GCM under K_rec; nonce = 8 zero bytes ‖
+  seq as u32 big-endian; AAD = `hdr_mac` ‖ type ‖ len ‖ seq. `seq` starts at 0 and increases by 1
+  for every record of either type; readers require exact succession.
+- **Limits:** at most 1 048 576 DATA records and 64 GiB of plaintext per generation (far above the
+  64 MiB cap, so in practice a generation ends by cap or writer restart); the writer starts a new
+  generation at 90 % of either limit and refuses to write past it.
+- **SEAL:** written at most once, at `seq = data_count`, plaintext = data_count u64 ‖ plain_len u64
+  ‖ SHA-256 over the concatenated DATA tags (32 B). No byte may follow a SEAL. A generation that
+  ended by crash is **never sealed afterwards**: its readable prefix is recorded in the descriptor
+  as `recovered` (§12.3) and, if it must stay, copied into a new generation by the next cap.
+- **Uniqueness:** `gen_id` = 16 bytes from `os.urandom`; the file is created with `O_CREAT|O_EXCL`
+  under a name containing the gen_id, after the gen_id is reserved in the descriptor. A collision
+  (or an orphan file with that name) aborts and retries with a new id. A clone of a VM with RAM can
+  still repeat randomness: stated as a limit (N1-class capture).
+- **Index** (`.idx`, a cache): entries (seq u32, logical offset u64, file offset u64), authenticated
+  with HMAC-SHA-256 under K_idx over (gen_id, entries, data_count); readers verify it against the
+  descriptor and the records they return, and rebuild by a bounded length scan when it is missing
+  or stale.
+- **Test vectors** (fixed RK, gen_id, plaintexts → exact bytes) are part of the first PR.
+
+### 12.2 Key manifest, bootstrap and boot
+
+- The keyring lives in **one file**, `DATA_DIR/keys.wtk`, not in the database (the SQLCipher key
+  cannot live inside the database it opens). Content: installation id, epoch u64, MK ids it accepts,
+  envelopes (`FK_legacy`, `FK`, `DBK`, `KWK`-checks), each envelope = AES-256 key wrap with padding
+  (RFC 5649, deterministic, no caller nonce) under KWK, with a type tag; the whole file is
+  authenticated by HMAC-SHA-256 under `K_man = HKDF(MK, "wt/v1/manifest")` (a key used for nothing
+  else). Per-session RKs stay in the `session_keys` table, wrapped the same way; their binding to
+  the session is the descriptor MAC (§12.3).
+- **Publication:** write `keys.wtk.tmp` (O_EXCL, 0600, O_NOFOLLOW), fsync, rename over `keys.wtk`,
+  fsync the directory. One file = one atomic switch; the epoch increases on every change.
+- **Rotation:** the new file holds envelopes under the new KWK and lists both MK ids until the
+  re-wrap of `session_keys` finishes; boot accepts either MK while `rotating`; when coverage is
+  verified the old id is dropped (new epoch). A crash at any point leaves either the old or the new
+  file, both valid, and the re-wrap resumes.
+- **Boot order** (before `db.connect`, before any writer): take the **process lock**
+  (`fcntl.flock` on `DATA_DIR/.lock`, exclusive, non-blocking: a second process refuses) → resolve
+  the key source → verify `keys.wtk` (MAC, MK id, unwrap of every envelope, an open probe of the DB
+  in phase 2) → only then schema, migrations and writers.
+  - `keys.wtk` absent and the data directory empty → bootstrap.
+  - `keys.wtk` absent and data present → refused, except the one declared legacy migration (a 3.7
+    volume: `data/secret` present, no `keys.wtk`, format markers all legacy).
+  - A source that is **explicitly configured** (`WEBTERM_MASTER_KEY_FILE` or `WEBTERM_MASTER_KEY`
+    set) but missing or invalid → refused. The default path (`/run/secrets/webterm_master_key`) only
+    counts as configured once a `keys.wtk` exists that expects an external key; a migrated volume
+    never falls back to the in-volume key.
+- Every Fernet value written from 3.8 carries a version prefix naming its key (`FK` or
+  `FK_legacy`); the migration re-encrypts every producer's values (hosts, connections, deploy keys,
+  TOTP, SMTP, cloud, agent CA) and the forward-token HMAC moves to a key derived from `FK`.
+
+### 12.3 Descriptors and commit
+
+- Each (sid, kind) has a **descriptor** in the database: version u64, list of generations
+  `{gen_id, state live|sealed|recovered, data_count, plain_len, phys_len, hdr_mac}`, the hash of the
+  session's wrapped RK, authenticated with HMAC-SHA-256 under `K_desc = HKDF(KWK, "wt/v1/desc")`
+  over (installation id, sid, kind, everything above).
+- **Commit order per checkpoint:** append records to `.out` and `.cast` → fsync both → one DB
+  transaction that updates both descriptors (`data_count` = exclusive watermark) **and** the
+  upstream agent offset. A reader trusts exactly the committed prefix: bytes after it are ignored,
+  even if they authenticate; inside it, a short file, a bad tag or a gap is corruption.
+- Range reads guarantee the records they return plus the descriptor; the seal (sealed generations)
+  or the watermark (live) guarantees completeness of the whole generation.
+- Detection limits: a MAC stops edits, not the replay of an older authentic descriptor together
+  with older files (whole-state rollback, N5); a monotonic epoch in `keys.wtk` catches a database
+  rolled back alone against a newer key file, nothing more.
+
+### 12.4 Concurrency, backup boundary, restore
+
+- Cross-process exclusivity: the boot lock (§12.2). In process, one async **commit barrier** that
+  every checkpoint takes for its fsync + DB transaction.
+- **Backup boundary:** take the barrier (milliseconds), `VACUUM INTO` the DB, read all descriptors,
+  **pin** the listed generations (cap, archive and purge defer unlinking pinned files), release the
+  barrier, then copy exactly the committed prefixes off the loop, then unpin. No long lease blocks a
+  live terminal.
+- **Restore** builds the complete new state in `DATA_DIR/.restore/<epoch>/` (DB, keys.wtk check,
+  generations), verifies manifest, key ids, DB integrity and every descriptor against its files,
+  applies the erasure journal (§12.5), then switches with a resumable rename journal at the next
+  boot (each step idempotent; a crash resumes or rolls back, never a half state). A backup without
+  recordings restores with recordings marked "not in this backup"; a pair where `.out` is migrated
+  and `.cast` is not is migrated together before the switch; orphans are listed in System health.
+
+### 12.5 Erasure journal
+
+- Order of an erasure: append a tombstone (sid, installation id, monotonic erasure number, time; no
+  personal data) to `DATA_DIR/erasures.wtj` (HMAC-chained under `HKDF(KWK, "wt/v1/erase")`, fsync)
+  → revoke share and replay links, close open readers of that session (exports already started are
+  cut at the next record) and drop caches → destroy the wrapped RK.
+- The journal is copied into **every** backup and, when an off-host backup destination is
+  configured, also written there as its own small object after each erasure.
+- A restore applies the freshest journal it can find (volume, backup, destination). When the
+  backup is older than the newest erasure it can see, those erasures are re-applied before access.
+  When no source newer than the backup is reachable (restore from a downloaded file on a new host),
+  the restore stays in staging until an Owner confirms "erasures after <backup date> cannot be
+  re-applied"; the confirmation is audited.
+
+### 12.6 Snapshot container
+
+- Header (magic, version, installation id, MK id, created, flags), a random snapshot key wrapped by
+  `SNK` (local) and, for portable copies, by the historical **MK id** recorded in the header
+  (recovery uses the recovery kit for that MK; kits list every MK id still needed by retained
+  backups). No independent recovery key: one root of trust, documented.
+- Chunked AES-256-GCM (1 MiB chunks, nonce = chunk counter, AAD = header hash ‖ counter ‖ final
+  flag), a final chunk with count and total length; truncated or reordered streams fail.
+- The scrypt passphrase layer is required for downloads, optional for configured remote
+  destinations (their credentials are a second factor), with bounded scrypt parameters on input.
+- The local snapshot is "protected" only when the MK is outside the volume (§2 table).
+
+### 12.7 First pull request (infrastructure, nothing user-visible)
+
+`keys.py` (key manifest, sources, boot contract, process lock, rotation skeleton), `txformat.py`
+(the §12.1 codec with test vectors, no writer wired in), descriptor schema + MAC, commit barrier
+and pinning API, INV-14 text with its phase matrix, and the contract tests: wrong key twice leaves
+the disk byte-identical; crash at every publication point; vectors; succession, seal and watermark
+rules. Writers, migration, backups and the protection promise stay **inactive** until the next PRs
+pass their own gates.
