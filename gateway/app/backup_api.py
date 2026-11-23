@@ -42,6 +42,8 @@ def _backup_value_error(e: Exception) -> ApiError:
         return ApiError(400, "backup.limitExceeded", msg)
     if msg == backup._BUSY:
         return ApiError(409, "backup.busy", msg)
+    if msg == backup._IN_PROGRESS:
+        return ApiError(409, "backup.restoreInProgress", msg)
     if "passphrase" in low and "wrong" in low:
         code = "backup.badPassphrase"
     elif "too large" in low or "bomb" in low:
@@ -188,6 +190,8 @@ async def backup_download(body: BackupIn, user=Depends(authz.perm('backups.manag
         raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
     try:
         blob = await asyncio.to_thread(backup.make_encrypted, body.passphrase, body.include_transcripts)
+    except wts.SnapshotTooLarge as e:
+        raise _backup_value_error(e)           # R-M2: peste limita de upload a restore-ului
     except Exception as e:
         log.exception("backup failed")
         raise ApiError(500, "backup.failed", "backup failed: %s" % e)
@@ -242,7 +246,7 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
     return {"ok": True, "restarting": True, **info}
 
 
-UPLOAD_MAX = 512 * 1024 * 1024
+UPLOAD_MAX = backup.UPLOAD_MAX          # R-M2: aceeaşi limită ca exportul (backup.py o impune la producere)
 
 
 async def _read_upload(request: Request) -> bytes:

@@ -866,10 +866,20 @@ process lock: *protected* = `DATA_DIR/keys.wtk` is a regular file **and** `keys.
 refuse). *Legacy* only when `keys.wtk` is absent **and nothing says the volume was protected**:
 no host-keys provider registered and no `set_boot_protected(True)`, no key artefact of the new
 format (`migrating.wtm[.tmp]`, `keys.wtk.tmp`, `master.key[.tmp]`), no reserved name
-(`keys.find_reserved`), no 3.8 staging (`restore-pending/keys.wtk`, `restore-pending/restore.json`,
-a JSON `.restore-flag`) and no WTS1 file in `backups/` (`*.wts`, `*.wts.keep`, `*.wts.tmp`). Any
-such trace with `keys.wtk` missing refuses **every** backup, verify and restore operation (a
-lost manifest never reopens the tar with `secret`). `make_snapshot` (the 3.7 tar) runs only on a
+(`keys.find_reserved`), no 3.8 staging (a `restore-pending.<generation>` directory,
+`restore-pending/keys.wtk`, `restore-pending/restore.json`, a JSON `.restore-flag`) and no WTS1
+file in `backups/` (`*.wts`, `*.wts.keep`, `*.wts.tmp`). Any such trace with `keys.wtk` missing
+refuses **every** backup, verify and restore operation (a lost manifest never reopens the tar
+with `secret`). The supported 3.7 layouts stay legacy (R-M3): a `backups/` or `transcripts/`
+that is a symlink to another disk is checked **through the link** (names only: `*.wts*` in
+`backups/`, reserved names in `transcripts/` and one level of real subdirectories below it) and,
+when clean, classified legacy with a logged warning; a link whose target cannot be listed is still
+a trace (refused). On a protected volume nothing changes: `transcripts/` as a symlink refuses a
+backup with transcripts. A clean result is cached per process, keyed by the `stat` of `DATA_DIR`,
+`keys.wtk`, the key artefacts, the flag, `restore-pending`, `backups/` and `transcripts[/arhiva]`
+(with and without following links) and the boot state, and dropped by every stage and apply; a
+refusal is never cached. `keys.classify` (the boot inventory) still reports a symlinked
+`transcripts/` as ambiguous; the wiring PR must make the authenticated boot state the authority. `make_snapshot` (the 3.7 tar) runs only on a
 volume classified legacy. *Legacy*: exactly the 3.7 code (`make_snapshot`, `.wtsnap`, WTBK1
 downloads, `restore-pending/` with `secret`). *Protected*: WTS1 everywhere below. The
 keyring comes from the caller (`keys=HostKeys(ring, mk)`) or from a provider the boot registers
@@ -940,6 +950,16 @@ Fernet ciphertexts as today).
   directories are skipped and logged. **Limit:** a *copy* of key bytes written into an allowed
   recording name is archived (inside the encrypted container); the inventory can stop aliases,
   not arbitrary content.
+- **Fleet signing key (R-H2).** `agent-signing.key` and `.pub` are read through one
+  `O_NOFOLLOW` fd each and checked on that fd: regular, ≤ 64 KiB, `st_nlink == 1`, and an inode
+  that is none of `secret`, `master.key[.tmp]`, `keys.wtk[.tmp]`, `migrating.wtm`, the DB (and its
+  `-wal`/`-shm`), `.lock`, `DATA_DIR` or the external key file; any of these → the whole backup is
+  refused (never archived, never skipped silently). The files are a **pair**: both or neither
+  (one alone → refused); `.pub` is 64 lowercase hex (+ optional newline); an unencrypted PKCS8 PEM
+  must be Ed25519 and derive exactly that public key. A passphrase-encrypted PEM can only be
+  checked for form (no passphrase at backup time): accepted, the pair match unproven. The same
+  check runs on import (WTS1 restore, verify, transcoding, the 3.7 import) on the members held in
+  memory, before anything is staged.
 - **Writer budgets.** The writer enforces the reader's limits while producing (members ≤
   200 000, unpacked tar ≤ 2 GiB, content manifest ≤ 4 MiB, plaintext ≤ 4 GiB) and reports success
   only after the produced container passed the restore reader (files: before the rename; the
@@ -962,12 +982,27 @@ header per member, ≤ 8 KiB, keys `path mtime atime ctime uid gid uname gname`.
 manifest is strict JSON: UTF-8, no duplicate keys, no floats or constants, exact key sets and
 types (`size` an int, `sha256` 64 lowercase hex), and byte-equal to its canonical form; every
 parse error is a `SnapshotError` (400), never a 500. The extracted set must equal the manifest
-(names, sizes, SHA-256); `webterm.db` and `keys.wtk` are required; the DB passes `PRAGMA
-integrity_check`; the inner `keys.wtk` must open (`open_keyring_bytes`, profile v1) with the MK
+(names, sizes, SHA-256); `webterm.db` and `keys.wtk` are required; the signing files are a valid
+pair or absent (above); the DB passes `PRAGMA integrity_check` **and** holds the gateway's
+minimal schema (`users`, `hosts`, `sessions`, `app_settings`; R-M2); the inner `keys.wtk` must open (`open_keyring_bytes`, profile v1) with the MK
 the **header** names — the host's or the operator's — and carry the header's installation id,
-epoch and MK id, and an SNK (writers keep outer and inner MK equal, see M4 below). `PRAGMA
-integrity_check` proves a sound SQLite file, not the gateway schema nor that `FK_legacy` decrypts
+epoch and MK id, and an SNK (writers keep outer and inner MK equal, see M4 below). The table
+check proves a sound gateway database, not its full schema version nor that `FK_legacy` decrypts
 it (§12.9 checklist item 3).
+
+**Structural vs restorable** (R-M2). *Structural* = everything above except the database
+(`_verify_wts(…, dest=None, restorable=False)`, hash only, nothing written). *Restorable* =
+structural + the database check, on the extracted set (stage, verify) or, for a container being
+produced, on `webterm.db` alone extracted into a private temp dir. Every produced container is
+checked **restorable** before it is published or returned (scheduled `.wts`, safety copy,
+download, re-export of a stored `.wts`); `verify` reports `restorable: true`.
+
+**Export size** (R-M2). A download / remote upload is built in memory under a cap: its WTBK1 must
+fit the restore route's upload limit (`backup.UPLOAD_MAX` = 512 MiB, which `backup_api` uses for
+the uploads too). A bigger export is refused while it is produced (`SnapshotTooLarge` →
+`backup.limitExceeded`), never handed out as a file no route can restore. Scheduled local `.wts`
+snapshots are not capped (they are verified and restored by name; an offline import of a larger
+file is a follow-up). Legacy volumes keep the 3.7 behaviour.
 
 **Paths:**
 
@@ -976,7 +1011,7 @@ it (§12.9 checklist item 3).
 | scheduled local snapshot `backups/webterm-…wts` | WTS1, local envelope only | this installation's SNK |
 | download (`make_encrypted`), manual and scheduled remote upload | WTBK1 (scrypt passphrase, mandatory) around WTS1 local + portable | passphrase **and** (SNK of the same installation, or the MK) |
 | download of a stored `.wts` (`encrypt_stored(name, pass, mk=)`) | transcoded (streamed, no plaintext on disk) to WTS1 local + portable with a new CK; the inner `keys.wtk` is authenticated with the MK its header names and **re-wrapped under the current MK** (same installation and epoch), so one MK opens the result; a snapshot made before a rotation needs the old MK as `mk=` ("needs master key <id>"); then WTBK1 | as above |
-| pre-restore safety copy `backups/pre-restore-<ts>.wts.keep` | WTS1 local + portable | the host MK (still opens after `keys.wtk` changed) |
+| pre-restore safety copy `backups/pre-restore-<ts>-<restore id>-<random>.wts.keep` (R-L1: published with `link(2)`, never replaces an existing copy; with the live transcripts when the apply replaces them, R-M1) | WTS1 local + portable | the host MK (still opens after `keys.wtk` changed) |
 
 The passphrase is mandatory for every archive that leaves the host (downloads, all remote
 profiles): the product promises "two secrets" for a stolen remote archive (V3-M1), and the
@@ -994,14 +1029,14 @@ remote credentials are not counted as one. Neither secret alone opens it (tested
    (`backups/.restore.lock`, `flock` non-blocking: a second verify/stage/apply is refused with
    `backup.busy`, and `.restore-verify-*` left by a crash are removed), the whole reader above
    runs into a private 0700 directory under `backups/` (`.restore-verify-*`, same filesystem as
-   `restore-pending/`). Only after everything passed: the inner keyring is **re-wrapped under the
+   the staged set). Only after everything passed: the inner keyring is **re-wrapped under the
    host MK** (KWK and SNK under the host `K_mw`, the KWK-wrapped keys unchanged; installation id of
    the snapshot; epoch = max(snapshot, host) + 1; retired ids = the snapshot's ∪ its MK id, plus
    the host's own when it is the same installation, minus the host MK id; > 64 → refused),
    replacing the snapshot's `keys.wtk`; then the set is published (below). A wrong key, a
-   tampered container or any content check failing leaves no `restore-pending/`, no flag, no
+   tampered container or any content check failing leaves no new staged set (the previous flag and set unchanged), no
    temp directory. The returned info says what the backup does **not** carry
-   (`live_transcripts_kept`, `live_signing_key_kept`).
+   (`live_transcripts_kept`, `live_transcripts_quarantined`, `live_signing_key_kept`).
 4. A 3.7 `tar.gz` on a legacy volume → the 3.7 code, unchanged.
 5. A 3.7 `tar.gz` on a protected volume → refused unless `legacy_import=True` (the explicit
    import of §6): the archive goes through the **same strict extractor** (profile "legacy": also
@@ -1012,15 +1047,20 @@ remote credentials are not counted as one. Neither secret alone opens it (tested
    refused); the DB check runs on exactly the files that are then published (one extraction).
    The raw key is never written to staging.
 
-**Staged set** (H1). Publication of a verified directory: every file and directory fsynced; then
-`restore.json` = canonical JSON `{format: "wt-restore-1", generation (random 128-bit), created,
-installation_id, epoch, mk_id (of the staged keyring), files: [{name, size, sha256}], dirs}`,
-fsynced with its directory; then the previous set is retired (its flag removed durably first,
-then its directory moved aside and deleted); then **one rename** to `restore-pending/` with fsync of
-both parents; the flag **last**, atomically (`.restore-flag.tmp`, fsync, rename, directory fsync)
-= `{format: "wt-restore-flag-1", manifest: sha256(restore.json), state: "staged"}`. A crash or an
-I/O error at any point leaves either no flag or a flag whose set is complete (fault-injected at
-every step and every fsync).
+**Staged set** (H1, R-H1). Publication of a verified directory: every file and directory
+fsynced; then `restore.json` = canonical JSON `{format: "wt-restore-1", generation (random
+128-bit), created, installation_id, epoch, mk_id (of the staged keyring), files: [{name, size,
+sha256}], dirs}`, fsynced with its directory; then **one rename** to its own generation directory
+`restore-pending.<generation>` with fsync of both parents; the flag **last**, atomically
+(`.restore-flag.tmp`, fsync, rename, directory fsync) = `{format: "wt-restore-flag-1", manifest:
+sha256(restore.json), state: "staged", set: <generation>}` — the flag is the pointer that switches
+from the previous set to the new one; only after it is durable are the generations it does not
+name (the previous set, an interrupted stage, a 3.7-named `restore-pending/`) moved aside and
+deleted. A crash or an I/O error at any point leaves the previous flag with its complete set or
+the new flag with its complete set, never a flag without its set (fault-injected at every step
+and every fsync, including while a staged set is being replaced). **A flag in `applying` or
+`committed` is never replaced**: stage (WTS1 or the 3.7 import) is refused with 409
+`backup.restoreInProgress` until apply has finished the journal; a malformed flag is refused too.
 
 **Apply** (`apply_pending_restore(keys=, force_without_safety_copy=False)`, at boot before
 `db.connect`). No flag and no `restore-pending/` → nothing to do (as in 3.7). Otherwise the volume
@@ -1028,6 +1068,7 @@ is classified first (above): an ambiguous volume → refuse; legacy → the 3.7 
 under the operations lock, a **journal kept in the flag**:
 
 - no flag, staging present → an interrupted stage: ignored (logged), replaced by the next stage;
+  with a flag, the generations it does not name are removed first;
 - a 3.7 flag (a timestamp), a flag without its staging, a staging without `restore.json`, a
   manifest whose digest is not the flag's, a missing / changed / extra file, a non-regular entry,
   a staged `keys.wtk` that does not open with the host MK or does not match the manifest's
@@ -1035,12 +1076,19 @@ under the operations lock, a **journal kept in the flag**:
 - `staged`: the set is re-validated against its manifest; **mandatory** safety copy
   (`pre-restore-<ts>.wts.keep`, WTS1 local + portable, verified like every produced container);
   if it cannot be made the apply is refused unless the caller passes
-  `force_without_safety_copy=True`; then the flag becomes `applying` (+ the safety copy's name);
+  `force_without_safety_copy=True`; then the flag becomes `applying` (+ the safety copy's name and
+  the **dataset decision** `quarantine`, taken once and resumed from the flag: once `keys.wtk` is
+  replaced the live identity can no longer be compared);
 - `applying`: the set is re-validated; `keys.wtk` replaced atomically if it differs
   (`keys.wtk.tmp`, `O_EXCL|O_NOFOLLOW`, fsync, rename, directory fsync, read-back); the fleet
-  signing key and `.pub` when the backup has them (otherwise the live ones stay); transcripts when
-  the backup has them, as a durable copy `transcripts.restoring` then two renames through
-  `transcripts.pre-restore` (otherwise the live ones stay, logged); the DB last (durable copy +
+  signing key **pair** when the backup has it (both files, or neither: the live pair stays; a
+  staged half pair is refused); transcripts when the backup has them, as a durable copy
+  `transcripts.restoring` then two renames through `transcripts.pre-restore` (the replaced ones
+  are in the safety copy); without transcripts in the backup the **dataset rule** (R-M1) applies:
+  the same installation id → the live transcripts stay (logged, `live_transcripts_kept`); another
+  installation id → the live `transcripts/` is moved whole to `backups/quarantine-<restore id>/`
+  (`live_transcripts_quarantined`: its session ids may collide with the restored DB's); the DB
+  last (durable copy +
   rename), `-wal`/`-shm` removed, `DATA_DIR` fsynced; then the flag becomes `committed`;
 - `committed`: the staging is moved aside and deleted, then the flag is removed.
 
@@ -1060,7 +1108,9 @@ in PR3).
 
 **API errors** (L1). `SnapshotWrongKey` with a header MK id → `backup.needsMasterKey` (vars
 `{id}`); other key mismatches → `backup.wrongKeys`; any budget (`SnapshotTooLarge`) →
-`backup.limitExceeded`; a concurrent verify/stage → 409 `backup.busy`; the 3.7 messages keep their
+`backup.limitExceeded` (also an export over the upload limit, on the download route); a concurrent
+verify/stage → 409 `backup.busy`; a stage while an apply journal is unfinished → 409
+`backup.restoreInProgress`; the 3.7 messages keep their
 codes. The detail stays the module's short English text (reason codes, no parser dump). Uploads
 (`/api/backup/restore`, `/api/backup/verify`) are refused with 413 from `Content-Length` before
 the body is read, and cut off at 512 MiB while streaming when the length is absent.
@@ -1077,7 +1127,8 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
   serialised by the operations lock only.
 - Plaintext temp copies remain, private (0700/0600) and removed on every path: the `VACUUM INTO`
   copy and transcript spool files (system temp dir), the verify/stage directory and
-  `restore-pending/` (DB, signing key, transcripts). Their remanence on disk is outside the phase-1
+  `restore-pending.<generation>/` (DB, signing key, transcripts), the restorable check's temp
+  copy of `webterm.db`, and `backups/quarantine-*` (moved transcripts, removed by hand). Their remanence on disk is outside the phase-1
   promise (it covers `secret`, `master.key` and unwrapped keyring keys, which never reach them,
   also not through an alias — H3).
 - `FK_legacy` of an imported 3.7 backup is not yet proven to decrypt its DB (§12.9 item 3).
@@ -1098,7 +1149,7 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
 - Routing: PR3 classifies the volume lock-free (`volume_kind`); the wiring PR must route from the
   boot state (`set_boot_protected`, the provider) and keep the lock through apply. There is no
   backup CLI yet; any future one must use the same classification and lock.
-- `restore-pending/` still holds the fleet signing key and the plaintext DB (as in 3.7); it holds
+- `restore-pending.<generation>/` still holds the fleet signing key and the plaintext DB (as in 3.7); it holds
   no `secret`, no MK and no unwrapped keyring key (now also not through a transcript alias).
 - The §12.4 restore layout (`.restore/<epoch>/`, rename journal, descriptors, erasure journal)
   and the §12.8 contract 5 snapshot coherence (barrier, pins) are not implemented: phase 1 has no

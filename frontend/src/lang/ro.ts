@@ -289,6 +289,7 @@ const ro: Lang = {
     'err.backup.wrongKeys': "Acest backup nu se poate deschide cu cheile acestei instalări.",
     'err.backup.limitExceeded': "Backup-ul depășește o limită de siguranță (mărime, număr de fișiere sau mărime despachetată) — refuzat.",
     'err.backup.busy': "O altă verificare sau restaurare de backup e în curs. Încearcă din nou peste câteva momente.",
+    'err.backup.restoreInProgress': "O restaurare este încă în curs de aplicare. Repornește gateway-ul ca să se termine înainte să pregătești alta.",
     'err.backup.noVaultKey': "Backupul nu conține cheia seifului — o restaurare ar lăsa credențialele salvate ilizibile.",
     'err.backup.emptyFile': "Fișierul e gol.",
     'err.backup.failed': "Backupul nu a putut fi creat — vezi logul gateway-ului.",
