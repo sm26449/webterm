@@ -560,9 +560,9 @@ async def upload_backup(data: bytes | None = None, name: str = "") -> str:
         # invariantul: arhiva conține cheia seifului; necriptată la un terț = joc încheiat
         raise CloudError("the encryption passphrase is missing — unencrypted archives are not uploaded")
     if data is None:
-        snap = await asyncio.to_thread(backup.make_snapshot, c["include_transcripts"])
         name = "webterm-%s.wtbk" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        data = await asyncio.to_thread(backup.encrypt, snap, c["passphrase"])
+        # legacy: WTBK1(tar.gz), ca înainte; volum protejat: WTBK1(WTS1 portabil), parola obligatorie
+        data = await asyncio.to_thread(backup.make_encrypted, c["passphrase"], c["include_transcripts"])
     async def _do_upload():
         if direct:
             cfg = await _direct_cfg(c)
@@ -629,7 +629,7 @@ async def upload_scheduled(local_name: str) -> str:
         if not c["passphrase"]:
             raise CloudError("the encryption passphrase is missing")
         blob = await asyncio.to_thread(backup.encrypt_stored, local_name, c["passphrase"])
-        await upload_backup(blob, local_name.replace(".wtsnap", ".wtbk"))
+        await upload_backup(blob, backup.remote_name(local_name))
         log.info("backup uploaded to %s: %s", c["provider"], local_name)
         return ""
     except Exception as e:                  # noqa: BLE001 — orice eșec e informativ, nu fatal

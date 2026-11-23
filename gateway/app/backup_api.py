@@ -284,7 +284,7 @@ async def backup_schedule(body: BackupScheduleIn, user=Depends(authz.perm('backu
 
 @router.delete("/api/backup/stored/{name}")
 async def backup_delete_stored(name: str, user=Depends(authz.perm('backups.manage'))):
-    if "/" in name or "\\" in name or not name.endswith(".wtsnap"):
+    if "/" in name or "\\" in name or not name.endswith((".wtsnap", backup.WTS_EXT)):
         raise ApiError(400, "generic.badName", "invalid name")
     p = config.DATA_DIR / "backups" / name
     try:

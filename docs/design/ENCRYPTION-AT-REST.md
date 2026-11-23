@@ -447,6 +447,10 @@ These rules close the review's open points. Where an earlier section is vaguer, 
 
 ### 12.6 Snapshot container
 
+*Sketch; the normative bytes and rules are §12.10 (where they differ, §12.10 wins: the portable
+envelope is keyed by `HKDF(MK, "wt/v1/portable")`, AAD uses the header MAC, and the passphrase is
+mandatory for every archive that leaves the host).*
+
 - Header (magic, version, installation id, MK id, created, flags), a random snapshot key wrapped by
   `SNK` (local) and, for portable copies, by the historical **MK id** recorded in the header
   (recovery uses the recovery kit for that MK; kits list every MK id still needed by retained
@@ -495,7 +499,7 @@ reviewed before the PR that turns writers, migration, backup or erasure on:
 4. **Snapshot container bytes (V3-M1):** per-envelope algorithm and purpose key, canonical AAD,
    nonce and strict counter, frame and decompression limits, single final frame, new key on retry
    after an ambiguous write; the passphrase is mandatory for downloads and for any remote profile
-   that promises "two secrets".
+   that promises "two secrets". *Written in §12.10 (PR3).*
 5. **Backup snapshot coherence (V3-M2):** descriptors and keyring read from the same snapshot as the
    DB; the list of mutations that take the barrier; pins on immutable references (fds), released
    only after the worker really finished; all I/O off the loop with budgets.
@@ -554,7 +558,16 @@ semantics). Entries are sorted into:
 | tolerated | `.lock` (regular file), `lost+found` (directory, content not inspected: it is filesystem metadata and may be unreadable), `transcripts/` that is empty or holds only an empty `arhiva/` (what `config.ensure_dirs` creates before boot) | never change the class |
 | key artefacts | `secret` (3.7 key), `keys.wtk`, `keys.wtk.tmp`, `master.key`, `master.key.tmp`, `migrating.wtm` (migration intent), `migrating.wtm.tmp` | each must be a regular file (a symlink, directory, FIFO… → `ambiguous`); `secret` must be exactly 32 bytes |
 | staged restore | `restore-pending/` + `.restore-flag` (3.7 mechanism), `.restore/` (3.8, §12.4) | reported as `staged_restore`; never read, applied or removed by PR2 code |
-| new-format markers | `erasures.wtj`, `.restore/`, any other top-level name of the reserved `.wt*` family (`*.wtk`, `*.wtj`, `*.wtx`, `*.wtd`…; the key artefacts above excepted), and under `transcripts/` (its top level and one level of subdirectories such as `arhiva/`) any name ending in `.wtx`, `.wtd`, `.idx` or of the `.wt*` family | data that only exists once a `keys.wtk` exists. 3.7 never writes these names (its snapshots `*.wtsnap` live in `backups/`, not at the top level). A `transcripts/` that cannot be listed counts as a marker (absence not proven) |
+| new-format markers | `erasures.wtj`, `.restore/`, any other top-level name of the reserved `.wt*` family (`*.wtk`, `*.wtj`, `*.wtx`, `*.wtd`…; only `migrating.wtm` is exempt, and only as the pre-commit/migration marker), and under `transcripts/` (its top level and one level of subdirectories such as `arhiva/`) any name ending in `.wtx`, `.wtd`, `.idx` or of the `.wt*` family | data that only exists once a `keys.wtk` exists. 3.7 never writes these names (its snapshots `*.wtsnap` live in `backups/`, not at the top level). A directory in the scanned set that cannot be opened or listed counts as a marker (absence not proven) → refuse |
+
+**The reserved namespace has one definition**, in `keys.py`: `RESERVED_TOP_NAMES`, the `.wt*`
+family, `TRANSCRIPT_MARKER_EXT`, `RESERVED_DIR = "transcripts"` and `RESERVED_SCAN_DEPTH = 1`,
+behind `is_reserved_name(name, where)` and `find_reserved(dir_fd, exempt)`. The inventory uses it
+now; the 3.8 writers, the cap and restore must import it rather than restate it, so nothing can
+write a name the inventory does not see. **Supported depth:** the top level of `DATA_DIR`, the top
+level of `transcripts/` and one level of subdirectories below it. The storage format creates
+nothing deeper; a writer that needs more must raise `RESERVED_SCAN_DEPTH` (and the tests) first.
+A reserved name deeper than that is not inspected (tested, so the limit is explicit).
 | data | everything else | — |
 
 Classes, first match wins:
@@ -563,11 +576,16 @@ Classes, first match wins:
    `migrating` when `migrating.wtm` is present (the migration's last steps, below); if `secret` is
    also present, `secret_leftover`. `secret` + `keys.wtk` **without** `migrating.wtm` is not a
    state the migration produces → `ambiguous`.
-2. `ambiguous`: no `keys.wtk` and `migrating.wtm` present ("migration published but keys.wtk
-   missing"), **except** the proven pre-commit state: `secret`, `migrating.wtm` and a
+2. `ambiguous`: no `keys.wtk`, and a new-format marker is present. This scan runs **before** the
+   pre-commit exception below, with only `migrating.wtm` exempt (the other artefacts legitimately
+   present in that state — `secret`, `keys.wtk.tmp`, `master.key*` for in-volume, `.lock` — are
+   not in the namespace). A restore-mixed set (`secret` + marker + tmp + a WTX1 segment or a new
+   journal) is refused, never migrated (tested with `transcripts/record.wtx`).
+3. `ambiguous`: no `keys.wtk` and `migrating.wtm` present ("migration published but keys.wtk
+   missing"), **except** the structurally matching pre-commit state: `secret`, `migrating.wtm` and a
    `keys.wtk.tmp` whose SHA-256 equals the marker's manifest digest, and the marker's secret digest
-   equals `secret` → `legacy-3.7` with `migrating` (below).
-3. `ambiguous`: no `keys.wtk`, and a new-format marker is present.
+   equals `secret` → `legacy-3.7` with `migrating` (below). These digests are unauthenticated:
+   they only select the class; the migration authenticates the tmp with the MK before any write.
 4. `legacy-3.7`: no `keys.wtk`, `secret` present (anything else may be present: DB, transcripts,
    keys, a 3.7 `restore-pending/`).
 5. `empty`: nothing outside the tolerated set, `keys.wtk.tmp`, `master.key.tmp` and `master.key`
@@ -595,14 +613,24 @@ trimmed either).
   a configured source: with `WEBTERM_MASTER_KEY_FILE` or `WEBTERM_MASTER_KEY` set, a file at the
   default path is not read and is not a conflict (tested).
 - **A key file must not be inside the data tree** (`file`, `default-file`, and the new file of a
-  rotation): refuse with `key-in-data-dir` ("…is inside the data directory; use
-  `WEBTERM_KEY_IN_VOLUME=1` explicitly") when the path as given or resolved (`realpath`) is under
-  `DATA_DIR` (as given or resolved), or when any ancestor directory of the resolved path has the
-  same `(st_dev, st_ino)` as the `DATA_DIR` fd (catches `DATA_DIR` seen through a bind mount at
-  another path). Not detectable from here: a hardlink of the key file inside the volume, a copy,
-  or a mount that puts the same storage under two unrelated trees. The real separation is the
-  operator's mount configuration (the key on a different mount from the data volume, excluded
-  from every capture of it). `ProtectionState.key_location` is therefore
+  rotation). The location is decided on the **opened file**, not on a second resolution of its
+  path: the path is walked from `/` one component at a time, each directory opened with
+  `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` relative to the previous fd (pinned), and the key file is
+  opened relative to the last one with `O_NOFOLLOW`. The `(st_dev, st_ino)` of every pinned
+  directory is compared with the `DATA_DIR` fd's; a match → refuse with `key-in-data-dir`
+  ("…is inside the data directory; use `WEBTERM_KEY_IN_VOLUME=1` explicitly"). The same fds are
+  then read, so a parent swapped between read and check cannot change the verdict (tested).
+  This also catches `DATA_DIR` seen through a bind mount at another path.
+  - **Symlink policy: no symlink anywhere in the key path** (an intermediate symlink → `symlink`;
+    an intermediate non-directory → `not-regular`; a `..` component → `unreadable`; `ENOENT` on
+    any component → `missing`). Docker secrets (`/run/secrets/…`) are bind mounts, not symlinks,
+    and pass. Not supported: a key path through `/var/run` (a symlink to `/run`) or a Kubernetes
+    secret volume (its `..data` links); point the variable at the real path.
+  - **Residual:** a hardlink or a copy of the key file inside the volume, a subdirectory of the
+    volume mounted separately elsewhere, or a mount that puts the same storage under two unrelated
+    trees are not detectable from here. The real separation is the operator's mount configuration
+    (the key on a different mount from the data volume, excluded from every capture of it).
+    `ProtectionState.key_location` is therefore
   `external (not verified off-host)` for a file source, `environment` for `env`, `in-volume` for
   `volume`.
 - `master.key` present with `WEBTERM_KEY_IN_VOLUME` unset, or with an external source set →
@@ -611,7 +639,8 @@ trimmed either).
 - A configured source that is missing or invalid → refuse. The default path that does not exist on
   an `empty` or `legacy-3.7` volume is "not configured" (an `ENOENT` on `open`, nothing else); a
   default file that exists is configured and must be valid.
-- **Reading a key file** (`file`, `default-file`, `volume`): `open(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|
+- **Reading a key file** (`file`, `default-file`, `volume`; external files through the pinned
+  walk above, `master.key` relative to the `DATA_DIR` fd): `open(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|
   O_CLOEXEC)` (a symlink as the final component, or a FIFO, cannot block or redirect); `fstat` on
   that same fd: regular file, owner = effective uid or root, `mode & 0o077 == 0` (neither readable
   nor writable by group/others), size ≤ 256 bytes; then read from that fd at most 257 bytes.
@@ -665,10 +694,11 @@ as reason `io-error` with the errno name):
 | `kind` | When | On disk | Next boot (right key) |
 |---|---|---|---|
 | `invalid-key` | preflight: lock, inventory, key source, wrong key, manifest/marker checks, before the first write | unchanged (`.lock` may have been created) — the *Guarantee* below applies | same refusal until the cause is fixed |
+| `preflight-io` | a raw `OSError` during preflight (`fstat`, listing or `stat` in the inventory, `flock` other than "taken"), normalised by `boot()` as reason `io-error` with the errno name | unchanged (`.lock` may have been created) — the *Guarantee* applies | same refusal until the I/O problem is fixed |
 | `operation-incomplete` | a publication started and failed **before** `keys.wtk`'s rename (unlinking an old tmp, open, write, close, fsync of the tmp, rename; also `master.key` and `migrating.wtm`, which are sub-steps before the manifest) | a tmp may remain; `master.key` / `migrating.wtm` may have been published | recovers: class unchanged (`empty` / `legacy-3.7`, possibly the proven pre-commit state) and the operation runs again |
 | `commit-unknown` | `keys.wtk`'s rename happened (this boot or an earlier one) and a later step failed: dir fsync, read-back, re-open, legacy-secret or marker removal, or the dir fsync barrier on resume | the new `keys.wtk` is visible; its durability is unknown | **never undo** the rename; the next boot re-verifies (opens `keys.wtk`, finishes the migration) |
 
-The byte-identical guarantee covers `invalid-key` only.
+The byte-identical guarantee covers `invalid-key` and `preflight-io` only.
 
 **Bootstrap (`empty`).** With `volume`: reuse a valid leftover `master.key` (same reader as an
 external file), otherwise generate 32 random bytes and publish them exactly like `keys.wtk`
@@ -690,8 +720,12 @@ leaves an `empty` volume (with leftovers) and the next boot bootstraps again, re
 5. `rename(keys.wtk.tmp, keys.wtk)`, fsync dir, read back, re-open with the MK.
 6. Require `fk_legacy == secret` (constant time) and the marker to name this manifest
    (installation id, MK id, manifest digest) and this `secret`.
-7. **fsync the directory, then** unlink `secret`, then fsync the directory again. On any failure
-   `secret` stays and the boot refuses (`commit-unknown`).
+7. **fsync the directory, then** unlink `secret`, then fsync the directory again. A failure
+   **before the unlink** (the barrier fsync, the unlink itself) keeps `secret` and the boot refuses
+   (`commit-unknown`). A failure of the fsync **after** the unlink also refuses (`commit-unknown`),
+   but the durability of the unlink is unknown: `secret` may or may not come back after a power
+   loss. Both are safe because the manifest was already synced and `migrating.wtm` is still there:
+   the next boot opens `keys.wtk` and the marker drives the resume (steps 7–8 again, or only 8).
 8. fsync the directory (the absence of `secret` is durable), unlink `migrating.wtm`, fsync.
 
 The first fsync of step 7 exists for the resume path: after a crash between the rename and its
@@ -701,7 +735,7 @@ otherwise delete the only copy of the legacy key before the manifest is durable.
 | Interrupted | On disk / class at next boot | Next boot with the right MK | With a wrong / no MK |
 |---|---|---|---|
 | before 4 (or inside 4, before the marker's rename) | `legacy-3.7`, `secret` intact, maybe tmps | migrates again (a leftover `master.key` is reused) | refuse (wrong) / legacy (no source) |
-| after 4, before 5's rename (or the rename not durable) | `secret` + `migrating.wtm` + `keys.wtk.tmp` matching the marker → `legacy-3.7`, `migrating` (proven pre-commit) | the MK must have the marker's MK id; the marker is removed (fsync) **before** the tmp, then migrates again with fresh keys (the uncommitted manifest never protected anything) | refuse (`wrong-key` / `migration-unfinished`): never back to the legacy state |
+| after 4, before 5's rename (or the rename not durable) | `secret` + `migrating.wtm` + `keys.wtk.tmp` matching the marker → `legacy-3.7`, `migrating` (pre-commit) | **authenticated resume**, before any write: `keys.wtk.tmp` is opened with the supplied MK (`open_keyring_bytes`: MK id, MAC, profile, unwrap); it must carry the marker's installation id and MK id (= id of the supplied MK), epoch 1, no retired ids, its SHA-256 must equal the marker's digest and its `FK_legacy` must equal `secret` (and the marker's secret digest). Then **exactly that blob** is published: the same fd that re-reads it (same bytes) is fsynced, renamed to `keys.wtk`, dir fsync, read back. No new keyring is generated and neither the marker nor the tmp is removed before the commit, so a crash anywhere leaves this state or step 5's | refuse (`wrong-key` / `migration-unfinished`): never back to the legacy state. A tmp that does not authenticate with the MK the marker names, or any mismatch above → `migration-proof-invalid` (e.g. a marker whose MK id was edited: tested), nothing written |
 | after 5, before 7's unlink | `protected` + `migrating` + `secret_leftover` | opens, checks marker and `fk_legacy == secret`, then steps 7–8 | refuse; nothing changes |
 | after 7's unlink, before 8's | `protected` + `migrating` | opens, checks the marker, step 8 | refuse |
 | after 8 | `protected` | opens | refuse |
@@ -735,22 +769,28 @@ gateway cannot know by itself which one a crash left current. Procedure (offline
 stopped, the rotation command takes the process lock):
 
 1. Generate the new MK and **persist it first** where the gateway will read it (a new file, not
-   overwriting the old one). The command takes `new_key_file`: before anything is published it
-   reads that file back with `read_key_file` (same checks as boot: owner, mode, encoding, not in
-   the data tree) and requires it to equal the new MK (`new-key-not-persisted` otherwise).
-2. Keep **both** key files until the new state is verified. A crash or a restart between the
-   publish and the configuration change leaves either manifest durable; exactly one of the two
-   keys opens it.
-3. `keys.expected_mk_id(DATA_DIR)` reads `keys.wtk` **without the key** (unauthenticated,
-   informative only; works while the gateway holds the lock) and prints the MK id it needs;
-   `keys.key_file_mk_id(path)` prints the id of a key file. The operator points the configuration
-   at the file whose id matches, starts the gateway, and only then retires the old key file.
+   overwriting the old one). `new_key_file` is a **required** parameter of `rotate_master_key`
+   (no in-memory-only rotation). After the old MK has opened the current manifest and before
+   anything is published, the file is opened the pinned way (same checks as boot: no symlink in
+   the path, owner, mode, encoding, not in the data tree), must equal the new MK
+   (`new-key-not-persisted` otherwise), and then **that fd and its directory's fd are fsynced**
+   (`new-key-not-durable` on failure; nothing published). A manifest therefore never names a key
+   that exists only in the page cache.
+2. Keep **both** key files until **a boot with the new key has succeeded**. A crash or a restart
+   between the publish and the configuration change leaves either manifest durable; exactly one of
+   the two keys opens it.
+3. `keys.expected_mk_id(DATA_DIR)` parses `keys.wtk` **without the key** and
+   `keys.key_file_mk_id(path)` derives the id of a key file. Both are **unauthenticated
+   diagnostics** (no MAC is checked): a CLI must label them so and never use them as an
+   authorization, as proof that a key matches, or as proof of durability. Only the authenticated
+   open at boot decides. The operator points the configuration at the file whose id matches,
+   starts the gateway, and only after that boot succeeds retires the old key file.
 4. Retired MK ids: a retired id stays listed while backups made under it may still be restored
    (they carry a manifest that opens only with that MK). Remove an id — and destroy the old key —
    only after every backup made under it has expired; the 64-id bound is a policy limit, not a
    reason to drop ids early.
 
-**Guarantee (wrong or missing key; refusals of kind `invalid-key` only).** A boot that refuses
+**Guarantee (wrong or missing key; refusals of kind `invalid-key` or `preflight-io` only).** A boot that refuses
 in preflight writes nothing in `DATA_DIR` except creating `.lock` (empty, 0600) if it did not
 exist. Two refused boots in a row leave, for every
 entry under `DATA_DIR` (recursively, symlinks not followed): the same names, types, modes, sizes,
@@ -785,7 +825,170 @@ tested in isolation; these are not implemented and each needs its own change and
    in System health, and define when they are re-encrypted or expired after the migration.
 6. **Backup and restore move to `keys.wtk` first.** Backup reads `keys.wtk` (never `secret` or
    the MK); restore validates the restored `keys.wtk` with the configured MK before anything is
-   replaced, and never deletes `.lock`.
+   replaced, and never deletes `.lock`. *Implemented in §12.10 (PR3), active once a `keys.wtk`
+   exists; it still needs the boot to register the keyring provider and re-open `keys.wtk` after
+   an apply.*
+7. **Resume and mixed-artefact gate.** Keep the authenticated pre-commit resume tests (edited
+   marker MK id + another MK, FK_legacy ≠ `secret`, broken MAC → `migration-proof-invalid`;
+   crash at every resume step → same installation) and the mixed-artefact tests (pre-commit +
+   a reserved name → refused) green, and add the equivalent for every new bootstrap/migration
+   branch: no branch may publish a new keyring over data already protected. Restore and the
+   writers import the reserved namespace from `keys.py`.
+8. **Location, rotation, process exclusion.** Keep the pinned-fd location check, the rotation
+   contract (required `new_key_file`, fsync of the file and its directory, both keys kept until a
+   boot with the new one succeeds) and the concurrent path-mutation tests green. The lock and the
+   `DATA_DIR` fd stay held through boot **and** restore, and every CLI that writes the same data
+   (rotation, restore, maintenance) takes the same lock. No 3.7 process may run against the
+   volume concurrently (deploy procedure: stop it before the 3.8 boot).
+9. **End-to-end preflight.** One test of the real boot order: staging present, lock taken, a
+   wrong key → refused before any clean-up or swap, byte-identical. Distinguish legacy volumes
+   **without** any verifiable ciphertext (fresh 3.7 install: an explicit eligibility criterion
+   decides whether `secret` may become `FK_legacy`) from volumes **with** encrypted data (prove
+   `FK_legacy` by decrypting it, item 3, before publishing). The forward-token HMAC is handled per
+   its meaning in the code; if a rotation or the migration changes the key it uses, existing
+   forward tokens are invalidated explicitly (and the UI says so), never silently.
+
+### 12.10 Snapshot container `WTS1` (PR3)
+
+Normative. Closes §12.8 contract 4 and replaces the sketch of §12.6 where they differ.
+Implemented in `gateway/app/snapshot.py` (pure codec: file objects in, file objects out, one
+chunk in memory) and `gateway/app/backup.py` (what goes inside, where it is stored, restore);
+tested in `tests/snapshot_test.py` and `tests/backup_protected_test.py`. Like PR2, it is **not
+reachable from production** until the boot is wired: a volume becomes *protected* only when
+`keys.wtk` exists, and until then every backup path runs the 3.7 code unchanged.
+
+**Which path.** `backup.is_protected()` = `DATA_DIR/keys.wtk` exists (a non-regular file at that
+name → refuse). *Legacy* (no `keys.wtk`): exactly the 3.7 code (`make_snapshot`, `.wtsnap`,
+WTBK1 downloads, `restore-pending/` with `secret`). *Protected*: WTS1 everywhere below. The
+keyring comes from the caller (`keys=HostKeys(ring, mk)`) or from a provider the boot registers
+(`backup.set_host_keys_provider`); with neither, every protected operation is refused — never
+treated as legacy. On each use `keys.wtk` is re-read and must open with that MK and show the same
+installation id and epoch as the keyring the process holds.
+
+**Bytes** (little-endian unless marked BE):
+
+| Part | Bytes |
+|---|---|
+| header (60 B) | `"WTS1"` · ver u8 = 1 · flags u8 (bit 0 local envelope, bit 1 portable envelope, others 0, at least one set) · reserved u16 = 0 · installation id 16 B · created u64 (ms) · keyring epoch u64 · MK id 16 B (the host's current MK when written; the portable envelope is under it) · content u8 = 1 (`tar.gz`) · reserved 3 B = 0 |
+| envelopes | local first (if flagged), then portable; each 83 B: kind u8 (1 local, 2 portable) · kek_id 16 B · wlen u16 = 64 · AES-KWP(KEK, `"WTS1"` ‖ kind ‖ kek_id ‖ CK 32 B) |
+| header MAC | HMAC-SHA-256(HKDF(CK, `"wt/v1/snap-hdr"`), header ‖ envelopes), 32 B |
+| frames | flag u8 (0 data, 1 final) · ct_len u32 · AES-256-GCM(HKDF(CK, `"wt/v1/snap-body"`)) ciphertext ‖ 16 B tag |
+| end | nothing after the final frame |
+
+- **Keys.** CK, the content key, is 32 random bytes, new for every `Writer` (one per snapshot).
+  Local KEK = `SNK` (it wraps nothing else); kek_id = key id of SNK. Portable KEK =
+  `HKDF(MK, "wt/v1/portable")` (info = label ‖ 0x00, the §12.2 derivation); kek_id = its key id,
+  and the header's MK id must be `key_id(MK)`. Like the keyring envelopes, the outer kind and
+  kek_id are repeated inside the KWP plaintext, so a relabelled envelope fails to unwrap.
+- **Frames.** nonce = 8 zero bytes ‖ counter u32 BE; AAD = header MAC ‖ counter u32 BE ‖ flag u8.
+  Data frames carry exactly 1 MiB of plaintext, except the last data frame (1 B…1 MiB; never
+  empty); the counter starts at 0 and increases by one per frame, the final frame included.
+  The final frame is exactly one, with plaintext = data-frame count u64 ‖ total plaintext length
+  u64 (ct_len = 32).
+- **Reader rules.** Header fields strict (magic, version, flags, reserved, content type) → the
+  envelope the caller can use (local only with SNK *and* the same installation id; portable only
+  with an MK whose id is the header's) → KWP unwrap → header MAC → frames. Before a frame's body
+  is read: flag ∈ {0, 1}; a data ct_len in (16, 1 MiB + 16]; a final ct_len of exactly 32; the
+  counter below 2³²−1; the running plaintext within the caller's budget (default 4 GiB); a data
+  frame after a short one → refused (non-canonical). A tag failure, a final with the wrong count
+  or length, a missing or duplicated final, any byte after the final, truncation anywhere,
+  reordered, dropped or foreign frames → refused. `read()` without a size is refused (bounded
+  memory: at most one frame is buffered).
+- **Retry after an ambiguous write.** A snapshot file is written as `<name>.tmp` (`O_EXCL`,
+  `O_NOFOLLOW`, 0600) → fsync → rename → fsync of the directory; any failure removes the tmp and
+  the next attempt is a new `Writer`, i.e. a new CK: the counter nonces never repeat under one key.
+  A transcoding (stored local snapshot → portable download) also uses a new CK.
+
+**Content** (the `tar.gz`, streamed through the Writer; `w|gz`, so the archive is never held in
+memory): `webterm.db` (`VACUUM INTO`), `keys.wtk` (the manifest bytes only — useless without the
+MK), `agent-signing.key/.pub` when present, `transcripts/…` when asked, and **last**
+`wts-manifest.json` = `{"format": "wts-content-1", "files": [{name, size, sha256}, …]}` for every
+regular file before it. Never `secret`, `master.key` or the MK, even when a `secret` is still on
+the volume (the migration's `secret_leftover` sub-state). Each file is hashed on exactly the bytes
+archived (a transcript that shrinks while read is first copied, up to its stat size, into a
+private temp file). Phase 1: the DB is plaintext *inside* the encrypted container (it holds the
+Fernet ciphertexts as today).
+
+**Restore reader** (also used by verify): names canonical (`[A-Za-z0-9_@+=-][A-Za-z0-9._@+=-]*`
+per component, no `.`/`..`/empty/absolute, at most 5 components), only the files above at the top
+level, anything under `transcripts/`, only regular files and directories, no duplicates, the
+manifest last and nothing after it, at most 200 000 members, the gzip stream with **two
+decompression budgets** checked after every 64 KiB step — absolute (2 GiB, the 3.7 cap) and ratio
+(output ≤ max(64 MiB, 1024 × compressed input so far)) — one gzip member, only zero padding after
+the tar end, then the WTS1 final frame and EOF. The extracted set must equal the manifest (names,
+sizes, SHA-256); `webterm.db` and `keys.wtk` are required; the DB passes `PRAGMA
+integrity_check`; the inner `keys.wtk` must open (`open_keyring_bytes`, profile v1) with the MK it
+names — the host's or the operator's — carry the header's installation id and an SNK.
+
+**Paths:**
+
+| Path | Container | Opens with |
+|---|---|---|
+| scheduled local snapshot `backups/webterm-…wts` | WTS1, local envelope only | this installation's SNK |
+| download (`make_encrypted`), manual and scheduled remote upload | WTBK1 (scrypt passphrase, mandatory) around WTS1 local + portable | passphrase **and** (SNK of the same installation, or the MK) |
+| download of a stored `.wts` (`encrypt_stored`) | transcoded to WTS1 local + portable with a new CK, then WTBK1 | as above |
+| pre-restore safety copy `backups/pre-restore-<ts>.wts.keep` | WTS1 local + portable | the host MK (still opens after `keys.wtk` changed) |
+
+The passphrase is mandatory for every archive that leaves the host (downloads, all remote
+profiles): the product promises "two secrets" for a stolen remote archive (V3-M1), and the
+remote credentials are not counted as one. Neither secret alone opens it (tested).
+
+**Restore** (`stage_restore(blob, passphrase, keys=, mk=, legacy_import=)`):
+
+1. The WTBK1 layer → a WTS1 (`"WTS1"` magic) or a 3.7 `tar.gz`.
+2. WTS1 on a legacy volume → refused (it can be restored only once `keys.wtk` is set up).
+3. WTS1 on a protected volume → unlock: the local envelope when the header names this
+   installation, otherwise the portable one with the operator's `mk` (a snapshot from another
+   installation, or made under a retired MK) or the host MK when the header names it. The whole
+   reader above runs into a private 0700 directory under `backups/` (`.restore-verify-*`, same
+   filesystem as `restore-pending/`). Only after everything passed: the inner keyring is
+   **re-wrapped under the host MK** (KWK and SNK under the host `K_mw`, the KWK-wrapped keys
+   unchanged; installation id of the snapshot; epoch = max(snapshot, host) + 1; retired ids = the
+   snapshot's ∪ its MK id, plus the host's own when it is the same installation, minus the host
+   MK id; > 64 → refused), replacing the snapshot's `keys.wtk`; then one rename of the directory to
+   `restore-pending/` and the flag. A wrong key, a tampered container or any content check
+   failing leaves no `restore-pending/`, no flag, no temp directory.
+4. A 3.7 `tar.gz` on a legacy volume → the 3.7 code, unchanged.
+5. A 3.7 `tar.gz` on a protected volume → refused unless `legacy_import=True` (the explicit
+   import of §6): the archive is checked as in 3.7, its `secret` (regular, exactly 32 B) is read
+   into memory and becomes `FK_legacy` of a new `keys.wtk` (this installation, host MK, the other
+   keys unchanged, epoch + 1); only `webterm.db`, `agent-signing.*` and `transcripts/` are
+   extracted (any other entry → refused). The raw key is never written to staging.
+
+**Apply** (`apply_pending_restore(keys=)`, at boot before `db.connect`): a staging with `keys.wtk`
+or a protected volume takes the protected path; a staging with `secret` or `master.key` on a
+protected volume, a staging with `keys.wtk` on a legacy volume, or no keyring → refuse (boot
+stops; staging is kept). The staged `keys.wtk` must open with the host MK. If it differs from the
+current one: safety copy (above; a failure is logged and the apply continues, as in 3.7), then
+`keys.wtk` replaced atomically (`keys.wtk.tmp`, `O_EXCL|O_NOFOLLOW`, fsync, rename, directory
+fsync, read-back); then the fleet signing key, transcripts, and the DB last (the commit point);
+staging and flag removed at the end. Re-running after a crash converges (the `keys.wtk` step is
+skipped once it matches). The caller must **re-open** `keys.wtk` afterwards: a restore from another
+installation changes the installation id, and any restore raises the epoch (the old keyring is
+then refused by `backup._host`).
+
+**Legacy copies of the raw key (wiring item 5).** 3.7 snapshots `backups/*.wtsnap` and
+`pre-restore-*.wtsnap.keep` contain `secret` in clear. They stay listed, verifiable, downloadable
+(WTBK1) and restorable (through the explicit import on a protected volume), and the retention
+still deletes `*.wtsnap` after 7 days; `*.keep` files are never deleted automatically. System
+health must list them after the migration (not in PR3).
+
+**Not in PR3 / decisions to confirm.**
+
+- A protected restore always replaces `keys.wtk` with a re-wrapped one, even for the same
+  installation, so a snapshot made before a legacy import (another `FK_legacy`) restores
+  consistently. Consequence: a snapshot whose inner `keys.wtk` names a retired MK needs that MK
+  (`mk=`) even when SNK opens the container — the stable keys inside cannot be checked otherwise.
+- `keys.wtk` replacement in `apply` writes directly (not through `keys.publish_manifest`, which
+  requires the same installation id); it must run under the boot's process lock when wired.
+- `restore-pending/` still holds the fleet signing key and the plaintext DB (as in 3.7); it holds
+  no `secret`, no MK and no unwrapped keyring key.
+- The §12.4 restore layout (`.restore/<epoch>/`, rename journal, descriptors, erasure journal)
+  and the §12.8 contract 5 snapshot coherence (barrier, pins) are not implemented: phase 1 has no
+  WTX1 recordings to pin.
+- API error codes: WTS1 refusals are `ValueError`s mapped like the 3.7 ones (`backup.tooLarge`
+  for budgets, otherwise `backup.badFile`); a dedicated "needs master key <id>" code comes with
+  the UI for the operator MK.
 
 ## Appendix: Test vectors (v1)
 
@@ -817,5 +1020,7 @@ KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
 | manifest (epoch 1, no retired ids, KWK + FK) MAC | `b1e621dcef08ec41607f045a18e1d345c3a5a10235d73ecbb757907b4827080b` |
 | descriptor (sid above, kind 1, version 3, the sealed generation above) MAC | `d9cff1271b174d9e23ad93253030e9438c64226d3f2ceff045b8134cfcf16716` |
 | index `WTI1` (kind 1, data_count 2, entries (0, 0, 96) and (1, 7, 128), whole file) | `5754493101010000101112131415161718191a1b1c1d1e1f020000000000000002000000000000000000000000000000600000000000000001000000070000000000000080000000000000004d1d98fab4e55f31a7430c27fafb843ac8aeaeb6869afbff8be106b89cbe86e9` |
+| portable KEK `HKDF(MK, "wt/v1/portable")` | `8cf0b68c716729fd2f2861bf8232e1411b37dc6eec228c11cba070073072e309` |
+| `WTS1` container (§12.10; SNK = `c0c1…df`, CK = `e0e1…ff`, MK and installation id above, created above, epoch 1, local + portable, plaintext `"hello"`; asserted in `tests/snapshot_test.py` `V_HELLO`) | `5754533101030000a0a1a2a3a4a5a6a7a8a9aaabacadaeaf00748d00a2010000010000000000000052062057e5bbb03e34bb12c0d05de4340100000001ed9b1d5549111099b6ed05e8bfca4f01400026fb1d7fa012d28c4c5427d09944e1fe698511c3c9c10b25e9d3e14464345fc93946edfef0bff8ec4f7b57cbeca807f6990734678749226331d245a7c94f9b9602bd94d0405378ffd3483fbc61aeb726b04000d078ded7e9a4c9494594450817cf72703278eb90a778effd81bd782c2675d36374f0d948bcea715e31fb16d4e5d5feac48077dc11ced6e0250c07656e5edfeed2c19853094b2dfe59e48df9db07f26fd87f554dcae070f090acbdb32e522dca80015000000a57126689e1a2bfed1114598dc410836ab394337a0012000000015adc832ed8bcdf93ea3b74295134b8817cba9764076dfea902388a32d8c32d8` |
 
 The manifest and descriptor bytes in full are in `tests/keyring_test.py` (`V_MANIFEST`, `V_DESC`).
