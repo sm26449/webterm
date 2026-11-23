@@ -19,20 +19,30 @@ mai sus e înlocuit de containerul WTS1 (`snapshot.py`): snapshoturi locale `.wt
 descărcări/upload-uri WTBK1(WTS1 portabil), niciodată `secret` sau MK; restore verificat complet
 înainte de staging. Volumele legacy rămân EXACT pe codul 3.7 (atenţie: `.wtsnap` / `.keep`
 conţin cheia seifului în clar — articol de retenţie din wiring checklist).
+Recenzia PR3: rutarea nu deduce „legacy” din lipsa keys.wtk când există urme ale formatului nou
+(volume_kind, H2); setul de restore e publicat durabil, cu manifest şi flag-jurnal (H1);
+inventarul transcripturilor e o listă de permisiuni parcursă prin fd-uri (H3); un singur
+extractor tar strict pentru WTS1 şi importul 3.7 (M1/M3); writer-ul aplică bugetele cititorului
+şi îşi verifică produsul (M2); un container cere un singur MK, cel din header (M4).
 """
+import errno
+import fcntl
 import gzip
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import stat
 import tarfile
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -40,6 +50,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from . import config
 from . import keyring as kr
+from . import keys as keystore
 from . import snapshot as wts
 
 log = logging.getLogger("webterm")
@@ -131,8 +142,10 @@ def decrypt(blob: bytes, passphrase: str) -> bytes:
 def make_snapshot(include_transcripts: bool = False) -> bytes:
     """tar.gz {webterm.db (VACUUM INTO), secret, [transcripts]}. SINCRON — apelează
     prin asyncio.to_thread din endpoint-uri (VACUUM + gzip pot dura).
-    Doar volume legacy: pe un volum protejat (keys.wtk) arhiva în clar e refuzată (§12.10)."""
-    if is_protected():
+    Doar volume clasificate EXPLICIT legacy (volume_kind, H2): pe un volum protejat sau cu urme
+    ale formatului nou (keys.wtk lipsă dar migrating.wtm / .wts / furnizor de chei) arhiva în
+    clar, cu `secret`, e refuzată (§12.10)."""
+    if volume_kind() != "legacy":
         raise ValueError("this installation is protected: plaintext snapshots are refused")
     buf = io.BytesIO()
     with tempfile.TemporaryDirectory() as td:
@@ -277,25 +290,25 @@ def remote_name(local_name: str) -> str:
     return local_name
 
 
-def encrypt_stored(name: str, passphrase: str, keys=None) -> bytes:
+def encrypt_stored(name: str, passphrase: str, keys=None, mk=None) -> bytes:
     """Citește un backup programat stocat și-l criptează cu parola userului (pt. download).
     Un `.wts` local se deschide cu SNK şi se re-criptează în flux ca WTS1 portabil cu o cheie de
-    conţinut NOUĂ (niciodată aceeaşi cheie cu alt AAD), apoi stratul cu parolă."""
+    conţinut NOUĂ (niciodată aceeaşi cheie cu alt AAD), cu keys.wtk-ul interior re-ambalat sub
+    MK-ul curent (M4: un singur MK deschide rezultatul; un snapshot de dinaintea unei rotaţii
+    cere MK-ul vechi în `mk`), verificat pe ruta portabilă, apoi stratul cu parolă."""
     if isinstance(name, str) and name.endswith(WTS_EXT) and "/" not in name and "\\" not in name:
+        if not is_protected():
+            raise ValueError(_WTS_ON_LEGACY)
         hk, _ = _host(keys)
         path = _open_stored_wts(name)
         buf = io.BytesIO()
-        with open(path, "rb") as f:
-            rd = wts.Reader(f)
-            _unlock(rd, hk)
-            w = wts.Writer(buf, installation_id=rd.installation_id, epoch=rd.epoch, mk_id=hk.ring.mk_id,
-                           snk=hk.ring.snk, mk=hk.mk)
-            for chunk in rd.chunks():
-                w.write(chunk)
-            w.close()
+        with open(os.open(str(path), _FILE_RO), "rb") as f:
+            _transcode(f, hk, buf, mk)
+        _verify_wts(io.BytesIO(buf.getvalue()), hk, None, prefer="portable")
         return encrypt(buf.getvalue(), passphrase)
     if "/" in name or "\\" in name or not name.endswith(".wtsnap"):
         raise ValueError("invalid name")
+    volume_kind()                                  # H2: un volum ambiguu nu livrează nimic
     path = _backup_dir() / name
     if not path.exists():
         raise FileNotFoundError(name)
@@ -351,12 +364,13 @@ def _inspect(raw: bytes) -> dict:
             "users_since": created}
 
 
-def verify(blob: bytes, passphrase: str, keys=None, mk=None) -> dict:
+def verify(blob: bytes, passphrase: str, keys=None, mk=None, prefer: str = "local") -> dict:
     raw = decrypt(blob, passphrase)
     if raw[:4] == wts.MAGIC:
         if not is_protected():
             raise ValueError(_WTS_ON_LEGACY)
-        return _verify_wts_bytes(raw, keys, mk)
+        return _verify_wts_bytes(raw, keys, mk, prefer)
+    volume_kind()                                  # H2: un volum ambiguu nu verifică nimic
     return _inspect(raw)
 
 
@@ -364,10 +378,10 @@ _WTS_ON_LEGACY = ("this backup comes from an installation with encryption at res
                   "restored on an installation whose key manifest (keys.wtk) is set up")
 
 
-def verify_restorable(blob: bytes, passphrase: str, keys=None, mk=None) -> dict:
+def verify_restorable(blob: bytes, passphrase: str, keys=None, mk=None, prefer: str = "local") -> dict:
     """3.6.8: a real restore test without restoring — decrypt, unpack (bounded), integrity-check
     the database, and require the vault key (a backup without it restores nothing usable)."""
-    info = verify(blob, passphrase, keys, mk)
+    info = verify(blob, passphrase, keys, mk, prefer)
     if info.get("format") != "WTS1" and not info["has_secret"]:
         raise ValueError("backup without the vault key — a restore would leave the credentials "
                          "undecryptable")
@@ -378,15 +392,20 @@ def verify_stored(name: str, keys=None) -> dict:
     """The same check on a stored scheduled snapshot (`data/backups/*.wtsnap`, unencrypted;
     `*.wts`, a local WTS1 checked end to end with the host's SNK)."""
     if isinstance(name, str) and name.endswith(WTS_EXT) and "/" not in name and "\\" not in name:
+        if not is_protected():
+            raise ValueError(_WTS_ON_LEGACY)
         hk, _ = _host(keys)
         path = _open_stored_wts(name)
-        td = _private_tmpdir()
-        try:
-            with open(path, "rb") as f:
-                info, _inner = _verify_wts(f, hk, td)
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
+        with _restore_lock():
+            td = _private_tmpdir()
+            try:
+                with open(os.open(str(path), _FILE_RO), "rb") as f:
+                    info, _inner = _verify_wts(f, hk, td)
+            finally:
+                shutil.rmtree(td, ignore_errors=True)
         return info
+    # un `.wtsnap` 3.7 rămas pe un volum protejat rămâne verificabil (§12.10); un volum ambiguu nu (H2)
+    volume_kind()
     if "/" in name or "\\" in name or not name.endswith(".wtsnap"):
         raise ValueError("invalid name")
     path = _backup_dir() / name
@@ -401,17 +420,19 @@ def verify_stored(name: str, keys=None) -> dict:
     return info
 
 
-def stage_restore(blob: bytes, passphrase: str, keys=None, mk=None, legacy_import: bool = False) -> dict:
+def stage_restore(blob: bytes, passphrase: str, keys=None, mk=None, legacy_import: bool = False,
+                  prefer: str = "local") -> dict:
     """Decriptează + validează + extrage în restore-pending/ + scrie markerul. Aplicarea
     reală se face la următorul boot (apply_pending_restore), după un restart.
     Volum protejat: un WTS1 (verificat complet înainte de staging; `mk` = MK-ul operatorului
-    pentru un backup portabil al altei instalări) sau, cu `legacy_import=True`, un backup
+    pentru un backup portabil al altei instalări sau făcut sub un MK retras; `prefer="portable"`
+    alege plicul portabil înaintea celui local) sau, cu `legacy_import=True`, un backup
     pre-3.8 importat explicit. Volum legacy: un WTS1 e refuzat, restul e codul de dinainte."""
     raw = decrypt(blob, passphrase)
     if raw[:4] == wts.MAGIC:
         if not is_protected():
             raise ValueError(_WTS_ON_LEGACY)
-        return _stage_wts(io.BytesIO(raw), keys, mk)
+        return _stage_wts(io.BytesIO(raw), keys, mk, prefer)
     if is_protected():
         if not legacy_import:
             raise ValueError("a pre-3.8 backup holds the raw vault key; on this installation it "
@@ -444,7 +465,7 @@ def _atomic_copy(src: str, dst) -> None:
     os.replace(tmp, str(dst))       # rename atomic → înlocuire tot-sau-nimic
 
 
-def apply_pending_restore(keys=None) -> bool:
+def apply_pending_restore(keys=None, force_without_safety_copy: bool = False) -> bool:
     """La boot, ÎNAINTE de db.connect(): dacă există un restore în staging, îl aplică
     (swap DB + secret + transcripturi). Întoarce True dacă a aplicat ceva.
 
@@ -454,13 +475,19 @@ def apply_pending_restore(keys=None) -> bool:
     staging + flag DOAR după ce totul e la loc. Un crash/excepție la mijloc lasă staging-ul
     + flagul → următorul boot reia de la zero și converge. Ridicăm la eșec (main.py refuză
     să pornească cu stare parțială, în loc să servească un seif rupt). Fiecare fișier critic
-    e înlocuit atomic (temp + os.replace)."""
+    e înlocuit atomic (temp + os.replace).
+
+    3.8 (H1/H2): fără flag şi fără staging nu e nimic de făcut (ca în 3.7). Altfel întâi
+    clasificarea volumului: protejat → jurnalul protejat (`_apply_protected`, unde orice marcaj
+    incomplet e refuz); ambiguu (keys.wtk lipsă cu urme ale formatului nou, staging 3.8 pe un
+    volum fără keys.wtk) → refuz; legacy → codul 3.7 de mai jos, neschimbat."""
     flag, rd = _restore_flag(), _restore_dir()
+    if not os.path.lexists(flag) and not os.path.lexists(rd):
+        return False
+    if volume_kind() == "protected":
+        return _apply_protected(keys, force_without_safety_copy)
     if not flag.exists() or not (rd / "webterm.db").exists():
         return False
-    # 3.8: un volum protejat (sau un staging cu keys.wtk) nu primeşte niciodată `secret` în clar
-    if is_protected() or os.path.lexists(rd / KEYS_NAME):
-        return _apply_protected(rd, flag, keys)
     # Plasă de siguranță: snapshot al stării CURENTE înainte de a o suprascrie. Sufix
     # `.keep` → retenția NU-l șterge (e singura recuperare dacă restore-ul e greșit).
     try:
@@ -512,10 +539,32 @@ KEYS_NAME = "keys.wtk"
 WTS_EXT = ".wts"
 CONTENT_MANIFEST = "wts-manifest.json"
 CONTENT_MANIFEST_MAX = 4 * 1024 * 1024
+RESTORE_MANIFEST = "restore.json"
+RESTORE_MANIFEST_MAX = CONTENT_MANIFEST_MAX + 64 * 1024
+FLAG_MAX = 4096
 MAX_MEMBERS = 200_000
-_TOP_FILES = frozenset({"webterm.db", KEYS_NAME, "agent-signing.key", "agent-signing.pub"})
+SIGNING_MAX = 64 * 1024
+STAGE_LOCK = ".restore.lock"
+VERIFY_PREFIX = ".restore-verify-"
+_SIGNING = ("agent-signing.key", "agent-signing.pub")
+_TOP_FILES = frozenset({"webterm.db", KEYS_NAME, *_SIGNING})
 _NAME_PART = re.compile(r"^[A-Za-z0-9_@+=-][A-Za-z0-9._@+=-]{0,254}$")
 _TX_DEPTH = 4
+# H3: inventarul transcripturilor e o listă de PERMISIUNI, nu de excluderi: doar înregistrările
+# pe care le scrie core.py (`<sid>.out`, `<sid>.cast`), la rădăcină şi în `arhiva/`.
+_TX_FILE = re.compile(r"^[A-Za-z0-9_-]{1,128}\.(out|cast)$")
+_TX_ARCHIVE = "arhiva"
+_TX_DIRS = frozenset({"transcripts", "transcripts/" + _TX_ARCHIVE})
+_LEGACY_IMPORT_FILES = frozenset({"webterm.db", *_SIGNING})
+# M1: profilul tar. Writer-ul nostru scrie USTAR pur (fără extensii); arhivele 3.7 (tarfile PAX
+# implicit) au antete PAX mici pentru mtime fracţionar. Doar acelea, mărginite, şi doar la import.
+_PAX_MAX = 8 * 1024
+_PAX_KEYS_LEGACY = frozenset({"path", "mtime", "atime", "ctime", "uid", "gid", "uname", "gname"})
+_MEM_CAP = {CONTENT_MANIFEST: CONTENT_MANIFEST_MAX, KEYS_NAME: kr.MAN_MAX_LEN, "secret": kr.KEY_LEN}
+_SHA_HEX = re.compile(r"^[0-9a-f]{64}$")
+_BUSY = "another backup verification or restore is in progress — try again in a moment"
+_KEYS_MISSING = ("this installation is protected but keys.wtk is missing — every backup and restore "
+                 "is refused until the key manifest is back")
 
 
 @dataclass(frozen=True)
@@ -529,22 +578,144 @@ class HostKeys:
 # Boot-ul (încă necablat, §12.9 Wiring checklist) înregistrează aici furnizorul; până atunci un
 # volum protejat fără `keys=` explicit e refuzat (fail closed), nu tratat ca legacy.
 _host_keys_provider = None
+_boot_protected = False
+# Injecţie de defecte pentru teste (H1): chemat cu numele fiecărui pas durabil al staging/apply.
+_fault = None
+
+
+def _step(name: str) -> None:
+    if _fault is not None:
+        _fault(name)
 
 
 def set_host_keys_provider(fn) -> None:
+    """Registered by the boot once the keyring is open. While one is registered the process
+    KNOWS it is protected: a missing keys.wtk is then a refusal, never the legacy path (H2)."""
     global _host_keys_provider
     _host_keys_provider = fn
 
 
-def is_protected() -> bool:
-    """keys.wtk present (regular file) → protected. Anything else at that name → refuse."""
+def set_boot_protected(flag: bool) -> None:
+    """The wiring PR sets this from the boot state (keys.classify under the process lock) before
+    any backup route runs; with it set, ENOENT on keys.wtk is never read as "legacy"."""
+    global _boot_protected
+    _boot_protected = bool(flag)
+
+
+def _protected_expected() -> bool:
+    return _boot_protected or _host_keys_provider is not None
+
+
+class _DirView:
+    """keys.classify / find_reserved read DATA_DIR only through `dir_fd`; this gives them one
+    without the process lock (read-only; the wiring PR routes through the boot state instead)."""
+
+    def __init__(self, dir_fd):
+        self.dir_fd = dir_fd
+
+
+_NEW_BACKUP = re.compile(r"\.wts(\.keep|\.tmp)?$")
+
+
+def _new_format_traces(dfd) -> str:
+    """A trace that this volume has been protected, looked for when keys.wtk is absent (H2)."""
+    for n in keystore.KEY_ARTEFACTS:
+        if n in (keystore.LEGACY_SECRET, keystore.MANIFEST):
+            continue
+        try:
+            os.stat(n, dir_fd=dfd, follow_symlinks=False)
+            return n
+        except FileNotFoundError:
+            pass
+    hit = keystore.find_reserved(dfd)
+    if hit:
+        return hit
     try:
-        st = os.lstat(config.DATA_DIR / KEYS_NAME)
+        sfd = os.open("restore-pending", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=dfd)
     except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError("keys.wtk is not a regular file — refused")
-    return True
+        sfd = None
+    except OSError:
+        return "restore-pending (not a plain directory)"
+    if sfd is not None:
+        try:
+            for n in (KEYS_NAME, RESTORE_MANIFEST):
+                try:
+                    os.stat(n, dir_fd=sfd, follow_symlinks=False)
+                    return "restore-pending/" + n
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(sfd)
+    try:
+        flag = _read_small(config.DATA_DIR / ".restore-flag", FLAG_MAX)
+        if flag[:1] == b"{":
+            return ".restore-flag (3.8 format)"
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return ".restore-flag (unreadable)"
+    try:
+        bfd = os.open("backups", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return "backups (not a plain directory)"
+    try:
+        for n in os.listdir(bfd):
+            if _NEW_BACKUP.search(n):
+                return "backups/" + n
+    finally:
+        os.close(bfd)
+    return ""
+
+
+def volume_kind() -> str:
+    """"protected" (keys.wtk, and keys.classify agrees) or "legacy"; anything else → ValueError.
+
+    H2: ENOENT on keys.wtk is "legacy" ONLY when nothing says otherwise — no host-keys provider
+    or boot flag, no key artefact of the new format (migrating.wtm, keys.wtk.tmp, master.key…),
+    no reserved name (keys.find_reserved), no 3.8 staging and no WTS1 snapshot in backups/.
+    Lock-free read; the wiring PR must route through the boot state taken under the lock."""
+    try:
+        dfd = os.open(str(config.DATA_DIR), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if _protected_expected():
+            raise ValueError(_KEYS_MISSING) from None
+        return "legacy"
+    try:
+        try:
+            st = os.stat(KEYS_NAME, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError("keys.wtk is not a regular file — refused")
+            try:
+                inv = keystore.classify(_DirView(dfd))
+            except OSError:
+                raise ValueError("the data directory cannot be read — refused") from None
+            if inv.kind != "protected":
+                raise ValueError("the data directory is in an inconsistent state (%s) — refused" % inv.reason)
+            return "protected"
+        if _protected_expected():
+            raise ValueError(_KEYS_MISSING)
+        try:
+            trace = _new_format_traces(dfd)
+        except OSError:
+            trace = "DATA_DIR (unreadable)"
+        if trace:
+            raise ValueError("keys.wtk is missing but %s shows this installation was protected — "
+                             "refused" % trace)
+        return "legacy"
+    finally:
+        os.close(dfd)
+
+
+def is_protected() -> bool:
+    """keys.wtk present (regular, consistent volume) → True; a volume that is neither cleanly
+    legacy nor cleanly protected → ValueError (see volume_kind)."""
+    return volume_kind() == "protected"
 
 
 def _read_small(path, max_len: int) -> bytes:
@@ -603,60 +774,498 @@ def _safe_name(name: str) -> str:
     return name
 
 
-def _allowed(name: str, is_dir: bool) -> bool:
+def _is_tx_file(name: str) -> bool:
     parts = name.split("/")
-    if parts[0] == "transcripts":
-        return True
-    return not is_dir and len(parts) == 1 and (name in _TOP_FILES or name == CONTENT_MANIFEST)
-
-
-def _add_member(tar, arcname: str, src, size: int, entries: list, td: str, stable: bool) -> None:
-    """Adds one regular file, hashing exactly the bytes archived. A file that may change while
-    read (transcripts) is first copied (at most its stat size) into a private temp file, so the
-    tar header's size and the manifest's hash always describe the same bytes."""
-    h = hashlib.sha256()
-    if stable:
-        with open(src, "rb") as f:
-            for b in iter(lambda: f.read(1 << 20), b""):
-                h.update(b)
-        n = os.path.getsize(src)
-        ti = tarfile.TarInfo(arcname)
-        ti.size, ti.mode, ti.mtime = n, 0o600, int(time.time())
-        with open(src, "rb") as f:
-            tar.addfile(ti, f)
+    if parts[0] != "transcripts":
+        return False
+    if len(parts) == 2:
+        base = parts[1]
+    elif len(parts) == 3 and parts[1] == _TX_ARCHIVE:
+        base = parts[2]
     else:
-        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        with os.fdopen(fd, "rb") as f, tempfile.TemporaryFile(dir=td) as spool:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return
-            left, n = size, 0
-            while left > 0:
-                b = f.read(min(left, 1 << 20))
+        return False
+    return bool(_TX_FILE.match(base)) and not keystore.is_reserved_name(base, "transcripts")
+
+
+def _allowed(name: str, is_dir: bool, profile: str = "wts1") -> bool:
+    if is_dir:
+        return name in _TX_DIRS
+    if "/" not in name:
+        if profile == "wts1":
+            return name in _TOP_FILES or name == CONTENT_MANIFEST
+        return name in _LEGACY_IMPORT_FILES or name == "secret"
+    return _is_tx_file(name)
+
+
+# ---------------------------------------------------------------- strict tar (M1)
+def _cstr(field_: bytes, what: str) -> str:
+    head, _sep, tail = field_.partition(b"\0")
+    if tail.strip(b"\0"):
+        raise wts.SnapshotError("bad-tar-header", what)
+    try:
+        return head.decode("utf-8")
+    except UnicodeDecodeError:
+        raise wts.SnapshotError("bad-tar-header", what) from None
+
+
+def _octal(field_: bytes, what: str) -> int:
+    if field_[:1] and field_[0] & 0x80:
+        raise wts.SnapshotError("bad-tar-header", what + " (base-256)")
+    s = field_.strip(b" \0")
+    if not re.fullmatch(rb"[0-7]{1,12}", s):
+        raise wts.SnapshotError("bad-tar-header", what)
+    return int(s, 8)
+
+
+@dataclass
+class _Entry:
+    name: str
+    is_dir: bool
+    size: int
+
+
+class _StrictTar:
+    """Bounded tar reader (M1): POSIX USTAR headers only (checksum, magic, version, no links, no
+    device/sparse/GNU types), regular files and directories, zero padding after every member,
+    both end blocks zero and only zeros up to the end of the decompressed stream (read to EOF by
+    `src.drain_zeros`, so nothing hides in a read-ahead buffer). PAX headers: refused for WTS1
+    (our writer never emits them); for a 3.7 import only small ones with harmless keys."""
+
+    def __init__(self, src, profile: str):
+        self._src = src
+        self._profile = profile
+        self._left = 0
+        self._pad = 0
+        self._count = 0
+        self._ended = False
+
+    def _exact(self, n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            b = self._src.read(n - len(out))
+            if not b:
+                raise wts.SnapshotError("truncated-archive")
+            out += b
+        return bytes(out)
+
+    def read(self, n: int) -> bytes:
+        n = min(n, self._left)
+        if n <= 0:
+            return b""
+        b = self._exact(n)
+        self._left -= n
+        return b
+
+    def _skip_rest(self) -> None:
+        while self._left:
+            self.read(1 << 20)
+        if self._pad:
+            if self._exact(self._pad).strip(b"\0"):
+                raise wts.SnapshotError("bad-tar-padding")
+            self._pad = 0
+
+    def _header(self, blk: bytes):
+        if blk[257:265] != b"ustar\x0000":
+            raise wts.SnapshotError("unsupported-tar-format")
+        want = _octal(blk[148:156], "checksum")
+        if want != sum(blk[:148]) + 8 * 32 + sum(blk[156:]):
+            raise wts.SnapshotError("bad-tar-checksum")
+        typ = blk[156:157]
+        if typ not in (b"0", b"\0", b"5", b"x"):
+            raise wts.SnapshotError("unexpected-member-type")
+        if blk[157:257].strip(b"\0") or blk[500:512].strip(b"\0"):
+            raise wts.SnapshotError("bad-tar-header", "link/padding")
+        name = _cstr(blk[0:100], "name")
+        prefix = _cstr(blk[345:500], "prefix")
+        return typ, (prefix + "/" + name if prefix else name), _octal(blk[124:136], "size")
+
+    def _pax(self, data: bytes) -> dict:
+        out, pos = {}, 0
+        while pos < len(data):
+            sp = data.find(b" ", pos, pos + 12)
+            ln = data[pos:sp] if sp > pos else b""
+            if not ln.isdigit() or ln.startswith(b"0"):
+                raise wts.SnapshotError("bad-tar-extension")
+            rec = data[pos:pos + int(ln)]
+            if len(rec) != int(ln) or not rec.endswith(b"\n"):
+                raise wts.SnapshotError("bad-tar-extension")
+            k, eq, v = rec[sp - pos + 1:-1].partition(b"=")
+            try:
+                key, val = k.decode("ascii"), v.decode("utf-8")
+            except UnicodeDecodeError:
+                raise wts.SnapshotError("bad-tar-extension") from None
+            if not eq or key not in _PAX_KEYS_LEGACY or key in out:
+                raise wts.SnapshotError("unsupported-tar-extension", key[:20])
+            out[key] = val
+            pos += len(rec)
+        return out
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> _Entry:
+        if self._ended:
+            raise StopIteration
+        self._skip_rest()
+        pax = None
+        while True:
+            blk = self._exact(512)
+            if blk == bytes(512):
+                if pax is not None:
+                    raise wts.SnapshotError("bad-tar-extension", "no member after it")
+                if self._exact(512) != bytes(512):
+                    raise wts.SnapshotError("bad-tar-end")
+                self._src.drain_zeros()
+                self._ended = True
+                raise StopIteration
+            self._count += 1
+            if self._count > MAX_MEMBERS:
+                raise wts.SnapshotTooLarge("too-many-members")
+            typ, name, size = self._header(blk)
+            if typ == b"x":
+                if self._profile != "legacy" or pax is not None:
+                    raise wts.SnapshotError("unsupported-tar-extension")
+                if size > _PAX_MAX:
+                    raise wts.SnapshotTooLarge("tar-extension")
+                data = self._exact(size)
+                pad = (-size) % 512
+                if pad and self._exact(pad).strip(b"\0"):
+                    raise wts.SnapshotError("bad-tar-padding")
+                pax = self._pax(data)
+                continue
+            if pax and "path" in pax:
+                name = pax["path"]
+            is_dir = typ == b"5"
+            if is_dir:
+                if size:
+                    raise wts.SnapshotError("bad-tar-header", "directory with data")
+                name = name[:-1] if name.endswith("/") else name
+            elif name.endswith("/"):
+                raise wts.SnapshotError("bad-member-name", repr(name)[:80])
+            self._left, self._pad = size, (-size) % 512
+            return _Entry(name, is_dir, size)
+
+
+class _Archive:
+    """The one strict extractor (WTS1 restore, verify, transcoding and the 3.7 import): every
+    name canonical and allowed by the profile, no duplicates, the content manifest last, every
+    byte hashed. Small members in `mem_only` / `mem_also` are kept in memory (capped before
+    they are read); `mem_only` ones never reach a file."""
+
+    def __init__(self, src, profile: str, mem_only=(), mem_also=()):
+        self._tar = _StrictTar(src, profile)
+        self._profile = profile
+        self._mem_only = frozenset(mem_only)
+        self._mem_also = frozenset(mem_also)
+        self.seen: dict = {}
+        self.dirs: set = set()
+        self.mem: dict = {}
+        self._cur = None
+
+    def entries(self):
+        for e in self._tar:
+            if self._cur is not None:
+                raise wts.SnapshotError("member-not-consumed", self._cur)
+            if self._profile == "wts1" and CONTENT_MANIFEST in self.mem:
+                raise wts.SnapshotError("member-after-manifest")
+            name = _safe_name(e.name)
+            if name in self.seen or name in self.dirs or name in self.mem:
+                raise wts.SnapshotError("duplicate-member", name)
+            if not _allowed(name, e.is_dir, self._profile):
+                raise wts.SnapshotError("unexpected-member", name)
+            if e.is_dir:
+                self.dirs.add(name)
+                yield name, True, 0
+                continue
+            if name in self._mem_only or name in self._mem_also:
+                if name == "secret" and e.size != kr.KEY_LEN:
+                    raise ValueError("the vault key in the backup is malformed — refused")
+                if e.size > _MEM_CAP[name]:
+                    raise wts.SnapshotTooLarge("member", name)
+                data = self._tar.read(e.size)
+                if len(data) != e.size:
+                    raise wts.SnapshotError("short-member", name)
+                self.mem[name] = data
+                if name in self._mem_only:
+                    continue
+            self._cur = name
+            yield name, False, e.size
+            if self._cur is not None:
+                raise wts.SnapshotError("member-not-consumed", name)
+
+    def data(self):
+        """Chunks of the current file member; recorded as (size, sha256) once fully read."""
+        name = self._cur
+        if name is None:
+            raise wts.SnapshotError("no-current-member")
+        h, n = hashlib.sha256(), 0
+        if name in self.mem:
+            b = self.mem[name]
+            h.update(b)
+            n = len(b)
+            yield b
+        else:
+            while True:
+                b = self._tar.read(1 << 20)
                 if not b:
-                    break                      # micşorat între timp: arhivăm ce am citit
-                spool.write(b)
+                    break
                 h.update(b)
                 n += len(b)
-                left -= len(b)
-            spool.seek(0)
-            ti = tarfile.TarInfo(arcname)
-            ti.size, ti.mode, ti.mtime = n, 0o600, int(time.time())
-            tar.addfile(ti, spool)
-    entries.append({"name": arcname, "size": ti.size, "sha256": h.hexdigest()})
+                yield b
+        self.seen[name] = (n, h.hexdigest())
+        self._cur = None
 
 
-def _add_bytes(tar, arcname: str, data: bytes, entries) -> None:
-    ti = tarfile.TarInfo(arcname)
-    ti.size, ti.mode, ti.mtime = len(data), 0o600, int(time.time())
-    tar.addfile(ti, io.BytesIO(data))
-    if entries is not None:
-        entries.append({"name": arcname, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+def _canon(doc) -> bytes:
+    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _add_dir(tar, arcname: str) -> None:
-    ti = tarfile.TarInfo(arcname)
-    ti.type, ti.mode, ti.mtime = tarfile.DIRTYPE, 0o700, int(time.time())
-    tar.addfile(ti)
+def _strict_json(raw: bytes, err):
+    def pairs(items):
+        d = {}
+        for k, v in items:
+            if k in d:
+                raise ValueError("duplicate key")
+            d[k] = v
+        return d
+
+    def no_const(_c):
+        raise ValueError("constant")
+
+    try:
+        doc = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=no_const,
+                         parse_float=no_const)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise err() from None
+    if _canon(doc) != raw:
+        raise err()
+    return doc
+
+
+def _file_list(files, err) -> dict:
+    if type(files) is not list:
+        raise err()
+    out = {}
+    for e in files:
+        if type(e) is not dict or set(e) != {"name", "size", "sha256"}:
+            raise err()
+        name, size, sha = e["name"], e["size"], e["sha256"]
+        if type(name) is not str or type(size) is not int or size < 0 or type(sha) is not str \
+                or not _SHA_HEX.match(sha) or name in out:
+            raise err()
+        out[name] = (size, sha)
+    return out
+
+
+def _parse_content_manifest(raw: bytes) -> dict:
+    def err():
+        return wts.SnapshotError("bad-content-manifest")
+    doc = _strict_json(raw, err)
+    if type(doc) is not dict or set(doc) != {"format", "files"} or doc["format"] != "wts-content-1":
+        raise err()
+    return _file_list(doc["files"], err)
+
+
+# ---------------------------------------------------------------- writing WTS1
+class _IterReader:
+    """File-like over an iterator of byte chunks (tarfile.addfile reads exactly ti.size)."""
+
+    def __init__(self, it):
+        self._it = iter(it)
+        self._buf = b""
+
+    def read(self, n=-1):
+        while len(self._buf) < n:
+            b = next(self._it, b"")
+            if not b:
+                break
+            self._buf += b
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+
+class _TarOut:
+    """USTAR → gzip → WTS1 Writer with the reader's budgets enforced while writing (M2): member
+    count, unpacked size, content-manifest size. Every file is hashed on exactly the bytes
+    written; the manifest goes last."""
+
+    def __init__(self, w):
+        self._tar = tarfile.open(fileobj=w, mode="w|gz", format=tarfile.USTAR_FORMAT)
+        self.entries: list = []
+        self._count = 0
+        self._size = 0
+
+    def _info(self, name, size, is_dir=False):
+        ti = tarfile.TarInfo(name)
+        ti.size, ti.mtime = size, int(time.time())
+        ti.mode = 0o700 if is_dir else 0o600
+        if is_dir:
+            ti.type = tarfile.DIRTYPE
+        ti.tobuf(tarfile.USTAR_FORMAT, "utf-8", "strict")   # nume nereprezentabil → ValueError, nimic scris
+        return ti
+
+    def _budget(self, size):
+        self._count += 1
+        self._size += 512 + size + (-size) % 512
+        if self._count > MAX_MEMBERS:
+            raise wts.SnapshotTooLarge("too-many-members")
+        if self._size + 1024 + tarfile.RECORDSIZE > RESTORE_MAX_UNCOMPRESSED:
+            raise wts.SnapshotTooLarge("unpacked-budget")
+
+    def add_dir(self, name):
+        ti = self._info(name, 0, True)
+        self._budget(0)
+        self._tar.addfile(ti)
+
+    def add_stream(self, name, size, chunks):
+        ti = self._info(name, size)
+        self._budget(size)
+        h = hashlib.sha256()
+
+        def hashed():
+            for b in chunks:
+                h.update(b)
+                yield b
+        gen = hashed()
+        self._tar.addfile(ti, _IterReader(gen))
+        # sursa trebuie să se termine exact la `size` (şi generatorul să ajungă la capăt: acolo
+        # îşi înregistrează extractorul strict hashul membrului)
+        if any(gen):
+            raise OSError("more data than declared for %s" % name[:80])
+        self.entries.append({"name": name, "size": size, "sha256": h.hexdigest()})
+
+    def add_bytes(self, name, data):
+        self.add_stream(name, len(data), [data])
+
+    def finish(self):
+        man = _canon({"format": "wts-content-1", "files": self.entries})
+        if len(man) > CONTENT_MANIFEST_MAX:
+            raise wts.SnapshotTooLarge("manifest")
+        ti = self._info(CONTENT_MANIFEST, len(man))
+        self._budget(len(man))
+        self._tar.addfile(ti, io.BytesIO(man))
+        self._tar.close()
+
+
+def _file_chunks(f, size):
+    left = size
+    while left > 0:
+        b = f.read(min(left, 1 << 20))
+        if not b:
+            raise OSError("file shrank while archived")
+        left -= len(b)
+        yield b
+
+
+def _forbidden_inodes():
+    """(dev, ino) of every key file and of DATA_DIR itself: never archived under another name
+    (H3: a hardlink, a symlinked root, a bind mount of the key into transcripts/)."""
+    out = set()
+    names = (keystore.LEGACY_SECRET, keystore.VOLUME_KEY, keystore.VOLUME_KEY_TMP, KEYS_NAME,
+             keystore.MANIFEST_TMP, keystore.MIGRATION_MARKER, "agent-signing.key", "webterm.db",
+             keystore.LOCK_NAME)
+    paths = [config.DATA_DIR / n for n in names] + [config.DATA_DIR]
+    for p in (os.environ.get(keystore.ENV_KEY_FILE), keystore.DEFAULT_KEY_FILE):
+        if p:
+            paths.append(p)
+    for p in paths:
+        for follow in (False, True):
+            try:
+                st = os.stat(str(p), follow_symlinks=follow)
+                out.add((st.st_dev, st.st_ino))
+            except OSError:
+                pass
+    return out
+
+
+_DIR_RO = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_RO = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _add_transcripts(t: _TarOut, td: str) -> None:
+    """H3: `transcripts/` opened without following a symlink and walked through directory fds;
+    only regular, single-link files with a recording name, never a key file's inode."""
+    forbidden = _forbidden_inodes()
+    try:
+        root = os.open(str(config.TRANSCRIPT_DIR), _DIR_RO)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("the transcripts directory is not a plain directory (symlink?) — refused") from None
+        raise
+    try:
+        st = os.fstat(root)
+        if (st.st_dev, st.st_ino) in forbidden:
+            raise ValueError("the transcripts directory is the data directory — refused")
+        t.add_dir("transcripts")
+        _walk_transcripts(t, root, "transcripts", 0, forbidden, td)
+    finally:
+        os.close(root)
+
+
+def _walk_transcripts(t, dfd, rel, depth, forbidden, td):
+    for n in sorted(os.listdir(dfd)):
+        try:
+            st = os.stat(n, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            if depth == 0 and n == _TX_ARCHIVE and (st.st_dev, st.st_ino) not in forbidden:
+                cfd = os.open(n, _DIR_RO, dir_fd=dfd)
+                try:
+                    cst = os.fstat(cfd)
+                    if (cst.st_dev, cst.st_ino) == (st.st_dev, st.st_ino):
+                        t.add_dir(rel + "/" + n)
+                        _walk_transcripts(t, cfd, rel + "/" + n, 1, forbidden, td)
+                finally:
+                    os.close(cfd)
+            else:
+                log.warning("directory skipped from the backup: %s/%s", rel, n[:80])
+            continue
+        if not _TX_FILE.match(n) or keystore.is_reserved_name(n, "transcripts"):
+            if not n.endswith(".cap-tmp"):
+                log.warning("file skipped from the backup (not a recording): %s/%s", rel, n[:80])
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (st.st_dev, st.st_ino) in forbidden:
+            log.warning("transcript skipped from the backup (link or key alias): %s/%s", rel, n[:80])
+            continue
+        try:
+            fd = os.open(n, _FILE_RO, dir_fd=dfd)
+        except OSError as e:
+            log.warning("transcript skipped from the backup (%s): %s", n[:80], e)
+            continue
+        with os.fdopen(fd, "rb") as f:
+            fst = os.fstat(f.fileno())
+            if ((fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(fst.st_mode)
+                    or fst.st_nlink != 1):
+                log.warning("transcript skipped from the backup (changed while read): %s", n[:80])
+                continue
+            # copie (cel mult mărimea de la stat) într-un temp privat: antetul tar şi hashul
+            # descriu exact aceiaşi octeţi chiar dacă transcriptul se schimbă între timp
+            with tempfile.TemporaryFile(dir=td) as spool:
+                left, size = fst.st_size, 0
+                while left > 0:
+                    b = f.read(min(left, 1 << 20))
+                    if not b:
+                        break
+                    spool.write(b)
+                    size += len(b)
+                    left -= len(b)
+                spool.seek(0)
+                t.add_stream(rel + "/" + n, size, _file_chunks(spool, size))
+
+
+def _read_signing(name: str):
+    """The fleet signing key file (O_NOFOLLOW, regular, small) or None when absent."""
+    try:
+        return _read_small(config.DATA_DIR / name, SIGNING_MAX)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ValueError("%s is a symlink — refused" % name) from None
+        raise
 
 
 def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
@@ -666,7 +1275,6 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
     ring = hk.ring
     w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
                    snk=ring.snk if local else None, mk=hk.mk if portable else None)
-    entries: list = []
     with tempfile.TemporaryDirectory() as td:
         dbcopy = os.path.join(td, "webterm.db")
         con = sqlite3.connect(str(config.DB_PATH))
@@ -674,42 +1282,24 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
             con.execute("VACUUM INTO ?", (dbcopy,))
         finally:
             con.close()
-        with tarfile.open(fileobj=w, mode="w|gz") as tar:
-            _add_member(tar, "webterm.db", dbcopy, 0, entries, td, stable=True)
-            _add_bytes(tar, KEYS_NAME, keys_blob, entries)
-            for name in ("agent-signing.key", "agent-signing.pub"):
-                p = config.DATA_DIR / name
-                if p.is_file() and not p.is_symlink():
-                    _add_member(tar, name, str(p), p.stat().st_size, entries, td, stable=False)
-            if include_transcripts and config.TRANSCRIPT_DIR.is_dir():
-                base = config.TRANSCRIPT_DIR
-                _add_dir(tar, "transcripts")
-                for f in sorted(base.rglob("*")):
-                    rel = "transcripts/" + str(f.relative_to(base))
-                    if f.name.endswith(".cap-tmp"):
-                        continue
-                    try:
-                        _safe_name(rel)
-                    except ValueError:
-                        log.warning("transcript skipped from the backup (unsupported name): %s", f.name)
-                        continue
-                    try:
-                        st = os.lstat(f)
-                        if stat.S_ISDIR(st.st_mode):
-                            _add_dir(tar, rel)
-                        elif stat.S_ISREG(st.st_mode):
-                            _add_member(tar, rel, str(f), st.st_size, entries, td, stable=False)
-                    except OSError as e:
-                        log.warning("transcript skipped from the backup (%s): %s", f.name, e)
-            man = json.dumps({"format": "wts-content-1", "files": entries},
-                             sort_keys=True, separators=(",", ":")).encode()
-            _add_bytes(tar, CONTENT_MANIFEST, man, None)
+        t = _TarOut(w)
+        size = os.path.getsize(dbcopy)
+        with open(dbcopy, "rb") as f:
+            t.add_stream("webterm.db", size, _file_chunks(f, size))
+        t.add_bytes(KEYS_NAME, keys_blob)
+        for name in _SIGNING:
+            b = _read_signing(name)
+            if b is not None:
+                t.add_bytes(name, b)
+        if include_transcripts:
+            _add_transcripts(t, td)
+        t.finish()
     w.close()
 
 
 def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=False) -> None:
-    """Writes a WTS1 file all-or-nothing (tmp in the same dir, fsync, replace, dir fsync).
-    A failed attempt leaves no file; a retry is a new Writer, so a new content key."""
+    """Writes a WTS1 file all-or-nothing (tmp in the same dir, fsync, read back and verified,
+    replace, dir fsync). A failed attempt leaves no file; a retry is a new Writer (new CK)."""
     path = str(path)
     tmp = path + TMP_SUFFIX
     try:
@@ -722,6 +1312,9 @@ def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=
             _write_wts(f, hk, keys_blob, include_transcripts, local, portable)
             f.flush()
             _fsync(f.fileno())
+        # M2: succes doar pentru o arhivă pe care restore-ul o acceptă (bugete, manifest, keyring)
+        with open(os.open(tmp, _FILE_RO), "rb") as f:
+            _verify_wts(f, hk, None, prefer="local" if local else "portable")
         os.replace(tmp, path)
         _fsync_dir(os.path.dirname(path))
     except BaseException:
@@ -742,98 +1335,83 @@ def _fsync_dir(d) -> None:
 
 def make_portable_bytes(include_transcripts: bool = False, keys=None) -> bytes:
     """A portable WTS1 (local + portable envelopes) in memory — the input of the WTBK1
-    passphrase layer for downloads and remote uploads (that layer is single-shot AES-GCM)."""
+    passphrase layer for downloads and remote uploads (that layer is single-shot AES-GCM, a
+    known full-buffer path, §12.10). Verified through the portable route before it is returned."""
     hk, blob = _host(keys)
     buf = io.BytesIO()
     _write_wts(buf, hk, blob, include_transcripts, local=True, portable=True)
+    _verify_wts(io.BytesIO(buf.getvalue()), hk, None, prefer="portable")
     return buf.getvalue()
 
 
-def _unlock(reader, hk: HostKeys, mk=None) -> None:
-    """Local envelope with this host's SNK (same installation), else the portable one with the
-    operator's `mk` or, failing that, the host MK when the header names it."""
-    if reader.local and reader.installation_id == hk.ring.installation_id:
-        reader.unlock(snk=hk.ring.snk, installation_id=hk.ring.installation_id)
-        return
-    for cand in (mk, hk.mk):
-        if cand is not None and reader.portable and kr.key_id(cand) == reader.mk_id:
-            reader.unlock(mk=cand)
-            return
-    raise wts.SnapshotWrongKey("no-usable-envelope", "the backup needs master key " + reader.mk_id.hex())
+# ---------------------------------------------------------------- reading WTS1
+def _unlock(reader, hk: HostKeys, mk=None, prefer: str = "local") -> None:
+    """M4: the local envelope with this host's SNK (same installation), or the portable one with
+    the operator's `mk` or the host MK when the header names it. `prefer="portable"` tries the
+    portable envelope first; a local envelope under another SNK (a recovered installation)
+    falls through to the portable one instead of failing."""
+    if prefer not in ("local", "portable"):
+        raise ValueError("invalid envelope preference")
+
+    def local():
+        if reader.local and reader.installation_id == hk.ring.installation_id:
+            reader.unlock(snk=hk.ring.snk, installation_id=hk.ring.installation_id)
+            return True
+        return False
+
+    def portable():
+        for cand in (mk, hk.mk):
+            if cand is not None and reader.portable and kr.key_id(cand) == reader.mk_id:
+                reader.unlock(mk=cand)
+                return True
+        return False
+
+    for route in ((local, portable) if prefer == "local" else (portable, local)):
+        try:
+            if route():
+                return
+        except wts.SnapshotWrongKey:
+            continue
+    raise wts.SnapshotWrongKey("needs-mk", "the backup needs master key " + reader.mk_id.hex(),
+                               mk_id=reader.mk_id)
 
 
-def _unpack_verified(reader, dest: str) -> dict:
-    """Streams the authenticated tar.gz into `dest` (a fresh private dir): names, types and
-    sizes checked per member, every byte hashed, the content manifest last and equal to what
-    was extracted, the gzip and WTS1 streams consumed to their authenticated end."""
+def _unpack_verified(reader, dest) -> tuple:
+    """Streams the authenticated tar.gz through the strict extractor into `dest` (a fresh
+    private dir; None = hash only), then the gzip and WTS1 streams to their authenticated end;
+    the extracted set must equal the content manifest. Returns (info, inner keys.wtk bytes)."""
     gz = wts.BoundedGunzip(reader, RESTORE_MAX_UNCOMPRESSED)
-    seen: dict = {}
-    dirs = set()
-    manifest = None
-    count = 0
+    arc = _Archive(gz, "wts1", mem_only=(CONTENT_MANIFEST,), mem_also=(KEYS_NAME,))
     try:
-        with tarfile.open(fileobj=gz, mode="r|") as tar:
-            for m in tar:
-                count += 1
-                if count > MAX_MEMBERS:
-                    raise wts.SnapshotTooLarge("too-many-members")
-                if manifest is not None:
-                    raise wts.SnapshotError("member-after-manifest")
-                name = _safe_name(m.name)
-                if name in seen or name in dirs:
-                    raise wts.SnapshotError("duplicate-member", name)
-                if m.isdir():
-                    if not _allowed(name, True):
-                        raise wts.SnapshotError("unexpected-member", name)
-                    os.makedirs(os.path.join(dest, name), mode=0o700, exist_ok=True)
-                    dirs.add(name)
-                    continue
-                if not m.isreg():
-                    raise wts.SnapshotError("unexpected-member-type", name)
-                if name == CONTENT_MANIFEST:
-                    if m.size > CONTENT_MANIFEST_MAX:
-                        raise wts.SnapshotTooLarge("manifest")
-                    manifest = tar.extractfile(m).read(CONTENT_MANIFEST_MAX + 1)
-                    continue
-                if not _allowed(name, False):
-                    raise wts.SnapshotError("unexpected-member", name)
-                parent = os.path.dirname(name)
-                if parent:
-                    os.makedirs(os.path.join(dest, parent), mode=0o700, exist_ok=True)
-                h = hashlib.sha256()
-                n = 0
-                src = tar.extractfile(m)
-                fd = os.open(os.path.join(dest, name),
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-                with os.fdopen(fd, "wb") as out:
-                    for b in iter(lambda: src.read(1 << 20), b""):
-                        h.update(b)
-                        n += len(b)
-                        out.write(b)
-                if n != m.size:
-                    raise wts.SnapshotError("short-member", name)
-                seen[name] = (n, h.hexdigest())
-        gz.drain_zeros()
+        for name, is_dir, _size in arc.entries():
+            if dest is None:
+                if not is_dir:
+                    for _b in arc.data():
+                        pass
+                continue
+            path = os.path.join(dest, name)
+            if is_dir:
+                os.makedirs(path, mode=0o700, exist_ok=True)
+                continue
+            parent = os.path.dirname(name)
+            if parent:
+                os.makedirs(os.path.join(dest, parent), mode=0o700, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                for b in arc.data():
+                    out.write(b)
         reader.finish()
-    except tarfile.TarError as e:
-        raise wts.SnapshotError("bad-archive", str(e)[:80]) from None
     except (FileExistsError, NotADirectoryError, IsADirectoryError):
-        # un fişier şi un director cu acelaşi nume (ex. „transcripts/a” apoi „transcripts/a/b”)
         raise wts.SnapshotError("conflicting-members") from None
-    if manifest is None:
+    if CONTENT_MANIFEST not in arc.mem:
         raise wts.SnapshotError("no-content-manifest")
-    try:
-        doc = json.loads(manifest)
-        listed = {e["name"]: (int(e["size"]), str(e["sha256"])) for e in doc["files"]}
-        if doc.get("format") != "wts-content-1" or len(listed) != len(doc["files"]):
-            raise ValueError
-    except (ValueError, KeyError, TypeError):
-        raise wts.SnapshotError("bad-content-manifest") from None
-    if listed != seen:
+    if _parse_content_manifest(arc.mem[CONTENT_MANIFEST]) != arc.seen:
         raise wts.SnapshotError("content-manifest-mismatch")
-    if "webterm.db" not in seen or KEYS_NAME not in seen:
+    if "webterm.db" not in arc.seen or KEYS_NAME not in arc.seen:
         raise wts.SnapshotError("incomplete", "webterm.db and keys.wtk are required")
-    return {"has_transcripts": "transcripts" in dirs or any(n.startswith("transcripts/") for n in seen)}
+    info = {"has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
+            "has_signing_key": "agent-signing.key" in arc.seen}
+    return info, arc.mem[KEYS_NAME]
 
 
 def _check_db(path: str):
@@ -863,145 +1441,466 @@ def _envelopes_for(mk: bytes, r: kr.Keyring) -> tuple:
     return tuple(envs)
 
 
+def _rewrap(src: kr.Keyring, mk: bytes, epoch: int, extra_retired=()) -> bytes:
+    """`src`'s keys under `mk` (installation id of `src`); retired ids = src's ∪ its MK id ∪
+    `extra_retired`, minus the new MK id."""
+    new_id = kr.key_id(mk)
+    retired = set(src.retired_mk_ids) | {src.mk_id} | set(extra_retired)
+    retired.discard(new_id)
+    if len(retired) > kr.MAN_MAX_RETIRED:
+        raise ValueError("too many retired master keys — refused")
+    m = kr.KeyManifest(src.installation_id, epoch, new_id, tuple(sorted(retired)), _envelopes_for(mk, src))
+    return kr.encode_manifest(m, mk, kr.PROFILE_V1)
+
+
 def _manifest_for_host(src: kr.Keyring, hk: HostKeys) -> bytes:
     """The keyring of a restored snapshot, re-wrapped under the host MK (the one the next boot
     will use), epoch above both the snapshot's and the host's; the snapshot's MK id (and, same
     installation, the host's old ids) stay listed as retired: backups made under them exist."""
-    host_id = kr.key_id(hk.mk)
-    retired = set(src.retired_mk_ids) | {src.mk_id}
+    extra = ()
     if src.installation_id == hk.ring.installation_id:
-        retired |= set(hk.ring.retired_mk_ids) | {hk.ring.mk_id}
-    retired.discard(host_id)
-    if len(retired) > kr.MAN_MAX_RETIRED:
-        raise ValueError("too many retired master keys — refused")
-    m = kr.KeyManifest(src.installation_id, max(src.epoch, hk.ring.epoch) + 1, host_id,
-                       tuple(sorted(retired)), _envelopes_for(hk.mk, src))
-    return kr.encode_manifest(m, hk.mk, kr.PROFILE_V1)
+        extra = tuple(hk.ring.retired_mk_ids) + (hk.ring.mk_id,)
+    return _rewrap(src, hk.mk, max(src.epoch, hk.ring.epoch) + 1, extra)
 
 
-def _verify_wts(fileobj, hk: HostKeys, dest: str, mk=None, max_plaintext=wts.MAX_PLAINTEXT) -> tuple:
-    """Full check of a WTS1 into `dest`: header MAC, envelope, every chunk, final frame, EOF,
-    content manifest, DB integrity, and the inner keys.wtk opened with the MK it names (the
-    host's or the operator's `mk`). Returns (info, inner keyring)."""
-    reader = wts.Reader(fileobj, max_plaintext)
-    _unlock(reader, hk, mk)
-    info = _unpack_verified(reader, dest)
-    inner_blob = _read_small(os.path.join(dest, KEYS_NAME), kr.MAN_MAX_LEN)
-    inner = None
-    for cand in (hk.mk, mk):
-        if cand is None:
-            continue
-        try:
-            inner = kr.open_keyring_bytes(inner_blob, cand, kr.PROFILE_V1)
-            break
-        except kr.WrongKeyError:
-            continue
-        except kr.KeyringError as e:
-            raise wts.SnapshotError("keyring-invalid", e.reason) from None
-    if inner is None:
-        raise wts.SnapshotWrongKey("inner-keyring", "its keys.wtk needs the master key it was made under")
-    if inner.installation_id != reader.installation_id or inner.snk is None:
+def _open_inner(blob: bytes, reader, hk: HostKeys, mk=None) -> kr.Keyring:
+    """M4: the inner keys.wtk is under the MK the header names (writers keep them equal), and
+    carries the header's installation id and epoch and an SNK."""
+    cand = next((c for c in (hk.mk, mk) if c is not None and kr.key_id(c) == reader.mk_id), None)
+    if cand is None:
+        raise wts.SnapshotWrongKey("needs-mk", "its keys.wtk needs master key " + reader.mk_id.hex(),
+                                   mk_id=reader.mk_id)
+    try:
+        inner = kr.open_keyring_bytes(blob, cand, kr.PROFILE_V1)
+    except kr.WrongKeyError:
+        raise wts.SnapshotError("keyring-mismatch", "keys.wtk is not under the header's master key") from None
+    except kr.KeyringError as e:
+        raise wts.SnapshotError("keyring-invalid", e.reason) from None
+    if (inner.installation_id != reader.installation_id or inner.epoch != reader.epoch
+            or inner.mk_id != reader.mk_id or inner.snk is None):
         raise wts.SnapshotError("keyring-mismatch")
-    users_since = _check_db(os.path.join(dest, "webterm.db"))
+    return inner
+
+
+def _verify_wts(fileobj, hk: HostKeys, dest, mk=None, prefer="local", max_plaintext=wts.MAX_PLAINTEXT) -> tuple:
+    """Full check of a WTS1 into `dest` (None = hash only, no DB check): header MAC, envelope,
+    every chunk, final frame, EOF, strict tar, content manifest, DB integrity, and the inner
+    keys.wtk bound to the header. Returns (info, inner keyring)."""
+    reader = wts.Reader(fileobj, max_plaintext)
+    _unlock(reader, hk, mk, prefer)
+    info, inner_blob = _unpack_verified(reader, dest)
+    inner = _open_inner(inner_blob, reader, hk, mk)
+    users_since = _check_db(os.path.join(dest, "webterm.db")) if dest is not None else None
     info.update({"has_secret": False, "has_keyring": True, "users_since": users_since,
                  "format": "WTS1", "portable": reader.portable,
                  "same_installation": inner.installation_id == hk.ring.installation_id})
     return info, inner
 
 
+def _transcode(src, hk: HostKeys, out, mk=None) -> None:
+    """A stored local snapshot → WTS1 local + portable with a NEW content key, streamed (no
+    plaintext on disk). M4: the inner keys.wtk is authenticated with the MK its header names
+    (the host's, or the operator's `mk` for a snapshot made before a rotation) and re-wrapped
+    under the current host MK, so the result opens with ONE MK. The source manifest must match
+    before the output is closed (a bad source leaves an unclosed, discarded output)."""
+    reader = wts.Reader(src)
+    _unlock(reader, hk, mk)
+    host_id = kr.key_id(hk.mk)
+    if reader.mk_id != host_id and (mk is None or kr.key_id(mk) != reader.mk_id):
+        raise wts.SnapshotWrongKey("needs-mk", "this snapshot was made under master key %s"
+                                   % reader.mk_id.hex(), mk_id=reader.mk_id)
+    w = wts.Writer(out, installation_id=reader.installation_id, epoch=reader.epoch, mk_id=host_id,
+                   snk=hk.ring.snk, mk=hk.mk)
+    t = _TarOut(w)
+    gz = wts.BoundedGunzip(reader, RESTORE_MAX_UNCOMPRESSED)
+    arc = _Archive(gz, "wts1", mem_only=(CONTENT_MANIFEST,), mem_also=(KEYS_NAME,))
+    for name, is_dir, size in arc.entries():
+        if is_dir:
+            t.add_dir(name)
+        elif name == KEYS_NAME:
+            blob = b"".join(arc.data())
+            inner = _open_inner(blob, reader, hk, mk)
+            t.add_bytes(KEYS_NAME, blob if inner.mk_id == host_id else _rewrap(inner, hk.mk, inner.epoch))
+        else:
+            t.add_stream(name, size, arc.data())
+    reader.finish()
+    if CONTENT_MANIFEST not in arc.mem or _parse_content_manifest(arc.mem[CONTENT_MANIFEST]) != arc.seen:
+        raise wts.SnapshotError("content-manifest-mismatch")
+    if KEYS_NAME not in arc.seen or "webterm.db" not in arc.seen:
+        raise wts.SnapshotError("incomplete", "webterm.db and keys.wtk are required")
+    t.finish()
+    w.close()
+
+
+# ---------------------------------------------------------------- operations lock (H1, M3)
 def _private_tmpdir() -> str:
     # sub backups/ (acelaşi filesystem ca restore-pending/ → rename atomic), 0700
-    return tempfile.mkdtemp(prefix=".restore-verify-", dir=str(_backup_dir()))
+    return tempfile.mkdtemp(prefix=VERIFY_PREFIX, dir=str(_backup_dir()))
 
 
-def _verify_wts_bytes(raw: bytes, keys=None, mk=None) -> dict:
-    hk, _ = _host(keys)
-    td = _private_tmpdir()
+@contextmanager
+def _restore_lock():
+    """One verify / stage / apply at a time (flock on backups/.restore.lock, non-blocking: a
+    second attempt is refused, never queued). Under it, `.restore-verify-*` left by a crash are
+    removed: every creator of such a directory holds this lock. The wiring PR may replace it
+    with the boot's process lock."""
+    d = _backup_dir()
+    fd = os.open(str(d / STAGE_LOCK), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        info, _inner = _verify_wts(io.BytesIO(raw), hk, td, mk)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(_BUSY) from None
+        for p in d.glob(VERIFY_PREFIX + "*"):
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+        yield
     finally:
-        shutil.rmtree(td, ignore_errors=True)
+        os.close(fd)
+
+
+def _verify_wts_bytes(raw: bytes, keys=None, mk=None, prefer="local") -> dict:
+    hk, _ = _host(keys)
+    with _restore_lock():
+        td = _private_tmpdir()
+        try:
+            info, _inner = _verify_wts(io.BytesIO(raw), hk, td, mk, prefer)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
     return info
 
 
-def _stage_dir(td: str) -> None:
-    """Moves a fully verified tree into restore-pending/ (one rename) and writes the flag."""
-    rd = _restore_dir()
-    if rd.exists():
-        shutil.rmtree(rd)
+# ---------------------------------------------------------------- staging (H1)
+def _write_new(path: str, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            n = os.write(fd, view)
+            if not n:
+                raise OSError("short write")
+            view = view[n:]
+        _fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _tree(root: str):
+    """(files {rel: abs}, dirs {rel}) of a staging tree; anything but regular files and
+    directories (a symlink, a fifo…) → refuse."""
+    files, dirs = {}, set()
+    for dp, dn, fn in os.walk(root):
+        rel_dp = os.path.relpath(dp, root)
+        for n in dn + fn:
+            p = os.path.join(dp, n)
+            rel = n if rel_dp == "." else rel_dp.replace(os.sep, "/") + "/" + n
+            st = os.lstat(p)
+            if stat.S_ISDIR(st.st_mode):
+                dirs.add(rel)
+            elif stat.S_ISREG(st.st_mode):
+                files[rel] = p
+            else:
+                raise ValueError("the restore staging holds a non-regular entry — refused")
+    return files, dirs
+
+
+def _hash_file(p: str):
+    h, n = hashlib.sha256(), 0
+    with open(os.open(p, _FILE_RO), "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError("the restore staging holds a non-regular entry — refused")
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+            n += len(b)
+    return n, h.hexdigest()
+
+
+def _fsync_path(p: str) -> None:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        _fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_flag(doc: dict) -> None:
+    """The flag, atomically and durably (tmp, fsync, rename, directory fsync)."""
+    d = config.DATA_DIR
+    tmp = str(d / ".restore-flag.tmp")
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    _write_new(tmp, _canon(doc))
+    _step("flag:tmp")
+    os.replace(tmp, str(_restore_flag()))
+    _fsync_dir(d)
+
+
+_FLAG_FORMAT = "wt-restore-flag-1"
+_FLAG_STATES = ("staged", "applying", "committed")
+
+
+def _read_flag():
+    """None (no flag), "legacy" (a 3.7 flag: a timestamp), or the 3.8 flag document."""
+    try:
+        raw = _read_small(_restore_flag(), FLAG_MAX)
+    except FileNotFoundError:
+        return None
+    if raw[:1] != b"{":
+        return "legacy"
+
+    def err():
+        return ValueError("the restore flag is malformed — refused")
+    doc = _strict_json(raw, err)
+    if (type(doc) is not dict or not {"format", "manifest", "state"} <= set(doc)
+            or not set(doc) <= {"format", "manifest", "state", "safety"}
+            or doc["format"] != _FLAG_FORMAT or doc["state"] not in _FLAG_STATES
+            or type(doc["manifest"]) is not str or not _SHA_HEX.match(doc["manifest"])
+            or type(doc.get("safety", "")) is not str):
+        raise err()
+    return doc
+
+
+def _stage_publish(td: str, staged_blob: bytes, mk: bytes) -> None:
+    """H1: publishes a fully verified tree as ONE durable staged set. Every file and directory
+    fsynced, then `restore.json` (generation, files with sizes + SHA-256, keyring identity),
+    then the previous set retired (its flag first), one rename, and the flag LAST, pointing at
+    the manifest's digest. A crash anywhere leaves either no flag or a flag whose set is complete."""
+    ring = _open_ring(staged_blob, mk, "staged keys.wtk")
+    files, dirs = _tree(td)
+    entries = []
+    for rel in sorted(files):
+        if not _allowed(rel, False) or rel == CONTENT_MANIFEST:
+            raise ValueError("unexpected file in the restore staging — refused: %s" % rel[:80])
+        size, sha = _hash_file(files[rel])
+        entries.append({"name": rel, "size": size, "sha256": sha})
+        _fsync_path(files[rel])
+    for rel in sorted(dirs, key=lambda r: -r.count("/")):
+        if rel not in _TX_DIRS:
+            raise ValueError("unexpected directory in the restore staging — refused")
+        _fsync_dir(os.path.join(td, rel))
+    doc = {"format": "wt-restore-1", "generation": secrets.token_hex(16), "created": int(time.time()),
+           "installation_id": ring.installation_id.hex(), "epoch": ring.epoch, "mk_id": ring.mk_id.hex(),
+           "files": entries, "dirs": sorted(dirs)}
+    raw = _canon(doc)
+    if len(raw) > RESTORE_MANIFEST_MAX:
+        raise wts.SnapshotTooLarge("restore-manifest")
+    _write_new(os.path.join(td, RESTORE_MANIFEST), raw)
+    _fsync_dir(td)
+    _step("stage:manifest")
+    flag, rd = _restore_flag(), _restore_dir()
+    # setul vechi încetează să fie un restore ÎNAINTE să-l atingem: întâi flagul, apoi directorul
+    if os.path.lexists(flag):
+        os.unlink(flag)
+        _fsync_dir(config.DATA_DIR)
+    _step("stage:old-flag-removed")
+    if os.path.lexists(rd):
+        old = tempfile.mkdtemp(prefix=VERIFY_PREFIX + "old-", dir=str(_backup_dir()))
+        os.rename(str(rd), os.path.join(old, "set"))
+        _fsync_dir(config.DATA_DIR)
+        shutil.rmtree(old, ignore_errors=True)
+    _step("stage:old-removed")
     os.rename(td, str(rd))
-    _restore_flag().write_text(str(int(time.time())))
+    _fsync_dir(_backup_dir())
+    _fsync_dir(config.DATA_DIR)
+    _step("stage:renamed")
+    _write_flag({"format": _FLAG_FORMAT, "manifest": hashlib.sha256(raw).hexdigest(), "state": "staged"})
+    _step("stage:flag")
     log.warning("RESTORE staged — it is applied on the next restart")
 
 
-def _stage_wts(fileobj, keys=None, mk=None) -> dict:
+def _stage_wts(fileobj, keys=None, mk=None, prefer="local") -> dict:
     """Protected restore of a WTS1: everything verified in a private dir BEFORE restore-pending/
-    is touched; the staged keys.wtk is the snapshot's keyring re-wrapped under the host MK."""
+    is touched; the staged keys.wtk is the snapshot's keyring re-wrapped under the host MK; the
+    verified files are exactly the ones published (no second extraction)."""
     hk, _ = _host(keys)
-    td = _private_tmpdir()
-    try:
-        info, inner = _verify_wts(fileobj, hk, td, mk)
-        staged = _manifest_for_host(inner, hk)
-        kp = os.path.join(td, KEYS_NAME)
-        os.unlink(kp)
-        fd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(staged)
-        _stage_dir(td)
-    except BaseException:
-        shutil.rmtree(td, ignore_errors=True)
-        raise
+    with _restore_lock():
+        td = _private_tmpdir()
+        try:
+            info, inner = _verify_wts(fileobj, hk, td, mk, prefer)
+            staged = _manifest_for_host(inner, hk)
+            kp = os.path.join(td, KEYS_NAME)
+            os.unlink(kp)
+            _write_new(kp, staged)
+            _stage_publish(td, staged, hk.mk)
+        except BaseException:
+            shutil.rmtree(td, ignore_errors=True)
+            raise
+    return _missing_data_note(info)
+
+
+def _missing_data_note(info: dict) -> dict:
+    # M3: ce NU vine din backup rămâne cel de pe volum — spus explicit, nu descoperit după restore
+    info = dict(info)
+    info["live_transcripts_kept"] = not info.get("has_transcripts")
+    info["live_signing_key_kept"] = not info.get("has_signing_key")
     return info
-
-
-_LEGACY_IMPORT_FILES = frozenset({"webterm.db", "agent-signing.key", "agent-signing.pub"})
 
 
 def _stage_legacy_import(raw: bytes, keys=None) -> dict:
-    """Explicit import of a pre-3.8 backup on a protected volume: its raw `secret` becomes the
-    FK_legacy of a new keys.wtk (this installation, host MK, other keys unchanged); the raw key
-    is never written to staging."""
+    """Explicit import of a pre-3.8 backup on a protected volume, through the same strict
+    extractor as WTS1 (M3): its raw `secret` (kept in memory only) becomes the FK_legacy of a new
+    keys.wtk (this installation, host MK, other keys unchanged); the DB is checked on exactly the
+    files that are then published; the raw key is never written to staging."""
     hk, _ = _host(keys)
-    info = _inspect(raw)
-    if not info["has_secret"]:
-        raise ValueError("backup without the vault key — a restore would leave the credentials "
-                         "undecryptable; use a complete WebTerm backup")
-    td = _private_tmpdir()
+    with _restore_lock():
+        td = _private_tmpdir()
+        try:
+            gz = wts.BoundedGunzip(io.BytesIO(raw), RESTORE_MAX_UNCOMPRESSED)
+            arc = _Archive(gz, "legacy", mem_only=("secret",))
+            try:
+                for name, is_dir, _size in arc.entries():
+                    path = os.path.join(td, name)
+                    if is_dir:
+                        os.makedirs(path, mode=0o700, exist_ok=True)
+                        continue
+                    parent = os.path.dirname(name)
+                    if parent:
+                        os.makedirs(os.path.join(td, parent), mode=0o700, exist_ok=True)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                    with os.fdopen(fd, "wb") as out:
+                        for b in arc.data():
+                            out.write(b)
+            except (FileExistsError, NotADirectoryError, IsADirectoryError):
+                raise wts.SnapshotError("conflicting-members") from None
+            if "webterm.db" not in arc.seen:
+                raise ValueError("backup without webterm.db")
+            secret = arc.mem.get("secret")
+            if secret is None or len(secret) != kr.KEY_LEN:
+                raise ValueError("backup without the vault key — a restore would leave the credentials "
+                                 "undecryptable; use a complete WebTerm backup")
+            users_since = _check_db(os.path.join(td, "webterm.db"))
+            r = hk.ring
+            new = kr.Keyring(r.installation_id, r.epoch, r.mk_id, r.retired_mk_ids, kwk=r.kwk,
+                             snk=r.snk, fk_legacy=secret, fk=r.fk, dbk=r.dbk)
+            staged = _manifest_for_host(new, hk)
+            del secret, new
+            arc.mem.clear()
+            _write_new(os.path.join(td, KEYS_NAME), staged)
+            _stage_publish(td, staged, hk.mk)
+        except BaseException:
+            shutil.rmtree(td, ignore_errors=True)
+            raise
+    info = {"has_secret": False, "has_keyring": True, "format": "legacy-import", "users_since": users_since,
+            "has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
+            "has_signing_key": "agent-signing.key" in arc.seen}
+    return _missing_data_note(info)
+
+
+# ---------------------------------------------------------------- apply (H1)
+def _validate_staging(rd, digest: str, mk: bytes):
+    """The staged set must be exactly its manifest: the manifest's digest is the flag's, every
+    listed file present with its size and SHA-256, nothing else, the staged keys.wtk opens with
+    the host MK and carries the manifest's identity. → (manifest doc, staged keys.wtk bytes)."""
+    if not os.path.isdir(rd) or os.path.islink(rd):
+        raise ValueError("a restore is flagged but its staging is missing — refused")
     try:
-        secret = None
-        flat = _gunzip_bounded(raw)
-        with tarfile.open(fileobj=io.BytesIO(flat), mode="r:") as tar:
-            for m in tar.getmembers():
-                name = m.name
-                if name == "secret":
-                    if not m.isreg() or m.size != 32 or secret is not None:
-                        raise ValueError("the vault key in the backup is malformed — refused")
-                    secret = tar.extractfile(m).read(33)
-                    continue
-                if name in _LEGACY_IMPORT_FILES or name == "transcripts" or name.startswith("transcripts/"):
-                    tar.extract(m, td, filter="data")
-                    continue
-                raise ValueError("unexpected entry in a pre-3.8 backup — refused: %s" % name[:80])
-        if secret is None or len(secret) != 32:
-            raise ValueError("backup without the vault key — refused")
-        r = hk.ring
-        new = kr.Keyring(r.installation_id, r.epoch, r.mk_id, r.retired_mk_ids, kwk=r.kwk,
-                         snk=r.snk, fk_legacy=secret, fk=r.fk, dbk=r.dbk)
-        staged = _manifest_for_host(new, hk)
-        del secret, new
-        fd = os.open(os.path.join(td, KEYS_NAME),
-                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(staged)
-        _stage_dir(td)
-    except tarfile.TarError as e:
-        shutil.rmtree(td, ignore_errors=True)
-        raise ValueError("corrupt file, or not a WebTerm backup") from e
-    except BaseException:
-        shutil.rmtree(td, ignore_errors=True)
-        raise
-    info = dict(info, has_secret=False, has_keyring=True, format="legacy-import")
-    return info
+        raw = _read_small(os.path.join(rd, RESTORE_MANIFEST), RESTORE_MANIFEST_MAX)
+    except FileNotFoundError:
+        raise ValueError("a restore is flagged but its staging has no manifest — refused") from None
+    if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest):
+        raise ValueError("the restore staging does not match its flag — refused")
+
+    def err():
+        return ValueError("the restore manifest is malformed — refused")
+    doc = _strict_json(raw, err)
+    want = {"format", "generation", "created", "installation_id", "epoch", "mk_id", "files", "dirs"}
+    if type(doc) is not dict or set(doc) != want or doc["format"] != "wt-restore-1":
+        raise err()
+    listed = _file_list(doc["files"], err)
+    if type(doc["dirs"]) is not list or not all(type(x) is str and x in _TX_DIRS for x in doc["dirs"]):
+        raise err()
+    files, dirs = _tree(str(rd))
+    files.pop(RESTORE_MANIFEST, None)
+    if set(files) != set(listed) or dirs != set(doc["dirs"]):
+        raise ValueError("the restore staging is incomplete or has extra entries — refused")
+    for rel, p in files.items():
+        if not _allowed(rel, False) or rel == CONTENT_MANIFEST:
+            raise ValueError("unexpected file in the restore staging — refused")
+        if _hash_file(p) != listed[rel]:
+            raise ValueError("a staged file changed since it was verified — refused: %s" % rel[:80])
+    if "webterm.db" not in listed or KEYS_NAME not in listed:
+        raise ValueError("the restore staging has no database or keys.wtk — refused")
+    staged = _read_small(os.path.join(rd, KEYS_NAME), kr.MAN_MAX_LEN)
+    ring = _open_ring(staged, mk, "staged keys.wtk")
+    if (ring.installation_id.hex(), ring.epoch, ring.mk_id.hex()) != (doc["installation_id"], doc["epoch"], doc["mk_id"]):
+        raise ValueError("the staged keys.wtk does not match the restore manifest — refused")
+    return doc, staged
+
+
+def _copy_durable(src: str, dst) -> None:
+    """dst replaced atomically and durably: tmp (O_NOFOLLOW, 0600), fsync, rename, dir fsync."""
+    dst = str(dst)
+    tmp = dst + ".restoring"
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    with open(os.open(src, _FILE_RO), "rb") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                out.write(b)
+            out.flush()
+            _fsync(out.fileno())
+    os.replace(tmp, dst)
+    _fsync_dir(os.path.dirname(dst))
+
+
+def _copy_tree_durable(src: str, dst: str) -> None:
+    os.mkdir(dst, 0o700)
+    for n in sorted(os.listdir(src)):
+        s, d = os.path.join(src, n), os.path.join(dst, n)
+        st = os.lstat(s)
+        if stat.S_ISDIR(st.st_mode):
+            _copy_tree_durable(s, d)
+        elif stat.S_ISREG(st.st_mode):
+            with open(os.open(s, _FILE_RO), "rb") as f:
+                fd = os.open(d, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                with os.fdopen(fd, "wb") as out:
+                    for b in iter(lambda: f.read(1 << 20), b""):
+                        out.write(b)
+                    out.flush()
+                    _fsync(out.fileno())
+        else:
+            raise ValueError("the restore staging holds a non-regular entry — refused")
+    _fsync_dir(dst)
+
+
+def _swap_transcripts(src: str) -> None:
+    """Live transcripts replaced by the staged ones: a full durable copy next to them, then two
+    renames. Idempotent: a re-run after a crash rebuilds the copy and finishes the swap."""
+    live = str(config.TRANSCRIPT_DIR)
+    parent = os.path.dirname(live)
+    new, old = live + ".restoring", live + ".pre-restore"
+    if os.path.lexists(new):
+        shutil.rmtree(new)
+    _copy_tree_durable(src, new)
+    _step("apply:transcripts-copied")
+    if os.path.lexists(old):
+        shutil.rmtree(old)
+    if os.path.lexists(live):
+        os.rename(live, old)
+    os.rename(new, live)
+    _fsync_dir(parent)
+    _step("apply:transcripts-swapped")
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _finish_restore(rd) -> None:
+    """After the durable commit only: the staging, then the flag."""
+    if os.path.lexists(rd):
+        old = tempfile.mkdtemp(prefix=VERIFY_PREFIX + "done-", dir=str(_backup_dir()))
+        os.rename(str(rd), os.path.join(old, "set"))
+        _fsync_dir(config.DATA_DIR)
+        shutil.rmtree(old, ignore_errors=True)
+    _step("apply:staging-removed")
+    try:
+        os.unlink(_restore_flag())
+    except FileNotFoundError:
+        pass
+    _fsync_dir(config.DATA_DIR)
 
 
 def _publish_keys(blob: bytes) -> None:
@@ -1013,75 +1912,86 @@ def _publish_keys(blob: bytes) -> None:
         os.unlink(tmp)
     except FileNotFoundError:
         pass
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        view = memoryview(blob)
-        while view:
-            n = os.write(fd, view)
-            if not n:
-                raise OSError("short write on keys.wtk")
-            view = view[n:]
-        _fsync(fd)
-    finally:
-        os.close(fd)
+    _write_new(str(tmp), blob)
     os.replace(str(tmp), str(d / KEYS_NAME))
     _fsync_dir(d)
     if _read_small(d / KEYS_NAME, kr.MAN_MAX_LEN) != blob:
         raise OSError("keys.wtk read-back mismatch")
 
 
-def _apply_protected(rd, flag, keys=None) -> bool:
-    """Protected apply (idempotent, resumable like the legacy one): the staged keys.wtk must open
-    with the host MK; safety copy as a WTS1; keys.wtk first, the DB last (commit point). The
-    caller re-opens keys.wtk afterwards (a foreign restore changes the installation id)."""
-    if not is_protected():
-        raise ValueError("a protected restore is staged but this volume has no keys.wtk — refused")
-    if os.path.lexists(rd / "secret") or os.path.lexists(rd / "master.key"):
-        raise ValueError("the staged restore contains a raw key — refused on a protected volume")
-    if not os.path.lexists(rd / KEYS_NAME):
-        raise ValueError("the staged restore has no keys.wtk — refused on a protected volume")
-    if keys is None and _host_keys_provider is not None:
-        keys = _host_keys_provider()
-    if keys is None:
-        raise ValueError("a protected restore needs the open keyring — refused")
-    staged = _read_small(rd / KEYS_NAME, kr.MAN_MAX_LEN)
-    _open_ring(staged, keys.mk, "staged keys.wtk")      # trebuie să se deschidă cu MK-ul gazdei
-    current = _read_small(config.DATA_DIR / KEYS_NAME, kr.MAN_MAX_LEN)
-    # keys.wtk curent trebuie şi el să se deschidă cu MK-ul dat: altfel cheile primite nu sunt
-    # ale acestui volum şi nu înlocuim nimic (fail closed, nu doar „copia de siguranţă a eşuat”)
-    hk = HostKeys(_open_ring(current, keys.mk, KEYS_NAME), keys.mk)
-    if current != staged:
-        # plasa de siguranţă: starea curentă ca WTS1 local + portabil (se deschide cu MK-ul
-        # gazdei şi după ce keys.wtk se schimbă). Un al doilea apel (reluare) găseşte deja
-        # keys.wtk nou şi nu mai face copia: starea curentă e atunci pe jumătate restaurată.
-        try:
-            if config.DB_PATH.exists():
-                keep = _backup_dir() / ("pre-restore-%d%s.keep" % (int(time.time()), WTS_EXT))
-                _wts_to_file(keep, hk, current, False, local=True, portable=True)
-        except Exception as e:                        # noqa: BLE001
-            log.warning("the pre-restore snapshot failed (continuing): %s", e)
-        _publish_keys(staged)
-    for name in ("agent-signing.key", "agent-signing.pub"):
-        if (rd / name).exists():
-            _atomic_copy(str(rd / name), config.DATA_DIR / name)
-            (config.DATA_DIR / name).chmod(0o600)
-    if (rd / "transcripts").is_dir():
-        if config.TRANSCRIPT_DIR.exists():
-            shutil.rmtree(config.TRANSCRIPT_DIR)
-        shutil.copytree(str(rd / "transcripts"), str(config.TRANSCRIPT_DIR))
-    _atomic_copy(str(rd / "webterm.db"), config.DB_PATH)
-    for ext in ("-wal", "-shm"):
-        p = config.DATA_DIR / ("webterm.db" + ext)
-        if p.exists():
-            p.unlink()
-    log.warning("RESTORE applied from an encrypted backup (DB + keys.wtk%s)",
-                " + transcripts" if (rd / "transcripts").is_dir() else "")
-    shutil.rmtree(rd, ignore_errors=True)
-    try:
-        flag.unlink()
-    except OSError:
-        pass
-    return True
+def _safety_copy(hk: HostKeys, current: bytes) -> str:
+    keep = _backup_dir() / ("pre-restore-%d%s.keep" % (int(time.time()), WTS_EXT))
+    _wts_to_file(keep, hk, current, False, local=True, portable=True)
+    return keep.name
+
+
+def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool:
+    """Protected apply as a resumable journal kept in the flag (H1): `staged` → mandatory safety
+    copy → `applying` → keys.wtk, signing key, transcripts, DB (each step idempotent and
+    durable) → `committed` → staging removed → flag removed. Any incomplete marker is a refusal,
+    never "nothing to do". The caller re-opens keys.wtk afterwards."""
+    with _restore_lock():
+        flag, rd = _read_flag(), _restore_dir()
+        if flag is None:
+            if os.path.lexists(rd):
+                log.warning("an unfinished restore staging without its flag is ignored; the next "
+                            "restore replaces it")
+            return False
+        if flag == "legacy":
+            raise ValueError("a pre-3.8 restore staging (raw vault key) on a protected volume — refused")
+        if keys is None and _host_keys_provider is not None:
+            keys = _host_keys_provider()
+        if keys is None:
+            raise ValueError("a protected restore needs the open keyring — refused")
+        current = _read_small(config.DATA_DIR / KEYS_NAME, kr.MAN_MAX_LEN)
+        # keys.wtk curent trebuie să se deschidă cu MK-ul dat: altfel cheile primite nu sunt ale
+        # acestui volum şi nu înlocuim nimic
+        hk = HostKeys(_open_ring(current, keys.mk, KEYS_NAME), keys.mk)
+        if flag["state"] == "committed":
+            _finish_restore(rd)
+            log.warning("RESTORE finished (committed before the last restart)")
+            return True
+        doc, staged = _validate_staging(rd, flag["manifest"], keys.mk)
+        listed = {e["name"] for e in doc["files"]}
+        if flag["state"] == "staged":
+            name = ""
+            try:
+                if config.DB_PATH.exists():
+                    name = _safety_copy(hk, current)
+            except Exception as e:                    # noqa: BLE001
+                if not force_without_safety_copy:
+                    raise ValueError("the pre-restore safety copy could not be made (%s) — the restore "
+                                     "is refused; free space and restart, or apply it with "
+                                     "force_without_safety_copy" % str(e)[:120]) from None
+                log.warning("the pre-restore safety copy failed, applying WITHOUT it (forced): %s", e)
+            _step("apply:safety")
+            flag = dict(flag, state="applying", safety=name)
+            _write_flag(flag)
+            _step("apply:applying")
+        if current != staged:
+            _publish_keys(staged)
+        _step("apply:keys")
+        for name in _SIGNING:
+            if name in listed:
+                _copy_durable(os.path.join(rd, name), config.DATA_DIR / name)
+        _step("apply:signing")
+        if "transcripts" in doc["dirs"] or any(n.startswith("transcripts/") for n in listed):
+            _swap_transcripts(os.path.join(rd, "transcripts"))
+        else:
+            log.warning("the backup has no transcripts: the live transcripts are kept")
+        _copy_durable(os.path.join(rd, "webterm.db"), config.DB_PATH)
+        for ext in ("-wal", "-shm"):
+            p = config.DATA_DIR / ("webterm.db" + ext)
+            if os.path.lexists(p):
+                os.unlink(p)
+        _fsync_dir(config.DATA_DIR)
+        _step("apply:db")
+        _write_flag(dict(flag, state="committed"))
+        _step("apply:committed")
+        _finish_restore(rd)
+        log.warning("RESTORE applied from an encrypted backup (DB + keys.wtk%s)",
+                    " + transcripts" if "transcripts" in doc["dirs"] else "")
+        return True
 
 
 def _open_stored_wts(name: str):
@@ -1089,3 +1999,18 @@ def _open_stored_wts(name: str):
     if not path.is_file() or path.is_symlink():
         raise FileNotFoundError(name)
     return path
+
+
+def list_keep_copies() -> list:
+    """L1: the pre-restore safety copies (`*.keep`, never pruned). Read-only inventory, so they
+    stay visible for retention; a `.wtsnap.keep` holds the 3.7 raw vault key."""
+    out = []
+    for f in sorted(_backup_dir().glob("*.keep"), reverse=True):
+        try:
+            st = f.lstat()
+            if stat.S_ISREG(st.st_mode):
+                out.append({"name": f.name, "size": st.st_size, "created": int(st.st_mtime),
+                            "raw_vault_key": f.name.endswith(".wtsnap.keep")})
+        except OSError:
+            pass
+    return out

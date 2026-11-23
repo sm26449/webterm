@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from .errors import ApiError
 from . import audit, authz, backup, bgtasks, cloudbackup, config, db, email_alerts, security, stepup, syshealth
+from . import snapshot as wts
 
 log = logging.getLogger("webterm")
 # Aceeaşi gardă ca api.router (fail-closed): o rută fără permisiune declarată → 500 authz.undeclared.
@@ -27,9 +28,20 @@ router = APIRouter(dependencies=[Depends(authz.declared)])
 
 def _backup_value_error(e: Exception) -> ApiError:
     """ValueError din backup.py (parolă greşită / fişier corupt / arhivă-bombă / fără cheia
-    seifului) → cod. Pe aceeaşi rută un singur status (400), deci codul e singura distincţie."""
+    seifului) → cod. Pe aceeaşi rută un singur status (400), deci codul e singura distincţie.
+    3.8 (L1): tipurile WTS1 au coduri proprii — „trebuie MK-ul <id>”, „limită depăşită” — şi
+    „altă operaţie de restore în curs”; detaliile de parsare nu ajung în cod."""
     msg = str(e) or "invalid backup"
     low = msg.lower()
+    if isinstance(e, wts.SnapshotWrongKey):
+        mk_id = getattr(e, "mk_id", None)
+        if mk_id:
+            return ApiError(400, "backup.needsMasterKey", msg, vars={"id": mk_id.hex()})
+        return ApiError(400, "backup.wrongKeys", msg)
+    if isinstance(e, wts.SnapshotTooLarge):
+        return ApiError(400, "backup.limitExceeded", msg)
+    if msg == backup._BUSY:
+        return ApiError(409, "backup.busy", msg)
     if "passphrase" in low and "wrong" in low:
         code = "backup.badPassphrase"
     elif "too large" in low or "bomb" in low:
@@ -163,6 +175,7 @@ async def backup_status(user=Depends(authz.perm('backups.manage'))):
         "last_error": (await db.get_json_setting("backup_last_error")) or None,
         "next_due": backup.next_due(sched, last),
         "backups": backup.list_backups(),
+        "keep_copies": backup.list_keep_copies(),
         "retention_days": backup.RETENTION_DAYS,
         "restore_verified_at": float(await db.get_setting(syshealth.K_RESTORE_VERIFIED, "0") or 0) or None,
     }
@@ -209,9 +222,7 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
     # ar putea încărca o arhivă a lui şi ar prelua instanţa. Aceeaşi clasă cu descărcarea.
     await stepup.require_reauth_for_secret(
         user, urllib.parse.unquote(request.headers.get("X-Reauth-Pass", "")), "restore")
-    data = await request.body()
-    if len(data) > 512 * 1024 * 1024:
-        raise ApiError(413, "backup.tooLarge", "file too large")
+    data = await _read_upload(request)
     if not data:
         raise ApiError(400, "backup.emptyFile", "empty file")
     try:
@@ -229,6 +240,27 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
         os._exit(0)
     bgtasks.spawn(_restart_soon(), "restart after restore")
     return {"ok": True, "restarting": True, **info}
+
+
+UPLOAD_MAX = 512 * 1024 * 1024
+
+
+async def _read_upload(request: Request) -> bytes:
+    """M2: an uploaded backup, refused BEFORE it is buffered when Content-Length is over the
+    limit, and cut off while streaming when the length is absent or lies. (WTBK1 is still
+    decrypted in memory: a documented limit, §12.10.)"""
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        if not cl.isdigit():
+            raise ApiError(400, "backup.badFile", "invalid Content-Length")
+        if int(cl) > UPLOAD_MAX:
+            raise ApiError(413, "backup.tooLarge", "file too large")
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > UPLOAD_MAX:
+            raise ApiError(413, "backup.tooLarge", "file too large")
+    return bytes(buf)
 
 
 async def _restore_verified(request: Request, what: str) -> None:
@@ -260,9 +292,7 @@ async def backup_verify_upload(request: Request, user=Depends(authz.perm('backup
     passphrase = urllib.parse.unquote(request.headers.get("X-Restore-Pass", ""))
     if not passphrase:
         raise ApiError(400, "backup.passphraseMissing", "the backup passphrase is missing")
-    data = await request.body()
-    if len(data) > 512 * 1024 * 1024:
-        raise ApiError(413, "backup.tooLarge", "file too large")
+    data = await _read_upload(request)
     if not data:
         raise ApiError(400, "backup.emptyFile", "empty file")
     try:

@@ -54,12 +54,24 @@ V_HELLO = (
 
 def make(data, snk=SNK, mk=MK, ck=None, epoch=1):
     buf = io.BytesIO()
-    w = wts.Writer(buf, installation_id=INST, epoch=epoch, mk_id=kr.key_id(MK), snk=snk, mk=mk,
-                   created_ms=CREATED, _ck=ck)
+    w = writer_with_ck(buf, ck, installation_id=INST, epoch=epoch, mk_id=kr.key_id(MK), snk=snk, mk=mk,
+                       created_ms=CREATED)
     for i in range(0, len(data), 300_000):
         w.write(data[i:i + 300_000])
     w.close()
     return buf.getvalue()
+
+
+def writer_with_ck(out, ck, **kw):
+    """CK fix doar prin cârligul privat al modulului (H4: niciun parametru public nu-l fixează)."""
+    if ck is None:
+        return wts.Writer(out, **kw)
+    orig = wts._fresh_ck
+    wts._fresh_ck = lambda: ck
+    try:
+        return wts.Writer(out, **kw)
+    finally:
+        wts._fresh_ck = orig
 
 
 def opened(blob, how="local", max_plaintext=wts.MAX_PLAINTEXT):
@@ -301,6 +313,90 @@ def main():
     check("MK-ul singur nu ajunge (fără parolă)", b"secret payload" not in outer and
           refused(lambda: wts.Reader(io.BytesIO(outer)), wts.SnapshotError))
     check("parolă + MK deschid", opened(got, "mk") == b"secret payload")
+
+    # 12) H4: writer-ul nu reintră, nu e concurent şi nu acceptă scrieri ambigue
+    kw = dict(installation_id=INST, epoch=1, mk_id=kr.key_id(MK), snk=SNK)
+    check("niciun parametru public nu fixează CK",
+          refused(lambda: wts.Writer(io.BytesIO(), _ck=CK, **kw), TypeError))
+
+    class Sink:
+        """write() programabil: la al `at`-lea apel întoarce `ret` / reintră / aşteaptă."""
+
+        def __init__(self, at=None, ret="ok", hook=None):
+            self.n, self.at, self.ret, self.hook, self.buf = 0, at, ret, hook, bytearray()
+
+        def write(self, b):
+            self.n += 1
+            if self.n == self.at:
+                if self.hook:
+                    self.hook()
+                if self.ret == "none":
+                    return None
+                if self.ret == "short":
+                    self.buf += b[:-1]
+                    return len(b) - 1
+            self.buf += b
+            return len(b)
+
+    # header = apelul 1, primul cadru DATA = 2, cadrul final = 3 (pentru < 1 MiB de date)
+    for at, where in ((1, "header"), (2, "DATA"), (3, "final")):
+        for ret in ("none", "short"):
+            def run(at=at, ret=ret):
+                w = wts.Writer(Sink(at, ret), **kw)
+                w.write(b"x" * 100)
+                w.close()
+            check(f"sink {ret} la {where} → refuz", refused(run))
+    w = wts.Writer(Sink(2, "short"), **kw)
+    w.write(b"x" * 10)
+    refused(w.close)
+    check("după o scriere scurtă writer-ul rămâne stricat",
+          refused(lambda: w.write(b"y")) and refused(w.close))
+
+    holder = {}
+
+    def reenter():
+        try:
+            holder["w"].write(b"z" * 10)
+            holder["inner"] = "accepted"
+        except wts.SnapshotError:
+            holder["inner"] = "refused"
+    sink = Sink(2, "ok", reenter)
+    holder["w"] = wts.Writer(sink, **kw)
+    # un cadru DATA în write(); sinkul reintră la scrierea lui
+    outer = refused(lambda: holder["w"].write(b"a" * (wts.CHUNK + 5)))
+    check("sink reintrant: apelul interior refuzat, cel exterior refuzat, writer stricat",
+          holder.get("inner") == "refused" and outer and holder["w"]._state == "broken"
+          and refused(holder["w"].close), holder)
+    check("sink reintrant: niciun cadru în plus (header + un singur cadru)", sink.n == 2, sink.n)
+    import threading
+    gate, release = threading.Event(), threading.Event()
+
+    def slow():
+        gate.set()
+        release.wait(5)
+    res = {}
+    w = wts.Writer(Sink(2, "ok", slow), **kw)
+
+    def t1():
+        try:
+            w.write(b"b" * (wts.CHUNK + 1))
+            res["t1"] = "ok"
+        except wts.SnapshotError:
+            res["t1"] = "refused"
+    th = threading.Thread(target=t1)
+    th.start()
+    gate.wait(5)
+    try:
+        w.write(b"c")
+        res["t2"] = "ok"
+    except wts.SnapshotError:
+        res["t2"] = "refused"
+    release.set()
+    th.join(5)
+    check("apel concurent dintr-un alt thread: refuzat, writer stricat",
+          res.get("t2") == "refused" and w._state == "broken" and refused(w.close), res)
+    check("buget de plaintext al writer-ului (acelaşi ca al cititorului)",
+          refused(lambda: wts.Writer(io.BytesIO(), max_plaintext=10, **kw).write(b"x" * 11), wts.SnapshotTooLarge))
 
     print(f"\n{ok}/{total} passed")
     sys.exit(0 if ok == total else 1)

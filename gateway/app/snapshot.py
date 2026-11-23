@@ -22,12 +22,15 @@ Layout (integers little-endian unless marked BE):
     EOF            nothing after the final frame
 
 CK (the content key) is random, fresh for every Writer (a retry after an ambiguous write is a new
-Writer, hence a new CK: the counter-based nonces are never reused under one key).
+Writer, hence a new CK: the counter-based nonces are never reused under one key). A Writer takes
+one caller at a time, reserves the counter before encrypting and requires every sink write to
+confirm its full length; anything else breaks it for good.
 """
 import hashlib
 import hmac
 import secrets
 import struct
+import threading
 import time
 import zlib
 
@@ -77,8 +80,11 @@ class SnapshotError(ValueError):
 
 
 class SnapshotWrongKey(SnapshotError):
-    def __init__(self, reason, detail=""):
+    """`mk_id` (16 B) when the refusal is "this needs master key <id>" (L1: its own API code)."""
+
+    def __init__(self, reason, detail="", mk_id=None):
         self.reason = reason
+        self.mk_id = mk_id
         ValueError.__init__(self, f"this backup cannot be opened with this installation's keys ({reason})"
                             + (f": {detail}" if detail else ""))
 
@@ -135,12 +141,22 @@ def _unwrap(kek, env, kind):
     return inner[5 + kr.ID_LEN:]
 
 
+def _fresh_ck():
+    """CK nou pentru fiecare Writer. Singurul punct de injecţie pentru vectorul de test (testul
+    înlocuieşte funcţia modulului); niciun parametru public nu poate fixa CK-ul (H4)."""
+    return secrets.token_bytes(kr.KEY_LEN)
+
+
 class Writer:
     """File-like sink: `write(bytes)` … `close()`. Single use: any error breaks it for good (the
-    caller discards the output and starts a new Writer, i.e. a new content key)."""
+    caller discards the output and starts a new Writer, i.e. a new content key).
+
+    Like txformat.Writer: one caller at a time (a non-blocking lock; a concurrent or re-entrant
+    call breaks the writer instead of waiting), the frame counter is reserved BEFORE encryption,
+    and every sink write must confirm its full length (None, short or an exception → broken)."""
 
     def __init__(self, out, *, installation_id, epoch, mk_id, snk=None, mk=None, created_ms=None,
-                 _ck=None):
+                 max_plaintext=MAX_PLAINTEXT):
         if snk is None and mk is None:
             raise SnapshotError("no-envelope")
         if not isinstance(installation_id, bytes) or len(installation_id) != kr.ID_LEN:
@@ -152,7 +168,7 @@ class Writer:
         if not isinstance(epoch, int) or not 0 <= epoch < 1 << 64:
             raise SnapshotError("bad-epoch")
         created_ms = int(time.time() * 1000) if created_ms is None else created_ms
-        ck = secrets.token_bytes(kr.KEY_LEN) if _ck is None else _ck
+        ck = _fresh_ck()
         flags = (FLAG_LOCAL if snk is not None else 0) | (FLAG_PORTABLE if mk is not None else 0)
         hdr = _HDR.pack(MAGIC, VERSION, flags, 0, installation_id, created_ms, epoch, mk_id,
                         CONTENT_TAR_GZ, b"\x00" * 3)
@@ -163,37 +179,75 @@ class Writer:
             envs += _wrap(portable_key(mk), ENV_PORTABLE, ck)
         self._mac = hmac.new(kr.derive(ck, LBL_HDR), hdr + envs, hashlib.sha256).digest()
         self._aead = AESGCM(kr.derive(ck, LBL_BODY))
+        del ck
         self._out = out
         self._buf = bytearray()
         self._ctr = 0
         self._total = 0
+        self._max = max_plaintext
         self._state = "open"
-        self._emit(hdr + envs + self._mac)
+        self._lock = threading.Lock()
+        self._enter()
+        try:
+            self._emit(hdr + envs + self._mac)
+        finally:
+            self._leave()
+
+    def _enter(self):
+        # neblocant: un al doilea apelant (alt thread sau sinkul reintrând) NU aşteaptă; strică
+        # writerul, ca nicio pereche cheie/nonce să nu poată fi folosită de două ori
+        if not self._lock.acquire(blocking=False):
+            self._state = "broken"
+            raise SnapshotError("writer-concurrent")
+        if self._state != "open":
+            self._lock.release()
+            raise SnapshotError("writer-" + self._state)
+
+    def _leave(self):
+        self._lock.release()
 
     def _emit(self, b):
         try:
-            self._out.write(b)
+            n = self._out.write(b)
         except BaseException:
             self._state = "broken"
             raise
+        if self._state != "open":            # sinkul a reintrat (şi a stricat writerul)
+            raise SnapshotError("writer-" + self._state)
+        if n is None or n != len(b):
+            # rezultat ambiguu: nu ştim ce a ajuns pe disc → containerul e abandonat
+            self._state = "broken"
+            raise SnapshotError("short-write", "%r of %d" % (n, len(b)))
 
     def _frame(self, pt, final):
-        if self._ctr > MAX_COUNTER:
+        ctr = self._ctr
+        if ctr > MAX_COUNTER:
             self._state = "broken"
             raise SnapshotTooLarge("too-many-chunks")
-        ct = self._aead.encrypt(_nonce(self._ctr), bytes(pt), _aad(self._mac, self._ctr, final))
+        # contorul e rezervat ÎNAINTE de criptare: orice eşec de aici încolo lasă writerul
+        # stricat, iar nonce-ul ctr nu mai poate fi reluat sub aceeaşi CK
+        self._ctr = ctr + 1
+        try:
+            ct = self._aead.encrypt(_nonce(ctr), bytes(pt), _aad(self._mac, ctr, final))
+        except BaseException:
+            self._state = "broken"
+            raise
         self._emit(_FRAME.pack(1 if final else 0, len(ct)) + ct)
 
     def write(self, data):
-        if self._state != "open":
-            raise SnapshotError("writer-" + self._state)
-        self._buf += data
-        while len(self._buf) >= CHUNK:
-            self._frame(self._buf[:CHUNK], False)
-            del self._buf[:CHUNK]
-            self._ctr += 1
-            self._total += CHUNK
-        return len(data)
+        self._enter()
+        try:
+            if self._total + len(self._buf) + len(data) > self._max:
+                self._state = "broken"
+                raise SnapshotTooLarge("plaintext-budget")
+            self._buf += data
+            while len(self._buf) >= CHUNK:
+                self._frame(self._buf[:CHUNK], False)
+                del self._buf[:CHUNK]
+                self._total += CHUNK
+            return len(data)
+        finally:
+            self._leave()
 
     def flush(self):
         pass
@@ -202,15 +256,22 @@ class Writer:
         """Writes the last data frame and the final frame. Idempotent once closed."""
         if self._state == "closed":
             return
-        if self._state != "open":
-            raise SnapshotError("writer-" + self._state)
-        if self._buf:
-            self._frame(self._buf, False)
-            self._total += len(self._buf)
-            self._ctr += 1
-            self._buf = bytearray()
-        self._frame(struct.pack("<QQ", self._ctr, self._total), True)
-        self._state = "closed"
+        self._enter()
+        try:
+            if self._buf:
+                n = len(self._buf)
+                self._frame(self._buf, False)
+                self._total += n
+                self._buf = bytearray()
+            data_frames = self._ctr
+            self._frame(struct.pack("<QQ", data_frames, self._total), True)
+            self._state = "closed"
+        finally:
+            self._leave()
+
+    @property
+    def plaintext_len(self):
+        return self._total + len(self._buf)
 
 
 class Reader:
@@ -277,7 +338,8 @@ class Reader:
             ck = _unwrap(_key32(snk, "snk"), self._envs[ENV_LOCAL], ENV_LOCAL)
         elif mk is not None and self.portable:
             if not hmac.compare_digest(kr.key_id(mk), self.mk_id):
-                raise SnapshotWrongKey("wrong-mk", "the backup needs master key " + self.mk_id.hex())
+                raise SnapshotWrongKey("wrong-mk", "the backup needs master key " + self.mk_id.hex(),
+                                       mk_id=self.mk_id)
             ck = _unwrap(portable_key(mk), self._envs[ENV_PORTABLE], ENV_PORTABLE)
         else:
             raise SnapshotWrongKey("no-usable-envelope",

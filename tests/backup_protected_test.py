@@ -8,6 +8,7 @@ modificat / bombă / prea multe intrări. Partea legacy rămâne în backup_test
 import io
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tarfile
@@ -69,7 +70,9 @@ def volume(name, protected=True, email="a@b.c", secret_leftover=False):
         (config.DATA_DIR / "secret").write_bytes(keys["secret"])
         return None, keys
     if secret_leftover:
+        # sub-starea secret_leftover a migrării: keys.wtk + secret + migrating.wtm (keys.classify)
         (config.DATA_DIR / "secret").write_bytes(keys["secret"])
+        (config.DATA_DIR / "migrating.wtm").write_bytes(b"WTM1" + b"\0" * 96)
     keys.update(mk=os.urandom(32), kwk=os.urandom(32), snk=os.urandom(32), fk=os.urandom(32),
                 fk_legacy=os.urandom(32))
     mk = keys["mk"]
@@ -127,7 +130,8 @@ def custom_wts(hk, members, manifest=True, bad_hash=False):
             entries.append({"name": name, "size": len(data),
                             "sha256": ("0" * 64) if bad_hash else hashlib.sha256(data).hexdigest()})
         if manifest:
-            m = json.dumps({"format": "wts-content-1", "files": entries}).encode()
+            m = json.dumps({"format": "wts-content-1", "files": entries}, sort_keys=True,
+                           separators=(",", ":")).encode()
             ti = tarfile.TarInfo(backup.CONTENT_MANIFEST)
             ti.size = len(m)
             t.addfile(ti, io.BytesIO(m))
@@ -158,6 +162,621 @@ def set_email(e):
     con.execute("UPDATE users SET email=?", (e,))
     con.commit()
     con.close()
+
+
+# ══════════════════════════════════════════════ review PR3 (H1–H4, M1–M4, L1)
+class Crash(Exception):
+    pass
+
+
+def tar_bytes(members, fmt=tarfile.USTAR_FORMAT, manifest=True, manifest_raw=None, pax=None):
+    """tar NECOMPRIMAT (ca testul să-i poată modifica octeţii), cu manifestul canonic la final."""
+    import hashlib
+    raw = io.BytesIO()
+    entries = []
+    with tarfile.open(fileobj=raw, mode="w", format=fmt) as t:
+        for name, data in members:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            if pax and name in pax:
+                ti.pax_headers = pax[name]
+            t.addfile(ti, io.BytesIO(data))
+            entries.append({"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        if manifest:
+            m = manifest_raw if manifest_raw is not None else json.dumps(
+                {"format": "wts-content-1", "files": entries}, sort_keys=True, separators=(",", ":")).encode()
+            ti = tarfile.TarInfo(backup.CONTENT_MANIFEST)
+            ti.size = len(m)
+            t.addfile(ti, io.BytesIO(m))
+    return raw.getvalue(), entries
+
+
+def wrap_tar(hk, plain):
+    out = io.BytesIO()
+    w = wts.Writer(out, installation_id=hk.ring.installation_id, epoch=hk.ring.epoch,
+                   mk_id=hk.ring.mk_id, snk=hk.ring.snk, mk=hk.mk)
+    w.write(_gz(plain))
+    w.close()
+    return backup.encrypt(out.getvalue(), PASS)
+
+
+def _gz(b):
+    c = zlib.compressobj(6, zlib.DEFLATED, 31)
+    return c.compress(b) + c.flush()
+
+
+def flag_doc():
+    return json.loads((config.DATA_DIR / ".restore-flag").read_text())
+
+
+def keyring_epoch(mk):
+    return kr.open_keyring_bytes((config.DATA_DIR / "keys.wtk").read_bytes(), mk, kr.PROFILE_V1).epoch
+
+
+def rotate(mk_old, mk_new):
+    """Rotaţie simulată: keys.wtk re-ambalat sub MK nou, epoch + 1, MK vechi retras."""
+    ring = kr.open_keyring_bytes((config.DATA_DIR / "keys.wtk").read_bytes(), mk_old, kr.PROFILE_V1)
+    (config.DATA_DIR / "keys.wtk").write_bytes(backup._rewrap(ring, mk_new, ring.epoch + 1))
+    return host_keys(mk_new)
+
+
+def plain_of(blob_wtbk, mk):
+    return tar_plain(backup.decrypt(blob_wtbk, PASS), mk=mk)
+
+
+def faults(step_name=None, nth=None):
+    """Cârlig de defect: Crash la pasul numit, sau la al n-lea pas (orice nume)."""
+    seen = []
+
+    def f(name):
+        seen.append(name)
+        if (step_name is not None and name == step_name) or (nth is not None and len(seen) == nth):
+            raise Crash(name)
+    return f, seen
+
+
+def fsync_fail_at(n):
+    calls = [0]
+    orig = backup._fsync
+
+    def f(fd):
+        calls[0] += 1
+        if calls[0] == n:
+            raise OSError("injected fsync failure")
+        return orig(fd)
+    return f, calls
+
+
+def staged_ok():
+    """Invariantul H1 după un crash la staging: fie niciun flag, fie un flag al unui set complet."""
+    flag = config.DATA_DIR / ".restore-flag"
+    if not flag.exists():
+        return True
+    try:
+        backup._validate_staging(config.DATA_DIR / "restore-pending", flag_doc()["manifest"], KEYS_MK[0])
+        return True
+    except Exception:
+        return False
+
+
+KEYS_MK = [None]
+
+
+def h1_tests():
+    hk, K = volume("H1")
+    KEYS_MK[0] = K["mk"]
+    blob = backup.make_encrypted(PASS, include_transcripts=True, keys=hk)
+    set_email("live@x")
+    (config.TRANSCRIPT_DIR / "live.out").write_bytes(b"live")
+
+    # 1) setul durabil: manifest de restore + flag care îl numeşte
+    backup.stage_restore(blob, PASS, keys=hk)
+    rd = config.DATA_DIR / "restore-pending"
+    man = json.loads((rd / "restore.json").read_bytes())
+    fd = flag_doc()
+    import hashlib
+    check("H1: restore.json cu generaţie, fişiere (mărime + sha256), identitatea keyring-ului",
+          man["format"] == "wt-restore-1" and len(man["generation"]) == 32
+          and {"webterm.db", "keys.wtk"} <= {e["name"] for e in man["files"]}
+          and man["installation_id"] == hk.ring.installation_id.hex() and man["epoch"] == hk.ring.epoch + 1
+          and man["mk_id"] == kr.key_id(K["mk"]).hex(), man.get("format"))
+    check("H1: flagul e scris ultimul şi numeşte digestul manifestului",
+          fd["state"] == "staged" and fd["manifest"] == hashlib.sha256((rd / "restore.json").read_bytes()).hexdigest())
+
+    # 2) orice marcaj incomplet = refuz (nu „nimic de făcut”), DB neatinsă
+    def hostile(mutate, label):
+        backup.stage_restore(blob, PASS, keys=hk)
+        mutate()
+        r = refused(lambda: backup.apply_pending_restore(keys=hk))
+        check(f"H1 apply refuzat: {label}", r and db_email() == "live@x")
+    hostile(lambda: (rd / "webterm.db").unlink(), "flag fără DB (reproducerea recenziei)")
+    hostile(lambda: (rd / "agent-signing.key").unlink(), "membru lipsă")
+    hostile(lambda: (rd / "transcripts" / "s1.out").write_bytes(b"altceva"), "fişier modificat după verificare")
+    hostile(lambda: (rd / "extra.out").write_bytes(b"x"), "fişier în plus")
+    hostile(lambda: shutil.rmtree(rd), "flag fără staging")
+    hostile(lambda: (config.DATA_DIR / ".restore-flag").write_text(
+        json.dumps(dict(flag_doc(), manifest="0" * 64), sort_keys=True, separators=(",", ":"))),
+        "flag care nu corespunde manifestului")
+    hostile(lambda: (config.DATA_DIR / ".restore-flag").write_text("1"), "flag 3.7 pe volum protejat")
+    hostile(lambda: (rd / "restore.json").write_bytes(b"{}"), "manifest de restore înlocuit")
+    os.unlink(config.DATA_DIR / ".restore-flag")
+    check("H1: staging fără flag (stage întrerupt) ignorat, DB neatinsă",
+          backup.apply_pending_restore(keys=hk) is False and db_email() == "live@x")
+
+    # 3) două stage-uri concurente: al doilea e refuzat (lock în backups/)
+    import fcntl
+    lfd = os.open(str(config.DATA_DIR / "backups" / backup.STAGE_LOCK), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lfd, fcntl.LOCK_EX)
+    try:
+        check("H1: stage cu lock-ul ţinut de altă operaţie refuzat",
+              refused(lambda: backup.stage_restore(blob, PASS, keys=hk)))
+    finally:
+        os.close(lfd)
+    inner = {}
+
+    def nested(name):
+        if name == "stage:manifest" and "r" not in inner:
+            inner["r"] = refused(lambda: backup.stage_restore(blob, PASS, keys=hk))
+    backup._fault = nested
+    try:
+        backup.stage_restore(blob, PASS, keys=hk)
+    finally:
+        backup._fault = None
+    check("H1: un al doilea stage în timpul primului refuzat", inner.get("r") is True)
+    check("H1: primul stage complet", staged_ok() and flag_doc()["state"] == "staged")
+
+    # 4) .restore-verify-* rămase de la un crash: curăţate la următoarea operaţie, sub lock
+    stale = config.DATA_DIR / "backups" / ".restore-verify-stale"
+    stale.mkdir()
+    (stale / "webterm.db").write_bytes(b"plaintext")
+    backup.verify(blob, PASS, keys=hk)
+    check("M3: .restore-verify-* rămas curăţat la următoarea operaţie", not stale.exists())
+
+    # 5) fault injection la staging: fiecare pas durabil şi fiecare fsync
+    probe, steps = faults()
+    backup._fault = probe
+    try:
+        backup.stage_restore(blob, PASS, keys=hk)
+    finally:
+        backup._fault = None
+    stage_steps = list(steps)
+    ok_all = True
+    for i in range(1, len(stage_steps) + 1):
+        f, _s = faults(nth=i)
+        backup._fault = f
+        try:
+            backup.stage_restore(blob, PASS, keys=hk)
+            ok_all = False
+        except Crash:
+            pass
+        finally:
+            backup._fault = None
+        if not staged_ok():
+            ok_all = False
+    check("H1: crash la fiecare pas al staging-ului (%d) → flag absent sau set complet" % len(stage_steps), ok_all,
+          stage_steps)
+    f, calls = fsync_fail_at(10 ** 9)
+    backup._fsync = f
+    backup.stage_restore(blob, PASS, keys=hk)
+    n_fsync = calls[0]
+    backup._fsync = os.fsync
+    ok_all = True
+    for i in range(1, n_fsync + 1):
+        f, _c = fsync_fail_at(i)
+        backup._fsync = f
+        try:
+            backup.stage_restore(blob, PASS, keys=hk)
+        except OSError:
+            pass
+        finally:
+            backup._fsync = os.fsync
+        if not staged_ok():
+            ok_all = False
+    check("H1: eşec la fiecare fsync al staging-ului (%d) → flag absent sau set complet" % n_fsync, ok_all)
+
+    # 6) fault injection la apply: crash la fiecare pas, apoi reluarea converge
+    def fresh_stage():
+        global_hk = host_keys(K["mk"])
+        set_email("live@x")
+        backup.stage_restore(blob, PASS, keys=global_hk)
+        return global_hk
+
+    cur = fresh_stage()
+    probe, steps = faults()
+    backup._fault = probe
+    try:
+        backup.apply_pending_restore(keys=cur)
+    finally:
+        backup._fault = None
+    apply_steps = list(steps)
+    ok_all, bad = True, []
+    for i in range(1, len(apply_steps) + 1):
+        cur = fresh_stage()
+        want_epoch = json.loads((rd / "restore.json").read_bytes())["epoch"]
+        f, _s = faults(nth=i)
+        backup._fault = f
+        try:
+            backup.apply_pending_restore(keys=cur)
+            ok_all = False
+        except Crash:
+            pass
+        finally:
+            backup._fault = None
+        try:
+            again = backup.apply_pending_restore(keys=cur)
+        except Exception as e:
+            again = repr(e)
+        good = (again is True and db_email() == "a@b.c" and keyring_epoch(K["mk"]) == want_epoch
+                and nothing_staged() and (config.TRANSCRIPT_DIR / "s1.out").exists()
+                and not (config.TRANSCRIPT_DIR / "live.out").exists()
+                and not os.path.lexists(str(config.TRANSCRIPT_DIR) + ".restoring")
+                and not os.path.lexists(str(config.TRANSCRIPT_DIR) + ".pre-restore"))
+        if not good:
+            ok_all = False
+            bad.append((apply_steps[i - 1], again))
+        (config.TRANSCRIPT_DIR / "live.out").write_bytes(b"live")
+    check("H1: crash la fiecare pas al apply-ului (%d), apoi reluare → converge" % len(apply_steps), ok_all, bad)
+    cur = fresh_stage()
+    f, calls = fsync_fail_at(10 ** 9)
+    backup._fsync = f
+    backup.apply_pending_restore(keys=cur)
+    backup._fsync = os.fsync
+    n_fsync = calls[0]
+    ok_all, bad = True, []
+    for i in range(1, n_fsync + 1, 3):
+        cur = fresh_stage()
+        f, _c = fsync_fail_at(i)
+        backup._fsync = f
+        try:
+            backup.apply_pending_restore(keys=cur)
+        except (OSError, ValueError):
+            pass
+        finally:
+            backup._fsync = os.fsync
+        try:
+            again = backup.apply_pending_restore(keys=cur)
+        except Exception as e:
+            again = repr(e)
+        if not (again in (True, False) and db_email() == "a@b.c" and nothing_staged()):
+            ok_all = False
+            bad.append((i, again))
+    check("H1: eşec de fsync la apply (%d puncte), apoi reluare → converge" % len(range(1, n_fsync + 1, 3)),
+          ok_all, bad)
+
+    # 7) copia de siguranţă e obligatorie (override explicit testat)
+    cur = fresh_stage()
+    orig = backup._wts_to_file
+    backup._wts_to_file = lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+    try:
+        r = refused(lambda: backup.apply_pending_restore(keys=cur))
+        check("M3: apply refuzat când copia de siguranţă nu se poate face",
+              r and db_email() == "live@x" and flag_doc()["state"] == "staged")
+        check("M3: force_without_safety_copy=True aplică",
+              backup.apply_pending_restore(keys=cur, force_without_safety_copy=True) is True and db_email() == "a@b.c")
+    finally:
+        backup._wts_to_file = orig
+
+    # 8) date absente din backup: transcripturile live rămân, şi e spus explicit
+    cur = host_keys(K["mk"])
+    b2 = backup.make_encrypted(PASS, include_transcripts=False, keys=cur)
+    (config.TRANSCRIPT_DIR / "live.out").write_bytes(b"live")
+    info = backup.stage_restore(b2, PASS, keys=cur)
+    check("M3: info spune că transcripturile live rămân", info["live_transcripts_kept"] is True
+          and info["live_signing_key_kept"] is False)
+    backup.apply_pending_restore(keys=cur)
+    check("M3: transcripturile live păstrate", (config.TRANSCRIPT_DIR / "live.out").exists())
+
+
+def h2_tests():
+    # volum protejat care îşi pierde keys.wtk: NICIO operaţie nu cade pe traseul legacy
+    hk, K = volume("H2", secret_leftover=True)
+    backup.run_scheduled_backup(keys=hk)
+    legacy_blob = None
+    _n, KL = volume("H2L", protected=False, email="leg@x")
+    legacy_blob = backup.make_encrypted(PASS)
+    use(os.path.join(ROOT, "H2"))
+    os.unlink(config.DATA_DIR / "keys.wtk")
+    os.unlink(config.DATA_DIR / "migrating.wtm")
+    ops = {
+        "is_protected": lambda: backup.is_protected(),
+        "make_snapshot": lambda: backup.make_snapshot(),
+        "make_encrypted": lambda: backup.make_encrypted(PASS),
+        "run_scheduled_backup": lambda: backup.run_scheduled_backup(),
+        "verify (3.7)": lambda: backup.verify(legacy_blob, PASS),
+        "stage_restore (3.7)": lambda: backup.stage_restore(legacy_blob, PASS),
+    }
+    for label, fn in ops.items():
+        check(f"H2: keys.wtk pierdut + .wts în backups/ → {label} refuzat", refused(fn))
+    check("H2: niciun .wtsnap cu secret produs", not list((config.DATA_DIR / "backups").glob("*.wtsnap"))
+          and nothing_staged())
+    for p in (config.DATA_DIR / "backups").glob("*.wts"):
+        p.unlink()
+    (config.DATA_DIR / "migrating.wtm").write_bytes(b"x")
+    check("H2: keys.wtk lipsă + migrating.wtm → refuz", refused(lambda: backup.make_encrypted(PASS)))
+    os.unlink(config.DATA_DIR / "migrating.wtm")
+    backup.set_host_keys_provider(lambda: hk)
+    try:
+        check("H2: furnizor de chei înregistrat + keys.wtk lipsă → refuz",
+              refused(lambda: backup.make_encrypted(PASS)) and refused(lambda: backup.make_snapshot()))
+    finally:
+        backup.set_host_keys_provider(None)
+    backup.set_boot_protected(True)
+    try:
+        check("H2: boot protejat + keys.wtk lipsă → refuz", refused(lambda: backup.make_snapshot()))
+    finally:
+        backup.set_boot_protected(False)
+    (config.TRANSCRIPT_DIR / "s9.wtx").write_bytes(b"x")
+    check("H2: segment rezervat sub transcripts/ fără keys.wtk → refuz", refused(lambda: backup.make_snapshot()))
+    os.unlink(config.TRANSCRIPT_DIR / "s9.wtx")
+    rd = config.DATA_DIR / "restore-pending"
+    rd.mkdir()
+    (rd / "webterm.db").write_bytes(config.DB_PATH.read_bytes())
+    (rd / "secret").write_bytes(b"S" * 32)
+    (rd / "restore.json").write_bytes(b"{}")
+    (config.DATA_DIR / ".restore-flag").write_text("1")
+    secret_before = (config.DATA_DIR / "secret").read_bytes()
+    check("H2: staging 3.8 pe volum fără keys.wtk → apply refuzat, secret neatins",
+          refused(lambda: backup.apply_pending_restore()) and (config.DATA_DIR / "secret").read_bytes() == secret_before)
+    os.unlink(rd / "restore.json")
+    check("H2: după curăţare volumul e legacy curat (snapshot 3.7 permis)", backup.make_snapshot()[:2] == b"\x1f\x8b")
+    shutil.rmtree(rd)
+    os.unlink(config.DATA_DIR / ".restore-flag")
+    use(os.path.join(ROOT, "H2L"))
+    check("H2: volumul legacy obişnuit nu e afectat", backup.volume_kind() == "legacy"
+          and backup.apply_pending_restore() is False)
+
+
+def h3_tests():
+    hk, K = volume("H3", secret_leftover=True)
+    T = config.TRANSCRIPT_DIR
+    os.link(config.DATA_DIR / "secret", T / "leak.out")
+    os.symlink(config.DATA_DIR / "secret", T / "ln.out")
+    (T / "secret").write_bytes(K["secret"])
+    os.symlink(config.DATA_DIR, T / "arhiva" / "sub")
+    os.symlink(config.DATA_DIR, T / "data")
+    name = backup.run_scheduled_backup(include_transcripts=True, keys=hk)
+    plain = tar_plain((config.DATA_DIR / "backups" / name).read_bytes(), snk=K["snk"], inst=hk.ring.installation_id)
+    names = tar_names(plain)
+    check("H3: hardlink, symlink, nume nepermis, director-alias excluse",
+          not ({"transcripts/leak.out", "transcripts/ln.out", "transcripts/secret"} & set(names))
+          and not any("sub" in n or "data" in n.split("/")[1:2] for n in names if n.startswith("transcripts/")), names)
+    check("H3: înregistrările legitime incluse", "transcripts/s1.out" in names and "transcripts/arhiva/s0.out" in names)
+    check("H3: cheia brută absentă din tar-ul decriptat", K["secret"] not in plain and not raw_keys_in([plain], K))
+    # rădăcina transcripts/ ca symlink spre DATA_DIR (cu `secret` rămas): refuz
+    os.rename(T, str(T) + ".real")
+    os.symlink(config.DATA_DIR, T)
+    before = set(os.listdir(config.DATA_DIR / "backups"))
+    check("H3: rădăcina transcripts/ symlink → backup cu transcripturi refuzat",
+          refused(lambda: backup.run_scheduled_backup(include_transcripts=True, keys=hk))
+          and refused(lambda: backup.make_encrypted(PASS, include_transcripts=True, keys=hk))
+          and set(os.listdir(config.DATA_DIR / "backups")) == before)
+    out = backup.make_encrypted(PASS, include_transcripts=False, keys=hk)
+    check("H3: fără transcripturi backup-ul merge şi nu conţine cheia",
+          K["secret"] not in plain_of(out, K["mk"]) and not any(n.startswith("transcripts") for n in tar_names(plain_of(out, K["mk"]))))
+
+
+def m1_tests():
+    hk, K = volume("M1")
+    db_bytes = config.DB_PATH.read_bytes()
+    kw = (config.DATA_DIR / "keys.wtk").read_bytes()
+    base = [("webterm.db", db_bytes), ("keys.wtk", kw)]
+    good, _e = tar_bytes(base)
+    check("M1: arhiva USTAR canonică acceptată", backup.verify(wrap_tar(hk, good), PASS, keys=hk)["format"] == "WTS1")
+    # ultimul membru se termină la len - 1024 - padding; primul bloc final începe acolo
+    end = len(good)
+    while good[end - 512:end] == bytes(512):
+        end -= 512
+    t = bytearray(good)
+    t[end + 512 + 7] = 1
+    check("M1: octet nenul în AL DOILEA bloc final refuzat",
+          refused(lambda: backup.stage_restore(wrap_tar(hk, bytes(t)), PASS, keys=hk)) and nothing_staged())
+    t = bytearray(good)
+    t[-1] = 1
+    check("M1: octet nenul în padding-ul de după final refuzat",
+          refused(lambda: backup.stage_restore(wrap_tar(hk, bytes(t)), PASS, keys=hk)) and nothing_staged())
+    check("M1: octeţi după arhivă refuzaţi",
+          refused(lambda: backup.verify(wrap_tar(hk, good + b"\x01" + bytes(511)), PASS, keys=hk)))
+    huge, _e = tar_bytes(base, fmt=tarfile.PAX_FORMAT, pax={"webterm.db": {"comment": "x" * (1 << 20)}})
+    check("M1: antet PAX uriaş refuzat (WTS1 nu acceptă extensii)",
+          refused(lambda: backup.stage_restore(wrap_tar(hk, huge), PASS, keys=hk)) and nothing_staged())
+    gnu, _e = tar_bytes(base + [("transcripts/" + "a" * 120 + ".out", b"x")], fmt=tarfile.GNU_FORMAT)
+    check("M1: GNU longname refuzat", refused(lambda: backup.verify(wrap_tar(hk, gnu), PASS, keys=hk)))
+    _p, entries = tar_bytes(base, manifest=False)
+    files = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    dup = ('{"files":%s,"files":%s,"format":"wts-content-1"}' % (files, files)).encode()
+    t, _e = tar_bytes(base, manifest_raw=dup)
+    check("M1: manifest JSON cu chei duplicate refuzat", refused(lambda: backup.verify(wrap_tar(hk, t), PASS, keys=hk)))
+    loose = json.dumps({"format": "wts-content-1", "files": entries}).encode()
+    t, _e = tar_bytes(base, manifest_raw=loose)
+    check("M1: manifest JSON necanonic refuzat", refused(lambda: backup.verify(wrap_tar(hk, t), PASS, keys=hk)))
+    strsize = json.dumps({"format": "wts-content-1", "files": [dict(e, size=str(e["size"])) for e in entries]},
+                         sort_keys=True, separators=(",", ":")).encode()
+    t, _e = tar_bytes(base, manifest_raw=strsize)
+    check("M1: tip greşit în manifest (size ca şir) refuzat", refused(lambda: backup.verify(wrap_tar(hk, t), PASS, keys=hk)))
+    t, _e = tar_bytes(base, manifest_raw=b"\xff\xfe")
+    check("M1: manifest ne-UTF-8 → eroarea modulului (ValueError), nu 500",
+          refused(lambda: backup.verify(wrap_tar(hk, t), PASS, keys=hk), wts.SnapshotError))
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tt:
+        ti = tarfile.TarInfo("transcripts/x.out")
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = "../secret"
+        tt.addfile(ti)
+    check("M1: symlink în arhivă refuzat", refused(lambda: backup.verify(wrap_tar(hk, raw.getvalue()), PASS, keys=hk)))
+    # importul 3.7 trece prin acelaşi extractor strict
+    use(os.path.join(ROOT, "M1"))
+    sec = os.urandom(32)
+    leg = io.BytesIO()
+    with tarfile.open(fileobj=leg, mode="w:gz", format=tarfile.PAX_FORMAT) as tt:
+        for n, d, ph in (("webterm.db", db_bytes, {"comment": "y" * 20000}), ("secret", sec, None)):
+            ti = tarfile.TarInfo(n)
+            ti.size = len(d)
+            if ph:
+                ti.pax_headers = ph
+            tt.addfile(ti, io.BytesIO(d))
+    check("M1: import 3.7 cu antet PAX mare refuzat",
+          refused(lambda: backup.stage_restore(backup.encrypt(leg.getvalue(), PASS), PASS, keys=hk, legacy_import=True))
+          and nothing_staged())
+    leg = io.BytesIO()
+    with tarfile.open(fileobj=leg, mode="w:gz") as tt:
+        for n, d in (("webterm.db", db_bytes), ("secret", sec)):
+            ti = tarfile.TarInfo(n)
+            ti.size = len(d)
+            tt.addfile(ti, io.BytesIO(d))
+        ti = tarfile.TarInfo("transcripts/x.out")
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = "secret"
+        tt.addfile(ti)
+    check("M1/M3: import 3.7 cu hardlink intern refuzat (fără tar.extract)",
+          refused(lambda: backup.stage_restore(backup.encrypt(leg.getvalue(), PASS), PASS, keys=hk, legacy_import=True))
+          and nothing_staged())
+
+
+def m2_tests():
+    hk, K = volume("M2")
+    backup._backup_dir()
+    for i in range(4):
+        (config.TRANSCRIPT_DIR / ("t%d.out" % i)).write_bytes(b"x")
+    old = backup.MAX_MEMBERS
+    backup.MAX_MEMBERS = 5
+    try:
+        before = set(os.listdir(config.DATA_DIR / "backups"))
+        check("M2: writer-ul aplică plafonul de membri al cititorului",
+              refused(lambda: backup.run_scheduled_backup(include_transcripts=True, keys=hk), wts.SnapshotTooLarge)
+              and set(os.listdir(config.DATA_DIR / "backups")) == before)
+    finally:
+        backup.MAX_MEMBERS = old
+    orig = backup._TarOut.finish
+
+    def lying(self):
+        self.entries.append({"name": "transcripts/ghost.out", "size": 1, "sha256": "0" * 64})
+        return orig(self)
+    backup._TarOut.finish = lying
+    try:
+        before = set(os.listdir(config.DATA_DIR / "backups"))
+        check("M2: o arhivă produsă pe care restore-ul n-ar accepta-o nu e raportată ca succes",
+              refused(lambda: backup.run_scheduled_backup(keys=hk)) and refused(lambda: backup.make_encrypted(PASS, keys=hk))
+              and set(os.listdir(config.DATA_DIR / "backups")) == before)
+    finally:
+        backup._TarOut.finish = orig
+    keep = config.DATA_DIR / "backups" / "pre-restore-1.wts.keep"
+    keep.write_bytes(b"x")
+    check("L1: copiile .keep apar în inventar (doar citire)",
+          [k["name"] for k in backup.list_keep_copies()] == ["pre-restore-1.wts.keep"]
+          and "pre-restore-1.wts.keep" not in {b["name"] for b in backup.list_backups()})
+
+
+def m4_tests():
+    hk1, K = volume("M4")
+    mk1 = K["mk"]
+    s1 = backup.run_scheduled_backup(keys=hk1)
+    d1 = backup.make_encrypted(PASS, keys=hk1)
+    mk2, mk3 = os.urandom(32), os.urandom(32)
+    hk2 = rotate(mk1, mk2)
+    try:
+        backup.encrypt_stored(s1, PASS, keys=hk2)
+        check("M4: snapshot local vechi după rotaţie fără MK-ul vechi → „trebuie MK <id>”", False)
+    except wts.SnapshotWrongKey as e:
+        check("M4: snapshot local vechi după rotaţie fără MK-ul vechi → „trebuie MK <id>”",
+              e.mk_id == kr.key_id(mk1))
+    x2 = backup.encrypt_stored(s1, PASS, keys=hk2, mk=mk1)
+    inner = backup.decrypt(x2, PASS)
+    plain = tar_plain(inner, mk=mk2)
+    ring_in = kr.open_keyring_bytes(tarfile.open(fileobj=io.BytesIO(plain)).extractfile("keys.wtk").read(),
+                                    mk2, kr.PROFILE_V1)
+    check("M4: re-export: MK exterior = MK interior = MK curent, epoch-ul header-ului = al keyring-ului",
+          inner[40:56] == kr.key_id(mk2) and ring_in.mk_id == kr.key_id(mk2)
+          and ring_in.epoch == int.from_bytes(inner[32:40], "little") and kr.key_id(mk1) in ring_in.retired_mk_ids)
+    check("M4: re-exportul nu se deschide cu MK-ul vechi", refused(lambda: tar_plain(inner, mk=mk1), wts.SnapshotWrongKey))
+    hk3 = rotate(mk2, mk3)
+    check("M4: a doua rotaţie: re-export tot cu MK-ul snapshotului",
+          backup.decrypt(backup.encrypt_stored(s1, PASS, keys=hk3, mk=mk1), PASS)[40:56] == kr.key_id(mk3))
+    check("M4: exportul de sub MK2 pe gazda MK3 cere MK2",
+          refused(lambda: backup.stage_restore(x2, PASS, keys=hk3), wts.SnapshotWrongKey) and nothing_staged())
+    try:
+        backup.stage_restore(d1, PASS, keys=hk3)
+        check("M4: download local vechi (MK1) după două rotaţii: cere MK1 (id în eroare)", False)
+    except wts.SnapshotWrongKey as e:
+        check("M4: download local vechi (MK1) după două rotaţii: cere MK1 (id în eroare)",
+              e.mk_id == kr.key_id(mk1) and nothing_staged())
+    info = backup.stage_restore(d1, PASS, keys=hk3, mk=mk1)
+    check("M4: cu MK1 se restaurează pe gazda MK3", info["same_installation"] is True)
+    backup.apply_pending_restore(keys=hk3)
+    hk3 = host_keys(mk3)
+    check("M4: după restore keys.wtk e sub MK3", hk3.ring.mk_id == kr.key_id(mk3))
+    # SNK divergent pe aceeaşi instalare (recuperare): plicul local nu se potriveşte → ruta portabilă
+    d3 = backup.make_encrypted(PASS, keys=hk3)
+    r = hk3.ring
+    other = kr.Keyring(r.installation_id, r.epoch, r.mk_id, r.retired_mk_ids, kwk=r.kwk, snk=os.urandom(32),
+                       fk_legacy=r.fk_legacy, fk=r.fk, dbk=r.dbk)
+    (config.DATA_DIR / "keys.wtk").write_bytes(backup._rewrap(other, mk3, r.epoch + 1))
+    hk3b = host_keys(mk3)
+    check("M4: SNK divergent → ruta portabilă cu MK-ul gazdei", backup.verify(d3, PASS, keys=hk3b)["format"] == "WTS1")
+    check("M4: prefer=\"portable\" explicit", backup.verify(d3, PASS, keys=hk3b, prefer="portable")["portable"] is True)
+    check("M4: prefer invalid refuzat", refused(lambda: backup.verify(d3, PASS, keys=hk3b, prefer="x")))
+    # header şi keyring interior legate (epoch / instalare)
+    db_bytes = config.DB_PATH.read_bytes()
+    kw = (config.DATA_DIR / "keys.wtk").read_bytes()
+    t, _e = tar_bytes([("webterm.db", db_bytes), ("keys.wtk", kw)])
+    out = io.BytesIO()
+    w = wts.Writer(out, installation_id=hk3b.ring.installation_id, epoch=hk3b.ring.epoch + 5,
+                   mk_id=hk3b.ring.mk_id, snk=hk3b.ring.snk, mk=hk3b.mk)
+    w.write(_gz(t))
+    w.close()
+    check("M4: epoch din header ≠ epoch-ul keyring-ului interior → refuz",
+          refused(lambda: backup.verify(backup.encrypt(out.getvalue(), PASS), PASS, keys=hk3b)))
+
+
+def l1_tests():
+    from app import backup_api
+    e = backup_api._backup_value_error(wts.SnapshotWrongKey("needs-mk", "x", mk_id=b"\x01" * 16))
+    check("L1: „trebuie MK <id>” are cod propriu cu id-ul", e.code == "backup.needsMasterKey")
+    check("L1: limită depăşită are cod propriu", backup_api._backup_value_error(
+        wts.SnapshotTooLarge("too-many-members")).code == "backup.limitExceeded")
+    check("L1: operaţie concurentă → backup.busy (409)",
+          backup_api._backup_value_error(ValueError(backup._BUSY)).status_code == 409)
+    check("L1: bomba 3.7 rămâne backup.tooLarge", backup_api._backup_value_error(
+        ValueError("backup too large when unpacked (possible compression bomb) — refused")).code == "backup.tooLarge")
+    import asyncio
+
+    class Req:
+        def __init__(self, headers, chunks):
+            self.headers, self._chunks, self.read = headers, chunks, 0
+
+        async def stream(self):
+            for c in self._chunks:
+                self.read += len(c)
+                yield c
+    big = Req({"content-length": str(backup_api.UPLOAD_MAX + 1)}, [b"x"])
+    try:
+        asyncio.run(backup_api._read_upload(big))
+        check("M2: Content-Length peste limită refuzat înainte de citirea corpului", False)
+    except Exception as ex:
+        check("M2: Content-Length peste limită refuzat înainte de citirea corpului",
+              getattr(ex, "status_code", 0) == 413 and big.read == 0)
+    old = backup_api.UPLOAD_MAX
+    backup_api.UPLOAD_MAX = 10
+    try:
+        lying = Req({}, [b"x" * 6, b"y" * 6, b"z" * 6])
+        try:
+            asyncio.run(backup_api._read_upload(lying))
+            check("M2: fără Content-Length, corpul e tăiat la limită", False)
+        except Exception as ex:
+            check("M2: fără Content-Length, corpul e tăiat la limită",
+                  getattr(ex, "status_code", 0) == 413 and lying.read == 12)
+        check("M2: corp sub limită citit întreg", asyncio.run(backup_api._read_upload(Req({}, [b"ab", b"c"]))) == b"abc")
+    finally:
+        backup_api.UPLOAD_MAX = old
+
+
+def review_tests():
+    h1_tests()
+    h2_tests()
+    h3_tests()
+    m1_tests()
+    m2_tests()
+    m4_tests()
+    l1_tests()
 
 
 def main():
@@ -302,7 +921,7 @@ def main():
     old_max = backup.MAX_MEMBERS
     backup.MAX_MEMBERS = 3
     try:
-        b = custom_wts(hk, [("webterm.db", db_bytes), ("keys.wtk", kw)] + [(f"transcripts/t{i}", b"x") for i in range(5)])
+        b = custom_wts(hk, [("webterm.db", db_bytes), ("keys.wtk", kw)] + [(f"transcripts/t{i}.out", b"x") for i in range(5)])
         check("prea multe intrări refuzate", refused(lambda: backup.stage_restore(b, PASS, keys=hk),
                                                      wts.SnapshotTooLarge) and nothing_staged())
     finally:
@@ -397,6 +1016,8 @@ def main():
     check("keys.wtk ca symlink → refuz", (lambda: (os.replace(config.DATA_DIR / "keys.wtk", config.DATA_DIR / "k2"),
                                                     os.symlink(config.DATA_DIR / "k2", config.DATA_DIR / "keys.wtk"),
                                                     refused(backup.is_protected))[-1])())
+
+    review_tests()
 
     print(f"\n{ok}/{total} passed")
     shutil.rmtree(ROOT, ignore_errors=True)

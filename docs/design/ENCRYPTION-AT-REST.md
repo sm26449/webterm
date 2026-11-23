@@ -826,8 +826,11 @@ tested in isolation; these are not implemented and each needs its own change and
 6. **Backup and restore move to `keys.wtk` first.** Backup reads `keys.wtk` (never `secret` or
    the MK); restore validates the restored `keys.wtk` with the configured MK before anything is
    replaced, and never deletes `.lock`. *Implemented in §12.10 (PR3), active once a `keys.wtk`
-   exists; it still needs the boot to register the keyring provider and re-open `keys.wtk` after
-   an apply.*
+   exists; it still needs the boot to register the keyring provider, call
+   `backup.set_boot_protected(True)` from the inventory taken under the process lock (so a
+   missing `keys.wtk` is never read as legacy), run `apply_pending_restore` under that lock
+   (it may replace `backups/.restore.lock` with it) and re-open `keys.wtk` after an apply.
+   `backup.volume_kind()` is the lock-free routing PR3 uses until then.*
 7. **Resume and mixed-artefact gate.** Keep the authenticated pre-commit resume tests (edited
    marker MK id + another MK, FK_legacy ≠ `secret`, broken MAC → `migration-proof-invalid`;
    crash at every resume step → same installation) and the mixed-artefact tests (pre-commit +
@@ -857,9 +860,18 @@ tested in `tests/snapshot_test.py` and `tests/backup_protected_test.py`. Like PR
 reachable from production** until the boot is wired: a volume becomes *protected* only when
 `keys.wtk` exists, and until then every backup path runs the 3.7 code unchanged.
 
-**Which path.** `backup.is_protected()` = `DATA_DIR/keys.wtk` exists (a non-regular file at that
-name → refuse). *Legacy* (no `keys.wtk`): exactly the 3.7 code (`make_snapshot`, `.wtsnap`,
-WTBK1 downloads, `restore-pending/` with `secret`). *Protected*: WTS1 everywhere below. The
+**Which path.** `backup.volume_kind()` (and `is_protected()` on top of it), read without the
+process lock: *protected* = `DATA_DIR/keys.wtk` is a regular file **and** `keys.classify` says
+`protected` (anything else at that name, or a protected volume `classify` calls ambiguous →
+refuse). *Legacy* only when `keys.wtk` is absent **and nothing says the volume was protected**:
+no host-keys provider registered and no `set_boot_protected(True)`, no key artefact of the new
+format (`migrating.wtm[.tmp]`, `keys.wtk.tmp`, `master.key[.tmp]`), no reserved name
+(`keys.find_reserved`), no 3.8 staging (`restore-pending/keys.wtk`, `restore-pending/restore.json`,
+a JSON `.restore-flag`) and no WTS1 file in `backups/` (`*.wts`, `*.wts.keep`, `*.wts.tmp`). Any
+such trace with `keys.wtk` missing refuses **every** backup, verify and restore operation (a
+lost manifest never reopens the tar with `secret`). `make_snapshot` (the 3.7 tar) runs only on a
+volume classified legacy. *Legacy*: exactly the 3.7 code (`make_snapshot`, `.wtsnap`, WTBK1
+downloads, `restore-pending/` with `secret`). *Protected*: WTS1 everywhere below. The
 keyring comes from the caller (`keys=HostKeys(ring, mk)`) or from a provider the boot registers
 (`backup.set_host_keys_provider`); with neither, every protected operation is refused — never
 treated as legacy. On each use `keys.wtk` is re-read and must open with that MK and show the same
@@ -894,31 +906,68 @@ installation id and epoch as the keyring the process holds.
   or length, a missing or duplicated final, any byte after the final, truncation anywhere,
   reordered, dropped or foreign frames → refused. `read()` without a size is refused (bounded
   memory: at most one frame is buffered).
+- **Writer discipline** (like `txformat.Writer`). One caller at a time: a non-blocking lock, and
+  a concurrent call (another thread, or the sink re-entering the writer) **breaks** the writer
+  instead of waiting. The frame counter is reserved before encryption. Every sink `write` must
+  return the full length: `None`, a short count or an exception breaks the writer and the
+  container is abandoned. The writer enforces the reader's plaintext budget. CK comes only from
+  `secrets`; the test vector fixes it through a private module hook (`_fresh_ck`), never a
+  parameter.
 - **Retry after an ambiguous write.** A snapshot file is written as `<name>.tmp` (`O_EXCL`,
-  `O_NOFOLLOW`, 0600) → fsync → rename → fsync of the directory; any failure removes the tmp and
-  the next attempt is a new `Writer`, i.e. a new CK: the counter nonces never repeat under one key.
-  A transcoding (stored local snapshot → portable download) also uses a new CK.
+  `O_NOFOLLOW`, 0600) → fsync → **read back and verified** (the full restore reader, hash-only)
+  → rename → fsync of the directory; any failure removes the tmp and the next attempt is a new
+  `Writer`, i.e. a new CK: the counter nonces never repeat under one key. A transcoding (stored
+  local snapshot → portable download) also uses a new CK.
 
 **Content** (the `tar.gz`, streamed through the Writer; `w|gz`, so the archive is never held in
 memory): `webterm.db` (`VACUUM INTO`), `keys.wtk` (the manifest bytes only — useless without the
 MK), `agent-signing.key/.pub` when present, `transcripts/…` when asked, and **last**
 `wts-manifest.json` = `{"format": "wts-content-1", "files": [{name, size, sha256}, …]}` for every
-regular file before it. Never `secret`, `master.key` or the MK, even when a `secret` is still on
+regular file before it (canonical JSON: sorted keys, no spaces). The tar is plain **USTAR**
+(no PAX/GNU extensions). Never `secret`, `master.key` or the MK, even when a `secret` is still on
 the volume (the migration's `secret_leftover` sub-state). Each file is hashed on exactly the bytes
 archived (a transcript that shrinks while read is first copied, up to its stat size, into a
 private temp file). Phase 1: the DB is plaintext *inside* the encrypted container (it holds the
 Fernet ciphertexts as today).
 
-**Restore reader** (also used by verify): names canonical (`[A-Za-z0-9_@+=-][A-Za-z0-9._@+=-]*`
-per component, no `.`/`..`/empty/absolute, at most 5 components), only the files above at the top
-level, anything under `transcripts/`, only regular files and directories, no duplicates, the
-manifest last and nothing after it, at most 200 000 members, the gzip stream with **two
-decompression budgets** checked after every 64 KiB step — absolute (2 GiB, the 3.7 cap) and ratio
-(output ≤ max(64 MiB, 1024 × compressed input so far)) — one gzip member, only zero padding after
-the tar end, then the WTS1 final frame and EOF. The extracted set must equal the manifest (names,
-sizes, SHA-256); `webterm.db` and `keys.wtk` are required; the DB passes `PRAGMA
-integrity_check`; the inner `keys.wtk` must open (`open_keyring_bytes`, profile v1) with the MK it
-names — the host's or the operator's — carry the header's installation id and an SNK.
+- **Transcript inventory (allowlist, not exclusions).** `transcripts/` is opened with
+  `O_DIRECTORY|O_NOFOLLOW` (a symlinked root, or a root that *is* `DATA_DIR` → the whole backup is
+  refused) and walked through directory fds: only `transcripts/<name>.out|.cast` and
+  `transcripts/arhiva/<name>.out|.cast` (`[A-Za-z0-9_-]{1,128}`, no reserved name), only regular
+  files with `st_nlink == 1`, re-checked on the opened fd; never a file whose `(st_dev, st_ino)`
+  is `secret`, `master.key[.tmp]`, `keys.wtk[.tmp]`, `migrating.wtm`, the signing key, the DB,
+  `.lock`, `DATA_DIR` or the external key file. Symlinks, hardlinks, other names and other
+  directories are skipped and logged. **Limit:** a *copy* of key bytes written into an allowed
+  recording name is archived (inside the encrypted container); the inventory can stop aliases,
+  not arbitrary content.
+- **Writer budgets.** The writer enforces the reader's limits while producing (members ≤
+  200 000, unpacked tar ≤ 2 GiB, content manifest ≤ 4 MiB, plaintext ≤ 4 GiB) and reports success
+  only after the produced container passed the restore reader (files: before the rename; the
+  in-memory portable container and a transcoded download: before they are returned).
+
+**Restore reader** (also used by verify, by transcoding, by the post-write check and by the 3.7
+import — one strict extractor, `tarfile` is not used to read): names canonical
+(`[A-Za-z0-9_@+=-][A-Za-z0-9._@+=-]*` per component, no `.`/`..`/empty/absolute, at most 5
+components), only the files above at the top level, under `transcripts/` only the allowlist
+above (directories `transcripts` and `transcripts/arhiva`), no duplicates, the manifest last and
+nothing after it, at most 200 000 members (counted on every header before it is processed), the
+gzip stream with **two decompression budgets** checked after every 64 KiB step — absolute (2 GiB,
+the 3.7 cap) and ratio (output ≤ max(64 MiB, 1024 × compressed input so far)) — one gzip member.
+Tar profile: POSIX USTAR headers only (checksum, `ustar\0` + `00`, numeric fields octal, no
+base-256, empty link name, zero header padding), type regular file or directory only, zero
+padding after every member, **both end blocks zero** and nothing but zeros up to the end of the
+decompressed stream (the parser reads it itself, so no byte can hide in a read-ahead buffer),
+then the WTS1 final frame and EOF. PAX headers are refused in a WTS1; in a 3.7 import only one
+header per member, ≤ 8 KiB, keys `path mtime atime ctime uid gid uname gname`. The content
+manifest is strict JSON: UTF-8, no duplicate keys, no floats or constants, exact key sets and
+types (`size` an int, `sha256` 64 lowercase hex), and byte-equal to its canonical form; every
+parse error is a `SnapshotError` (400), never a 500. The extracted set must equal the manifest
+(names, sizes, SHA-256); `webterm.db` and `keys.wtk` are required; the DB passes `PRAGMA
+integrity_check`; the inner `keys.wtk` must open (`open_keyring_bytes`, profile v1) with the MK
+the **header** names — the host's or the operator's — and carry the header's installation id,
+epoch and MK id, and an SNK (writers keep outer and inner MK equal, see M4 below). `PRAGMA
+integrity_check` proves a sound SQLite file, not the gateway schema nor that `FK_legacy` decrypts
+it (§12.9 checklist item 3).
 
 **Paths:**
 
@@ -926,70 +975,137 @@ names — the host's or the operator's — carry the header's installation id an
 |---|---|---|
 | scheduled local snapshot `backups/webterm-…wts` | WTS1, local envelope only | this installation's SNK |
 | download (`make_encrypted`), manual and scheduled remote upload | WTBK1 (scrypt passphrase, mandatory) around WTS1 local + portable | passphrase **and** (SNK of the same installation, or the MK) |
-| download of a stored `.wts` (`encrypt_stored`) | transcoded to WTS1 local + portable with a new CK, then WTBK1 | as above |
+| download of a stored `.wts` (`encrypt_stored(name, pass, mk=)`) | transcoded (streamed, no plaintext on disk) to WTS1 local + portable with a new CK; the inner `keys.wtk` is authenticated with the MK its header names and **re-wrapped under the current MK** (same installation and epoch), so one MK opens the result; a snapshot made before a rotation needs the old MK as `mk=` ("needs master key <id>"); then WTBK1 | as above |
 | pre-restore safety copy `backups/pre-restore-<ts>.wts.keep` | WTS1 local + portable | the host MK (still opens after `keys.wtk` changed) |
 
 The passphrase is mandatory for every archive that leaves the host (downloads, all remote
 profiles): the product promises "two secrets" for a stolen remote archive (V3-M1), and the
 remote credentials are not counted as one. Neither secret alone opens it (tested).
 
-**Restore** (`stage_restore(blob, passphrase, keys=, mk=, legacy_import=)`):
+**Restore** (`stage_restore(blob, passphrase, keys=, mk=, legacy_import=, prefer=)`):
 
 1. The WTBK1 layer → a WTS1 (`"WTS1"` magic) or a 3.7 `tar.gz`.
 2. WTS1 on a legacy volume → refused (it can be restored only once `keys.wtk` is set up).
 3. WTS1 on a protected volume → unlock: the local envelope when the header names this
-   installation, otherwise the portable one with the operator's `mk` (a snapshot from another
-   installation, or made under a retired MK) or the host MK when the header names it. The whole
-   reader above runs into a private 0700 directory under `backups/` (`.restore-verify-*`, same
-   filesystem as `restore-pending/`). Only after everything passed: the inner keyring is
-   **re-wrapped under the host MK** (KWK and SNK under the host `K_mw`, the KWK-wrapped keys
-   unchanged; installation id of the snapshot; epoch = max(snapshot, host) + 1; retired ids = the
-   snapshot's ∪ its MK id, plus the host's own when it is the same installation, minus the host
-   MK id; > 64 → refused), replacing the snapshot's `keys.wtk`; then one rename of the directory to
-   `restore-pending/` and the flag. A wrong key, a tampered container or any content check
-   failing leaves no `restore-pending/`, no flag, no temp directory.
+   installation, otherwise (or when the local envelope is under another SNK — a recovered
+   installation — or with `prefer="portable"`, chosen before any body byte is read) the portable
+   one with the operator's `mk` (a snapshot from another installation, or made under a retired
+   MK) or the host MK when the header names it. Under the operations lock
+   (`backups/.restore.lock`, `flock` non-blocking: a second verify/stage/apply is refused with
+   `backup.busy`, and `.restore-verify-*` left by a crash are removed), the whole reader above
+   runs into a private 0700 directory under `backups/` (`.restore-verify-*`, same filesystem as
+   `restore-pending/`). Only after everything passed: the inner keyring is **re-wrapped under the
+   host MK** (KWK and SNK under the host `K_mw`, the KWK-wrapped keys unchanged; installation id of
+   the snapshot; epoch = max(snapshot, host) + 1; retired ids = the snapshot's ∪ its MK id, plus
+   the host's own when it is the same installation, minus the host MK id; > 64 → refused),
+   replacing the snapshot's `keys.wtk`; then the set is published (below). A wrong key, a
+   tampered container or any content check failing leaves no `restore-pending/`, no flag, no
+   temp directory. The returned info says what the backup does **not** carry
+   (`live_transcripts_kept`, `live_signing_key_kept`).
 4. A 3.7 `tar.gz` on a legacy volume → the 3.7 code, unchanged.
 5. A 3.7 `tar.gz` on a protected volume → refused unless `legacy_import=True` (the explicit
-   import of §6): the archive is checked as in 3.7, its `secret` (regular, exactly 32 B) is read
-   into memory and becomes `FK_legacy` of a new `keys.wtk` (this installation, host MK, the other
-   keys unchanged, epoch + 1); only `webterm.db`, `agent-signing.*` and `transcripts/` are
-   extracted (any other entry → refused). The raw key is never written to staging.
+   import of §6): the archive goes through the **same strict extractor** (profile "legacy": also
+   `secret`, no manifest, small PAX headers; no `tar.extract`, so no links of any kind), its
+   `secret` (regular, exactly 32 B) is kept in memory only and becomes `FK_legacy` of a new
+   `keys.wtk` (this installation, host MK, the other keys unchanged, epoch + 1); only
+   `webterm.db`, `agent-signing.*` and the transcript allowlist are extracted (anything else →
+   refused); the DB check runs on exactly the files that are then published (one extraction).
+   The raw key is never written to staging.
 
-**Apply** (`apply_pending_restore(keys=)`, at boot before `db.connect`): a staging with `keys.wtk`
-or a protected volume takes the protected path; a staging with `secret` or `master.key` on a
-protected volume, a staging with `keys.wtk` on a legacy volume, or no keyring → refuse (boot
-stops; staging is kept). The staged `keys.wtk` must open with the host MK. If it differs from the
-current one: safety copy (above; a failure is logged and the apply continues, as in 3.7), then
-`keys.wtk` replaced atomically (`keys.wtk.tmp`, `O_EXCL|O_NOFOLLOW`, fsync, rename, directory
-fsync, read-back); then the fleet signing key, transcripts, and the DB last (the commit point);
-staging and flag removed at the end. Re-running after a crash converges (the `keys.wtk` step is
-skipped once it matches). The caller must **re-open** `keys.wtk` afterwards: a restore from another
-installation changes the installation id, and any restore raises the epoch (the old keyring is
-then refused by `backup._host`).
+**Staged set** (H1). Publication of a verified directory: every file and directory fsynced; then
+`restore.json` = canonical JSON `{format: "wt-restore-1", generation (random 128-bit), created,
+installation_id, epoch, mk_id (of the staged keyring), files: [{name, size, sha256}], dirs}`,
+fsynced with its directory; then the previous set is retired (its flag removed durably first,
+then its directory moved aside and deleted); then **one rename** to `restore-pending/` with fsync of
+both parents; the flag **last**, atomically (`.restore-flag.tmp`, fsync, rename, directory fsync)
+= `{format: "wt-restore-flag-1", manifest: sha256(restore.json), state: "staged"}`. A crash or an
+I/O error at any point leaves either no flag or a flag whose set is complete (fault-injected at
+every step and every fsync).
+
+**Apply** (`apply_pending_restore(keys=, force_without_safety_copy=False)`, at boot before
+`db.connect`). No flag and no `restore-pending/` → nothing to do (as in 3.7). Otherwise the volume
+is classified first (above): an ambiguous volume → refuse; legacy → the 3.7 code. Protected →
+under the operations lock, a **journal kept in the flag**:
+
+- no flag, staging present → an interrupted stage: ignored (logged), replaced by the next stage;
+- a 3.7 flag (a timestamp), a flag without its staging, a staging without `restore.json`, a
+  manifest whose digest is not the flag's, a missing / changed / extra file, a non-regular entry,
+  a staged `keys.wtk` that does not open with the host MK or does not match the manifest's
+  identity, no keyring → **refuse** (boot stops; nothing touched), never "nothing to do";
+- `staged`: the set is re-validated against its manifest; **mandatory** safety copy
+  (`pre-restore-<ts>.wts.keep`, WTS1 local + portable, verified like every produced container);
+  if it cannot be made the apply is refused unless the caller passes
+  `force_without_safety_copy=True`; then the flag becomes `applying` (+ the safety copy's name);
+- `applying`: the set is re-validated; `keys.wtk` replaced atomically if it differs
+  (`keys.wtk.tmp`, `O_EXCL|O_NOFOLLOW`, fsync, rename, directory fsync, read-back); the fleet
+  signing key and `.pub` when the backup has them (otherwise the live ones stay); transcripts when
+  the backup has them, as a durable copy `transcripts.restoring` then two renames through
+  `transcripts.pre-restore` (otherwise the live ones stay, logged); the DB last (durable copy +
+  rename), `-wal`/`-shm` removed, `DATA_DIR` fsynced; then the flag becomes `committed`;
+- `committed`: the staging is moved aside and deleted, then the flag is removed.
+
+Each step is idempotent (copies, not moves: the staged set stays intact until the commit), so a
+re-run after a crash at any step converges (fault-injected at every step and at fsync points).
+The caller must **re-open** `keys.wtk` afterwards: a restore from another installation changes
+the installation id, and any restore raises the epoch (the old keyring is then refused by
+`backup._host`).
 
 **Legacy copies of the raw key (wiring item 5).** 3.7 snapshots `backups/*.wtsnap` and
 `pre-restore-*.wtsnap.keep` contain `secret` in clear. They stay listed, verifiable, downloadable
 (WTBK1) and restorable (through the explicit import on a protected volume), and the retention
-still deletes `*.wtsnap` after 7 days; `*.keep` files are never deleted automatically. System
-health must list them after the migration (not in PR3).
+still deletes `*.wtsnap` after 7 days; `*.keep` files are never deleted automatically. They are
+now listed read-only by `backup.list_keep_copies()` (`raw_vault_key` marks the 3.7 ones) and in
+`GET /api/backup/status` as `keep_copies`; System health must flag them after the migration (not
+in PR3).
+
+**API errors** (L1). `SnapshotWrongKey` with a header MK id → `backup.needsMasterKey` (vars
+`{id}`); other key mismatches → `backup.wrongKeys`; any budget (`SnapshotTooLarge`) →
+`backup.limitExceeded`; a concurrent verify/stage → 409 `backup.busy`; the 3.7 messages keep their
+codes. The detail stays the module's short English text (reason codes, no parser dump). Uploads
+(`/api/backup/restore`, `/api/backup/verify`) are refused with 413 from `Content-Length` before
+the body is read, and cut off at 512 MiB while streaming when the length is absent.
+
+**Known limits (follow-up items).**
+
+- WTBK1 is single-shot AES-GCM: downloads (`make_encrypted`, `encrypt_stored`) and uploads hold
+  the whole archive (≤ 512 MiB upload, the WTS1 inside it) in memory, and the in-memory portable
+  container is verified before it is wrapped. A streamed passphrase layer is a follow-up (format
+  change, its own review).
+- The 3.7 legacy restore path (legacy volumes) is untouched: `_gunzip_bounded` still inflates up
+  to 2 GiB in memory and uses `tarfile`; it disappears with the migration.
+- No global concurrency limit for downloads / scheduled backups; verify, stage and apply are
+  serialised by the operations lock only.
+- Plaintext temp copies remain, private (0700/0600) and removed on every path: the `VACUUM INTO`
+  copy and transcript spool files (system temp dir), the verify/stage directory and
+  `restore-pending/` (DB, signing key, transcripts). Their remanence on disk is outside the phase-1
+  promise (it covers `secret`, `master.key` and unwrapped keyring keys, which never reach them,
+  also not through an alias — H3).
+- `FK_legacy` of an imported 3.7 backup is not yet proven to decrypt its DB (§12.9 item 3).
 
 **Not in PR3 / decisions to confirm.**
 
 - A protected restore always replaces `keys.wtk` with a re-wrapped one, even for the same
   installation, so a snapshot made before a legacy import (another `FK_legacy`) restores
-  consistently. Consequence: a snapshot whose inner `keys.wtk` names a retired MK needs that MK
-  (`mk=`) even when SNK opens the container — the stable keys inside cannot be checked otherwise.
+  consistently. Writers now keep the header MK id equal to the inner `keys.wtk` MK id (a
+  re-export re-wraps the inner keyring under the current MK), so a container needs exactly
+  **one** MK: the one its header names. A local snapshot or download made before a rotation needs
+  that older MK (`mk=`); the error names its id (`backup.needsMasterKey`). A retired MK must
+  therefore be kept as long as backups made under it are kept.
 - `keys.wtk` replacement in `apply` writes directly (not through `keys.publish_manifest`, which
-  requires the same installation id); it must run under the boot's process lock when wired.
+  requires the same installation id); replacing a foreign installation id is a dataset
+  operation and must run under the boot's process lock when wired (the operations lock in
+  `backups/` is the PR3 stand-in).
+- Routing: PR3 classifies the volume lock-free (`volume_kind`); the wiring PR must route from the
+  boot state (`set_boot_protected`, the provider) and keep the lock through apply. There is no
+  backup CLI yet; any future one must use the same classification and lock.
 - `restore-pending/` still holds the fleet signing key and the plaintext DB (as in 3.7); it holds
-  no `secret`, no MK and no unwrapped keyring key.
+  no `secret`, no MK and no unwrapped keyring key (now also not through a transcript alias).
 - The §12.4 restore layout (`.restore/<epoch>/`, rename journal, descriptors, erasure journal)
   and the §12.8 contract 5 snapshot coherence (barrier, pins) are not implemented: phase 1 has no
-  WTX1 recordings to pin.
-- API error codes: WTS1 refusals are `ValueError`s mapped like the 3.7 ones (`backup.tooLarge`
-  for budgets, otherwise `backup.badFile`); a dedicated "needs master key <id>" code comes with
-  the UI for the operator MK.
-
+  WTX1 recordings to pin. The restore journal above (flag states) is the phase-1 form; it must be
+  extended before recordings or erasures are written (the §12.4 recovery and erasure promises).
+- The API does not pass `mk`, `prefer` or `legacy_import` yet (no UI to enter an operator MK);
+  until then those routes surface `backup.needsMasterKey` and the operator uses a future CLI.
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
