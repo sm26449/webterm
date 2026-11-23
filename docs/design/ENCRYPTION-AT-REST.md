@@ -322,6 +322,18 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   logical offset u64, file offset u64, all LE) | HMAC-SHA-256(K_idx, all bytes before); entries
   strictly ascending, below the watermark, with file offset = 96 + logical offset + 25 × seq.
   Vectors: Appendix "Test vectors (v1)".
+- **Writer and budgets (PR1 review fixes):** `Writer` has a single owner: append / write / seal
+  take a non-blocking lock, so a concurrent or re-entrant call (e.g. from the file object's
+  `write`) is refused with `busy` before any encryption; each seq is reserved before it is
+  encrypted, and any failure after a reservation breaks the writer for good. `write()` on the
+  file object must return exactly the buffer length; `None`, a short count, a non-int or an
+  exception is an ambiguous write: the writer is broken and its counters stay at the last fully
+  written record (the integration abandons the generation and keeps only the last durable
+  watermark). The record encoder is private. Budgets: `Reader.read_all(max_bytes=…)` has no
+  default; `verify_full` stops as soon as the generation exceeds the descriptor's expected
+  count / plain length / physical length; `verify_index` refuses more than `max_entries`
+  (default 65 536) by size before copying or MAC-ing; types and sizes are checked before any
+  copy, and `bool` is never accepted as an integer.
 
 ### 12.2 Key manifest, bootstrap and boot
 
@@ -346,6 +358,12 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   Decoding compares the MK id first (a wrong key is reported as such), then the MAC, then parses
   strictly (trailing bytes, order, reserved bits refused). The manifest does not yet carry
   migration or format state (§3.2 lists them); that is part of contract 6.
+- **Opening (PR1 review fixes):** the only public way to open the manifest is
+  `open_keyring_bytes(blob, mk, profile)`: size/type gate → MK id → MAC → strict parse → envelope
+  types checked against a `Profile` (required types present; any type outside `allowed`, even
+  authentic, is refused) → unwrap of every envelope. The structural parser is private
+  (`_parse_manifest_unauthenticated`). Profile `v1` requires KWK and allows SNK, FK_legacy, FK
+  and DBK; later phases declare their own profiles. Key bytes never appear in `repr`.
 - **Publication:** write `keys.wtk.tmp` (O_EXCL, 0600, O_NOFOLLOW), fsync, rename over `keys.wtk`,
   fsync the directory. One file = one atomic switch; the epoch increases on every change.
 - **Routine MK rotation (v4, review V3-H1):** KWK, SNK and the keys derived from KWK (`K_desc`,
@@ -385,7 +403,9 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   phys_len u64 | hdr_mac 32 B) | HMAC-SHA-256(K_desc, all bytes before). The list is in recording
   order; gen_ids unique; at most one `live`, and only last; phys_len is the committed prefix for
   live and recovered, the whole file with its SEAL for sealed. The decoder also checks the
-  expected installation, sid and kind and, when given, the RK envelope hash.
+  expected installation, sid and kind and the RK envelope: `rk_envelope` is a required
+  argument, must be an RK envelope, and its hash must match before the generation list is
+  parsed (an authentic RK envelope of another session under the same KWK would unwrap fine).
 - **Commit order per checkpoint:** append records to `.out` and `.cast` → fsync both → one DB
   transaction that updates both descriptors (`data_count` = exclusive watermark) **and** the
   upstream agent offset. A reader trusts exactly the committed prefix: bytes after it are ignored,
@@ -448,6 +468,12 @@ pass their own gates.
 
 ### 12.8 Open contracts before any writer is enabled (review v3)
 
+Notes from the PR1 code review: any concurrent or re-entrant writer call breaks the writer for good
+(the generation ends, a new one starts); `encode_manifest` refuses a manifest its profile would not
+open; contract 1 must also prove that every Writer starts on a fresh (RK, kind, gen_id), since the
+codec restarts at seq 0; request-path callers pass the descriptor's data_count, plain_len and
+phys_len to `verify_full` as budgets.
+
 The first PR ships the codec and internal types only. These contracts must be written here and
 reviewed before the PR that turns writers, migration, backup or erasure on:
 
@@ -507,5 +533,6 @@ KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
 | envelope RK under KWK | `0106f11f697470f59679fa2294223bae52cd40009cab90a76f09514cc0cbc9713a516f12470584239e7c0702a63c4de1adfe146bfc0413330f3b724ade21506857c85af97be734dee47f2e1f1b5c8bf75baf5c53` |
 | manifest (epoch 1, no retired ids, KWK + FK) MAC | `b1e621dcef08ec41607f045a18e1d345c3a5a10235d73ecbb757907b4827080b` |
 | descriptor (sid above, kind 1, version 3, the sealed generation above) MAC | `d9cff1271b174d9e23ad93253030e9438c64226d3f2ceff045b8134cfcf16716` |
+| index `WTI1` (kind 1, data_count 2, entries (0, 0, 96) and (1, 7, 128), whole file) | `5754493101010000101112131415161718191a1b1c1d1e1f020000000000000002000000000000000000000000000000600000000000000001000000070000000000000080000000000000004d1d98fab4e55f31a7430c27fafb843ac8aeaeb6869afbff8be106b89cbe86e9` |
 
 The manifest and descriptor bytes in full are in `tests/keyring_test.py` (`V_MANIFEST`, `V_DESC`).

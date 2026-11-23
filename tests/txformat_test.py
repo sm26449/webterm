@@ -10,6 +10,7 @@ import io
 import os
 import struct
 import sys
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 from app import txformat as tx  # noqa: E402
@@ -58,6 +59,9 @@ V_EMPTY = ("5754583101020000101112131415161718191a1b1c1d1e1f00112233445566778899
            "b431b09f12712547f8d74193369016de7b8b883dad7a3ceeba47335213466b5c"
            "0230000000000000001f49d8f9d7956aadb2c7207cce695467662a48cd8359662e0287d2205e2e1322"
            "c8e8a9dc5f178b3305a6540d98895fe535262c337f54526386817f15925faf89")
+# Index (kind 1, data_count 2, intrări pentru ambele recorduri DATA de mai sus).
+V_INDEX = ("5754493101010000101112131415161718191a1b1c1d1e1f0200000000000000020000000000000000000000000000006000000000000000"
+           "01000000070000000000000080000000000000004d1d98fab4e55f31a7430c27fafb843ac8aeaeb6869afbff8be106b89cbe86e9")
 
 
 def make(kind=1, payloads=(P0, P1), seal=True, gen=GEN, sid=SID, **kw):
@@ -219,7 +223,7 @@ check("watermark above the record limit refused",
       raises(lambda: read(blob, tx.MAX_DATA_RECORDS + 1), tx.CorruptError, "bad-watermark"))
 check("plain_len impossible for the count refused", raises(lambda: read(blob, 2, plain_len=1), tx.CorruptError, "bad-watermark"))
 r = tx.Reader(io.BytesIO(blob), RK, kind=1, sid=SID, gen_id=GEN, data_count=2)
-check("read_all = concatenated plaintext", r.read_all() == P0 + P1)
+check("read_all = concatenated plaintext", r.read_all(max_bytes=13) == P0 + P1)
 check("a reader cannot be consumed twice", raises(lambda: list(r.records()), tx.StateError, "consumed"))
 
 print("== SEAL rules (verify_full) ==")
@@ -269,7 +273,7 @@ class Failing(io.BytesIO):
 ff = Failing()
 w4 = tx.Writer(ff, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
 ff.fail = True
-check("short write raises", raises(lambda: w4.append(b"abc"), OSError))
+check("short write raises ambiguous-write", raises(lambda: w4.append(b"abc"), tx.WriteError, "ambiguous-write"))
 ff.fail = False
 check("after a write error the writer is broken (no append)", raises(lambda: w4.append(b"abc"), tx.StateError, "broken"))
 check("after a write error the writer is broken (no SEAL)", raises(lambda: w4.seal(), tx.StateError, "broken"))
@@ -301,7 +305,216 @@ check("write() past the byte limit refused, all or nothing", raises(lambda: w6.w
 w6.write(b"x" * 10)
 check("writing exactly up to the limit is allowed", w6.plain_len == 100)
 
+print("== H1: single owner, seq reserved before encryption ==")
+check("the stateless record encoder is private", not hasattr(tx, "encode_record") and not hasattr(tx, "encode_seal"))
+
+
+class Reenter(io.BytesIO):
+    """write() re-enters append once (the reviewer's reproduction)."""
+
+    def __init__(self, swallow):
+        super().__init__()
+        self.w, self.swallow, self.inner = None, swallow, None
+
+    def write(self, b):
+        if self.w is not None and self.inner is None:
+            w, self.w = self.w, None
+            try:
+                w.append(b"inner")
+                self.inner = "accepted"
+            except tx.StateError as e:
+                self.inner = e.reason
+                if not self.swallow:
+                    raise
+        return super().write(b)
+
+
+def seqs(blob):
+    # Toate seq-urile din flux, parcurse după câmpul len (fără chei): o dublură s-ar vedea aici.
+    out, p = [], 96
+    while p + 9 <= len(blob):
+        _t, n, sq = struct.unpack_from("<BII", blob, p)
+        out.append(sq)
+        p += 9 + n + 16
+    return out
+
+
+ra = Reenter(swallow=False)
+wr = tx.Writer(ra, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+ra.w = wr
+check("re-entrant append from write() refused with busy (propagated)",
+      raises(lambda: wr.append(b"outer"), tx.StateError, "busy") and ra.inner == "busy")
+check("…no record written, so no duplicate seq", seqs(ra.getvalue()) == [] and len(ra.getvalue()) == 96)
+check("…the outer writer is broken for good", raises(lambda: wr.append(b"x"), tx.StateError, "broken")
+      and raises(lambda: wr.seal(), tx.StateError, "broken"))
+check("…counters still describe the last full record", (wr.data_count, wr.plain_len, wr.phys_len) == (0, 0, 96))
+rs = Reenter(swallow=True)
+ws = tx.Writer(rs, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+rs.w = ws
+check("re-entrant append swallowed by the sink: inner refused, outer completes", ws.append(b"outer") == 0 and rs.inner == "busy")
+check("…stream has seq 0 exactly once and reads back",
+      seqs(rs.getvalue()) == [0] and [x.data for x in read(rs.getvalue(), 1)] == [b"outer"])
+check("…but the writer is now broken for good (strict: any concurrent attempt ends the generation)",
+      raises(lambda: ws.append(b"next"), tx.StateError) and seqs(rs.getvalue()) == [0])
+
+
+class Gate(io.BytesIO):
+    def __init__(self):
+        super().__init__()
+        self.hold = False
+        self.entered, self.go = threading.Event(), threading.Event()
+
+    def write(self, b):
+        if self.hold:
+            self.entered.set()
+            self.go.wait(5)
+        return super().write(b)
+
+
+gt = Gate()
+wg = tx.Writer(gt, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+gt.hold = True
+th = threading.Thread(target=lambda: wg.append(b"from-thread"))
+th.start()
+gt.entered.wait(5)
+check("concurrent append from another thread → busy", raises(lambda: wg.append(b"main"), tx.StateError, "busy"))
+check("concurrent seal from another thread → busy", raises(lambda: wg.seal(), tx.StateError, "busy"))
+check("concurrent write() → busy", raises(lambda: wg.write(b"main"), tx.StateError, "busy"))
+gt.hold = False
+gt.go.set()
+th.join(5)
+check("the owner's append completed; refused calls left no trace (one record, seq 0)",
+      wg.data_count == 1 and seqs(gt.getvalue()) == [0])
+check("…and the writer is broken after the concurrent attempts (strict), so it cannot be sealed",
+      raises(lambda: wg.seal(), tx.StateError, "broken"))
+
+print("== M1: write() must confirm the whole buffer ==")
+
+
+class Sink(io.BytesIO):
+    def __init__(self):
+        super().__init__()
+        self.mode = None
+
+    def write(self, b):
+        m = self.mode
+        if m == "none":
+            return None
+        if m == "short":
+            super().write(b[:len(b) - 1])
+            return len(b) - 1
+        if m == "float":
+            super().write(b)
+            return float(len(b))
+        if m == "raise":
+            raise OSError("disk gone")
+        return super().write(b)
+
+
+for mode, exc, reason in (("none", tx.WriteError, "ambiguous-write"), ("short", tx.WriteError, "ambiguous-write"),
+                          ("float", tx.WriteError, "ambiguous-write"), ("raise", OSError, None)):
+    sk = Sink()
+    wk = tx.Writer(sk, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+    wk.append(P0)
+    before = (wk.data_count, wk.plain_len, wk.phys_len)
+    sk.mode = mode
+    check(f"write() → {mode}: refused", raises(lambda: wk.append(P1), exc, reason))
+    check(f"write() → {mode}: counters not advanced past the last full record",
+          (wk.data_count, wk.plain_len, wk.phys_len) == before == (1, 7, 128))
+    sk.mode = None
+    check(f"write() → {mode}: writer broken (append and seal refused)",
+          raises(lambda: wk.append(b"x"), tx.StateError, "broken") and raises(lambda: wk.seal(), tx.StateError, "broken"))
+sk = Sink()
+sk.mode = "none"
+check("header write returning None → constructor refuses",
+      raises(lambda: tx.Writer(sk, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED), tx.WriteError, "ambiguous-write"))
+sk = Sink()
+wk = tx.Writer(sk, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+wk.append(P0)
+sk.mode = "none"
+check("SEAL write returning None → refused, not sealed", raises(lambda: wk.seal(), tx.WriteError) and not wk.sealed)
+sk.mode = None
+check("…and no second SEAL attempt (broken)", raises(lambda: wk.seal(), tx.StateError, "broken"))
+sk = Sink()
+wk = tx.Writer(sk, RK, kind=1, sid=SID, gen_id=GEN, created_ms=CREATED)
+wk.append(P0)
+sk.mode = "short"
+check("multi-record write() failing mid-way breaks the writer",
+      raises(lambda: wk.write(b"z" * 70000), tx.WriteError) and raises(lambda: wk.append(b"x"), tx.StateError, "broken"))
+
+print("== M3: budgets ==")
+
+
+def reader(b, **kw):
+    return tx.Reader(io.BytesIO(b) if isinstance(b, bytes) else b, RK, kind=1, sid=SID, gen_id=GEN, data_count=2, **kw)
+
+
+check("read_all needs an explicit budget", raises(lambda: reader(blob).read_all(), TypeError))
+check("read_all over budget → LimitError", raises(lambda: reader(blob).read_all(max_bytes=12), tx.LimitError, "budget"))
+
+
+class Counting(io.BytesIO):
+    def __init__(self, b):
+        super().__init__(b)
+        self.reads = 0
+
+    def read(self, n=-1):
+        self.reads += 1
+        return super().read(n)
+
+
+cf = Counting(blob)
+rc = reader(cf, plain_len=13)
+n_hdr = cf.reads
+check("read_all refuses from the descriptor's plain_len before reading any record",
+      raises(lambda: rc.read_all(max_bytes=12), tx.LimitError, "budget") and cf.reads == n_hdr)
+check("read_all with a bool budget refused", raises(lambda: reader(blob).read_all(max_bytes=True), tx.StateError, "bad-argument"))
+check("verify_full stops early past the expected data_count",
+      raises(lambda: full(h + r0 + r1 + r0 + r1 + sl, data_count=1), tx.CorruptError, "count-mismatch"))
+cf = Counting(live + os.urandom(10))
+check("verify_full stops at the first record past expected plain_len (no further reads)",
+      raises(lambda: tx.verify_full(cf, RK, kind=1, sid=SID, gen_id=GEN, plain_len=7), tx.CorruptError, "plain-len-mismatch")
+      and cf.reads == 7)  # antet 1 + 2 recorduri × 3 citiri, nimic după
+check("verify_full stops past expected phys_len", raises(lambda: full(blob, phys_len=100), tx.CorruptError, "phys-len-mismatch"))
+check("verify_full refuses a bool expected value", raises(lambda: full(blob, data_count=True), tx.CorruptError, "bad-watermark"))
+
+
+class Greedy(io.BytesIO):
+    def read(self, n=-1):
+        return super().read(-1)  # dă mai mult decât s-a cerut
+
+
+check("file object returning more than asked → bad-read", raises(lambda: reader(Greedy(blob)), tx.CorruptError, "bad-read"))
+
+print("== L1: API input types ==")
+check("bool kind refused", raises(lambda: tx.generation_keys(RK, True, GEN), tx.StateError, "bad-argument"))
+check("bool created_ms refused", raises(lambda: tx.Writer(io.BytesIO(), RK, kind=1, sid=SID, gen_id=GEN, created_ms=True), tx.StateError))
+check("bool limit refused",
+      raises(lambda: tx.Writer(io.BytesIO(), RK, kind=1, sid=SID, gen_id=GEN, created_ms=0, max_records=True), tx.StateError))
+check("int as sid refused (no bytes(16) zero sid)",
+      raises(lambda: tx.Writer(io.BytesIO(), RK, kind=1, sid=16, gen_id=GEN, created_ms=0), tx.StateError, "bad-argument"))
+check("int as DATA refused (no bytes(n) allocation)", raises(lambda: w3.append(10 ** 9), tx.StateError, "bad-argument"))
+check("str as DATA refused", raises(lambda: w3.append("text"), tx.StateError, "bad-argument"))
+check("float kind refused", raises(lambda: tx.generation_keys(RK, 1.0, GEN), tx.StateError, "bad-argument"))
+check("unhashable kind refused with the module error", raises(lambda: tx.generation_keys(RK, [1], GEN), tx.StateError, "bad-argument"))
+check("bool watermark refused", raises(lambda: read(blob, True), tx.CorruptError, "bad-watermark"))
+check("int hdr_mac refused (no bytes(32) zero MAC)", raises(lambda: read(blob, 2, hdr_mac=32), tx.StateError, "bad-argument"))
+check("int sid on read refused", raises(lambda: read(blob, 2, sid=16), tx.StateError, "bad-argument"))
+check("nonce(seq) refuses bool / out of range",
+      raises(lambda: tx.nonce(True), tx.StateError) and raises(lambda: tx.nonce(1 << 32), tx.StateError))
+check("index entry with bool fields refused on encode",
+      raises(lambda: tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=[tx.IndexEntry(True, 1, 122)]), tx.StateError))
+check("index entries that are not entries refused",
+      raises(lambda: tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=[5]), tx.StateError, "bad-argument"))
+check("index blob that is an int refused", raises(lambda: tx.verify_index(10 ** 9, RK, kind=1, gen_id=GEN, data_count=3), tx.StateError))
+check("GenKeys repr hides the keys", keys.rec.hex() not in repr(keys) and "rec=" not in repr(keys) and "rec=" not in f"{keys}")
+
 print("== index ==")
+vidx = tx.encode_index(RK, kind=1, gen_id=GEN, data_count=2, entries=[tx.IndexEntry(0, 0, 96), tx.IndexEntry(1, 7, 128)])
+check("index vector (kind 1, data_count 2, both records)", vidx.hex() == V_INDEX)
+vbody = (b"WTI1" + bytes([1, 1, 0, 0]) + GEN + struct.pack("<QI", 2, 2) + struct.pack("<IQQ", 0, 0, 96)
+         + struct.pack("<IQQ", 1, 7, 128))
+check("index vector = layout + HMAC-SHA-256(K_idx, body)", vidx == vbody + hmac.new(keys.idx, vbody, hashlib.sha256).digest())
 ents = [tx.IndexEntry(r.seq, r.logical_offset, r.file_offset) for r in read(live, 3)]
 idx = tx.encode_index(RK, kind=1, gen_id=GEN, data_count=3, entries=ents)
 check("index round trip", tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3) == ents)
@@ -338,6 +551,13 @@ check("authentic MAC but impossible offsets → bad-index", raises(lambda: tx.ve
 check("oversized index refused before the MAC", raises(lambda: tx.verify_index(b"\x00" * (36 + 20 * (tx.MAX_DATA_RECORDS + 1) + 32),
                                                                                 RK, kind=1, gen_id=GEN, data_count=3),
                                                         tx.CorruptError, "bad-index"))
+check("index above max_entries refused by size, before the MAC",
+      raises(lambda: tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3, max_entries=2), tx.CorruptError, "bad-index"))
+check("index at exactly max_entries accepted", tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3, max_entries=3) == ents)
+check("default index budget is 65 536 entries", tx.DEFAULT_MAX_INDEX_ENTRIES == 65536
+      and raises(lambda: tx.verify_index(b"\x00" * (36 + 20 * 65537 + 32), RK, kind=1, gen_id=GEN, data_count=3), tx.CorruptError, "bad-index"))
+check("max_entries above the record limit refused", raises(lambda: tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3,
+                                                                                   max_entries=tx.MAX_DATA_RECORDS + 1), tx.StateError))
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

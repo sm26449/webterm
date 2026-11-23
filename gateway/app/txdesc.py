@@ -15,6 +15,10 @@ first). Rules checked on encode and decode (fail closed): gen_ids unique, at mos
 generation and only as the last one, data_count / plain_len within the §12.1 limits and
 consistent with each other, phys_len exact for the state: the committed prefix for live and
 recovered, the whole file including the 73-byte SEAL for sealed (txformat.phys_len).
+
+`decode_descriptor` always needs the session's wrapped-RK envelope (from `session_keys`): its
+type must be RK and its hash must equal the descriptor's `rk_hash` before anything is returned,
+so a caller cannot forget the binding. Type and size are checked before the blob is copied.
 """
 import hashlib
 import hmac
@@ -69,12 +73,19 @@ def _b(v, n):
     return isinstance(v, bytes) and len(v) == n
 
 
+def _is_int(v):
+    # bool refuzat: True ar trece drept kind 1, state 1 (live) sau count 1.
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def _check(d):
+    if not isinstance(d, Descriptor) or not isinstance(d.generations, (tuple, list)):
+        raise DescriptorError("bad-input")
     if not _b(d.installation_id, ID_LEN) or not _b(d.sid, ID_LEN):
         raise DescriptorError("bad-identity")
-    if d.kind not in txformat.KINDS:
+    if not _is_int(d.kind) or d.kind not in txformat.KINDS:
         raise DescriptorError("bad-kind")
-    if not isinstance(d.version, int) or not 0 <= d.version < 1 << 64:
+    if not _is_int(d.version) or not 0 <= d.version < 1 << 64:
         raise DescriptorError("bad-version")
     if not _b(d.rk_hash, 32):
         raise DescriptorError("bad-rk-hash")
@@ -83,23 +94,25 @@ def _check(d):
         raise DescriptorError("too-many-generations")
     seen = set()
     for i, g in enumerate(gens):
+        if not isinstance(g, Generation):
+            raise DescriptorError("bad-generation", f"#{i}")
         if not _b(g.gen_id, ID_LEN) or not _b(g.hdr_mac, MAC_LEN):
             raise DescriptorError("bad-generation", f"#{i} ids")
         if g.gen_id in seen:
             raise DescriptorError("duplicate-generation")
         seen.add(g.gen_id)
-        if g.state not in STATES:
+        if not _is_int(g.state) or g.state not in STATES:
             raise DescriptorError("bad-state", f"#{i}")
         # O singură generaţie live, şi doar ultima: writerul scrie mereu la coada înregistrării.
         if g.state == STATE_LIVE and i != len(gens) - 1:
             raise DescriptorError("live-not-last", f"#{i}")
-        if not isinstance(g.data_count, int) or not 0 <= g.data_count <= txformat.MAX_DATA_RECORDS:
+        if not _is_int(g.data_count) or not 0 <= g.data_count <= txformat.MAX_DATA_RECORDS:
             raise DescriptorError("bad-count", f"#{i}")
-        if (not isinstance(g.plain_len, int) or g.plain_len > txformat.MAX_PLAIN_BYTES
+        if (not _is_int(g.plain_len) or g.plain_len > txformat.MAX_PLAIN_BYTES
                 or not g.data_count <= g.plain_len <= g.data_count * txformat.MAX_DATA_LEN):
             raise DescriptorError("bad-plain-len", f"#{i}")
         want = txformat.phys_len(g.data_count, g.plain_len, g.state == STATE_SEALED)
-        if g.phys_len != want:
+        if not _is_int(g.phys_len) or g.phys_len != want:
             raise DescriptorError("bad-phys-len", f"#{i}: {g.phys_len} != {want}")
 
 
@@ -116,14 +129,25 @@ def encode_descriptor(d, kwk):
     return bytes(out) + _mac(kwk, bytes(out))
 
 
-def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope=None):
-    """Verify a descriptor and its binding to this installation, session and kind; when
-    `rk_envelope` (the wrapped RK from `session_keys`) is given, its hash must match too."""
+def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope):
+    """Verify a descriptor and its binding to this installation, session, kind and wrapped RK.
+
+    `rk_envelope` is required (no default): the session's RK envelope from `session_keys`; it
+    must be an RK envelope and its SHA-256 must equal the descriptor's `rk_hash`, checked before
+    the generation list is parsed. The caller unwraps that same envelope afterwards."""
+    if not _b(installation_id, ID_LEN) or not _b(sid, ID_LEN) or not _is_int(kind):
+        raise DescriptorError("bad-argument")
+    try:
+        if keyring.parse_envelope(rk_envelope)[0] != keyring.KT_RK:
+            raise DescriptorError("bad-rk-envelope")
+    except keyring.EnvelopeError:
+        raise DescriptorError("bad-rk-envelope") from None
+    # Tip şi mărime înainte de copie: un int sau un blob uriaş nu ajung la bytes(...).
     if not isinstance(blob, (bytes, bytearray)):
         raise DescriptorError("bad-input")
-    blob = bytes(blob)
     if not _HEAD.size + MAC_LEN <= len(blob) <= MAX_LEN:
         raise DescriptorError("bad-size")
+    blob = bytes(blob)
     body, mac = blob[:-MAC_LEN], blob[-MAC_LEN:]
     # MAC-ul acoperă instalaţia, sid-ul şi kind-ul: un descriptor autentic mutat pe alt rând
     # (altă sesiune, celălalt kind, altă instalaţie) e respins mai jos, nu doar la MAC.
@@ -138,12 +162,13 @@ def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope=None
         raise DescriptorError("wrong-sid")
     if k != kind:
         raise DescriptorError("wrong-kind")
+    # Legătura cu plicul RK înainte de lista de generaţii şi înainte de orice acces la fişiere:
+    # un plic RK autentic al altei sesiuni (acelaşi KWK) ar despacheta fără eroare.
+    if not hmac.compare_digest(keyring.envelope_hash(rk_envelope), rk_hash):
+        raise DescriptorError("rk-mismatch")
     if len(body) != _HEAD.size + n * _GEN.size:
         raise DescriptorError("bad-size")
     gens = tuple(Generation(*_GEN.unpack_from(body, _HEAD.size + i * _GEN.size)) for i in range(n))
     d = Descriptor(inst, s, k, version, rk_hash, gens)
     _check(d)
-    if rk_envelope is not None and not hmac.compare_digest(keyring.envelope_hash(rk_envelope),
-                                                           rk_hash):
-        raise DescriptorError("rk-mismatch")
     return d

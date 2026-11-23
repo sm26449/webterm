@@ -29,14 +29,21 @@ Key manifest (`keys.wtk` content), canonical binary:
     never the current one) | n_env u8 | n_env × (len u16 | envelope), strictly ascending by type,
     one per type, KWK required, RK forbidden | mac 32 B = HMAC-SHA-256(K_man, all bytes before)
 
-Decoding is strict: size limits first, the current MK id is compared before the MAC (so a wrong
-key is reported as such, not as tampering), the MAC is checked before any other field is trusted,
-and any non-canonical form (order, duplicates, trailing bytes, reserved bits) is refused.
+Opening is one operation, `open_keyring_bytes(blob, mk, profile)`: type and size limits first,
+the current MK id is compared before the MAC (so a wrong key is reported as such, not as
+tampering), the MAC is checked before any other field is trusted, any non-canonical form (order,
+duplicates, trailing bytes, reserved bits) is refused, the envelope types must fit the caller's
+`Profile` (required present, nothing outside the allowed set, even when authentic), and every
+envelope is unwrapped. There is no public way to get a parsed-but-unopened manifest:
+`_parse_manifest_unauthenticated` is structural only and private.
+
+Objects holding key bytes (`Keyring`) hide them from repr / str / f-strings; never serialize
+them generically (asdict, pickle, locals dumps).
 """
 import hashlib
 import hmac
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -102,6 +109,11 @@ class ManifestError(KeyringError):
     pass
 
 
+def _is_int(v):
+    # bool e subclasă de int: True ar trece drept tipul de cheie 1 (KWK).
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def _need_key(name, key):
     # Toate cheile ierarhiei sunt exact 32 B aleatori; orice altă lungime e o greşeală de apel,
     # iar HKDF ar „accepta” tăcut şi o cheie scurtă.
@@ -144,6 +156,8 @@ def key_id(key):
 
 def envelope_hash(env):
     """SHA-256 of an envelope's exact bytes (the descriptor binds the session's wrapped RK)."""
+    if not isinstance(env, (bytes, bytearray)) or len(env) != ENV_LEN:
+        raise EnvelopeError("bad-length")
     return hashlib.sha256(bytes(env)).digest()
 
 
@@ -154,8 +168,8 @@ def wrap_key(kek, ktype, key):
     """Wrap `key` (32 B) of type `ktype` under `kek` with AES-KWP; returns the envelope bytes."""
     kek = _need_key("kek", kek)
     key = _need_key("key", key)
-    if ktype not in MK_WRAPPED | KWK_WRAPPED:
-        raise EnvelopeError("bad-type", str(ktype))
+    if not _is_int(ktype) or ktype not in MK_WRAPPED | KWK_WRAPPED:
+        raise EnvelopeError("bad-type")
     kid = key_id(kek)
     inner = bytes([ENV_VERSION, ktype]) + kid + key
     wrapped = aes_key_wrap_with_padding(kek, inner)
@@ -180,6 +194,8 @@ def parse_envelope(env):
 def unwrap_key(kek, env, expected_type):
     """Unwrap an envelope; refuses another type, another wrapping key or a failed KWP check."""
     kek = _need_key("kek", kek)
+    if not _is_int(expected_type):
+        raise EnvelopeError("bad-type")
     ktype, kid, wrapped = parse_envelope(env)
     if ktype != expected_type:
         raise EnvelopeError("wrong-type", f"{ktype} != {expected_type}")
@@ -197,26 +213,26 @@ def unwrap_key(kek, env, expected_type):
 
 
 def wrap_under_mk(mk, ktype, key):
-    if ktype not in MK_WRAPPED:
-        raise EnvelopeError("wrong-wrapper", f"type {ktype} is not wrapped by the MK")
+    if not _is_int(ktype) or ktype not in MK_WRAPPED:
+        raise EnvelopeError("wrong-wrapper", "type is not wrapped by the MK")
     return wrap_key(mkwrap_key(mk), ktype, key)
 
 
 def unwrap_under_mk(mk, env, ktype):
-    if ktype not in MK_WRAPPED:
-        raise EnvelopeError("wrong-wrapper", f"type {ktype} is not wrapped by the MK")
+    if not _is_int(ktype) or ktype not in MK_WRAPPED:
+        raise EnvelopeError("wrong-wrapper", "type is not wrapped by the MK")
     return unwrap_key(mkwrap_key(mk), env, ktype)
 
 
 def wrap_under_kwk(kwk, ktype, key):
-    if ktype not in KWK_WRAPPED:
-        raise EnvelopeError("wrong-wrapper", f"type {ktype} is not wrapped by KWK")
+    if not _is_int(ktype) or ktype not in KWK_WRAPPED:
+        raise EnvelopeError("wrong-wrapper", "type is not wrapped by KWK")
     return wrap_key(kwk, ktype, key)
 
 
 def unwrap_under_kwk(kwk, env, ktype):
-    if ktype not in KWK_WRAPPED:
-        raise EnvelopeError("wrong-wrapper", f"type {ktype} is not wrapped by KWK")
+    if not _is_int(ktype) or ktype not in KWK_WRAPPED:
+        raise EnvelopeError("wrong-wrapper", "type is not wrapped by KWK")
     return unwrap_key(kwk, env, ktype)
 
 
@@ -225,6 +241,8 @@ def unwrap_under_kwk(kwk, env, ktype):
 
 @dataclass(frozen=True)
 class KeyManifest:
+    """Fields of a manifest (wrapped envelopes only, no key in clear). Input of
+    `encode_manifest`; never the output of an authenticated open (see open_keyring_bytes)."""
     installation_id: bytes
     epoch: int
     mk_id: bytes
@@ -238,13 +256,42 @@ class KeyManifest:
         return None
 
 
+@dataclass(frozen=True)
+class Profile:
+    """Which envelope types a manifest must / may carry for one phase of the installation.
+    The opener refuses a missing required type and any type outside `allowed`, even when the
+    manifest is authentic (a key the code does not know what to do with is not silently kept)."""
+    name: str
+    required: frozenset
+    allowed: frozenset
+
+    def __post_init__(self):
+        req, allowed = frozenset(self.required), frozenset(self.allowed)
+        known = MK_WRAPPED | (KWK_WRAPPED - {KT_RK})
+        if (not all(_is_int(t) for t in req) or not all(_is_int(t) for t in allowed)
+                or KT_KWK not in req or not req <= allowed or not allowed <= known):
+            raise KeyringError("bad-profile")
+        object.__setattr__(self, "required", req)
+        object.__setattr__(self, "allowed", allowed)
+
+
+# v1: doar KWK e obligatorie; restul cheilor stabile apar pe măsură ce fazele 3.8 le activează.
+# O fază care cere o cheie (ex. FK după migrare) îşi declară propriul profil cu ea în `required`.
+PROFILE_V1 = Profile("v1", frozenset({KT_KWK}),
+                     frozenset({KT_KWK, KT_SNK, KT_FK_LEGACY, KT_FK, KT_DBK}))
+
+
 def _check_manifest(m):
+    if not isinstance(m, KeyManifest):
+        raise ManifestError("bad-input")
     if not isinstance(m.installation_id, bytes) or len(m.installation_id) != ID_LEN:
         raise ManifestError("bad-installation-id")
-    if not isinstance(m.epoch, int) or not 1 <= m.epoch < 1 << 64:
+    if not _is_int(m.epoch) or not 1 <= m.epoch < 1 << 64:
         raise ManifestError("bad-epoch")
     if not isinstance(m.mk_id, bytes) or len(m.mk_id) != ID_LEN:
         raise ManifestError("bad-mk-id")
+    if not isinstance(m.retired_mk_ids, (tuple, list)) or not isinstance(m.envelopes, (tuple, list)):
+        raise ManifestError("bad-input")
     ret = tuple(m.retired_mk_ids)
     if len(ret) > MAN_MAX_RETIRED:
         raise ManifestError("too-many-retired")
@@ -265,8 +312,25 @@ def _check_manifest(m):
         raise ManifestError("missing-kwk")
 
 
-def encode_manifest(m, mk):
-    """Canonical bytes of the manifest, MAC included. `m.mk_id` must be the id of `mk`."""
+def encode_manifest(m, mk, profile=None):
+    """Canonical bytes of the manifest, MAC included. `m.mk_id` must be the id of `mk`. The
+    manifest must satisfy `profile` (default PROFILE_V1): we never write a manifest that
+    `open_keyring_bytes` would refuse. Tests that need a deliberately invalid manifest use
+    `_encode_manifest_unchecked`."""
+    profile = PROFILE_V1 if profile is None else profile
+    if not isinstance(profile, Profile):
+        raise KeyringError("bad-profile")
+    _check_manifest(m)
+    types = {env[1] for env in m.envelopes}
+    if not profile.required <= types:
+        raise ManifestError("missing-envelope")
+    if not types <= profile.allowed or not types <= _OPEN_SLOTS.keys():
+        raise ManifestError("unexpected-envelope")
+    return _encode_manifest_unchecked(m, mk)
+
+
+def _encode_manifest_unchecked(m, mk):
+    """Doar pentru teste: codifică fără verificarea profilului (manifeste invalide deliberat)."""
     _check_manifest(m)
     if not hmac.compare_digest(m.mk_id, key_id(mk)):
         raise WrongKeyError("wrong-mk")
@@ -283,23 +347,18 @@ def encode_manifest(m, mk):
     return bytes(out)
 
 
-def decode_manifest(data, mk):
-    """Verify and parse a manifest under `mk`. Raises WrongKeyError when the manifest names
-    another MK, ManifestError on any tamper or non-canonical form."""
+def _parse_manifest_unauthenticated(data):
+    """STRUCTURAL parse only: the MAC is NOT checked and nothing is unwrapped. The result is
+    attacker-controlled; never use it to decide anything. The only authenticated path is
+    `open_keyring_bytes`."""
     if not isinstance(data, (bytes, bytearray)):
         raise ManifestError("bad-input")
-    data = bytes(data)
     if len(data) > MAN_MAX_LEN:
         raise ManifestError("too-large")
+    data = bytes(data)
     if len(data) < _MAN_FIXED + 2 + MAC_LEN or data[:4] != MAN_MAGIC:
         raise ManifestError("bad-magic")
-    # Întâi id-ul MK (câmp la poziţie fixă): „cheie greşită” trebuie să se distingă de
-    # „fişier modificat”, fără să parsăm altceva înainte de MAC.
-    if not hmac.compare_digest(data[_MAN_MKID_AT:_MAN_MKID_AT + ID_LEN], key_id(mk)):
-        raise WrongKeyError("wrong-mk")
-    body, mac = data[:-MAC_LEN], data[-MAC_LEN:]
-    if not hmac.compare_digest(mac, hmac.new(manifest_key(mk), body, hashlib.sha256).digest()):
-        raise ManifestError("bad-mac")
+    body = data[:-MAC_LEN]
     if body[4] != MAN_VERSION:
         raise ManifestError("bad-version")
     if body[5:8] != b"\x00\x00\x00":
@@ -341,25 +400,64 @@ def decode_manifest(data, mk):
 
 @dataclass(frozen=True)
 class Keyring:
-    kwk: bytes
-    snk: bytes = None
-    fk_legacy: bytes = None
-    fk: bytes = None
-    dbk: bytes = None
+    """The opened keyring. Identity fields are public; key fields never appear in repr."""
+    installation_id: bytes
+    epoch: int
+    mk_id: bytes
+    retired_mk_ids: tuple
+    kwk: bytes = field(repr=False)
+    snk: bytes = field(default=None, repr=False)
+    fk_legacy: bytes = field(default=None, repr=False)
+    fk: bytes = field(default=None, repr=False)
+    dbk: bytes = field(default=None, repr=False)
 
 
-def open_keyring(m, mk):
-    """Unwrap every envelope of a verified manifest. Any failure is fatal (no partial keyring)."""
-    if not hmac.compare_digest(m.mk_id, key_id(mk)):
+# tip → (ambalat sub MK?, câmpul din Keyring). Un tip fără rând aici nu poate fi deschis.
+_OPEN_SLOTS = {
+    KT_KWK: (True, "kwk"),
+    KT_SNK: (True, "snk"),
+    KT_FK_LEGACY: (False, "fk_legacy"),
+    KT_FK: (False, "fk"),
+    KT_DBK: (False, "dbk"),
+}
+
+
+def open_keyring_bytes(blob, mk, profile):
+    """The single authenticated way to open `keys.wtk` content: size and type gate, MK id
+    (WrongKeyError: another MK), MAC (ManifestError "bad-mac"), strict parse, the envelope types
+    against `profile` ("missing-envelope" / "unexpected-envelope"), then the unwrap of EVERY
+    envelope. Any failure is fatal: there is no partial keyring."""
+    if not isinstance(profile, Profile):
+        raise KeyringError("bad-profile")
+    mk = _need_key("mk", mk)
+    # Tip şi mărime înainte de orice copie: un int sau un blob uriaş nu ajung la bytes(...).
+    if not isinstance(blob, (bytes, bytearray)):
+        raise ManifestError("bad-input")
+    if len(blob) > MAN_MAX_LEN:
+        raise ManifestError("too-large")
+    data = bytes(blob)
+    if len(data) < _MAN_FIXED + 2 + MAC_LEN or data[:4] != MAN_MAGIC:
+        raise ManifestError("bad-magic")
+    # Întâi id-ul MK (câmp la poziţie fixă): „cheie greşită” trebuie să se distingă de
+    # „fişier modificat”, fără să parsăm altceva înainte de MAC.
+    if not hmac.compare_digest(data[_MAN_MKID_AT:_MAN_MKID_AT + ID_LEN], key_id(mk)):
         raise WrongKeyError("wrong-mk")
-    _check_manifest(m)
+    if not hmac.compare_digest(data[-MAC_LEN:],
+                               hmac.new(manifest_key(mk), data[:-MAC_LEN], hashlib.sha256).digest()):
+        raise ManifestError("bad-mac")
+    m = _parse_manifest_unauthenticated(data)
+    types = {env[1] for env in m.envelopes}
+    if not profile.required <= types:
+        raise ManifestError("missing-envelope")
+    # Un tip autentic dar necunoscut profilului e refuzat, nu ignorat: contractul e „toate
+    # plicurile se despachetează”, iar o cheie fără consumator nu are ce căuta în keyring.
+    if not types <= profile.allowed or not types <= _OPEN_SLOTS.keys():
+        raise ManifestError("unexpected-envelope")
     kwk = unwrap_under_mk(mk, m.envelope(KT_KWK), KT_KWK)
-
-    def opt(t, under_mk):
+    keys = {"kwk": kwk}
+    for t in sorted(types - {KT_KWK}):
+        under_mk, name = _OPEN_SLOTS[t]
         env = m.envelope(t)
-        if env is None:
-            return None
-        return unwrap_under_mk(mk, env, t) if under_mk else unwrap_under_kwk(kwk, env, t)
-
-    return Keyring(kwk=kwk, snk=opt(KT_SNK, True), fk_legacy=opt(KT_FK_LEGACY, False),
-                   fk=opt(KT_FK, False), dbk=opt(KT_DBK, False))
+        keys[name] = unwrap_under_mk(mk, env, t) if under_mk else unwrap_under_kwk(kwk, env, t)
+    return Keyring(installation_id=m.installation_id, epoch=m.epoch, mk_id=m.mk_id,
+                   retired_mk_ids=m.retired_mk_ids, **keys)
