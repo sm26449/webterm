@@ -7,6 +7,7 @@ byte-identical. Temp directories only; never /run/secrets, never a real data/sec
 
 Hook-ul _crash_at ridică Crash la pasul ales: starea de pe disc e exact cea de după acel pas."""
 import base64
+import errno
 import hashlib
 import os
 import shutil
@@ -65,6 +66,7 @@ def fresh(name="d"):
     _n[0] += 1
     d = os.path.join(ROOT, f"{name}{_n[0]}")
     os.mkdir(d)
+    os.chmod(d, 0o700)  # independent de umask: DATA_DIR scriibil de grup e refuzat (M3)
     return d
 
 
@@ -196,7 +198,12 @@ check("keys.wtk present → protected (content not judged by classify)", kind(d)
 put(os.path.join(d, "master.key"), b"x")
 put(os.path.join(d, "secret"), SECRET)
 inv = with_lock(d, K.classify)
-check("protected + master.key + secret → in_volume + secret_leftover", inv.in_volume and inv.secret_leftover)
+check("protected + secret WITHOUT migrating.wtm → ambiguous (not a state of our migration)",
+      inv.kind == "ambiguous" and "migrating.wtm" in inv.reason)
+put(os.path.join(d, "migrating.wtm"), b"x")
+inv = with_lock(d, K.classify)
+check("protected + master.key + secret + marker → in_volume + secret_leftover + migrating",
+      inv.kind == "protected" and inv.in_volume and inv.secret_leftover and inv.migrating)
 d = fresh()
 os.symlink("/etc/hostname", os.path.join(d, "keys.wtk"))
 check("keys.wtk as a symlink → ambiguous", kind(d) == "ambiguous")
@@ -218,6 +225,19 @@ check(".restore/ without keys.wtk → ambiguous", kind(d) == "ambiguous")
 d = fresh()
 os.mkdir(os.path.join(d, "restore-pending"))
 check("staged restore in an otherwise empty dir → ambiguous", kind(d) == "ambiguous")
+for label, rel in (("top-level .wtd segment", "seg.wtd"), ("top-level .wt* family name", "x.wtq"),
+                   ("transcripts/*.wtx", "transcripts/s1.wtx"), ("transcripts/arhiva/*.idx", "transcripts/arhiva/s0.idx"),
+                   ("transcripts/*.wtd", "transcripts/s1.wtd"), ("migrating.wtm alone", "migrating.wtm")):
+    d = legacy_dir()
+    put(os.path.join(d, rel), b"x")
+    inv = with_lock(d, K.classify)
+    check(f"legacy + reserved new-format name ({label}) → ambiguous, never legacy",
+          inv.kind == "ambiguous" and os.path.basename(rel) in inv.reason)
+d = legacy_dir()
+os.makedirs(os.path.join(d, "backups"))
+put(os.path.join(d, "backups", "webterm-1.wtsnap"), b"x")
+put(os.path.join(d, "transcripts", "arhiva", "old.cast"), b"x")
+check("legacy + 3.7 backups/*.wtsnap and archived .cast → still legacy", kind(d) == "legacy")
 d = legacy_dir()
 before = snapshot(d, skip_lock=True)
 for _ in range(2):
@@ -249,6 +269,28 @@ os.mkdir(os.path.join(d, ".lock"))
 check(".lock as a directory → refused", raises(lambda: K.acquire_lock(d), K.LockError, "lock-not-regular"))
 check("missing data directory → refused", raises(lambda: K.acquire_lock(os.path.join(ROOT, "nope")),
                                                  K.LockError, "data-dir-unavailable"))
+for mode in (0o777, 0o775, 0o757):
+    d = fresh()
+    os.chmod(d, mode)
+    check(f"DATA_DIR mode {oct(mode)} (group/world-writable) → refused, nothing created",
+          raises(lambda: K.acquire_lock(d), K.LockError, "data-dir-bad-mode") and os.listdir(d) == [])
+d = fresh()
+put(os.path.join(d, ".lock"), b"", 0o666)
+check(".lock group/world-writable → refused, not removed",
+      raises(lambda: K.acquire_lock(d), K.LockError, "lock-bad-mode") and os.path.exists(os.path.join(d, ".lock")))
+d = fresh()
+put(os.path.join(d, ".lock"), b"", 0o644)
+check(".lock 0644 is accepted (not writable by others)", with_lock(d, K.classify).kind == "empty")
+if os.geteuid() == 0:
+    d = fresh()
+    os.chown(d, 54321, 54321)
+    check("DATA_DIR owned by another user → refused", raises(lambda: K.acquire_lock(d), K.LockError, "data-dir-bad-owner"))
+    d = fresh()
+    put(os.path.join(d, ".lock"), b"")
+    os.chown(os.path.join(d, ".lock"), 54321, 54321)
+    check(".lock owned by another user → refused", raises(lambda: K.acquire_lock(d), K.LockError, "lock-bad-owner"))
+else:
+    print("  (skip owner tests: not root)")
 
 # ── key files and encodings ──────────────────────────────────────────────────
 print("key sources")
@@ -317,6 +359,16 @@ check("configured env invalid → refused", raises(lambda: resolve(d, {K.ENV_KEY
 check("explicit file wins over the default path", resolve(d, env_file(MK2), keyfile(MK1)).mk == MK2)
 rk = resolve(d, {K.ENV_IN_VOLUME: "1"})
 check("in-volume on an empty dir → volume, to be generated", rk.source == "volume" and rk.mk is None)
+# L1: strip() decide doar „setat”; valoarea originală trece prin aceleaşi reguli ca fişierul
+for label, v in (("leading space", " " + good.decode()), ("trailing space", good.decode() + " "),
+                 ("CRLF", good.decode() + "\r\n"), ("two newlines", good.decode() + "\n\n"), ("tab", good.decode() + "\t")):
+    check(f"env value refused: {label}", raises(lambda v=v: resolve(d, {K.ENV_KEY_VALUE: v}), K.KeySourceError, "bad-encoding"))
+check("env value with one trailing \\n is fine", resolve(d, {K.ENV_KEY_VALUE: good.decode() + "\n"}).mk == MK1)
+rk = resolve(d, {K.ENV_KEY_VALUE: base64.b64encode(MK2).decode()}, keyfile(MK1))
+check("default path present + explicit env → env wins, no conflict (default is only a fallback)",
+      rk.source == "env" and rk.mk == MK2)
+check("key file path with a trailing space is not trimmed → missing",
+      raises(lambda: resolve(d, {K.ENV_KEY_FILE: keyfile(MK1) + " "}), K.KeySourceError, "missing"))
 
 # ── bootstrap ────────────────────────────────────────────────────────────────
 print("bootstrap")
@@ -341,6 +393,37 @@ check("protected + wrong key twice → refused, byte-identical", refused_twice_i
 check("protected + no source (default absent) → refused, byte-identical", refused_twice_identical(d, {}, "missing"))
 check("protected + configured file missing → refused", refused_twice_identical(d, {K.ENV_KEY_FILE: os.path.join(ROOT, "gone")}, "missing"))
 check("protected + key via the default path", boot_ok(d, {}, default_key_file=keyfile(MK1)).state.source == "default-file")
+check("external file → key_location says not verified off-host",
+      boot_ok(d, env1).state.key_location == "external (not verified off-host)")
+# H3: un fişier-cheie în arborele de date nu e „protected”
+inside = put(os.path.join(d, "not-a-key-name"), base64.b64encode(MK1) + b"\n")
+check("key file at an arbitrary name inside DATA_DIR → refused, byte-identical",
+      refused_twice_identical(d, {K.ENV_KEY_FILE: inside}, "key-in-data-dir"))
+os.makedirs(os.path.join(d, "transcripts", "arhiva"), exist_ok=True)
+deep = put(os.path.join(d, "transcripts", "arhiva", "k"), base64.b64encode(MK1) + b"\n")
+check("key file in a subdirectory of DATA_DIR → refused", refused_twice_identical(d, {K.ENV_KEY_FILE: deep}, "key-in-data-dir"))
+via = os.path.join(fresh("t"), "ln")
+os.symlink(d, via)
+check("key file reached through a symlinked directory → refused (realpath)",
+      refused_twice_identical(d, {K.ENV_KEY_FILE: os.path.join(via, "not-a-key-name")}, "key-in-data-dir"))
+check("default path inside DATA_DIR → refused", refused_twice_identical(d, {}, "key-in-data-dir", default_key_file=inside))
+try:
+    boot(d, {K.ENV_KEY_FILE: inside})
+    msg = ""
+except K.KeySourceError as e:
+    msg = str(e)
+check("the refusal names the explicit opt-out", "WEBTERM_KEY_IN_VOLUME=1" in msg)
+os.unlink(inside)
+os.unlink(deep)
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+other_view = K.ProcessLock(os.path.join(ROOT, "elsewhere-view"), dfd, None)  # ca un bind mount: altă cale, acelaşi inode
+os.makedirs(os.path.join(d, "sub"))
+kp = put(os.path.join(d, "sub", "mk"), base64.b64encode(MK1) + b"\n")
+check("inode ancestry catches DATA_DIR seen under another path (bind-mount view)",
+      raises(lambda: K.check_outside_data_dir(other_view, kp, "x"), K.KeySourceError, "key-in-data-dir"))
+check("a key file outside the data tree passes the ancestry check", K.check_outside_data_dir(other_view, keyfile(MK1), "x") is None)
+os.close(dfd)
+shutil.rmtree(os.path.join(d, "sub"))
 r = boot_ok(d, {K.ENV_KEY_VALUE: good.decode()})
 check("key in the environment → warned", "key-in-environment" in r.state.warnings)
 check("protected + WEBTERM_KEY_IN_VOLUME=1 without master.key → refused",
@@ -408,10 +491,19 @@ r = boot_ok(d, {K.ENV_IN_VOLUME: "1"})
 check("legacy + in-volume opt-out → reduced, master.key written, secret removed",
       r.state.mode == "reduced" and os.path.exists(os.path.join(d, "master.key")) and not os.path.exists(os.path.join(d, "secret")))
 
+MARK = "migrating.wtm"
+
+
+def gone(d, *names):
+    return not any(os.path.lexists(os.path.join(d, n)) for n in names)
+
+
 for label, env in (("external", env1), ("in-volume", {K.ENV_IN_VOLUME: "1"})):
     steps = []
     boot_ok(legacy_dir(), env, _crash_at=steps.append)
-    ok = "migrate:verified" in steps and "secret:removed" in steps
+    ok = all(x in steps for x in ("migrating.wtm:published", "migrate:verified", "secret:barrier", "secret:removed",
+                                   "marker:removed"))
+    ok &= steps.index("migrating.wtm:published") < steps.index("keys.wtk:renamed")
     for s in steps:
         d = legacy_dir()
 
@@ -419,23 +511,83 @@ for label, env in (("external", env1), ("in-volume", {K.ENV_IN_VOLUME: "1"})):
         ok &= raises(lambda: boot(d, env, _crash_at=hook), Crash)
         sp = os.path.join(d, "secret")
         secret_ok = os.path.exists(sp) and open(sp, "rb").read() == SECRET
-        k = kind(d)
+        inv = with_lock(d, K.classify)
+        k = inv.kind
         man_ok = False
         if k == "protected":
             mk = MK1 if label == "external" else K.read_key_file(os.path.join(d, "master.key"))
             man_ok = kr.open_keyring_bytes(open(os.path.join(d, "keys.wtk"), "rb").read(), mk, kr.PROFILE_V1).fk_legacy == SECRET
         # niciodată „niciuna”: ori secret intact (legacy), ori manifest verificat cu FK_legacy = secret
-        ok &= (k == "legacy" and secret_ok) or (k == "protected" and man_ok)
+        step_ok = (k == "legacy" and secret_ok) or (k == "protected" and man_ok)
+        # markerul există de la publicarea lui până la ultimul pas; fără el nu există keys.wtk
+        step_ok &= inv.migrating == os.path.exists(os.path.join(d, MARK))
         if k == "protected" and os.path.exists(sp):
-            ok &= secret_ok  # secretul nu dispare înainte de verificare
-            if label == "external":
-                ok &= refused_twice_identical(d, env_file(MK2), "wrong-key", K.WrongKey)
+            step_ok &= secret_ok and inv.migrating  # secretul nu dispare înainte de verificare
+        if label == "external":
+            if k == "protected":
+                step_ok &= refused_twice_identical(d, env_file(MK2), "wrong-key", K.WrongKey)
+                step_ok &= refused_twice_identical(d, {}, "missing")
+            elif inv.migrating:
+                # pre-commit: fără sursă NU se întoarce în legacy
+                step_ok &= refused_twice_identical(d, {}, "migration-unfinished")
+                step_ok &= refused_twice_identical(d, env_file(MK2), "wrong-key", K.WrongKey)
+            else:
+                step_ok &= boot_ok(d, {}).state.mode == "legacy"
         if s == "keys.wtk:renamed":
+            # rename nedurabil: keys.wtk poate reveni la .tmp → pre-commit dovedit, reluabil
             os.rename(os.path.join(d, "keys.wtk"), os.path.join(d, "keys.wtk.tmp"))
-            ok &= kind(d) == "legacy"
+            inv2 = with_lock(d, K.classify)
+            step_ok &= inv2.kind == "legacy" and inv2.migrating
+        if s == "migrating.wtm:renamed":
+            os.rename(os.path.join(d, MARK), os.path.join(d, MARK + ".tmp"))
+            inv2 = with_lock(d, K.classify)
+            step_ok &= inv2.kind == "legacy" and not inv2.migrating
+        pending = os.path.exists(os.path.join(d, MARK)) or os.path.exists(sp)
         r = boot_ok(d, env)
-        ok &= r.keyring.fk_legacy == SECRET and not os.path.exists(sp) and kind(d) == "protected"
-    check(f"migration ({label}): crash at each of {len(steps)} steps → legacy or verified-protected, then completes", ok)
+        step_ok &= r.keyring.fk_legacy == SECRET and gone(d, "secret", MARK) and kind(d) == "protected"
+        step_ok &= r.state.migrated == pending  # „migrated” = acest boot a terminat migrarea
+        if not step_ok:
+            print(f"      (step {s} failed)")
+        ok &= step_ok
+    check(f"migration ({label}): crash at each of {len(steps)} steps → legacy, pre-commit or verified-protected, then completes", ok)
+
+# H2: manifest pierdut DUPĂ publicare → niciodată legacy
+for s in ("migrate:verified", "secret:barrier", "secret:unlinked", "marker:barrier"):
+    d = legacy_dir()
+    raises(lambda: boot(d, env1, _crash_at=crash_at(s)), Crash)
+    os.unlink(os.path.join(d, "keys.wtk"))
+    inv = with_lock(d, K.classify)
+    check(f"crash at {s} + keys.wtk lost → ambiguous 'published but keys.wtk missing', refused with or without key",
+          inv.kind == "ambiguous" and "keys.wtk missing" in inv.reason
+          and refused_twice_identical(d, {}, "ambiguous") and refused_twice_identical(d, env1, "ambiguous"))
+d = legacy_dir()
+raises(lambda: boot(d, {K.ENV_IN_VOLUME: "1"}, _crash_at=crash_at("migrating.wtm:published")), Crash)
+os.unlink(os.path.join(d, "master.key"))
+check("pre-commit in-volume migration whose master.key vanished → refused, no new key generated",
+      refused_twice_identical(d, {K.ENV_IN_VOLUME: "1"}, "missing") and gone(d, "master.key"))
+d = legacy_dir()
+raises(lambda: boot(d, env1, _crash_at=crash_at("migrating.wtm:published")), Crash)
+put(os.path.join(d, "keys.wtk.tmp"), b"a different manifest")
+check("pre-commit marker whose keys.wtk.tmp does not match → ambiguous", kind(d) == "ambiguous")
+d = legacy_dir()
+raises(lambda: boot(d, env1, _crash_at=crash_at("migrating.wtm:published")), Crash)
+put(os.path.join(d, "secret"), hashlib.sha256(b"other").digest())
+check("pre-commit marker with a different secret → ambiguous", kind(d) == "ambiguous")
+d = legacy_dir()
+raises(lambda: boot(d, env1, _crash_at=crash_at("migrate:verified")), Crash)
+mp = os.path.join(d, MARK)
+mb = open(mp, "rb").read()
+put(mp, mb[:4] + b"\x00" * 16 + mb[20:])
+check("protected + marker naming another installation → refused, byte-identical",
+      refused_twice_identical(d, env1, "migration-marker-mismatch"))
+put(mp, b"garbage")
+check("protected + unparseable marker → refused", refused_twice_identical(d, env1, "marker-invalid"))
+put(mp, mb)
+lock = K.acquire_lock(d)
+check("rotation refused while a migration is unfinished",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2), K.BootRefused, "migration-unfinished"))
+lock.release()
+check("restored marker → the migration finishes", boot_ok(d, env1).state.migrated and gone(d, "secret", MARK))
 
 d = legacy_dir()
 
@@ -449,6 +601,140 @@ raises(lambda: boot(d, env1, _crash_at=stop_after_publish), Crash)
 put(os.path.join(d, "secret"), hashlib.sha256(b"other").digest())
 check("protected + a DIFFERENT leftover secret → refused, byte-identical",
       refused_twice_identical(d, env1, "legacy-secret-mismatch"))
+
+# ── fault injection (H1, M1) ─────────────────────────────────────────────────
+print("I/O faults")
+
+
+class FaultOS:
+    """Înlocuieşte `os` în keys.py: delegă tot, jurnalizează open/write/close/fsync/rename/unlink/read
+    (cu numele fişierului din spatele fd-ului) şi ridică OSError la regula armată."""
+    WATCH = ("open", "write", "close", "fsync", "rename", "unlink", "read")
+
+    def __init__(self, rules=()):
+        self.rules = list(rules)
+        self.fdname = {}
+        self.log = []
+
+    def __getattr__(self, n):
+        real = getattr(os, n)
+        if n not in self.WATCH:
+            return real
+
+        def wrapped(*a, **kw):
+            target = self.fdname.get(a[0], "?") if n in ("write", "close", "fsync", "read") else a[0]
+            self.log.append((n, target))
+            for r in self.rules:
+                if r["armed"] and r["fn"] == n and r["target"] == target:
+                    r["armed"], r["hit"] = False, True
+                    if n == "close":
+                        os.close(a[0])
+                        self.fdname.pop(a[0], None)
+                    raise OSError(r["err"], os.strerror(r["err"]))
+            res = real(*a, **kw)
+            if n == "open":
+                self.fdname[res] = a[0]
+            elif n == "close":
+                self.fdname.pop(a[0], None)
+            return res
+        return wrapped
+
+
+def with_faults(d, env, rules, arm_at=None, crash=None):
+    """Boot sub FaultOS; regula cu arm_at se armează când hook-ul vede pasul. → (kind | "ok", proxy)."""
+    for r in rules:
+        r.setdefault("err", errno.ENOSPC)
+        r.setdefault("hit", False)
+        r["armed"] = arm_at is None
+
+    def hook(x):
+        if x == arm_at:
+            for r in rules:
+                r["armed"] = True
+        if crash and x == crash:
+            raise Crash(x)
+    proxy = FaultOS(rules)
+    K.os = proxy
+    try:
+        try:
+            boot(d, env, _crash_at=hook).lock.release()
+            out = "ok"
+        except K.BootRefused as e:
+            out = e.kind
+    finally:
+        K.os = os
+    return out, proxy
+
+
+INC, CU = "operation-incomplete", "commit-unknown"
+cases_boot = (("open keys.wtk.tmp", "open", "keys.wtk.tmp", None, INC), ("write keys.wtk.tmp", "write", "keys.wtk.tmp", None, INC),
+              ("close keys.wtk.tmp", "close", "keys.wtk.tmp", None, INC), ("fsync keys.wtk.tmp", "fsync", "keys.wtk.tmp", None, INC),
+              ("rename keys.wtk.tmp", "rename", "keys.wtk.tmp", None, INC),
+              ("dir fsync after rename", "fsync", "DIR", "keys.wtk:renamed", CU),
+              ("read-back of keys.wtk", "read", "keys.wtk", "keys.wtk:published", CU))
+for label, fn, target, arm, want in cases_boot:
+    d = fresh()
+    rule = {"fn": fn, "target": d if target == "DIR" else target, "err": errno.EIO if fn != "write" else errno.ENOSPC}
+    got, _ = with_faults(d, env1, [rule], arm)
+    r = boot_ok(d, env1)
+    check(f"bootstrap, {label} fails → {want}; next boot recovers",
+          rule["hit"] and got == want and r.keyring is not None and boot_ok(d, env1).keyring.kwk == r.keyring.kwk
+          and gone(d, "keys.wtk.tmp"))
+d = fresh()
+rule = {"fn": "write", "target": "master.key.tmp"}
+got, _ = with_faults(d, {K.ENV_IN_VOLUME: "1"}, [rule])
+check("bootstrap in-volume, write master.key.tmp ENOSPC → operation-incomplete; next boot recovers",
+      rule["hit"] and got == INC and boot_ok(d, {K.ENV_IN_VOLUME: "1"}).state.mode == "reduced")
+
+cases_mig = (("open keys.wtk.tmp", "open", "keys.wtk.tmp", None, INC, True),
+             ("write migrating.wtm.tmp", "write", "migrating.wtm.tmp", None, INC, True),
+             ("rename keys.wtk.tmp", "rename", "keys.wtk.tmp", None, INC, True),
+             ("dir fsync after the marker", "fsync", "DIR", "migrating.wtm:renamed", INC, True),
+             ("dir fsync after keys.wtk rename", "fsync", "DIR", "keys.wtk:renamed", CU, True),
+             ("read-back of keys.wtk", "read", "keys.wtk", "keys.wtk:published", CU, True),
+             ("dir fsync barrier before unlinking secret", "fsync", "DIR", "migrate:verified", CU, True),
+             ("unlink secret", "unlink", "secret", None, CU, True),
+             ("dir fsync after unlinking secret", "fsync", "DIR", "secret:unlinked", CU, False),
+             ("unlink migrating.wtm", "unlink", "migrating.wtm", None, CU, False))
+for label, fn, target, arm, want, secret_kept in cases_mig:
+    d = legacy_dir()
+    rule = {"fn": fn, "target": d if target == "DIR" else target, "err": errno.EIO}
+    got, _ = with_faults(d, env1, [rule], arm)
+    sp = os.path.join(d, "secret")
+    kept = os.path.exists(sp) and open(sp, "rb").read() == SECRET
+    r = boot_ok(d, env1)
+    check(f"migration, {label} fails → {want}{', secret kept' if secret_kept else ''}; next boot finishes",
+          rule["hit"] and got == want and (kept or not secret_kept) and r.keyring.fk_legacy == SECRET
+          and gone(d, "secret", MARK) and kind(d) == "protected")
+
+# H1: reluarea (protected + secret + marker) face fsync pe director ÎNAINTE de unlink şi după
+for s in ("keys.wtk:renamed", "migrate:verified", "secret:barrier"):
+    d = legacy_dir()
+    raises(lambda: boot(d, env1, _crash_at=crash_at(s)), Crash)
+    got, proxy = with_faults(d, env1, [])
+    log = proxy.log
+    iu = log.index(("unlink", "secret"))
+    check(f"resume after a crash at {s}: dir fsync before unlinking secret and after it",
+          got == "ok" and ("fsync", d) in log[:iu] and ("fsync", d) in log[iu:]
+          and log.index(("unlink", MARK)) > iu and gone(d, "secret", MARK))
+d = legacy_dir()
+raises(lambda: boot(d, env1, _crash_at=crash_at("keys.wtk:renamed")), Crash)
+before = snapshot(d, skip_lock=True)
+rule = {"fn": "fsync", "target": d, "err": errno.EIO}
+got, _ = with_faults(d, env1, [rule])
+check("resume with an injected dir-fsync error → commit-unknown, secret kept, nothing changed",
+      rule["hit"] and got == CU and snapshot(d, skip_lock=True) == before)
+check("… and the next boot finishes the migration", boot_ok(d, env1).state.migrated and gone(d, "secret", MARK))
+d = legacy_dir()
+raises(lambda: boot(d, env1, _crash_at=crash_at("secret:unlinked")), Crash)
+check("crash after unlinking secret (before its fsync) → protected + marker, next boot removes the marker",
+      with_lock(d, K.classify).migrating and boot_ok(d, env1).state.migrated and gone(d, "secret", MARK))
+try:
+    boot(fresh(), {})
+    kd = None
+except K.BootRefused as e:
+    kd = e.kind
+check("a preflight refusal has kind invalid-key", kd == "invalid-key")
 
 # ── staged restore ───────────────────────────────────────────────────────────
 print("staged restore")
@@ -564,6 +850,27 @@ lock = K.acquire_lock(d)
 check("rotation with the key in the volume → unsupported",
       raises(lambda: K.rotate_master_key(lock, K.read_key_file(os.path.join(d, "master.key")), MK2), K.BootRefused, "unsupported"))
 lock.release()
+
+# M2: MK-ul aşteptat se citeşte fără cheie; noua cheie e persistată şi verificată înainte de commit
+d = fresh()
+boot_ok(d, env1)
+lock = K.acquire_lock(d)
+check("expected_mk_id reads keys.wtk without the key (and while the lock is held)",
+      K.expected_mk_id(d) == kr.key_id(MK1).hex() == K.key_file_mk_id(keyfile(MK1)))
+before = snapshot(d, skip_lock=True)
+check("rotation with a new key file holding another key → refused, nothing published",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2, new_key_file=keyfile(MK3)), K.BootRefused, "new-key-not-persisted")
+      and snapshot(d, skip_lock=True) == before)
+check("rotation with a missing new key file → refused",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2, new_key_file=os.path.join(ROOT, "nope")), K.KeySourceError, "missing"))
+inside = put(os.path.join(d, "newkey"), base64.b64encode(MK2) + b"\n")
+check("rotation with the new key file inside DATA_DIR → refused",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2, new_key_file=inside), K.KeySourceError, "key-in-data-dir"))
+os.unlink(inside)
+K.rotate_master_key(lock, MK1, MK2, new_key_file=keyfile(MK2))
+lock.release()
+check("rotation with the persisted new key → expected_mk_id is the new id", K.expected_mk_id(d) == kr.key_id(MK2).hex())
+check("expected_mk_id on a volume without keys.wtk → refused", raises(lambda: K.expected_mk_id(fresh()), K.BootRefused, "missing"))
 
 steps = []
 d = fresh()

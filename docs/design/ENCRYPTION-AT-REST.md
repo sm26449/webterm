@@ -503,15 +503,19 @@ reviewed before the PR that turns writers, migration, backup or erasure on:
    classification, leftover `keys.wtk.tmp` handled, `fstat` on the same fd, regular file, no
    symlinks, canonical encodings and size limits for manifest, envelopes and descriptors; the
    wrong-key refusal also with a restore in staging. *Written in §12.9 (PR2), together with the
-   key-manifest part of contract 1; the descriptor part of contract 1 stays open.*
+   key-manifest part of contract 1; the descriptor part of contract 1 stays open. The boot is not
+   wired until the §12.9 "Wiring checklist" is closed (preflight before ensure_dirs/restore,
+   3.7 staged restore, FK_legacy proven on real data, FK vs FK_legacy selection, legacy raw-key
+   copies, backup/restore on `keys.wtk`).*
 
 ### 12.9 Boot and key-manifest publication (PR2)
 
 Normative. Closes contract 6 and the key-manifest part of contract 1 (§12.8). Implemented in
 `gateway/app/keys.py`, tested in `tests/keys_test.py`; **not called by the real boot yet**
 (`config.load_secret`, `security.init_crypto` and `main.lifespan` are unchanged in PR2). The
-wiring PR places `keys.boot()` after `config.ensure_dirs()` and before the staged-restore apply,
-the vault and `db.connect`.
+wiring PR places `keys.boot()` before anything that mutates `DATA_DIR` (the clean-up in
+`config.ensure_dirs()`, the staged-restore apply), before the vault and before `db.connect`; see
+the *Wiring checklist* at the end of this section, which must be closed before the wiring PR.
 
 **Order.** Lock → inventory → key source → open or create the keyring → (later PRs) restore apply,
 schema, writers. Every step before "open" only reads; a refusal at any of them leaves the data
@@ -526,31 +530,56 @@ directory"); never wait, never remove the file. The lock is held for the life of
 lock object keeps both fds open) and is released only by process exit. `.lock` belongs to the
 tolerated set below, so taking the lock cannot change the classification.
 
+- **Trust domain.** `flock` excludes only processes that use the same inode and follow the
+  protocol: whoever can write `DATA_DIR` can unlink or replace `.lock`, and a second `open` then
+  locks another inode. `DATA_DIR` and its ancestors are therefore a trust domain: no other user
+  may write them, and no 3.7 process may run against the same volume. Checked at lock time, on
+  the fds (refuse, never repair): `fstat(DATA_DIR)` owner = effective uid or root and
+  `mode & 0o022 == 0` (`data-dir-bad-owner`, `data-dir-bad-mode`); the same for `.lock`
+  (`lock-bad-owner`, `lock-bad-mode`). The ancestors are the operator's (the container image
+  creates `/data` 0755 owned by the service user). This does not exclude an actor who is allowed
+  to rewrite the volume; it makes an accidental second writer fail loudly.
+- **`.lock` is never deleted** — not by boot, restore, backup, clean-up or an operator procedure.
+  Deleting it while a process holds it is exactly the race above.
+- **Supported filesystems:** local filesystems with working BSD `flock` (ext4, xfs, btrfs, zfs,
+  overlayfs on those; a Docker named volume is one of them). NFS and other network or FUSE
+  filesystems are not supported for `DATA_DIR`: `flock` there may be emulated per client or be a
+  no-op, and the single-writer guarantee would silently disappear.
+
 **Inventory.** The top level of `DATA_DIR` is listed without following symlinks (`lstat`
 semantics). Entries are sorted into:
 
 | Group | Entries | Rule |
 |---|---|---|
 | tolerated | `.lock` (regular file), `lost+found` (directory, content not inspected: it is filesystem metadata and may be unreadable), `transcripts/` that is empty or holds only an empty `arhiva/` (what `config.ensure_dirs` creates before boot) | never change the class |
-| key artefacts | `secret` (3.7 key), `keys.wtk`, `keys.wtk.tmp`, `master.key`, `master.key.tmp` | each must be a regular file (a symlink, directory, FIFO… → `ambiguous`); `secret` must be exactly 32 bytes |
+| key artefacts | `secret` (3.7 key), `keys.wtk`, `keys.wtk.tmp`, `master.key`, `master.key.tmp`, `migrating.wtm` (migration intent), `migrating.wtm.tmp` | each must be a regular file (a symlink, directory, FIFO… → `ambiguous`); `secret` must be exactly 32 bytes |
 | staged restore | `restore-pending/` + `.restore-flag` (3.7 mechanism), `.restore/` (3.8, §12.4) | reported as `staged_restore`; never read, applied or removed by PR2 code |
-| new-format markers | `erasures.wtj`, `.restore/` | data that only exists once a `keys.wtk` exists (the recording segment names join this list when they are fixed) |
+| new-format markers | `erasures.wtj`, `.restore/`, any other top-level name of the reserved `.wt*` family (`*.wtk`, `*.wtj`, `*.wtx`, `*.wtd`…; the key artefacts above excepted), and under `transcripts/` (its top level and one level of subdirectories such as `arhiva/`) any name ending in `.wtx`, `.wtd`, `.idx` or of the `.wt*` family | data that only exists once a `keys.wtk` exists. 3.7 never writes these names (its snapshots `*.wtsnap` live in `backups/`, not at the top level). A `transcripts/` that cannot be listed counts as a marker (absence not proven) |
 | data | everything else | — |
 
 Classes, first match wins:
 
-1. `protected`: `keys.wtk` is present. Sub-state `in_volume` when `master.key` is present. If
-   `secret` is also present, the volume is in the last step of the 3.7 migration (`secret_leftover`).
-2. `ambiguous`: no `keys.wtk`, and a new-format marker is present.
-3. `legacy-3.7`: no `keys.wtk`, `secret` present (anything else may be present: DB, transcripts,
+1. `protected`: `keys.wtk` is present. Sub-state `in_volume` when `master.key` is present,
+   `migrating` when `migrating.wtm` is present (the migration's last steps, below); if `secret` is
+   also present, `secret_leftover`. `secret` + `keys.wtk` **without** `migrating.wtm` is not a
+   state the migration produces → `ambiguous`.
+2. `ambiguous`: no `keys.wtk` and `migrating.wtm` present ("migration published but keys.wtk
+   missing"), **except** the proven pre-commit state: `secret`, `migrating.wtm` and a
+   `keys.wtk.tmp` whose SHA-256 equals the marker's manifest digest, and the marker's secret digest
+   equals `secret` → `legacy-3.7` with `migrating` (below).
+3. `ambiguous`: no `keys.wtk`, and a new-format marker is present.
+4. `legacy-3.7`: no `keys.wtk`, `secret` present (anything else may be present: DB, transcripts,
    keys, a 3.7 `restore-pending/`).
-4. `empty`: nothing outside the tolerated set, `keys.wtk.tmp`, `master.key.tmp` and `master.key`
+5. `empty`: nothing outside the tolerated set, `keys.wtk.tmp`, `master.key.tmp` and `master.key`
    (the last three are leftovers of an interrupted bootstrap).
-5. `ambiguous`: anything else (data without `secret`, a staged restore without any key, a
+6. `ambiguous`: anything else (data without `secret`, a staged restore without any key, a
    non-regular key artefact). **Refuse**, naming the first offending entry.
 
 **Key sources.** Read from the environment; a variable counts as *set* only when it is non-empty
-after stripping whitespace (compose passes `${VAR:-}` as present-and-empty).
+after stripping whitespace (compose passes `${VAR:-}` as present-and-empty). The strip only
+decides *set*: the value used is the original one (a `WEBTERM_MASTER_KEY` with spaces, a CR or a
+second newline is refused like the same bytes in a file; a `WEBTERM_MASTER_KEY_FILE` path is not
+trimmed either).
 
 | Source | Name in `ProtectionState.source` | Configured when |
 |---|---|---|
@@ -562,7 +591,20 @@ after stripping whitespace (compose passes `${VAR:-}` as present-and-empty).
 - Exactly one source may be configured. `file` + `env`, or `volume` + any external source → refuse
   ("conflicting key sources"). (Stricter than "precedence": a second configured source is an
   operator error, and guessing which one wins is how a key gets silently replaced.) When no
-  explicit source is set, the default path is consulted.
+  explicit source is set, the default path is consulted. The default path is a **fallback**, not
+  a configured source: with `WEBTERM_MASTER_KEY_FILE` or `WEBTERM_MASTER_KEY` set, a file at the
+  default path is not read and is not a conflict (tested).
+- **A key file must not be inside the data tree** (`file`, `default-file`, and the new file of a
+  rotation): refuse with `key-in-data-dir` ("…is inside the data directory; use
+  `WEBTERM_KEY_IN_VOLUME=1` explicitly") when the path as given or resolved (`realpath`) is under
+  `DATA_DIR` (as given or resolved), or when any ancestor directory of the resolved path has the
+  same `(st_dev, st_ino)` as the `DATA_DIR` fd (catches `DATA_DIR` seen through a bind mount at
+  another path). Not detectable from here: a hardlink of the key file inside the volume, a copy,
+  or a mount that puts the same storage under two unrelated trees. The real separation is the
+  operator's mount configuration (the key on a different mount from the data volume, excluded
+  from every capture of it). `ProtectionState.key_location` is therefore
+  `external (not verified off-host)` for a file source, `environment` for `env`, `in-volume` for
+  `volume`.
 - `master.key` present with `WEBTERM_KEY_IN_VOLUME` unset, or with an external source set →
   refuse. `WEBTERM_KEY_IN_VOLUME=1` on a `protected` volume without `master.key` → refuse (a key is
   never generated when a `keys.wtk` exists).
@@ -578,7 +620,7 @@ after stripping whitespace (compose passes `${VAR:-}` as present-and-empty).
   no URL alphabet, no spaces, no unused bits); one trailing `\n` is tolerated, nothing else.
 - The key value is never logged and never part of an error: errors carry the source name and a
   reason code (`missing`, `symlink`, `not-regular`, `bad-owner`, `bad-mode`, `too-large`,
-  `bad-encoding`, `conflict`, `no-source`, `unreadable`).
+  `bad-encoding`, `conflict`, `no-source`, `unreadable`, `key-in-data-dir`).
 
 **Decision table** (after lock and inventory):
 
@@ -617,6 +659,17 @@ lock):
 The process lock makes the sequence single-writer; the epoch never goes backwards, because every
 publication reads its predecessor through the authenticated opener.
 
+**Outcomes of a refusal** (`BootRefused.kind`; every raw `OSError` from a publication is wrapped
+as reason `io-error` with the errno name):
+
+| `kind` | When | On disk | Next boot (right key) |
+|---|---|---|---|
+| `invalid-key` | preflight: lock, inventory, key source, wrong key, manifest/marker checks, before the first write | unchanged (`.lock` may have been created) — the *Guarantee* below applies | same refusal until the cause is fixed |
+| `operation-incomplete` | a publication started and failed **before** `keys.wtk`'s rename (unlinking an old tmp, open, write, close, fsync of the tmp, rename; also `master.key` and `migrating.wtm`, which are sub-steps before the manifest) | a tmp may remain; `master.key` / `migrating.wtm` may have been published | recovers: class unchanged (`empty` / `legacy-3.7`, possibly the proven pre-commit state) and the operation runs again |
+| `commit-unknown` | `keys.wtk`'s rename happened (this boot or an earlier one) and a later step failed: dir fsync, read-back, re-open, legacy-secret or marker removal, or the dir fsync barrier on resume | the new `keys.wtk` is visible; its durability is unknown | **never undo** the rename; the next boot re-verifies (opens `keys.wtk`, finishes the migration) |
+
+The byte-identical guarantee covers `invalid-key` only.
+
 **Bootstrap (`empty`).** With `volume`: reuse a valid leftover `master.key` (same reader as an
 external file), otherwise generate 32 random bytes and publish them exactly like `keys.wtk`
 (`master.key.tmp`, `O_EXCL|O_NOFOLLOW`, 0600, fsync, rename, fsync dir) **before** the manifest. Then
@@ -628,19 +681,42 @@ leaves an `empty` volume (with leftovers) and the next boot bootstraps again, re
 
 1. Read `secret` (`O_NOFOLLOW`, `fstat`: regular, exactly 32 bytes); it becomes `FK_legacy`.
 2. With `volume`: `master.key` as in bootstrap.
-3. Publish epoch 1 with KWK, SNK, FK_legacy (= `secret`) and FK.
-4. Re-open `keys.wtk` from disk with the MK and require `fk_legacy == secret` (constant time).
-5. Only now unlink `secret` and fsync the directory.
+3. Build epoch 1 with KWK, SNK, FK_legacy (= `secret`) and FK; write and fsync `keys.wtk.tmp`
+   (publication steps 2–3).
+4. **Intent marker.** Publish `migrating.wtm` atomically (`migrating.wtm.tmp`, `O_EXCL`, 0600,
+   fsync, rename, fsync dir — this dir fsync also makes the `keys.wtk.tmp` entry durable). Content,
+   100 bytes: `"WTM1"` ‖ installation id (16) ‖ MK id (16) ‖ SHA-256(`"wt/v1/migrate-secret\0"` ‖
+   `secret`) ‖ SHA-256(manifest bytes). Digests only; the key never appears.
+5. `rename(keys.wtk.tmp, keys.wtk)`, fsync dir, read back, re-open with the MK.
+6. Require `fk_legacy == secret` (constant time) and the marker to name this manifest
+   (installation id, MK id, manifest digest) and this `secret`.
+7. **fsync the directory, then** unlink `secret`, then fsync the directory again. On any failure
+   `secret` stays and the boot refuses (`commit-unknown`).
+8. fsync the directory (the absence of `secret` is durable), unlink `migrating.wtm`, fsync.
 
-| Interrupted | Class at next boot | Next boot with the right MK | With a wrong / no MK |
+The first fsync of step 7 exists for the resume path: after a crash between the rename and its
+directory fsync, a restart without power loss sees the new `keys.wtk` in the page cache and could
+otherwise delete the only copy of the legacy key before the manifest is durable.
+
+| Interrupted | On disk / class at next boot | Next boot with the right MK | With a wrong / no MK |
 |---|---|---|---|
-| before 3 (or during 3, before its rename) | `legacy-3.7`, `secret` intact | migrates again (a leftover `master.key` is reused) | refuse (wrong) / legacy (no source) |
-| after 3, before 5 | `protected` + `secret_leftover` | opens, checks `fk_legacy == secret`, then finishes step 5 | refuse; nothing changes |
-| after 5 | `protected` | opens | refuse |
+| before 4 (or inside 4, before the marker's rename) | `legacy-3.7`, `secret` intact, maybe tmps | migrates again (a leftover `master.key` is reused) | refuse (wrong) / legacy (no source) |
+| after 4, before 5's rename (or the rename not durable) | `secret` + `migrating.wtm` + `keys.wtk.tmp` matching the marker → `legacy-3.7`, `migrating` (proven pre-commit) | the MK must have the marker's MK id; the marker is removed (fsync) **before** the tmp, then migrates again with fresh keys (the uncommitted manifest never protected anything) | refuse (`wrong-key` / `migration-unfinished`): never back to the legacy state |
+| after 5, before 7's unlink | `protected` + `migrating` + `secret_leftover` | opens, checks marker and `fk_legacy == secret`, then steps 7–8 | refuse; nothing changes |
+| after 7's unlink, before 8's | `protected` + `migrating` | opens, checks the marker, step 8 | refuse |
+| after 8 | `protected` | opens | refuse |
+| `keys.wtk` lost after 5 (deleted, partial restore) while `migrating.wtm` remains | `ambiguous` ("migration published but keys.wtk missing") | refuse | refuse |
 
-If `secret_leftover` and the opened `fk_legacy` differs from `secret` (or `FK_legacy` is absent),
-boot refuses: two different legacy keys mean someone else wrote one of them. A `protected` volume
-never reads `secret` as a key.
+If `secret_leftover` and the opened `fk_legacy` differs from `secret` (or `FK_legacy` is absent,
+or the marker's secret digest differs), boot refuses: two different legacy keys mean someone else
+wrote one of them. A marker that names another installation, MK id or manifest → refuse
+(`migration-marker-mismatch`). A `protected` volume never reads `secret` as a key. Rotation is
+refused while `migrating.wtm` or `secret` remains.
+
+**Residual (H2).** The marker defeats the loss of `keys.wtk` alone. Someone who rolls back the
+whole volume — `keys.wtk`, `migrating.wtm` and the transcripts markers together — to a 3.7
+snapshot gets a genuine 3.7 volume, which boots as legacy (or migrates again). That is the
+rollback of §12.8 contract 1 and is only detectable with state kept outside the restorable set.
 
 **In-volume opt-out.** `WEBTERM_KEY_IN_VOLUME=1` keeps the MK in `DATA_DIR/master.key` (0600). The
 state is `reduced` ("reduced protection" in System health: the key lives next to the data it
@@ -652,16 +728,64 @@ build epoch + 1 with the same installation id, `mk_id` = id(new MK), retired ids
 retired ids ∪ {old MK id} (sorted, the new id removed; more than 64 → refuse), KWK and SNK
 re-wrapped under the new `K_mw`, every KWK-wrapped envelope copied byte for byte; publish; re-open
 with the new MK. A crash leaves the old file (opens with the old MK only) or the new one (opens with
-the new MK only). Boot needs exactly the current MK; the operator switches the key file after the
-command reports success.
+the new MK only). Boot needs exactly the current MK.
 
-**Guarantee (wrong or missing key).** A boot that refuses writes nothing in `DATA_DIR` except
-creating `.lock` (empty, 0600) if it did not exist. Two refused boots in a row leave, for every
+Rotation has two points of administration, the manifest and the external key source, and the
+gateway cannot know by itself which one a crash left current. Procedure (offline: gateway
+stopped, the rotation command takes the process lock):
+
+1. Generate the new MK and **persist it first** where the gateway will read it (a new file, not
+   overwriting the old one). The command takes `new_key_file`: before anything is published it
+   reads that file back with `read_key_file` (same checks as boot: owner, mode, encoding, not in
+   the data tree) and requires it to equal the new MK (`new-key-not-persisted` otherwise).
+2. Keep **both** key files until the new state is verified. A crash or a restart between the
+   publish and the configuration change leaves either manifest durable; exactly one of the two
+   keys opens it.
+3. `keys.expected_mk_id(DATA_DIR)` reads `keys.wtk` **without the key** (unauthenticated,
+   informative only; works while the gateway holds the lock) and prints the MK id it needs;
+   `keys.key_file_mk_id(path)` prints the id of a key file. The operator points the configuration
+   at the file whose id matches, starts the gateway, and only then retires the old key file.
+4. Retired MK ids: a retired id stays listed while backups made under it may still be restored
+   (they carry a manifest that opens only with that MK). Remove an id — and destroy the old key —
+   only after every backup made under it has expired; the 64-id bound is a policy limit, not a
+   reason to drop ids early.
+
+**Guarantee (wrong or missing key; refusals of kind `invalid-key` only).** A boot that refuses
+in preflight writes nothing in `DATA_DIR` except creating `.lock` (empty, 0600) if it did not
+exist. Two refused boots in a row leave, for every
 entry under `DATA_DIR` (recursively, symlinks not followed): the same names, types, modes, sizes,
 contents and symlink targets — between the state before the first boot and after the second,
 `.lock` excepted, and between the first and the second boot with `.lock` included. Timestamps
 (`atime`, directory `mtime` after the creation of `.lock`) are not part of the guarantee. This
-holds with a staged restore present: staging is never read before the key is verified.
+holds with a staged restore present: staging is never read before the key is verified. Refusals
+of kind `operation-incomplete` or `commit-unknown` make no such promise; their recovery is in the
+*Outcomes* table above.
+
+**Wiring checklist (must be closed before `keys.boot()` is called by the real boot).** PR2 is
+tested in isolation; these are not implemented and each needs its own change and test:
+
+1. **Preflight before every mutation.** `keys.boot()` (lock, inventory, key source, key check)
+   runs before `config.ensure_dirs()`'s clean-up and cap trimming, before the staged-restore
+   apply and before any other write in `DATA_DIR`; those steps then run under the same lock.
+   Directory bootstrap becomes explicit (what may be created before the lock: only `DATA_DIR`
+   itself). The lock and directory fds stay open for the lifespan, also on error paths.
+2. **3.7 staged restore.** Define what happens to a 3.7 `restore-pending/` + `.restore-flag`
+   found on a `legacy-3.7` volume before migration (apply first under the 3.7 key, then migrate;
+   or refuse and ask), and never publish the final migrated state before the restore set is
+   reconciled.
+3. **Prove FK_legacy before publishing.** Migration currently accepts any 32-byte `secret`.
+   Before step 4, decrypt representative legacy data with it (a vault entry, the forward HMAC
+   check, an encrypted setting) and refuse if nothing verifies; a foreign 32-byte file must not
+   become `FK_legacy`.
+4. **Key selection by migration state.** The vault and the forward-token HMAC use `FK_legacy`
+   for data written before the migration and `FK` for new data; the choice follows the
+   migration state recorded in the keyring/DB, never a guess on decryption failure.
+5. **Legacy copies of the raw key.** 3.7 snapshots (`backups/*.wtsnap`) and `pre-restore-*.keep`
+   files contain the raw `secret`. They are a separate protection and retention item: list them
+   in System health, and define when they are re-encrypted or expired after the migration.
+6. **Backup and restore move to `keys.wtk` first.** Backup reads `keys.wtk` (never `secret` or
+   the MK); restore validates the restored `keys.wtk` with the configured MK before anything is
+   replaced, and never deletes `.lock`.
 
 ## Appendix: Test vectors (v1)
 
