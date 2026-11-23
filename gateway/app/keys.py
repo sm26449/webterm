@@ -14,15 +14,21 @@ Entry points (all of them under a `ProcessLock`, whose directory fd is the only 
     bootstrap(lock, resolved)                       → (Keyring, ProtectionState)        class empty
     migrate_legacy(lock, resolved)                  → (Keyring, ProtectionState)        class legacy
     open_protected(lock, inv, resolved)             → (Keyring, ProtectionState)        class protected
-    rotate_master_key(lock, old_mk, new_mk)         → Keyring (external key only)
+    rotate_master_key(lock, old_mk, new_mk, new_key_file) → Keyring (external key only)
     publish_manifest(lock, blob, mk, previous_mk=)  → Keyring (atomic, verified read-back)
     boot(data_dir, env)                             → BootResult (the §12.9 order, end to end)
-    expected_mk_id(data_dir), key_file_mk_id(path)  → hex MK ids for the operator (no key needed)
+    expected_mk_id(data_dir), key_file_mk_id(path)  → hex MK ids for the operator (no key needed;
+                                                      UNAUTHENTICATED diagnostics, never a proof)
+    is_reserved_name(name, where), find_reserved(dir_fd, exempt)
+                                                    → the new-format namespace (one definition for
+                                                      inventory now, writers / restore later)
 
 Every refusal is a `BootRefused` with a short `reason` code, a `subject` (a file or variable
 NAME, never a value) and a `kind`:
 
     "invalid-key"           preflight refusal: nothing in DATA_DIR was written (only `.lock`)
+    "preflight-io"          an OSError during preflight (fstat, listing, flock…), normalised at
+                            `boot()`: nothing in DATA_DIR was written (only `.lock`)
     "operation-incomplete"  a publication started and failed before keys.wtk's rename; a tmp may
                             remain, the next boot (right key) recovers
     "commit-unknown"        keys.wtk's rename happened (this boot or an earlier one) and a later
@@ -34,6 +40,7 @@ tests raise from it to stop the sequence there. Steps:
 
     "<f>:before-tmp" "<f>:partial-tmp" "<f>:tmp-written" "<f>:renamed" "<f>:published"
         (f = "master.key", "migrating.wtm" or "keys.wtk")
+    "resume:proven" (pre-commit resume: keys.wtk.tmp authenticated and fsynced, before its rename)
     "migrate:verified" "secret:barrier" "secret:unlinked" "secret:removed"
     "marker:barrier" "marker:unlinked" "marker:removed"
 """
@@ -68,12 +75,23 @@ MIGRATION_MARKER_TMP = "migrating.wtm.tmp"
 KEY_ARTEFACTS = (LEGACY_SECRET, MANIFEST, MANIFEST_TMP, VOLUME_KEY, VOLUME_KEY_TMP,
                  MIGRATION_MARKER, MIGRATION_MARKER_TMP)
 STAGING = ("restore-pending", ".restore-flag", ".restore")
-NEW_MARKERS = ("erasures.wtj", ".restore")
-# Familia `.wt*` (numele noului format: keys.wtk, erasures.wtj, migrating.wtm, segmente …) e
-# rezervată: un astfel de nume la rădăcina DATA_DIR fără keys.wtk interzice ramura legacy.
+
+# ── namespace-ul rezervat formatului nou (§12.9 Inventory) ──
+# O SINGURĂ definiție: inventarul o folosește acum, scriitorii/restore-ul 3.8 o vor importa, ca să
+# nu poată scrie un nume pe care inventarul nu-l vede (sau invers).
+# Nume exacte la rădăcina DATA_DIR care există doar după keys.wtk.
+RESERVED_TOP_NAMES = ("erasures.wtj", ".restore")
+NEW_MARKERS = RESERVED_TOP_NAMES  # nume vechi, păstrat pentru cititori
+# Familia `.wt*` (keys.wtk, erasures.wtj, migrating.wtm, segmente …) e rezervată oriunde o
+# scanăm: fără keys.wtk, un astfel de nume interzice ramura legacy.
 _WT_FAMILY = re.compile(r"\.wt[a-z0-9]*$")
-# nume rezervate pentru segmentele de înregistrare (WTX1, descriptori, index) sub transcripts/
+# sub transcripts/: segmentele de înregistrare (WTX1, descriptori, index)
 TRANSCRIPT_MARKER_EXT = (".wtx", ".wtd", ".idx")
+RESERVED_DIR = "transcripts"
+# Adâncimea scanată sub transcripts/: rădăcina lui + UN nivel de subdirectoare (ca `arhiva/`).
+# Formatul de stocare nu creează structuri mai adânci; un scriitor care ar avea nevoie de ele
+# trebuie întâi să mărească acest număr (și testele). Un director care nu se poate lista = refuz.
+RESERVED_SCAN_DEPTH = 1
 # ce lasă în urmă un bootstrap întrerupt: nu schimbă clasa „empty”
 BOOTSTRAP_LEFTOVERS = (MANIFEST_TMP, VOLUME_KEY_TMP, VOLUME_KEY)
 
@@ -87,6 +105,7 @@ _SECRET_DIGEST_LABEL = b"wt/v1/migrate-secret\x00"
 KIND_INVALID_KEY = "invalid-key"
 KIND_INCOMPLETE = "operation-incomplete"
 KIND_COMMIT_UNKNOWN = "commit-unknown"
+KIND_PREFLIGHT_IO = "preflight-io"
 
 LOCATION_EXTERNAL = "external (not verified off-host)"
 
@@ -205,39 +224,121 @@ def acquire_lock(data_dir):
 # ── reading small files ──────────────────────────────────────────────────────
 
 
-def _read_small(name, dir_fd, max_len, subject, err, private):
-    """Open O_NOFOLLOW|O_NONBLOCK, fstat on the SAME fd, read at most max_len + 1 bytes."""
+def _open_ro(name, dir_fd, subject, err):
     try:
-        fd = os.open(name, _RD, dir_fd=dir_fd)
+        return os.open(name, _RD, dir_fd=dir_fd)
     except FileNotFoundError:
         raise err("missing", subject) from None
     except OSError as e:
         raise err("symlink" if e.errno == errno.ELOOP else "unreadable", subject) from None
+
+
+def _read_small(name, dir_fd, max_len, subject, err, private):
+    """Open O_NOFOLLOW|O_NONBLOCK, fstat on the SAME fd, read at most max_len + 1 bytes."""
+    fd = _open_ro(name, dir_fd, subject, err)
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise err("not-regular", subject)
-        if private:
-            if st.st_uid not in (os.geteuid(), 0):
-                raise err("bad-owner", subject)
-            if st.st_mode & 0o077:
-                raise err("bad-mode", subject)
-        if st.st_size > max_len:
-            raise err("too-large", subject)
-        buf = bytearray()
-        while len(buf) <= max_len:
-            try:
-                chunk = os.read(fd, max_len + 1 - len(buf))
-            except OSError:
-                raise err("unreadable", subject) from None
-            if not chunk:
-                break
-            buf += chunk
-        if len(buf) > max_len:
-            raise err("too-large", subject)
-        return bytes(buf)
+        return _read_fd(fd, max_len, subject, err, private)
     finally:
         os.close(fd)
+
+
+def _read_fd(fd, max_len, subject, err, private):
+    """fstat + citire pe un fd deja deschis (nu-l închide)."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise err("not-regular", subject)
+    if private:
+        if st.st_uid not in (os.geteuid(), 0):
+            raise err("bad-owner", subject)
+        if st.st_mode & 0o077:
+            raise err("bad-mode", subject)
+    if st.st_size > max_len:
+        raise err("too-large", subject)
+    buf = bytearray()
+    while len(buf) <= max_len:
+        try:
+            chunk = os.read(fd, max_len + 1 - len(buf))
+        except OSError:
+            raise err("unreadable", subject) from None
+        if not chunk:
+            break
+        buf += chunk
+    if len(buf) > max_len:
+        raise err("too-large", subject)
+    return bytes(buf)
+
+
+class _PinnedPath:
+    """Un fișier-cheie deschis pe un lanț de fd-uri fixate (§12.9 Key sources, M3): `fd` e
+    fișierul, `parent_fd` directorul care îl conține, `chain` (st_dev, st_ino) pentru fiecare
+    director parcurs de la `/`. Verdictul „în DATA_DIR” și citirea folosesc ACELEAȘI fd-uri."""
+
+    def __init__(self, fd, parent_fd, chain):
+        self.fd = fd
+        self.parent_fd = parent_fd
+        self.chain = chain
+
+    def close(self):
+        for f in (self.fd, self.parent_fd):
+            if f is not None:
+                try:
+                    os.close(f)
+                except OSError:
+                    pass
+        self.fd = self.parent_fd = None
+
+
+_DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_pinned(path, subject, err=None):
+    """Parcurge calea de la `/` componentă cu componentă (openat O_DIRECTORY|O_NOFOLLOW) și
+    deschide fișierul relativ la ultimul fd, O_NOFOLLOW. Politica: NICIUN symlink nicăieri în
+    calea cheii (un secret Docker e bind mount, nu symlink); `..` refuzat (normalizarea lexicală
+    ar sări peste o componentă). ENOENT oriunde = „missing” (calea implicită neconfigurată)."""
+    err = err or KeySourceError
+    p = os.fspath(path)
+    if not isinstance(p, str) or not p or "\x00" in p:
+        raise err("unreadable", subject)
+    if not os.path.isabs(p):
+        p = os.path.join(os.getcwd(), p)
+    parts = [c for c in p.split("/") if c not in ("", ".")]
+    if not parts or ".." in parts:
+        raise err("unreadable", subject)
+    try:
+        dfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        raise err("unreadable", subject) from None
+    chain = []
+    try:
+        for comp in parts[:-1]:
+            st = os.fstat(dfd)
+            chain.append((st.st_dev, st.st_ino))
+            try:
+                nfd = os.open(comp, _DIR_NOFOLLOW, dir_fd=dfd)
+            except FileNotFoundError:
+                raise err("missing", subject) from None
+            except OSError as e:
+                # O_DIRECTORY|O_NOFOLLOW pe un symlink dă ENOTDIR (sau ELOOP): lstat decide
+                if e.errno in (errno.ENOTDIR, errno.ELOOP):
+                    try:
+                        lst = os.stat(comp, dir_fd=dfd, follow_symlinks=False)
+                    except OSError:
+                        raise err("unreadable", subject) from None
+                    raise err("symlink" if stat.S_ISLNK(lst.st_mode) else "not-regular", subject) from None
+                raise err("unreadable", subject) from None
+            os.close(dfd)
+            dfd = nfd
+        st = os.fstat(dfd)
+        chain.append((st.st_dev, st.st_ino))
+        fd = _open_ro(parts[-1], dfd, subject, err)
+    except OSError:
+        os.close(dfd)
+        raise err("unreadable", subject) from None
+    except BaseException:
+        os.close(dfd)
+        raise
+    return _PinnedPath(fd, dfd, tuple(chain))
 
 
 def _read_manifest(lock):
@@ -354,44 +455,52 @@ def _transcripts_untouched(lock):
         os.close(fd)
 
 
-def _reserved_name(n):
-    return n.endswith(TRANSCRIPT_MARKER_EXT) or bool(_WT_FAMILY.search(n))
+def is_reserved_name(name, where="top"):
+    """True for a name of the new-format namespace. `where` = "top" (DATA_DIR's top level) or
+    "transcripts" (under transcripts/, up to RESERVED_SCAN_DEPTH). The one definition writers,
+    restore and the inventory share (§12.9 Inventory)."""
+    if where == "top":
+        return name in RESERVED_TOP_NAMES or bool(_WT_FAMILY.search(name))
+    return name.endswith(TRANSCRIPT_MARKER_EXT) or bool(_WT_FAMILY.search(name))
 
 
-def _transcripts_marker(lock):
-    """Primul nume rezervat noului format sub transcripts/ (rădăcina + un nivel de subdirectoare,
-    ca `arhiva/`), sau None. O listare eșuată nu dovedește absența → tratată ca marker."""
+def _scan_reserved(parent_fd, name, rel, depth):
+    """Primul nume rezervat sub `name` (până la `depth` niveluri de subdirectoare în plus).
+    Un director care nu se poate deschide/lista nu dovedește absența → întors ca marker."""
     try:
-        fd = _open_subdir("transcripts", lock.dir_fd)
+        fd = _open_subdir(name, parent_fd)
     except FileNotFoundError:
         return None
     except OSError:
-        return "transcripts (unreadable)"
+        return f"{rel} (unreadable)"
     try:
         for n in sorted(os.listdir(fd)):
-            if _reserved_name(n):
-                return f"transcripts/{n}"
-            st = os.stat(n, dir_fd=fd, follow_symlinks=False)
-            if stat.S_ISDIR(st.st_mode):
-                sfd = _open_subdir(n, fd)
-                try:
-                    hit = next((m for m in sorted(os.listdir(sfd)) if _reserved_name(m)), None)
-                finally:
-                    os.close(sfd)
+            if is_reserved_name(n, "transcripts"):
+                return f"{rel}/{n}"
+            if depth > 0 and stat.S_ISDIR(os.stat(n, dir_fd=fd, follow_symlinks=False).st_mode):
+                hit = _scan_reserved(fd, n, f"{rel}/{n}", depth - 1)
                 if hit:
-                    return f"transcripts/{n}/{hit}"
+                    return hit
         return None
     except OSError:
-        return "transcripts (unreadable)"
+        return f"{rel} (unreadable)"
     finally:
         os.close(fd)
 
 
-def _top_marker(names):
+def find_reserved(dir_fd, exempt=()):
+    """The first reserved entry of DATA_DIR, or None: its top level (names in `exempt`
+    skipped: the protocol artefacts legitimately present in the caller's state), then
+    `transcripts/` and RESERVED_SCAN_DEPTH levels of subdirectories. Symlinks are never
+    followed; an unreadable directory counts as a marker."""
+    try:
+        names = sorted(os.listdir(dir_fd))
+    except OSError:
+        return "DATA_DIR (unreadable)"
     for n in names:
-        if n in NEW_MARKERS or (n not in KEY_ARTEFACTS and _WT_FAMILY.search(n)):
+        if n not in exempt and is_reserved_name(n, "top"):
             return n
-    return None
+    return _scan_reserved(dir_fd, RESERVED_DIR, RESERVED_DIR, RESERVED_SCAN_DEPTH)
 
 
 def classify(lock):
@@ -420,19 +529,21 @@ def classify(lock):
                              reason=f"{LEGACY_SECRET} next to {MANIFEST} without {MIGRATION_MARKER}")
         return Inventory("protected", in_volume=in_volume, secret_leftover=has_secret,
                          staged_restore=staged, leftovers=leftovers, migrating=has_marker)
+    # H2 (recheck): namespace-ul nou se verifică ÎNAINTEA excepției pre-commit. Fără keys.wtk,
+    # singurul nume rezervat legitim e migrating.wtm (secret, keys.wtk.tmp, master.key*, .lock
+    # nu sunt în namespace); orice altceva (un segment, un jurnal) = set amestecat → refuz.
+    reserved = find_reserved(lock.dir_fd, exempt=(MIGRATION_MARKER,))
+    if reserved:
+        return Inventory("ambiguous", staged_restore=staged, reason=f"{reserved} without {MANIFEST}")
     if has_marker:
+        # potrivire structurală (hashuri) doar pentru clasă; migrate_legacy AUTENTIFICĂ tmp-ul
+        # cu MK înainte de orice mutație
         if has_secret and MANIFEST_TMP in st and _precommit_evidence(lock):
             return Inventory("legacy", in_volume=in_volume, staged_restore=staged, leftovers=leftovers,
                              migrating=True)
         return Inventory("ambiguous", staged_restore=staged,
                          reason=f"{MIGRATION_MARKER} without {MANIFEST}: migration published but {MANIFEST} missing")
-    marker = _top_marker(names)
-    if marker:
-        return Inventory("ambiguous", staged_restore=staged, reason=f"{marker} without {MANIFEST}")
     if has_secret:
-        tmarker = _transcripts_marker(lock)
-        if tmarker:
-            return Inventory("ambiguous", staged_restore=staged, reason=f"{tmarker} without {MANIFEST}")
         return Inventory("legacy", in_volume=in_volume, staged_restore=staged, leftovers=leftovers)
 
     def tolerated(n):
@@ -485,9 +596,20 @@ def encode_key_text(key):
     return base64.b64encode(bytes(key)) + b"\n"
 
 
-def read_key_file(path, dir_fd=None, subject=None):
+def read_key_file(path, dir_fd=None, subject=None, lock=None):
+    """With `dir_fd` (master.key): relative to that fd, final component O_NOFOLLOW. Without it:
+    an external key file, opened through `_open_pinned` (no symlink anywhere in the path); with
+    `lock`, the pinned ancestors must not include DATA_DIR (`key-in-data-dir`)."""
     subject = subject or os.fspath(path)
-    return decode_key_text(_read_small(path, dir_fd, KEY_FILE_MAX, subject, KeySourceError, True), subject)
+    if dir_fd is not None:
+        return decode_key_text(_read_small(path, dir_fd, KEY_FILE_MAX, subject, KeySourceError, True), subject)
+    pinned = _open_pinned(path, subject)
+    try:
+        if lock is not None:
+            _check_chain(lock, pinned.chain, subject)
+        return decode_key_text(_read_fd(pinned.fd, KEY_FILE_MAX, subject, KeySourceError, True), subject)
+    finally:
+        pinned.close()
 
 
 # ── key sources ──────────────────────────────────────────────────────────────
@@ -507,47 +629,32 @@ def _env_set(env, name):
     return v if isinstance(v, str) and v.strip() else ""
 
 
-def _under(path, root):
+def _check_chain(lock, chain, subject):
+    """Verdictul „în DATA_DIR” pe lanțul FIXAT al fișierului deja deschis (M3): niciun director
+    parcurs nu are (st_dev, st_ino) al fd-ului DATA_DIR. Prinde și DATA_DIR văzut printr-un bind
+    mount la altă cale. Nu vede: hardlink/copie în volum, un subdirector al volumului montat
+    separat, aceeași stocare montată în doi arbori (§12.9 Key sources, reziduu)."""
     try:
-        return os.path.commonpath([path, root]) == root
-    except ValueError:
-        return False
+        dst = os.fstat(lock.dir_fd)
+    except OSError:
+        raise KeySourceError("unreadable", subject) from None
+    if (dst.st_dev, dst.st_ino) in chain:
+        raise KeySourceError("key-in-data-dir",
+                             f"{subject} is inside the data directory; use {ENV_IN_VOLUME}=1 explicitly")
 
 
 def check_outside_data_dir(lock, path, subject):
-    """A key FILE must not live in the data tree: by path (as given and resolved) and by
-    (st_dev, st_ino) of every ancestor of the resolved path against DATA_DIR's own fd (catches a
-    bind mount of DATA_DIR elsewhere). Hardlinks and copies cannot be seen from here: the real
-    separation is the operator's mount configuration (§12.9 Key sources)."""
-    msg = f"{subject} is inside the data directory; use {ENV_IN_VOLUME}=1 explicitly"
+    """Open `path` the pinned way and apply `_check_chain` (refuses any symlink in the path).
+    Kept for tests and operator tools; the boot path checks the very fds it reads from."""
+    pinned = _open_pinned(path, subject)
     try:
-        dst = os.fstat(lock.dir_fd)
-        root_abs = os.path.abspath(lock.path)
-        root_real = os.path.realpath(lock.path)
-        p_abs = os.path.abspath(path)
-        p_real = os.path.realpath(path)
-    except OSError:
-        raise KeySourceError("unreadable", subject) from None
-    if any(_under(p, r) for p in (p_abs, p_real) for r in (root_abs, root_real)):
-        raise KeySourceError("key-in-data-dir", msg)
-    cur = os.path.dirname(p_real)
-    while True:
-        try:
-            st = os.stat(cur)
-        except OSError:
-            raise KeySourceError("unreadable", subject) from None
-        if (st.st_dev, st.st_ino) == (dst.st_dev, dst.st_ino):
-            raise KeySourceError("key-in-data-dir", msg)
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            return
-        cur = parent
+        _check_chain(lock, pinned.chain, subject)
+    finally:
+        pinned.close()
 
 
 def _read_external_file(lock, path, subject):
-    mk = read_key_file(path, subject=subject)
-    check_outside_data_dir(lock, path, subject)
-    return mk
+    return read_key_file(path, subject=subject, lock=lock)
 
 
 def resolve_master_key(env, lock, inv, default_key_file=DEFAULT_KEY_FILE):
@@ -700,6 +807,10 @@ def publish_manifest(lock, blob, mk, previous_mk=None, profile=kr.PROFILE_V1, _c
         if new.epoch <= cur.epoch:
             raise BootRefused("epoch-not-increasing", MANIFEST)
     _atomic_publish(lock, MANIFEST, MANIFEST_TMP, bytes(blob), crash, KIND_COMMIT_UNKNOWN, _before_rename)
+    return _read_back(lock, blob, mk, profile)
+
+
+def _read_back(lock, blob, mk, profile):
     # după rename: nimic nu se anulează orbește; boot-ul următor re-verifică
     with _phase(KIND_COMMIT_UNKNOWN, MANIFEST):
         if not hmac.compare_digest(_read_manifest(lock), bytes(blob)):
@@ -798,10 +909,64 @@ def _check_marker(marker, ring, blob):
         raise BootRefused("migration-marker-mismatch", MIGRATION_MARKER)
 
 
+def _authenticated_precommit(lock, mk, secret, profile):
+    """High 1 (recheck): reluarea pre-commit se bazează pe keys.wtk.tmp DESCHIS cu MK (MAC,
+    profil, unwrap), nu pe hashurile neautentificate din marker. Întoarce (blob, marker) sau
+    refuză fără nicio mutație. Markerul e doar intenție: dacă cineva i-a schimbat MK id-ul,
+    tmp-ul nu se deschide cu cheia dată → migration-proof-invalid."""
+    marker = _read_marker(lock)
+    blob = _read_small(MANIFEST_TMP, lock.dir_fd, kr.MAN_MAX_LEN, MANIFEST_TMP, BootRefused, False)
+    try:
+        ring = kr.open_keyring_bytes(blob, mk, profile)
+    except kr.WrongKeyError:
+        if hmac.compare_digest(marker.mk_id, kr.key_id(mk)):
+            # markerul numește cheia dată, dar manifestul anunțat nu e al ei: dovadă falsă
+            raise BootRefused("migration-proof-invalid", MANIFEST_TMP) from None
+        raise WrongKey("wrong-key", MIGRATION_MARKER) from None
+    except kr.KeyringError:
+        raise BootRefused("migration-proof-invalid", MANIFEST_TMP) from None
+    ok = (hmac.compare_digest(marker.mk_id, kr.key_id(mk))
+          and hmac.compare_digest(ring.mk_id, marker.mk_id)
+          and hmac.compare_digest(ring.installation_id, marker.installation_id)
+          and hmac.compare_digest(hashlib.sha256(blob).digest(), marker.manifest_digest)
+          and hmac.compare_digest(_secret_digest(secret), marker.secret_digest)
+          and ring.fk_legacy is not None and hmac.compare_digest(ring.fk_legacy, secret)
+          and ring.epoch == 1 and not ring.retired_mk_ids)
+    if not ok:
+        raise BootRefused("migration-proof-invalid", MIGRATION_MARKER)
+    return blob, marker
+
+
+def _commit_proven_tmp(lock, blob, mk, profile, crash):
+    """Publică EXACT blobul autentificat: fsync pe tmp (prin fd-ul care îl re-citește și trebuie
+    să dea aceiași octeți), rename, fsync dir, read-back. Dovada (tmp + marker) nu se șterge
+    niciodată înainte de commit: un crash oriunde aici lasă fie pre-commit-ul, fie keys.wtk."""
+    dfd = lock.dir_fd
+    with _phase(KIND_INCOMPLETE, MANIFEST_TMP):
+        if _exists(lock, MANIFEST):
+            raise BootRefused("manifest-exists", MANIFEST)
+        fd = _open_ro(MANIFEST_TMP, dfd, MANIFEST_TMP, BootRefused)
+        try:
+            if not hmac.compare_digest(_read_fd(fd, kr.MAN_MAX_LEN, MANIFEST_TMP, BootRefused, False), blob):
+                raise BootRefused("migration-proof-invalid", MANIFEST_TMP)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        crash("resume:proven")
+        os.rename(MANIFEST_TMP, MANIFEST, src_dir_fd=dfd, dst_dir_fd=dfd)
+    crash("keys.wtk:renamed")
+    with _phase(KIND_COMMIT_UNKNOWN, MANIFEST):
+        os.fsync(dfd)
+    crash("keys.wtk:published")
+    return _read_back(lock, blob, mk, profile)
+
+
 def migrate_legacy(lock, resolved, profile=kr.PROFILE_V1, _crash_at=None):
     """Class `legacy` + a source: data/secret becomes FK_legacy. Order: keys.wtk.tmp written →
     migrating.wtm published (intent) → keys.wtk renamed + fsync → read back and re-opened →
-    secret removed (dir fsync before and after) → marker removed."""
+    secret removed (dir fsync before and after) → marker removed. On the proven pre-commit state
+    (`inv.migrating`) the existing keys.wtk.tmp is authenticated with the MK and published as is
+    (never a new keyring, never the proof removed first)."""
     crash = _crash_at or _noop
     inv = classify(lock)
     if inv.kind != "legacy":
@@ -810,39 +975,35 @@ def migrate_legacy(lock, resolved, profile=kr.PROFILE_V1, _crash_at=None):
         raise KeySourceError("no-source", "migration needs a master key")
     secret = _read_secret(lock)
     if inv.migrating:
-        # pre-commit dovedit de classify: manifestul n-a devenit niciodată autoritate, deci
-        # nimic nu a fost scris sub cheile lui. Cerem totuși aceeași MK ca la prima încercare.
-        old = _read_marker(lock)
         if resolved.mk is None:
             # master.key a dispărut după marker: nu generăm o cheie nouă peste o migrare începută
             raise KeySourceError("missing", VOLUME_KEY)
-        if not hmac.compare_digest(old.mk_id, kr.key_id(resolved.mk)):
-            raise WrongKey("wrong-key", MIGRATION_MARKER)
-    mk = _mk_for(lock, resolved, crash)
-    with _phase(KIND_INCOMPLETE, MANIFEST):
-        if inv.migrating:
-            # markerul vechi pleacă ÎNAINTEA tmp-ului: altfel un crash ar lăsa marker fără dovadă
-            _unlink_leftover(lock, MIGRATION_MARKER)
-            os.fsync(lock.dir_fd)
-        rnd = secrets.token_bytes
-        inst = rnd(kr.ID_LEN)
-        envs = _envelopes(mk, rnd(32), snk=rnd(32), fk_legacy=secret, fk=rnd(32))
-        blob = kr.encode_manifest(kr.KeyManifest(inst, 1, kr.key_id(mk), (), envs), mk, profile)
-        mbytes = _marker_bytes(inst, kr.key_id(mk), secret, blob)
+        mk = resolved.mk
+        blob, _ = _authenticated_precommit(lock, mk, secret, profile)  # înainte de orice mutație
+        with _phase(KIND_INCOMPLETE, MANIFEST):
+            ring = _commit_proven_tmp(lock, blob, mk, profile, crash)
+    else:
+        mk = _mk_for(lock, resolved, crash)
+        with _phase(KIND_INCOMPLETE, MANIFEST):
+            rnd = secrets.token_bytes
+            inst = rnd(kr.ID_LEN)
+            envs = _envelopes(mk, rnd(32), snk=rnd(32), fk_legacy=secret, fk=rnd(32))
+            blob = kr.encode_manifest(kr.KeyManifest(inst, 1, kr.key_id(mk), (), envs), mk, profile)
+            mbytes = _marker_bytes(inst, kr.key_id(mk), secret, blob)
 
-        def intent():
-            # fsync-ul de director al markerului face durabilă și intrarea keys.wtk.tmp
-            _atomic_publish(lock, MIGRATION_MARKER, MIGRATION_MARKER_TMP, mbytes, crash, KIND_INCOMPLETE)
+            def intent():
+                # fsync-ul de director al markerului face durabilă și intrarea keys.wtk.tmp
+                _atomic_publish(lock, MIGRATION_MARKER, MIGRATION_MARKER_TMP, mbytes, crash, KIND_INCOMPLETE)
 
-        ring = publish_manifest(lock, blob, mk, profile=profile, _crash_at=crash, _before_rename=intent)
-        with _phase(KIND_COMMIT_UNKNOWN, MANIFEST):
-            if ring.fk_legacy is None or not hmac.compare_digest(ring.fk_legacy, secret):
-                raise BootRefused("legacy-secret-mismatch", MANIFEST)
-            crash("migrate:verified")
-            marker = _read_marker(lock)
-            _check_marker(marker, ring, blob)
-            _remove_legacy_secret(lock, ring, marker, crash)
-            _remove_marker(lock, crash)
+            ring = publish_manifest(lock, blob, mk, profile=profile, _crash_at=crash, _before_rename=intent)
+    with _phase(KIND_COMMIT_UNKNOWN, MANIFEST):
+        if ring.fk_legacy is None or not hmac.compare_digest(ring.fk_legacy, secret):
+            raise BootRefused("legacy-secret-mismatch", MANIFEST)
+        crash("migrate:verified")
+        marker = _read_marker(lock)
+        _check_marker(marker, ring, bytes(blob))
+        _remove_legacy_secret(lock, ring, marker, crash)
+        _remove_marker(lock, crash)
     return ring, _state(_resolved_with(resolved, mk), inv, migrated=True)
 
 
@@ -867,11 +1028,36 @@ def open_protected(lock, inv, resolved, profile=kr.PROFILE_V1, _crash_at=None):
     return ring, _state(resolved, inv, migrated)
 
 
-def rotate_master_key(lock, old_mk, new_mk, profile=kr.PROFILE_V1, new_key_file=None, _crash_at=None):
+def _persisted_new_key(lock, path, new_mk):
+    """M4: noua MK trebuie să fie DURABILĂ în fișierul din care o va citi gateway-ul înainte de
+    a publica un manifest pentru ea: deschidere pe lanț fixat (fără symlinkuri, nu în DATA_DIR),
+    aceleași verificări ca la boot, conținut = new_mk, apoi fsync pe fișier și pe directorul lui
+    (aceleași fd-uri). Altfel un power loss ar lăsa un keys.wtk pentru o cheie din page cache."""
+    subject = "new_key_file"
+    if path is None or (isinstance(path, str) and not path.strip()):
+        raise KeySourceError("no-source", subject)
+    pinned = _open_pinned(path, subject)
+    try:
+        _check_chain(lock, pinned.chain, subject)
+        persisted = decode_key_text(_read_fd(pinned.fd, KEY_FILE_MAX, subject, KeySourceError, True), subject)
+        if not hmac.compare_digest(persisted, new_mk):
+            raise BootRefused("new-key-not-persisted", subject)
+        try:
+            os.fsync(pinned.fd)
+            os.fsync(pinned.parent_fd)
+        except OSError as e:
+            code = errno.errorcode.get(e.errno, "EIO") if e.errno else "EIO"
+            raise BootRefused("new-key-not-durable", f"{subject}: {code}") from None
+    finally:
+        pinned.close()
+
+
+def rotate_master_key(lock, old_mk, new_mk, new_key_file, profile=kr.PROFILE_V1, _crash_at=None):
     """One new keys.wtk (epoch + 1) with the stable keys re-wrapped under `new_mk`; the old MK
     id joins the retired list. External key only (in-volume would need two files to switch).
-    With `new_key_file`, that file must already hold `new_mk` (read back with `read_key_file`,
-    outside DATA_DIR) before anything is published (§12.9 MK rotation)."""
+    `new_key_file` is required: it must already hold `new_mk` (pinned open, same checks as boot,
+    outside DATA_DIR) and is fsynced, with its directory, before anything is published. The
+    caller keeps BOTH key files until a boot with the new one has succeeded (§12.9 MK rotation)."""
     inv = classify(lock)
     if inv.kind != "protected":
         raise BootRefused("not-protected", inv.kind)
@@ -883,11 +1069,8 @@ def rotate_master_key(lock, old_mk, new_mk, profile=kr.PROFILE_V1, new_key_file=
     new_mk = _key32(new_mk, "new_mk")
     if hmac.compare_digest(old_mk, new_mk):
         raise BootRefused("same-key", "new_mk")
-    if new_key_file is not None:
-        persisted = _read_external_file(lock, new_key_file, "new_key_file")
-        if not hmac.compare_digest(persisted, new_mk):
-            raise BootRefused("new-key-not-persisted", "new_key_file")
-    ring = _open_ring(lock, old_mk, profile)
+    ring = _open_ring(lock, old_mk, profile)  # vechea MK întâi: nimic de atins dacă e greșită
+    _persisted_new_key(lock, new_key_file, new_mk)
     new_id = kr.key_id(new_mk)
     retired = sorted((set(ring.retired_mk_ids) | {ring.mk_id}) - {new_id})
     if len(retired) > kr.MAN_MAX_RETIRED:
@@ -912,9 +1095,10 @@ def _key32(k, name):
 
 
 def expected_mk_id(data_dir):
-    """The MK id (hex) keys.wtk was published for, read WITHOUT the key and without the process
-    lock (the gateway may be running). Unauthenticated: it only tells the operator which key a
-    volume asks for; the boot still authenticates the manifest with the key itself."""
+    """UNAUTHENTICATED DIAGNOSTIC. The MK id (hex) keys.wtk claims, parsed structurally WITHOUT
+    the key and without the process lock (the gateway may be running); no MAC is checked. It
+    only tells the operator which key file to try; it is never an authorization, a proof that
+    a key matches, or a proof of durability. Only an authenticated open decides."""
     dfd = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         blob = _read_small(MANIFEST, dfd, kr.MAN_MAX_LEN, MANIFEST, BootRefused, False)
@@ -928,7 +1112,9 @@ def expected_mk_id(data_dir):
 
 
 def key_file_mk_id(path):
-    """The MK id (hex) of a key file, for comparison with `expected_mk_id`; the key never leaves."""
+    """UNAUTHENTICATED DIAGNOSTIC. The MK id (hex) derived from a key file (pinned open, same
+    checks as boot), for comparison with `expected_mk_id`; the key never leaves. Equal ids do
+    not prove the manifest opens with that key, nor that the file is durable."""
     return kr.key_id(read_key_file(path)).hex()
 
 
@@ -947,8 +1133,12 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
          _crash_at=None):
     """§12.9 order: lock → inventory → key source → open / bootstrap / migrate. On a preflight
     refusal (kind invalid-key) nothing but `.lock` may have been created; the lock is released on
-    every refusal."""
-    lock = acquire_lock(data_dir)
+    every refusal. A raw OSError that escapes preflight (fstat, listing, flock…) becomes
+    BootRefused("io-error", kind="preflight-io"); publication errors are already typed."""
+    try:
+        lock = acquire_lock(data_dir)
+    except OSError as e:
+        raise _preflight_io(e) from e
     try:
         inv = classify(lock)
         if inv.kind == "ambiguous":
@@ -969,6 +1159,16 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
             return BootResult(lock, state, ring)
         ring, state = open_protected(lock, inv, resolved, profile, _crash_at)
         return BootResult(lock, state, ring)
+    except OSError as e:
+        lock.release()
+        # Low 5: orice OSError brut ajuns aici e din preflight (publicările îl tipizează în
+        # _phase): nimic nu a fost scris de acest boot
+        raise _preflight_io(e) from e
     except BaseException:
         lock.release()
         raise
+
+
+def _preflight_io(e):
+    code = errno.errorcode.get(e.errno, "EIO") if e.errno else "EIO"
+    return BootRefused("io-error", code, KIND_PREFLIGHT_IO)

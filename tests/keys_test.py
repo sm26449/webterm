@@ -126,6 +126,11 @@ def env_file(key):
     return {K.ENV_KEY_FILE: keyfile(key)}
 
 
+def rot(lock, old, new, **kw):
+    """Rotație cu noul fișier-cheie persistat (M4: parametrul e obligatoriu)."""
+    return K.rotate_master_key(lock, old, new, keyfile(new if len(new) == 32 else MK3), **kw)
+
+
 def with_lock(d, fn):
     lock = K.acquire_lock(d)
     try:
@@ -404,8 +409,8 @@ deep = put(os.path.join(d, "transcripts", "arhiva", "k"), base64.b64encode(MK1) 
 check("key file in a subdirectory of DATA_DIR → refused", refused_twice_identical(d, {K.ENV_KEY_FILE: deep}, "key-in-data-dir"))
 via = os.path.join(fresh("t"), "ln")
 os.symlink(d, via)
-check("key file reached through a symlinked directory → refused (realpath)",
-      refused_twice_identical(d, {K.ENV_KEY_FILE: os.path.join(via, "not-a-key-name")}, "key-in-data-dir"))
+check("key file reached through a symlinked directory → refused (no symlink anywhere in the key path)",
+      refused_twice_identical(d, {K.ENV_KEY_FILE: os.path.join(via, "not-a-key-name")}, "symlink"))
 check("default path inside DATA_DIR → refused", refused_twice_identical(d, {}, "key-in-data-dir", default_key_file=inside))
 try:
     boot(d, {K.ENV_KEY_FILE: inside})
@@ -424,6 +429,65 @@ check("inode ancestry catches DATA_DIR seen under another path (bind-mount view)
 check("a key file outside the data tree passes the ancestry check", K.check_outside_data_dir(other_view, keyfile(MK1), "x") is None)
 os.close(dfd)
 shutil.rmtree(os.path.join(d, "sub"))
+# M3 (recheck): lanț de fd-uri fixate; niciun symlink nicăieri în calea cheii
+real = fresh("kp")
+put(os.path.join(real, "mk"), base64.b64encode(MK1) + b"\n")
+lnk = os.path.join(fresh("t"), "lnk")
+os.symlink(real, lnk)
+check("key file outside DATA_DIR but behind a symlinked parent → refused (symlink)",
+      raises(lambda: K.read_key_file(os.path.join(lnk, "mk")), K.KeySourceError, "symlink")
+      and refused_twice_identical(d, {K.ENV_KEY_FILE: os.path.join(lnk, "mk")}, "symlink"))
+check("'..' in a key path → refused", raises(lambda: K.read_key_file(real + "/../" + os.path.basename(real) + "/mk"),
+                                            K.KeySourceError, "unreadable"))
+check("missing intermediate directory → missing", raises(lambda: K.read_key_file(os.path.join(real, "no", "mk")),
+                                                         K.KeySourceError, "missing"))
+check("intermediate component that is a file → not-regular",
+      raises(lambda: K.read_key_file(os.path.join(real, "mk", "x")), K.KeySourceError, "not-regular"))
+
+
+class SwapOS:
+    """Rulează `fn` imediat după ce fișierul-cheie „mk” a fost deschis (relativ la un dir fd):
+    exact intervalul în care vechiul cod re-rezolva calea pentru verificarea locației."""
+
+    def __init__(self, fn):
+        self.fn, self.done = fn, False
+
+    def __getattr__(self, n):
+        real = getattr(os, n)
+        if n != "open":
+            return real
+
+        def w(*a, **kw):
+            fd = real(*a, **kw)
+            if not self.done and a[0] == "mk" and kw.get("dir_fd") is not None:
+                self.done = True
+                self.fn()
+            return fd
+        return w
+
+
+dv = fresh()
+os.makedirs(os.path.join(dv, "sub"))
+put(os.path.join(dv, "sub", "mk"), base64.b64encode(MK1) + b"\n")
+
+
+def swap_out():
+    # DATA_DIR se mută; la vechea cale apare un fișier-cheie „din afară”
+    os.rename(dv, dv + "-moved")
+    os.makedirs(os.path.join(dv, "sub"))
+    put(os.path.join(dv, "sub", "mk"), base64.b64encode(MK2) + b"\n")
+
+
+lock = K.acquire_lock(dv)
+sw = SwapOS(swap_out)
+K.os = sw
+try:
+    ok = raises(lambda: K.read_key_file(os.path.join(dv, "sub", "mk"), subject="x", lock=lock), K.KeySourceError, "key-in-data-dir")
+finally:
+    K.os = os
+    lock.release()
+check("path swapped between opening the key and the location check → verdict on the opened file: refused",
+      ok and sw.done)
 r = boot_ok(d, {K.ENV_KEY_VALUE: good.decode()})
 check("key in the environment → warned", "key-in-environment" in r.state.warnings)
 check("protected + WEBTERM_KEY_IN_VOLUME=1 without master.key → refused",
@@ -585,7 +649,7 @@ check("protected + unparseable marker → refused", refused_twice_identical(d, e
 put(mp, mb)
 lock = K.acquire_lock(d)
 check("rotation refused while a migration is unfinished",
-      raises(lambda: K.rotate_master_key(lock, MK1, MK2), K.BootRefused, "migration-unfinished"))
+      raises(lambda: rot(lock, MK1, MK2), K.BootRefused, "migration-unfinished"))
 lock.release()
 check("restored marker → the migration finishes", boot_ok(d, env1).state.migrated and gone(d, "secret", MARK))
 
@@ -736,6 +800,138 @@ except K.BootRefused as e:
     kd = e.kind
 check("a preflight refusal has kind invalid-key", kd == "invalid-key")
 
+
+class ListdirFails:
+    def __getattr__(self, n):
+        if n == "listdir":
+            def fail(*a, **kw):
+                raise OSError(errno.EIO, "injected")
+            return fail
+        return getattr(os, n)
+
+
+d = legacy_dir()
+before = snapshot(d, skip_lock=True)
+K.os = ListdirFails()
+try:
+    boot(d, env1)
+    kd = None
+except K.BootRefused as e:
+    kd = (e.kind, e.reason, e.subject)
+finally:
+    K.os = os
+check("Low 5: an OSError while listing DATA_DIR → kind preflight-io, nothing written, lock released",
+      kd == ("preflight-io", "io-error", "EIO") and snapshot(d, skip_lock=True) == before and kind(d) == "legacy")
+
+# ── High 1 (recheck): reluarea pre-commit e autentificată cu MK ──
+print("pre-commit resume")
+
+
+def precommit_dir():
+    d = legacy_dir()
+    raises(lambda: boot(d, env1, _crash_at=crash_at("migrating.wtm:published")), Crash)
+    return d
+
+
+def rd(d, n):
+    with open(os.path.join(d, n), "rb") as f:
+        return f.read()
+
+
+d = precommit_dir()
+inv = with_lock(d, K.classify)
+tmpb, mb = rd(d, "keys.wtk.tmp"), rd(d, MARK)
+r = boot_ok(d, env1)
+check("pre-commit fixture is legacy + migrating; resume publishes EXACTLY the authenticated tmp (no new keyring)",
+      inv.kind == "legacy" and inv.migrating and rd(d, "keys.wtk") == tmpb and r.keyring.installation_id == mb[4:20]
+      and r.state.migrated and r.keyring.fk_legacy == SECRET and gone(d, "secret", MARK, "keys.wtk.tmp"))
+# reproducerea recenzentului: doar MK id-ul din marker schimbat, tmp și hashuri intacte, altă MK
+d = precommit_dir()
+mb2 = rd(d, MARK)
+put(os.path.join(d, MARK), mb2[:20] + kr.key_id(MK2) + mb2[36:])
+check("marker MK id edited + another MK → migration-proof-invalid, byte-identical, no keys.wtk",
+      with_lock(d, K.classify).migrating
+      and refused_twice_identical(d, env_file(MK2), "migration-proof-invalid") and gone(d, "keys.wtk"))
+check("… and with the original MK → refused as well (the marker no longer names it)",
+      refused_twice_identical(d, env1, "migration-proof-invalid") and gone(d, "keys.wtk"))
+# tmp consistent cu markerul (hashuri corecte) dar FK_legacy ≠ secret
+d = precommit_dir()
+inst = os.urandom(16)
+envs = K._envelopes(MK1, os.urandom(32), snk=os.urandom(32), fk_legacy=hashlib.sha256(b"other").digest(), fk=os.urandom(32))
+blob = kr.encode_manifest(kr.KeyManifest(inst, 1, kr.key_id(MK1), (), envs), MK1)
+put(os.path.join(d, "keys.wtk.tmp"), blob)
+put(os.path.join(d, MARK), K._marker_bytes(inst, kr.key_id(MK1), SECRET, blob))
+check("tmp + marker consistent but FK_legacy ≠ secret → migration-proof-invalid, byte-identical",
+      with_lock(d, K.classify).migrating and refused_twice_identical(d, env1, "migration-proof-invalid"))
+# tmp care NU se deschide cu MK (alt MAC), marker care numește MK și hashul lui
+d = precommit_dir()
+bad = bytearray(rd(d, "keys.wtk.tmp"))
+bad[-1] ^= 1
+put(os.path.join(d, "keys.wtk.tmp"), bytes(bad))
+put(os.path.join(d, MARK), rd(d, MARK)[:68] + hashlib.sha256(bytes(bad)).digest())
+check("tmp with a broken MAC (marker re-hashed to match) → migration-proof-invalid, byte-identical",
+      with_lock(d, K.classify).migrating and refused_twice_identical(d, env1, "migration-proof-invalid"))
+# nicio dovadă ștearsă înainte de commit
+d = precommit_dir()
+got, proxy = with_faults(d, env1, [])
+log = proxy.log
+ir = log.index(("rename", "keys.wtk.tmp"))
+check("resume: keys.wtk.tmp fsynced and renamed before any unlink of the proof (marker / tmp / secret)",
+      got == "ok" and ("fsync", "keys.wtk.tmp") in log[:ir]
+      and not any(e in log[:ir] for e in (("unlink", MARK), ("unlink", "keys.wtk.tmp"), ("unlink", "secret"))))
+d = precommit_dir()
+before = snapshot(d, skip_lock=True)
+rule = {"fn": "fsync", "target": "keys.wtk.tmp", "err": errno.EIO}
+got, _ = with_faults(d, env1, [rule])
+check("resume, fsync of the proven tmp fails → operation-incomplete, nothing changed, next boot finishes",
+      rule["hit"] and got == INC and snapshot(d, skip_lock=True) == before
+      and boot_ok(d, env1).keyring.installation_id == rd(d, "keys.wtk")[8:24] and gone(d, "secret", MARK))
+steps = []
+boot_ok(precommit_dir(), env1, _crash_at=steps.append)
+ok = "resume:proven" in steps and steps.index("resume:proven") < steps.index("keys.wtk:renamed")
+for s in steps:
+    d = precommit_dir()
+    inst = rd(d, MARK)[4:20]
+    hook = crash_at(s)
+    ok &= raises(lambda: boot(d, env1, _crash_at=hook), Crash)
+    ik = kind(d)
+    ok &= ik in ("legacy", "protected") and (ik == "protected") == (s not in ("resume:proven",))
+    r = boot_ok(d, env1)
+    ok &= r.keyring.installation_id == inst and gone(d, "secret", MARK, "keys.wtk.tmp") and kind(d) == "protected"
+check(f"resume: crash at each of {len(steps)} steps → pre-commit or protected, then completes with the SAME installation", ok)
+
+# ── High 2 (recheck): artefacte amestecate ──
+print("mixed artefacts")
+for label, rel in (("transcripts/record.wtx", "transcripts/record.wtx"), ("top-level erasures.wtj", "erasures.wtj"),
+                   ("transcripts/arhiva/s.wtd", "transcripts/arhiva/s.wtd"), ("top-level x.wtq", "x.wtq")):
+    d = precommit_dir()
+    put(os.path.join(d, rel), b"x")
+    inv = with_lock(d, K.classify)
+    check(f"pre-commit fixture + {label} → ambiguous, refused byte-identical with the right key",
+          inv.kind == "ambiguous" and os.path.basename(rel) in inv.reason
+          and refused_twice_identical(d, env1, "ambiguous") and gone(d, "keys.wtk"))
+check("reserved namespace: one definition",
+      K.is_reserved_name("keys.wtk") and K.is_reserved_name("migrating.wtm") and K.is_reserved_name(".restore")
+      and K.is_reserved_name("erasures.wtj") and not K.is_reserved_name("keys.wtk.tmp") and not K.is_reserved_name("secret")
+      and K.is_reserved_name("s.idx", "transcripts") and not K.is_reserved_name("s.idx")
+      and not K.is_reserved_name("s1.out", "transcripts") and K.RESERVED_SCAN_DEPTH == 1)
+d = legacy_dir()
+os.makedirs(os.path.join(d, "transcripts", "a", "b"))
+put(os.path.join(d, "transcripts", "a", "b", "x.wtx"), b"x")
+check("documented depth: a reserved name deeper than RESERVED_SCAN_DEPTH is not inspected",
+      with_lock(d, lambda lk: K.find_reserved(lk.dir_fd)) is None)
+if os.geteuid() != 0:
+    d = precommit_dir()
+    ap = os.path.join(d, "transcripts", "arhiva")
+    os.chmod(ap, 0)
+    try:
+        inv = with_lock(d, K.classify)
+    finally:
+        os.chmod(ap, 0o755)
+    check("pre-commit + an unreadable transcripts subdirectory → ambiguous", inv.kind == "ambiguous" and "unreadable" in inv.reason)
+else:
+    print("  (skip unreadable-directory test: root reads everything)")
+
 # ── staged restore ───────────────────────────────────────────────────────────
 print("staged restore")
 d = fresh()
@@ -769,7 +965,7 @@ check("protected + leftover tmp: boot opens and does not touch it", r.keyring an
 check("protected + leftover tmp + wrong key → refused, byte-identical",
       refused_twice_identical(d, env_file(MK2), "wrong-key", K.WrongKey))
 lock = K.acquire_lock(d)
-ring2 = K.rotate_master_key(lock, MK1, MK2)
+ring2 = rot(lock, MK1, MK2)
 lock.release()
 check("the next publication removes the leftover tmp", ring2.epoch == 2 and not os.path.exists(os.path.join(d, "keys.wtk.tmp")))
 
@@ -822,7 +1018,7 @@ d = legacy_dir()
 r1 = boot_ok(d, env1).keyring
 old_blob = open(os.path.join(d, "keys.wtk"), "rb").read()
 lock = K.acquire_lock(d)
-r2 = K.rotate_master_key(lock, MK1, MK2)
+r2 = rot(lock, MK1, MK2)
 lock.release()
 new_blob = open(os.path.join(d, "keys.wtk"), "rb").read()
 mo, mn = kr._parse_manifest_unauthenticated(old_blob), kr._parse_manifest_unauthenticated(new_blob)
@@ -836,19 +1032,19 @@ check("rotation: KWK-wrapped envelopes byte-identical, MK-wrapped re-wrapped",
 check("after rotation the old MK is refused", refused_twice_identical(d, env1, "wrong-key", K.WrongKey))
 check("after rotation the new MK opens", boot_ok(d, env_file(MK2)).keyring.epoch == 2)
 lock = K.acquire_lock(d)
-r3 = K.rotate_master_key(lock, MK2, MK3)
+r3 = rot(lock, MK2, MK3)
 check("second rotation: both old ids retired, sorted", r3.retired_mk_ids == tuple(sorted((kr.key_id(MK1), kr.key_id(MK2)))))
 check("rotation back to a retired MK drops it from the retired list",
-      K.rotate_master_key(lock, MK3, MK1).retired_mk_ids == tuple(sorted((kr.key_id(MK2), kr.key_id(MK3)))))
-check("rotation with the same key → refused", raises(lambda: K.rotate_master_key(lock, MK1, MK1), K.BootRefused, "same-key"))
-check("rotation with a wrong old MK → refused", raises(lambda: K.rotate_master_key(lock, MK2, MK3), K.WrongKey, "wrong-key"))
-check("rotation with a short key → refused", raises(lambda: K.rotate_master_key(lock, MK1, MK2[:31]), K.BootRefused, "bad-key"))
+      rot(lock, MK3, MK1).retired_mk_ids == tuple(sorted((kr.key_id(MK2), kr.key_id(MK3)))))
+check("rotation with the same key → refused", raises(lambda: rot(lock, MK1, MK1), K.BootRefused, "same-key"))
+check("rotation with a wrong old MK → refused", raises(lambda: rot(lock, MK2, MK3), K.WrongKey, "wrong-key"))
+check("rotation with a short key → refused", raises(lambda: rot(lock, MK1, MK2[:31]), K.BootRefused, "bad-key"))
 lock.release()
 d = fresh()
 boot_ok(d, {K.ENV_IN_VOLUME: "1"})
 lock = K.acquire_lock(d)
 check("rotation with the key in the volume → unsupported",
-      raises(lambda: K.rotate_master_key(lock, K.read_key_file(os.path.join(d, "master.key")), MK2), K.BootRefused, "unsupported"))
+      raises(lambda: rot(lock, K.read_key_file(os.path.join(d, "master.key")), MK2), K.BootRefused, "unsupported"))
 lock.release()
 
 # M2: MK-ul aşteptat se citeşte fără cheie; noua cheie e persistată şi verificată înainte de commit
@@ -872,17 +1068,58 @@ lock.release()
 check("rotation with the persisted new key → expected_mk_id is the new id", K.expected_mk_id(d) == kr.key_id(MK2).hex())
 check("expected_mk_id on a volume without keys.wtk → refused", raises(lambda: K.expected_mk_id(fresh()), K.BootRefused, "missing"))
 
+# M4 (recheck): new_key_file obligatoriu, fsync pe fișier și pe directorul lui înainte de publicare
+d = fresh()
+boot_ok(d, env1)
+before = snapshot(d, skip_lock=True)
+lock = K.acquire_lock(d)
+check("rotation without new_key_file → TypeError (required parameter)", raises(lambda: K.rotate_master_key(lock, MK1, MK2), TypeError))
+check("rotation with new_key_file=None → refused (no-source)",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2, None), K.KeySourceError, "no-source"))
+nkr = fresh("nk")
+put(os.path.join(nkr, "mk"), base64.b64encode(MK2) + b"\n")
+nkl = os.path.join(fresh("t"), "lnk")
+os.symlink(nkr, nkl)
+check("rotation with a new key file behind a symlinked parent → refused (symlink)",
+      raises(lambda: K.rotate_master_key(lock, MK1, MK2, os.path.join(nkl, "mk")), K.KeySourceError, "symlink"))
+lock.release()
+check("refused rotations change nothing", snapshot(d, skip_lock=True) == before)
+nk = keyfile(MK2)
+proxy = FaultOS()
+K.os = proxy
+try:
+    with_lock(d, lambda lk: K.rotate_master_key(lk, MK1, MK2, nk))
+finally:
+    K.os = os
+log = proxy.log
+ir = log.index(("rename", "keys.wtk.tmp"))
+check("rotation fsyncs the new key file and its directory before publishing",
+      ("fsync", "mk") in log[:ir] and ("fsync", os.path.basename(os.path.dirname(nk))) in log[:ir]
+      and boot_ok(d, {K.ENV_KEY_FILE: nk}).keyring.mk_id == kr.key_id(MK2))
+d = fresh()
+boot_ok(d, env1)
+before = snapshot(d, skip_lock=True)
+proxy = FaultOS([{"fn": "fsync", "target": "mk", "err": errno.EIO, "armed": True, "hit": False}])
+K.os = proxy
+try:
+    ok = raises(lambda: with_lock(d, lambda lk: K.rotate_master_key(lk, MK1, MK2, keyfile(MK2))), K.BootRefused,
+                "new-key-not-durable")
+finally:
+    K.os = os
+check("fsync of the new key file fails → new-key-not-durable, nothing published, old MK opens",
+      ok and snapshot(d, skip_lock=True) == before and boot_ok(d, env1).keyring.epoch == 1)
+
 steps = []
 d = fresh()
 boot_ok(d, env1)
-with_lock(d, lambda lk: K.rotate_master_key(lk, MK1, MK2, _crash_at=steps.append))
+with_lock(d, lambda lk: rot(lk, MK1, MK2, _crash_at=steps.append))
 ok = bool(steps)
 for s in steps:
     d = fresh()
     r0 = boot_ok(d, env1).keyring
 
     hook = crash_at(s)
-    ok &= raises(lambda: with_lock(d, lambda lk: K.rotate_master_key(lk, MK1, MK2, _crash_at=hook)), Crash)
+    ok &= raises(lambda: with_lock(d, lambda lk: rot(lk, MK1, MK2, _crash_at=hook)), Crash)
     opens = []
     for mk in (MK1, MK2):
         try:
