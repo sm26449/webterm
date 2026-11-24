@@ -93,6 +93,8 @@ lifecycle_lock() {   # lifecycle_lock INSTALL_DIR → returns holding the lock; 
     echo "  (it holds $f) — refusing. Wait for it to finish, then run this again." >&2
     exit 1; }
 }
+# RC4-L1: planurile vechi se curăţă doar dacă lacătul e luat acum (fd 9 neprimit de la un părinte)
+WT_RUN_START=$(date +%s); WT_SWEEP=1; [ -e "/proc/$$/fd/9" ] && WT_SWEEP=0
 lifecycle_lock "$ROOT"
 
 TARGET=""
@@ -588,6 +590,17 @@ plan_cleanup() {   # şterge planurile randate de această rulare (conţin mediu
   for f in $PLAN_FILES; do rm -f -- "$f"; done
   PLAN_FILES=""
 }
+plan_sweep() {   # plan_sweep DIR → şterge planurile rămase de la o rulare întreruptă (RC4-L1)
+  # Un SIGKILL / o cădere a maşinii nu rulează trap-ul, iar planul conţine mediul rezolvat al serviciilor.
+  # Doar când lacătul a fost luat ACUM (WT_SWEEP=1, nu moştenit de la un părinte care ar putea avea un
+  # plan viu): fişiere obişnuite (nu symlink-uri), ale noastre, din DIR, mai vechi decât începutul rulării.
+  local n
+  [ "${WT_SWEEP:-0}" = 1 ] && [ -n "${WT_RUN_START:-}" ] || return 0
+  n=$(find "$1" -maxdepth 1 -name '.wt-plan.*' -type f -user "$(id -u)" ! -newermt "@$WT_RUN_START" \
+        -print -delete 2>/dev/null | wc -l) || n=0
+  [ "${n:-0}" -eq 0 ] || echo "→ removed $n stale compose plan file(s) left by an interrupted run."
+  return 0
+}
 render_checked() {   # render_checked COMPOSE_FILE IMAGE_REF IMAGE_ID LABEL [BASE_PLAN] → 0 + PLAN_FILE, PLAN_NAME; 1 refused
   # RC3-H1: planul se randează o singură dată, cu mediul din `up` (WEBTERM_IMAGE=<ID>, eticheta), şi se
   # scrie într-un fişier privat; garda şi `up` folosesc exact acel fişier. Toate profilele (`*`): un
@@ -668,6 +681,7 @@ guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the s
   return 0
 }
 # ── sfârşitul gărzii 3.8 (bloc identic în deploy.sh, rollback.sh, upgrade.sh) ──
+plan_sweep "$ROOT"
 # H1: o ţintă mai veche de 3.8 pe un volum migrat se refuză ÎNAINTE de backup, de trusa de pe
 # host (deploy.sh-ul ţintei n-ar mai avea garda) şi de deploy
 guard_pre38 "$IMAGE" "$FILE" || die "refusing to install a pre-3.8 image on this migrated volume"
@@ -888,7 +902,9 @@ say "Applying $TARGET ($IMAGE)"
 # compose), ca services.app.image să fie legată de ID-ul verificat; într-un subshell, fără efecte
 # RC3-H1: şi planul randat cu ID-ul trebuie să difere de cel cu referinţa DOAR prin services.app.image
 # (un Compose în care WEBTERM_IMAGE mută şi altceva = refuz); planul temporar se şterge în subshell
-( export WEBTERM_IMAGE="$IMAGE"
+# RC4-L1: subshell-ul nu moşteneşte trap-urile; planul lui se şterge şi la Ctrl-C / TERM
+( trap plan_cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+  export WEBTERM_IMAGE="$IMAGE"
   render_checked "$FILE" "$IMAGE" "$CHECKED_ID" "$TARGET" \
     && guard_recheck "$IMAGE" "$PLAN_FILE" "$CHECKED_PLAN" "$CHECKED_ID"
   rc=$?; plan_cleanup; exit "$rc" ) \

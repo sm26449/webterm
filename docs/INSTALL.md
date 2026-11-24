@@ -104,6 +104,11 @@ On a freshly installed Ubuntu/Debian, the installer does the whole chain: Docker
 (ufw: OpenSSH + 80/443), the Traefik + app stack, daily backup (systemd timer,
 03:30, keeps 14 archives) and a health check. Idempotent — running it again keeps
 `.env` and the data.
+The stack is always started through `./deploy.sh` (the same checked start as a deploy
+or an upgrade), so a re-run on an existing installation cannot start an image the data
+volume does not accept. A re-run also never changes the image of an existing
+installation: `--image` with a different image is refused; change versions with
+`./upgrade.sh <version>` or `./deploy.sh <image>`.
 
 ```sh
 # interactive (asks for domain and email; the Cloudflare token is optional):

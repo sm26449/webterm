@@ -14,11 +14,13 @@ maşini care chiar au o instalare. Pasul de imagini (singurul care s-a schimbat,
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ok = 0
@@ -393,6 +395,7 @@ def main():
 
         pre38_checks(tmp)
         master_key_checks(tmp)
+        install_checks(tmp)
         rh1_checks(tmp)
 
     print(f"\n{ok}/{total} passed")
@@ -1007,6 +1010,150 @@ def master_key_checks(tmp):
           "--key-in-volume" in src and 'if [ "$KEY_IN_VOLUME" = 1 ]' in src
           and src.count('echo "WEBTERM_KEY_IN_VOLUME=1" >> .env') == 1)
 
+
+
+# ── RC5-H1 / RC4-L1: install.sh porneşte doar prin deploy.sh; planuri vechi curăţate ────────────
+INSTALL_KIT = ("docker-compose.prod.yml", ".env.prod.example", "deploy.sh", "rollback.sh", "upgrade.sh",
+               "remove.sh", "scripts/backup.sh", "scripts/restore.sh", "scripts/cert-check.sh",
+               "scripts/cert-renew.sh", "scripts/host-health.sh", "scripts/docker-cleanup.sh",
+               "scripts/authentik-upgrade.sh")
+FAKE_PROVISION = ("print('WEBTERM_OIDC_ISSUER=https://auth.term.test/application/o/webterm/')\n"
+                  "print('WEBTERM_OIDC_CLIENT_ID=cid')\nprint('WEBTERM_OIDC_CLIENT_SECRET=csecret')\n")
+
+
+def install_sandbox(tmp):
+    """Sursa trusei (install.sh + fişierele pe care le copiază, provision.py înlocuit cu un stub) şi
+    shim-urile; installerul rulează pe un --dir din sandbox, cu `docker` & co. stub-uite."""
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    src = d / "src"
+    shutil.copytree(ROOT / "deploy", src / "deploy")
+    for rel in ("install.sh",) + INSTALL_KIT:
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / rel, src / rel)
+    (src / "deploy" / "authentik" / "provision.py").write_text(FAKE_PROVISION)
+    # installerul cere root, apt şi chown 10001; în sandbox (şi pe runner-ul CI, ne-root) le stub-uim
+    for name, body in (("apt-get", "#!/bin/sh\nexit 0\n"),
+                       ("openssl", "#!/bin/sh\nexit 1\n"),
+                       ("getent", "#!/bin/sh\nexit 2\n"),
+                       ("id", '#!/bin/sh\n[ "$1" = -u ] && [ $# = 1 ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n'),
+                       ("install", '#!/bin/bash\na=()\nwhile [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; '
+                                   '*) a+=("$1"); shift ;; esac; done\nexec /usr/bin/install "${a[@]}"\n')):
+        p = d / "bin" / name
+        p.write_text(body)
+        os.chmod(p, 0o755)
+    return d, d / "inst"
+
+
+INSTALL_ARGS = ("--domain", "term.test", "--email", "a@b.test", "--non-interactive", "--no-ufw",
+                "--no-backup", "--no-cert-check", "--no-host-health", "--skip-port-check")
+
+
+def run_install(d, inst, args=(), **extra):
+    r, calls = run(d, "src/install.sh", ("--dir", str(inst)) + INSTALL_ARGS + tuple(args), **extra)
+    ups = [ln for ln in calls.splitlines() if ln.startswith("docker ") and " up " in f"{ln} "]
+    return r, calls, ups, r.stdout + r.stderr
+
+
+def install_checks(tmp):
+    print("── 15. RC5-H1: install.sh starts the stack only through ./deploy.sh; RC4-L1 stale plans")
+    checked = "docker compose -p proj -f .wt-plan."
+    # volumul existent = cel din planul /data (proj_webterm-data, implicit listat de `docker volume ls`)
+    CFG_PROJ = CFG.replace("custom_data", "proj_webterm-data")
+    fresh = dict(COMPOSE_CFG=CFG, VOLUMES="", APP_PS="", IMG_LABEL="v3.8.0")
+
+    # instalare nouă: o singură pornire, a planului verificat (nu `compose -f … up`)
+    d, inst = install_sandbox(tmp)
+    r, calls, ups, out = run_install(d, inst, **fresh)
+    check("install.sh, instalare nouă: porneşte prin deploy.sh (planul verificat, ID, fără pull/build)",
+          r.returncode == 0 and len(ups) == 1 and ups[0].startswith(checked)
+          and "up -d --pull never --no-build --remove-orphans" in ups[0], (out[-600:], ups))
+    check("…cheia master creată, niciun plan rămas în director",
+          (inst / "secrets" / "master-key" / "master.key").exists()
+          and not any(p.name.startswith(".wt-plan.") for p in inst.iterdir()), out[-300:])
+
+    # --with-authentik: re-up-ul SSO e tot planul re-verificat al lui deploy.sh
+    d, inst = install_sandbox(tmp)
+    r, calls, ups, out = run_install(d, inst, ("--with-authentik", "--authentik-domain", "auth.term.test"),
+                                     AK_CODE="200", **fresh)
+    e = env_of(inst)
+    check("install.sh --with-authentik: pornire + re-up SSO, ambele prin planul verificat al lui deploy.sh",
+          r.returncode == 0 and len(ups) == 2 and all(u.startswith(checked) for u in ups)
+          and ups[1].rstrip().endswith("--no-build app")
+          and e.get("WEBTERM_OIDC_ISSUER") == "https://auth.term.test/application/o/webterm/",
+          (out[-700:], ups))
+
+    # instalare existentă, volum migrat, .env pe o imagine < 3.8: garda lui deploy.sh refuză, nimic pornit
+    d, inst = install_sandbox(tmp)
+    inst.mkdir()
+    (inst / ".env").write_text("WEBTERM_DOMAIN=term.test\nLETSENCRYPT_EMAIL=a@b.test\nGHCR_USER=x\n"
+                               f"WEBTERM_IMAGE={OLD}\nWEBTERM_IMAGE_TAG=ghcr.io/x/webterm:v3.7.1\n")
+    r, calls, ups, out = run_install(d, inst, COMPOSE_CFG=CFG_PROJ, APP_PS="cid-app-1",
+                                     IMG_LABEL="v3.7.1", VOL_LS=MIGRATED)
+    check("install.sh peste un volum migrat, imagine < 3.8 în .env → deploy.sh refuză, nimic pornit, exit ≠ 0",
+          r.returncode != 0 and ups == [] and "migrated to 3.8" in out and "never 'docker compose up'" in out,
+          (out[-700:], ups))
+    check("…imaginea din .env rămâne cea a instalării (installerul nu o rescrie)",
+          env_of(inst).get("WEBTERM_IMAGE") == OLD, env_of(inst).get("WEBTERM_IMAGE"))
+
+    # instalare existentă pe 3.8: delegată, imaginea neschimbată
+    d, inst = install_sandbox(tmp)
+    inst.mkdir()
+    (inst / ".env").write_text("WEBTERM_DOMAIN=term.test\nLETSENCRYPT_EMAIL=a@b.test\nGHCR_USER=x\n"
+                               f"WEBTERM_IMAGE={NEW}\n")
+    r, calls, ups, out = run_install(d, inst, COMPOSE_CFG=CFG_PROJ, APP_PS="cid-app-1",
+                                     IMG_LABEL="v3.8.0", VOL_LS=MIGRATED)
+    check("install.sh peste o instalare 3.8 existentă → delegă la deploy.sh (o pornire, planul verificat)",
+          r.returncode == 0 and len(ups) == 1 and ups[0].startswith(checked) and "Existing installation" in out
+          and env_of(inst).get("WEBTERM_IMAGE") == NEW
+          and not (inst / "secrets" / "master-key" / "master.key").exists(), (out[-600:], ups))
+
+    # --image diferit pe o instalare existentă → refuz înainte de trusă şi de .env
+    d, inst = install_sandbox(tmp)
+    inst.mkdir()
+    env0 = f"WEBTERM_DOMAIN=term.test\nLETSENCRYPT_EMAIL=a@b.test\nWEBTERM_IMAGE={NEW}\n"
+    (inst / ".env").write_text(env0)
+    r, calls, ups, out = run_install(d, inst, ("--image", "ghcr.io/x/webterm:v3.7.1"),
+                                     COMPOSE_CFG=CFG_PROJ, IMG_LABEL="v3.7.1")
+    check("install.sh --image <altă imagine> pe o instalare existentă → refuz, trimite la upgrade.sh/deploy.sh",
+          r.returncode != 0 and "does not change the image" in out and "upgrade.sh" in out
+          and ups == [] and (inst / ".env").read_text() == env0 and not (inst / "deploy.sh").exists(),
+          (out[-500:], ups))
+
+    # sursa: nicio pornire compose directă în installer (în afara mesajelor)
+    bad = [ln for ln in (ROOT / "install.sh").read_text().splitlines()
+           if re.search(r"compose\b.*\bup\b", ln) and not re.match(r"\s*(#|err |warn |say |echo )", ln)]
+    check("install.sh: niciun `docker compose … up` direct în cod", bad == [], bad)
+
+    # RC4-L1: planurile rămase de la o rulare întreruptă se şterg la începutul rulării care ia lacătul
+    def stale(d):
+        p = d / ".wt-plan.STALE1"
+        p.write_text('{"x": "secret"}\n')
+        os.utime(p, (time.time() - 3600, time.time() - 3600))
+        tgt = d / "keep-me"
+        tgt.write_text("x\n")
+        (d / ".wt-plan.LINK").symlink_to(tgt)
+        return p, tgt
+    for script in ("deploy.sh", "rollback.sh"):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(NEW + "\n")
+        p, tgt = stale(d)
+        r, _ = run(d, script, IMG_LABEL="v3.8.0")
+        out = r.stdout + r.stderr
+        check(f"RC4-L1: {script} şterge planul vechi la început; symlink-ul (şi ţinta lui) rămân",
+              not p.exists() and (d / ".wt-plan.LINK").is_symlink() and tgt.exists()
+              and "stale compose plan" in out, out[-400:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    p, _ = stale(d)
+    (d / "wrap.sh").write_text('exec 9>>"$PWD/.deploy.lock"\nexec bash ./deploy.sh\n')
+    r, _ = run(d, "wrap.sh", IMG_LABEL="v3.8.0")
+    check("RC4-L1: cu lacătul moştenit de la un părinte, nimic nu se şterge (planul lui poate fi viu)",
+          r.returncode == 0 and p.exists() and "stale compose plan" not in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-300:])
+    for script in ("deploy.sh", "rollback.sh", "upgrade.sh"):
+        src = (ROOT / script).read_text()
+        check(f"RC4-L1: {script}: planul se şterge şi la INT/TERM, iar curăţarea rulează după lacăt",
+              "trap plan_cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM" in src
+              and src.index("\nlifecycle_lock ") < src.index("\nplan_sweep "), script)
 
 
 if __name__ == "__main__":

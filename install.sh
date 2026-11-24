@@ -205,6 +205,20 @@ fi
 # ── 2) runtime files ──────────────────────────────────────────────────────
 # From the local checkout if the installer runs inside one, otherwise clone.
 SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
+# 3.8 (RC5-H1, recheck PR4): pe o instalare EXISTENTĂ (.env deja acolo) installerul nu schimbă
+# imaginea. O schimbare de versiune trece prin upgrade.sh (sincronizează trusa, notează punctul de
+# revenire, garda 3.8) sau ./deploy.sh <ref>; un --image vechi peste un volum migrat ar porni altfel
+# fără nicio verificare. Refuzăm ÎNAINTE de a copia trusa sau de a scrie ceva.
+if [ -n "$IMAGE" ] && [ -f "$INSTALL_DIR/.env" ]; then
+  CUR_ENV_IMAGE=$(unset WEBTERM_IMAGE; load_env "$INSTALL_DIR/.env" 2>/dev/null; printf '%s' "${WEBTERM_IMAGE:-}")
+  if [ "$IMAGE" != "$CUR_ENV_IMAGE" ]; then
+    err "$INSTALL_DIR already holds an installation (.env, image: ${CUR_ENV_IMAGE:-<compose default>})."
+    err "install.sh does not change the image of an existing installation. Use instead:"
+    err "  cd $INSTALL_DIR && sudo ./upgrade.sh <version>     (or ./deploy.sh <image ref>)"
+    err "Both check the data volume before starting anything. Nothing was changed or started."
+    exit 1
+  fi
+fi
 mkdir -p "$INSTALL_DIR"
 if [ -f "$SRC/docker-compose.prod.yml" ]; then
   say "[2/7] Copying files from the local checkout ($SRC)…"
@@ -366,7 +380,9 @@ else
   set_env WEBTERM_CERT_LABEL_FWD_MAIN ""
   set_env WEBTERM_CERT_LABEL_FWD_SANS ""
 fi
-set_env WEBTERM_IMAGE "$IMAGE"
+# RC5-H1: imaginea se scrie doar într-un .env NOU; unul existent îşi păstrează valoarea (sau default-ul
+# din compose, dacă nu are niciuna) — un pin al installerului nu înlocuieşte tăcut ce rulează
+[ "$FRESH_ENV" = 1 ] && set_env WEBTERM_IMAGE "$IMAGE"
 set_env GHCR_USER "$GHCR_USER"
 # where this kit lives on the host: the app only PRINTS it (`sudo <dir>/scripts/cert-renew.sh …`
 # in Settings → Infrastructure → Certificates), it never reaches it
@@ -421,7 +437,8 @@ data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unk
 }
 MK_DIR="$SECRETS_DIR/master-key"
 VOL_STATE=unknown
-[ "$FRESH_ENV" != 1 ] || VOL_STATE=$(data_volume_state docker-compose.prod.yml)
+# RC5-H1: starea se citeşte mereu (şi pasul 6 o raportează); cheia rămâne legată de FRESH_ENV=1
+VOL_STATE=$(data_volume_state docker-compose.prod.yml)
 if [ "$FRESH_ENV" = 1 ] && [ "$VOL_STATE" = unknown ]; then
   # M4: o eroare Docker nu dovedeşte o instalare nouă — nu creăm şi nu activăm nicio cheie
   err "cannot confirm that this is a new installation (docker compose config / docker volume ls failed)."
@@ -531,43 +548,30 @@ else
 fi
 
 # ── 6) stack-ul ───────────────────────────────────────────────────────────
-say "[6/7] Starting the stack (Traefik + app)…"
-docker compose -f docker-compose.prod.yml pull || warn "  pull failed — using local images if present."
-docker compose -f docker-compose.prod.yml up -d --remove-orphans
-
-# Provisionăm aplicaţia OIDC în Authentik-ul din stack (idempotent, best-effort). Dacă Authentik
-# nu e gata la timp, WebTerm rămâne pornit şi indicăm comanda de reluat — niciun stack stricat.
-if [ -n "$WITH_AUTHENTIK" ] && ! grep -q '^WEBTERM_OIDC_ISSUER=.' .env 2>/dev/null; then
-  AK_TOKEN=$(secret_read authentik_bootstrap_token)
-  say "Waiting for Authentik at https://$AUTHENTIK_DOMAIN (first boot runs migrations, ~1-2 min)…"
-  ak_ready=""
-  for _i in $(seq 1 90); do
-    code=$(curl_bearer "$AK_TOKEN" -s -o /dev/null -w '%{http_code}' --max-time 5 \
-      "https://$AUTHENTIK_DOMAIN/api/v3/core/users/me/" 2>/dev/null || echo 000)
-    [ "$code" = 200 ] && { ak_ready=1; break; }
-    sleep 4
-  done
-  PROV="$INSTALL_DIR/deploy/authentik/provision.py"
-  if [ -n "$ak_ready" ] && [ -f "$PROV" ] && command -v python3 >/dev/null; then
-    say "Provisioning the WebTerm OIDC application in Authentik…"
-    if OUT=$(AUTHENTIK_DOMAIN="$AUTHENTIK_DOMAIN" WEBTERM_DOMAIN="$DOMAIN" \
-             WEBTERM_OIDC_PROVIDER_NAME=Authentik AUTHENTIK_API_TOKEN="$AK_TOKEN" \
-             python3 "$PROV" 2>&1); then
-      # secretul de client → fişier; restul (public) → .env
-      while IFS='=' read -r _k _v; do
-        case "$_k" in
-          WEBTERM_OIDC_CLIENT_SECRET) secret_write webterm_oidc_client_secret "$_v" ;;
-          WEBTERM_OIDC_ISSUER|WEBTERM_OIDC_CLIENT_ID|WEBTERM_OIDC_PROVIDER_NAME) set_env "$_k" "$_v" ;;
-        esac
-      done < <(printf '%s\n' "$OUT" | grep -E '^WEBTERM_OIDC_(ISSUER|CLIENT_ID|CLIENT_SECRET|PROVIDER_NAME)=')
-      docker compose -f docker-compose.prod.yml up -d app
-      say "SSO linked — add users to the 'wt-access' group in Authentik to grant them access."
-    else
-      warn "provisioning failed; WebTerm is up, SSO is off:"; printf '  %s\n' "$OUT" | tail -5
-    fi
-  else
-    warn "Authentik not ready yet — finish later with: cd $INSTALL_DIR && ./deploy.sh"
-  fi
+# 3.8 (RC5-H1, recheck PR4): installerul nu mai porneşte NIMIC direct. `docker compose up` de aici
+# (pornirea iniţială şi re-up-ul după legarea SSO) ocolea garda 3.8 a lui deploy.sh: planul /data
+# randat şi verificat, imaginea pornită ca ID, refuzul unei imagini < 3.8 peste un volum migrat,
+# lacătul de lifecycle. O reinstalare peste un volum existent putea porni astfel o imagine veche pe
+# date criptate. Acum ORICE pornire — instalare nouă sau existentă, cu sau fără Authentik — e
+# ./deploy.sh din trusa tocmai copiată: el trage imaginea, verifică planul, porneşte, aşteaptă
+# sănătatea (cu rollback-ul lui) şi provisionează SSO-ul cu acelaşi plan re-verificat.
+if [ "$FRESH_ENV" = 1 ] && [ "$VOL_STATE" = none ]; then
+  say "[6/7] Starting the stack (Traefik + app) through ./deploy.sh…"
+else
+  say "[6/7] Existing installation (.env or data volume present) — starting it through ./deploy.sh,"
+  say "      which checks the data volume and the image before starting anything…"
+fi
+if [ ! -x ./deploy.sh ]; then
+  err "./deploy.sh is missing in $INSTALL_DIR — refusing to start the stack without its checks."
+  exit 1
+fi
+# load_env a exportat valorile .env-ului de la începutul rulării; WEBTERM_IMAGE din mediu ar bate
+# .env-ul la compose. deploy.sh îşi citeşte singur .env-ul, deci nu-i lăsăm nimic moştenit aici.
+unset WEBTERM_IMAGE WEBTERM_IMAGE_TAG
+if ! ./deploy.sh ${WITH_AUTHENTIK:+--with-authentik}; then
+  err "The stack was not started, or not confirmed healthy, by ./deploy.sh (see above)."
+  err "Fix the cause, then run: cd $INSTALL_DIR && sudo ./deploy.sh   — never 'docker compose up' directly."
+  exit 1
 fi
 
 # O A DOUA instalare pe aceeaşi maşină nu are voie să deturneze unităţile primei. Numele lor

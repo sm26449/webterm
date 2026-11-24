@@ -28,6 +28,14 @@ back.
   that still hold the old vault key in clear**, so they can be deleted once no longer needed.
 
 ### Changed
+- **`install.sh` starts the stack only through `./deploy.sh`.** The installer used to run
+  `docker compose up` itself, for the first start and again after linking SSO, which skipped the
+  checks a deploy makes before starting anything (the data volume, the exact image, no image older
+  than 3.8 on a migrated volume). Re-running it on an existing installation could therefore start an
+  old image on protected data. Every start, on a new or an existing installation, now goes through
+  `./deploy.sh`, and a re-run refuses an `--image` that differs from the installation's own: version
+  changes go through `./upgrade.sh` or `./deploy.sh`. `deploy.sh`, `rollback.sh` and `upgrade.sh`
+  also delete their temporary compose plan on Ctrl-C, and remove plans left by a run that was killed.
 - **A gateway refuses to start rather than run with the wrong key.** A protected volume needs exactly
   its own master key: a missing, wrong or badly-permissioned key file stops the boot before anything
   in the data directory is touched (no clean-up, no restore, no schema change), with one log line

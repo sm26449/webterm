@@ -72,6 +72,8 @@ lifecycle_lock() {   # lifecycle_lock INSTALL_DIR → returns holding the lock; 
     echo "  (it holds $f) — refusing. Wait for it to finish, then run this again." >&2
     exit 1; }
 }
+# RC4-L1: planurile vechi se curăţă doar dacă lacătul e luat acum (fd 9 neprimit de la un părinte)
+WT_RUN_START=$(date +%s); WT_SWEEP=1; [ -e "/proc/$$/fd/9" ] && WT_SWEEP=0
 lifecycle_lock "$PWD"
 
 # --with-authentik: porneşte şi Authentik (SSO) în acelaşi stack (profilul compose `authentik`),
@@ -663,6 +665,17 @@ plan_cleanup() {   # şterge planurile randate de această rulare (conţin mediu
   for f in $PLAN_FILES; do rm -f -- "$f"; done
   PLAN_FILES=""
 }
+plan_sweep() {   # plan_sweep DIR → şterge planurile rămase de la o rulare întreruptă (RC4-L1)
+  # Un SIGKILL / o cădere a maşinii nu rulează trap-ul, iar planul conţine mediul rezolvat al serviciilor.
+  # Doar când lacătul a fost luat ACUM (WT_SWEEP=1, nu moştenit de la un părinte care ar putea avea un
+  # plan viu): fişiere obişnuite (nu symlink-uri), ale noastre, din DIR, mai vechi decât începutul rulării.
+  local n
+  [ "${WT_SWEEP:-0}" = 1 ] && [ -n "${WT_RUN_START:-}" ] || return 0
+  n=$(find "$1" -maxdepth 1 -name '.wt-plan.*' -type f -user "$(id -u)" ! -newermt "@$WT_RUN_START" \
+        -print -delete 2>/dev/null | wc -l) || n=0
+  [ "${n:-0}" -eq 0 ] || echo "→ removed $n stale compose plan file(s) left by an interrupted run."
+  return 0
+}
 render_checked() {   # render_checked COMPOSE_FILE IMAGE_REF IMAGE_ID LABEL [BASE_PLAN] → 0 + PLAN_FILE, PLAN_NAME; 1 refused
   # RC3-H1: planul se randează o singură dată, cu mediul din `up` (WEBTERM_IMAGE=<ID>, eticheta), şi se
   # scrie într-un fişier privat; garda şi `up` folosesc exact acel fişier. Toate profilele (`*`): un
@@ -743,12 +756,14 @@ guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the s
   return 0
 }
 # ── sfârşitul gărzii 3.8 (bloc identic în deploy.sh, rollback.sh, upgrade.sh) ──
+plan_sweep "$PWD"
 # imaginea pe care compose o va porni: WEBTERM_IMAGE, altfel default-ul din compose
 TARGET_IMG="${WEBTERM_IMAGE:-}"
 if [ -z "$TARGET_IMG" ]; then
   TARGET_IMG=$($COMPOSE -f "$FILE" config --images 2>/dev/null | grep -m1 -E '/webterm[:@]' || true)
 fi
-trap plan_cleanup EXIT
+# RC4-L1: şi la Ctrl-C / TERM (exit din trap rulează trap-ul EXIT)
+trap plan_cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 if [ -n "$TARGET_IMG" ]; then
   # R-H1: verificarea e chiar înaintea lui `up`, sub lacătul de lifecycle; nimic nu rulează între ele
   # RC-H1: şi imaginea din planul compose (services.app.image) e exact cea verificată, ca ID
