@@ -37,10 +37,28 @@ async def revoke_all_shares(owner_email: str | None = None,
         args = ()
     rows = await db.fetchall("SELECT id, share_expires FROM sessions" + where, *args)
     sids = {r["id"] for r in rows}
-    # 3.8: gardul de revocare al înregistrărilor criptate pe fiecare sid atins (no-op când e oprit)
-    async with txhub.revoking_many(sids):
+    if not txhub.active():
         await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
                          " share_writable=0" + where, *args)
+    else:
+        # 3.8 (M3): gardul şi mutaţia pe ACELAŞI set fix de rânduri (UPDATE pe id-uri, nu pe predicat);
+        # un share apărut între timp e prins de trecerea următoare, tot cu gard. După 3 treceri, un
+        # gard global peste predicat (fail-closed: orice citire în curs se re-autorizează).
+        todo = set(sids)
+        for _pass in range(3):
+            if not todo:
+                break
+            async with txhub.revoking_many(todo):
+                for chunk in _chunks(sorted(todo)):
+                    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                                     " share_writable=0 WHERE id IN (%s)" % ",".join("?" * len(chunk)),
+                                     *chunk)
+            todo = {r["id"] for r in await db.fetchall("SELECT id FROM sessions" + where, *args)}
+            sids |= todo
+        if todo:
+            async with txhub.revoking(None):
+                await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                                 " share_writable=0" + where, *args)
     for sid, hub in list(core.hubs.items()):
         if sid in sids:
             await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
@@ -51,22 +69,25 @@ async def delete_replay_links(where: str, *args) -> int:
     """Şterge link-urile de replay care se potrivesc (+ jurnalul lor de deschideri) şi întoarce
     câte erau ÎNCĂ ACTIVE. Ştergere, nu marcaj: un link revocat nu mai are ce arăta, iar urma
     durabilă a deschiderilor stă oricum în audit_log."""
-    rows = await db.fetchall("SELECT id, expires FROM replay_links" + where, *args)
+    # 3.8 (M3): id-urile şi sid-urile din ACEEAŞI citire — gardul acoperă exact rândurile şterse
+    rows = await db.fetchall("SELECT id, expires, sid FROM replay_links" + where, *args)
     if not rows:
         return 0
     ids = [r["id"] for r in rows]
-    sids = ()
-    if txhub.active():
-        sids = {r["sid"] for r in await db.fetchall("SELECT DISTINCT sid FROM replay_links" + where, *args)}
+    sids = {r["sid"] for r in rows} if txhub.active() else ()
     # 3.8: un flux de replay deschis cu un link revocat cade la următorul chunk (gardul §12.11.2)
     async with txhub.revoking_many(sids):
-        for i in range(0, len(ids), 500):
-            chunk = ids[i:i + 500]
+        for chunk in _chunks(ids):
             marks = ",".join("?" * len(chunk))
             await db.execute("DELETE FROM replay_opens WHERE link_id IN (%s)" % marks, *chunk)
             await db.execute("DELETE FROM replay_links WHERE id IN (%s)" % marks, *chunk)
     now = time.time()
     return sum(1 for r in rows if r["expires"] > now)
+
+
+def _chunks(items, n=500):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
 
 
 async def revoke_replay_links(owner_id: int | None = None) -> int:

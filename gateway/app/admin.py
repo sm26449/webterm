@@ -37,12 +37,14 @@ ultimul Owner care încă are parolă locală (contul break-glass), în afară d
 """
 import argparse
 import asyncio
+import contextlib
 import getpass
+import io
 import os
 import sys
 import time
 
-from . import config, db, keys, owners, security
+from . import config, db, keys, owners, security, txstore
 
 
 async def _find(email: str):
@@ -114,11 +116,40 @@ async def _bump_tx_access_gen() -> None:
         " SET value = CAST(COALESCE(CAST(value AS INTEGER), 0) + 1 AS TEXT)")
 
 
+async def tx_volume() -> bool:
+    """Encrypted recordings may be served from this data volume: the flag is on in THIS process, or
+    the volume carries the test-volume marker (the only volume a 3.8 PR5 gateway serves them from,
+    even when the CLI was started without the flag). Otherwise the command runs exactly as in 3.7
+    (M4: no transaction, no access_gen)."""
+    if txstore.enabled():
+        return True
+    try:
+        return await db.fetchone("SELECT 1 FROM tx_state WHERE key='test_volume'") is not None
+    except Exception as e:                       # noqa: BLE001 — doar o bază fără tabel e „nu"
+        if "no such table" in str(e):
+            return False
+        raise
+
+
 async def run_access_change(fn, args) -> None:
-    """`fn(args)` and the access_gen bump in ONE transaction (both or neither)."""
-    async with db.transaction():
+    """`fn(args)` and the access_gen bump in ONE transaction (both or neither). What the command
+    prints on stdout is held until the COMMIT returned (M4): a failed stamp or commit rolls
+    everything back, prints nothing of the command's success and propagates (non-zero exit)."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        async with db.transaction():
+            await fn(args)
+            await _bump_tx_access_gen()
+    sys.stdout.write(out.getvalue())
+
+
+async def dispatch(cmd, fn, args) -> None:
+    """One command: an access change on a tx volume in ONE transaction with the access_gen stamp
+    (output after COMMIT); anything else exactly as in 3.7."""
+    if cmd in ACCESS_CHANGES and await tx_volume():
+        await run_access_change(fn, args)
+    else:
         await fn(args)
-        await _bump_tx_access_gen()
 
 
 async def cmd_list(_args) -> None:
@@ -526,10 +557,7 @@ async def main() -> None:
               "roles": cmd_roles, "promote": cmd_promote,
               "sso-only": cmd_sso_only, "enable": cmd_enable,
               "vacuum": cmd_vacuum}[args.cmd]
-        if args.cmd in ACCESS_CHANGES:
-            await run_access_change(fn, args)
-        else:
-            await fn(args)
+        await dispatch(args.cmd, fn, args)
     finally:
         await db.close()
         os.close(maint)

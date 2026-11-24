@@ -17,7 +17,7 @@ import asyncssh
 
 from fastapi import (APIRouter, Depends, HTTPException, Query, Request, Response,
                      WebSocket, WebSocketDisconnect)
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from typing import Optional
 
@@ -28,7 +28,7 @@ from . import webauthn_api
 from . import (accounts, alert_history, audit, authz, backup, certmon, cmdguard, config,
                agentca, agentgate, core, db, edgeguard, edgelists, edgemtls, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, idlesess, push,
                pyruntime, replay, scim, security, sessctl, shares, conntypes, fwddomain, signing, ssomap,
-               stepup, syshealth, totp, txhub, updatecheck, watermark)
+               stepup, syshealth, totp, txhub, txstore, updatecheck, watermark)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -4552,13 +4552,22 @@ async def search(q: str, request: Request, user=Depends(authz.perm('recording.vi
     # CE s-a căutat, nu doar că s-a căutat: „a rulat o căutare" nu răspunde la întrebarea
     # de după un cookie furat, iar interogarea E lucrul care spune ce urmărea atacatorul.
     audit.detail(request, "search: " + q)
-    # 3.8: contoarele de revocare ale înregistrărilor criptate, capturate ÎNAINTEA deciziei (§12.11.2);
-    # grant-urile se recitesc după captură. Un token de automatizare primeşte doar metadate.
+    # 3.8: un token de automatizare primeşte doar metadate; un cookie, conţinut sub `_search_tx`.
     is_token = isinstance(user, dict) and bool(user.get("is_token"))
-    txsnap = txhub.snapshot() if txhub.active() and not is_token else None
-    grants = authz.grants_of(request)
-    if txsnap is not None:
-        grants = await authz.grants_for_user(user["id"])
+    if txhub.active() and not is_token:
+        return await _search_tx(request, user, q)
+    rows = await _search_rows(authz.grants_of(request), user["id"])
+    if txhub.active():
+        found = await core.search_transcripts_tx(rows, q, "user:%s" % user["id"], None)
+        return {"sessions": [res for res, _acc, _meta in found]}
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(None, core.search_transcripts, rows, q)
+    return {"sessions": results}
+
+
+async def _search_rows(grants, user_id: int) -> list:
+    """The sessions a search may look into (3.7 rules): visible hosts with `recording.view`,
+    and on a `require_2fa` host only with an open step-up window."""
     # 3.6 (§A.11.12): filtrul de vizibilitate e în SQL, ÎNAINTE de a citi vreun transcript —
     # filtrat după citire ar fi şi o scurgere prin timp, şi un amplificator de DoS.
     vis = await authz.visible_hosts(grants, "recording.view")
@@ -4578,14 +4587,49 @@ async def search(q: str, request: Request, user=Depends(authz.perm('recording.vi
         "SELECT id FROM hosts WHERE require_2fa=1")}
     if gated:
         # read-only: o căutare nu trebuie să prelungească fereastra de step-up pe hosturile potrivite
-        allowed = {hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
+        allowed = {hid for hid in gated if security.stepup_window_is_open(user_id, hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
-    if txhub.active():
-        results = await core.search_transcripts_tx(rows, q, "user:%s" % user["id"], txsnap)
-        return {"sessions": results}
-    loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(None, core.search_transcripts, rows, q)
-    return {"sessions": results}
+    return rows
+
+
+async def _search_tx(request: Request, user, q: str):
+    """3.8 search on encrypted recordings (H2, §12.11.10 "Authorization until emission"): the
+    counters are captured BEFORE the decision (cookie re-validated, grants re-read, hosts filtered);
+    each sid's Access carries the earliest deadline (web session, time-bound binding, its host's
+    step-up window). Right before the response leaves — synchronously at the end of the route and
+    again in the body, after any middleware — a global change or the caller's deadline re-runs the
+    whole search once (then refuses), and content read under an Access that no longer holds is
+    dropped (a result that matched only through it disappears)."""
+    tok = request.cookies.get(security.COOKIE_NAME)
+    uid = user["id"]
+    principal = "user:%s" % uid
+    for _attempt in (0, 1):
+        snap = txhub.snapshot()
+        u = await security.user_for_token(tok)
+        if not u or u["id"] != uid:
+            raise ApiError(401, "auth.required", "not authenticated")
+        grants = await authz.grants_for_user(uid)
+        rows = await _search_rows(grants, uid)
+        base = txhub.earliest(await txhub.web_session_limits(tok, grants))
+        gated = {r["id"] for r in await db.fetchall("SELECT id FROM hosts WHERE require_2fa=1")}
+
+        def deadline(row, base=base, gated=gated):
+            if row["host_id"] in gated:
+                return txhub.earliest([base, txhub.stepup_deadline(uid, row["host_id"])])
+            return base
+        found = await core.search_transcripts_tx(rows, q, principal, snap, not_after=deadline)
+        results = txhub.search_emit(snap, found, base)
+        if results is None:
+            continue                              # decizia e veche: o reluăm, o dată
+
+        async def body(snap=snap, found=found, base=base):
+            # ultima verificare, după middleware, chiar înainte de predarea către transport
+            out = txhub.search_emit(snap, found, base)
+            yield json.dumps({"sessions": out if out is not None else []}).encode()
+        return StreamingResponse(body(), media_type="application/json",
+                                 headers={"Cache-Control": "no-store"})
+    raise ApiError(503, "transcript.busy", "recordings are busy; retry in a few seconds",
+                   headers={"Retry-After": "5"})
 
 
 # ── [snippets] Snippets (comenzi salvate) ───────────────────────────────────────────
@@ -6290,6 +6334,7 @@ async def shared_ws(ws: WebSocket, token: str):
         # Un invitat nu e niciodată „dispozitivul tău": link-ul a fost dat deliberat, dar
         # MOMENTUL în care cineva îl foloseşte e exact ce vrei să afli. Deci mereu necunoscut.
         client.known = False
+        client.tx_decide = _ws_guest_decider(security.sha256_hex(token), row["id"])
     await ws.send_text(json.dumps({"type": "init", "state": row["state"],
                                    "title": row["title"], "readonly": not writable,
                                    "writable": writable,
@@ -6323,13 +6368,20 @@ async def shared_ws(ws: WebSocket, token: str):
     osc_span: dict = {}
     replay_sent = False
     if not start_locked:
+        grant = core.ws_grant(row["id"], "guest:" + client.id, "ws-attach",
+                              client.tx_decide if client else None)
         replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows, span=osc_span,
-                                                principal="guest:" + client.id)
+                                                grant=grant)
+        # 3.8 (§12.11.10): decizia invitatului (tokenul de share) re-verificată chiar înainte de
+        # trimitere; refuzat → nimic din istoric (nici blocul tmux, aceeaşi decizie)
+        granted = not txhub.active() or await grant.before_emit()
         if hub and (hub.locked or (share_2fa and not hub.has_operator())):
             start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
-        else:
+        elif granted:
             await ws.send_bytes(replay_bytes)
             replay_sent = True
+        else:
+            await ws.send_bytes(b"")
     if hub:
         # Blocat ÎNAINTE de a intra în hub: între `clients.add` şi sfârşitul ataşării sunt mai multe
         # await-uri (ensure_attached = drum la agent, audit, roster) în care `push` livra output-ul
@@ -6462,6 +6514,47 @@ async def _ws_access(user_id: int, row) -> str:
     return "none"
 
 
+def _ws_user_decider(tok, user_id: int, sid: str, *, live: bool):
+    """3.8 (§12.11.10, H1): the browser WebSocket's own decision for ONE history read (attach,
+    resync, unlock), re-run from the connection's credential (the cookie) and scope (this sid):
+    the web session still valid, the account's CURRENT access to the sid ('rw'/'ro' on a live
+    connection, 'replay' on a closed one, as `_revalidate`), and — closed session on a 2FA host —
+    an open step-up window. Deadline = the earliest of the web session's absolute/idle expiry, a
+    time-bound binding and that window. On a live hub the 2FA gate is the hub/client lock, checked
+    synchronously right before the send. Any refusal raises (nothing is read or sent)."""
+    async def decide():
+        if not await security.session_valid(tok):
+            raise txstore.Revoked("revoked", "web session ended")
+        cur = await db.fetchone("SELECT * FROM sessions WHERE id=?", sid)
+        acc = await _ws_access(user_id, cur) if cur else "hidden"
+        if acc not in (("rw", "ro") if live else ("replay",)):
+            raise txstore.Revoked("revoked", "no access to this session")
+        g = await authz.grants_for_user(user_id)
+        limits = await txhub.web_session_limits(tok, g)
+        if not live:
+            h = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", cur["host_id"])
+            if h is None or h["require_2fa"]:
+                if not security.stepup_window_is_open(user_id, cur["host_id"]):
+                    raise txstore.Revoked("revoked", "step-up window closed")
+                limits.append(txhub.stepup_deadline(user_id, cur["host_id"]))
+        return txhub.earliest(limits)
+    return decide
+
+
+def _ws_guest_decider(token_hash: str, sid: str):
+    """3.8 (§12.11.10, H1): a share guest's decision for one history read, from the share token
+    (the guest's only credential): the link still valid for THIS live sid; deadline = its expiry.
+    The 2FA rule (a verified operator present) is the client/hub lock, checked right before the send."""
+    async def decide():
+        r = await db.fetchone(
+            "SELECT id, state, share_expires FROM sessions WHERE share_token=? AND share_expires > ?",
+            token_hash, time.time())
+        if r is None or r["id"] != sid or r["state"] not in ("creating", "live"):
+            raise txstore.Revoked("revoked", "share link no longer valid")
+        return r["share_expires"]
+    return decide
+
+
 # ── [ws] /ws/sessions/{sid} — browser terminal websocket ──────────────────────────────────────────
 
 @router.websocket("/ws/sessions/{sid}")
@@ -6510,6 +6603,8 @@ async def browser_ws(ws: WebSocket, sid: str):
         # „Cunoscut" = IP-ul a mai apărut la un login reuşit al ACESTUI cont. Deliberat un
         # semnal slab: decide doar dacă facem zgomot, niciodată dacă sărim o verificare.
         client.known = await security.ip_is_known(user["id"], client.remote_addr)
+        client.tx_decide = _ws_user_decider(ws.cookies.get(security.COOKIE_NAME), user["id"], sid,
+                                            live=True)
 
     # host_online pe aceeaşi regulă ca `_host_json` (jump = agentul părinte), nu `in sources`:
     # o sesiune telnet-jump e pe un host fără sursă proprie şi apărea „host offline" deşi era vie
@@ -6574,15 +6669,22 @@ async def browser_ws(ws: WebSocket, sid: str):
     osc_span: dict = {}
     replay_sent = False
     if not start_locked:
-        replay = await core.attach_replay(sid, hub, sb, sb_rows, span=osc_span,
-                                          principal="user:%s" % user["id"])
+        decide = client.tx_decide if client else _ws_user_decider(
+            ws.cookies.get(security.COOKIE_NAME), user["id"], sid, live=False)
+        grant = core.ws_grant(sid, "user:%s" % user["id"], "ws-attach", decide)
+        replay = await core.attach_replay(sid, hub, sb, sb_rows, span=osc_span, grant=grant)
+        # 3.8 (§12.11.10): decizia WS-ului re-verificată chiar înainte de trimitere (contoarele
+        # capturate înaintea ei); refuzat → nimic din istoric
+        granted = not txhub.active() or await grant.before_emit()
         if hub and hub.locked:
             # blocată (idle-lock) cât aşteptam istoricul de la agent: nu scurgem nimic; calea
             # `start_locked` de mai jos ne blochează clientul şi trimite „locked"
             start_locked = True
-        else:
+        elif granted:
             await ws.send_bytes(replay)
             replay_sent = True
+        else:
+            await ws.send_bytes(b"")
     elif not hub:
         # Sesiune ÎNCHISĂ pe host 2FA fără fereastră de step-up: nu există hub care să trimită un
         # „locked" prin broadcast, deci semnalăm direct pe acest socket şi NU trimitem scrollback.
@@ -6726,8 +6828,11 @@ async def browser_ws(ws: WebSocket, sid: str):
                             start_locked = False
                             await ws.send_text(json.dumps({"type": "unlocked"}))
                             if txhub.active():
-                                tail, _e, _le = await core.read_tail_tx(
-                                    sid, principal="user:%s" % user["id"], route="ws-unlock")
+                                grant = core.ws_grant(sid, "user:%s" % user["id"], "ws-unlock",
+                                                      _ws_user_decider(tok, user["id"], sid, live=False))
+                                tail, _e, _le = await core.read_tail_tx(sid, grant=grant)
+                                if not await grant.before_emit():
+                                    tail = b""          # §12.11.10: refuzat chiar înainte de emitere
                                 await ws.send_bytes(tail)
                             else:
                                 await ws.send_bytes(await asyncio.to_thread(core.read_tail, sid))

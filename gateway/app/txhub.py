@@ -18,7 +18,11 @@ Pieces:
   same-epoch reattach as a no-op, `resume()` after an overflow, `close(cast_ts)`).
 * Counters: `bump` / `revoking` (the §12.11.2 fences) and the `tx_state.access_gen` poller for
   writers in another process (`python3 -m app.admin`).
-* Readers used by core.py: `tail_out` (attach replay, resync, closed-session replay, preview).
+* Authorization until emission (§12.11.10): `authorizer` + `Grant`. Every reader (HTTP route,
+  WebSocket history, search) builds its `Access` from its OWN decision, re-run with the counters
+  captured first, and checks it again immediately before anything derived from the recording is
+  handed to the transport (`Grant.before_emit` / `Grant.emit_ok`, `emit_chunks`, `search_emit`).
+* Readers used by core.py: `tail_out` (attach replay, resync, closed-session replay).
   Route-level readers live in the route modules, which own the authorization (share_api.py).
 """
 import asyncio
@@ -28,10 +32,9 @@ import dataclasses
 import json
 import logging
 import os
-import re
 import time
 
-from . import authz, config, db, txstore
+from . import authz, config, db, keys, security, txstore
 
 log = logging.getLogger("webterm.txhub")
 
@@ -45,11 +48,11 @@ committed_at = {}
 POLL_SECS = 1.0
 SHUTDOWN_SECS = txstore.SHUTDOWN_SECS
 BACKLOG_CAP = 8 * 1024 * 1024
+# plafonul de INTRĂRI (M2): placeholder-ele disjuncte nu mai pot adăuga obiecte la nesfârşit
+BACKLOG_MAX_ITEMS = 4096
 RETRY_SECS = 1.0
 CHECKPOINT_BYTES = 65536
 CHECKPOINT_SECS = 2.0
-# numele generaţiilor WTX1 (§12.11.0); aceeaşi formă ca txstore, citită aici doar ca să REFUZE boot-ul
-_GEN_NAME = re.compile(r"^[0-9a-f]{32}\.(out|cast)\.[0-9a-f]{32}\.(wtx|idx)$")
 
 
 class BootRefused(Exception):
@@ -67,24 +70,44 @@ def store():
 # ── boot / shutdown ──────────────────────────────────────────────────────────
 
 
+TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps")
+
+
+def recording_files_present(data_dir=None) -> str:
+    """'' when no file of the encrypted-recording namespace is under `transcripts/`; otherwise the
+    first one. The ONE inventory definition shared with backup / restore (`keys.find_reserved`:
+    `transcripts/` and one level of subdirectories such as `arhiva/`, symlinks never followed below
+    the root, a supported `transcripts` symlink followed once; an unreadable directory = found)."""
+    root = str(config.DATA_DIR if data_dir is None else data_dir)
+    try:
+        dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        return "DATA_DIR (unreadable: %s)" % e.strerror
+    try:
+        if keys.is_link(dfd, keys.RESERVED_DIR):
+            return keys.find_reserved_through_link(dfd) or ""
+        # doar subarborele transcripts/: nivelul de sus (keys.wtk & co.) nu e o înregistrare
+        try:
+            top = os.listdir(dfd)
+        except OSError:
+            return "DATA_DIR (unreadable)"
+        return keys.find_reserved(dfd, exempt=frozenset(top)) or ""
+    finally:
+        os.close(dfd)
+
+
 async def encrypted_recordings_present() -> str:
     """'' when the volume holds no encrypted recording; otherwise what was found (a table or a file)."""
-    for table in ("session_keys", "tx_descriptors", "tx_files"):
+    for table in TX_TABLES:
         try:
             if await db.fetchone("SELECT 1 FROM %s LIMIT 1" % table):
                 return table
         except Exception as e:                       # noqa: BLE001 — necitibil ≠ absent
             return "%s (unreadable: %s)" % (table, type(e).__name__)
-    try:
-        names = os.listdir(config.TRANSCRIPT_DIR)
-    except FileNotFoundError:
-        return ""
-    except OSError as e:
-        return "transcripts/ (unreadable: %s)" % e.strerror
-    for n in names:
-        if _GEN_NAME.match(n):
-            return "transcripts/" + n
-    return ""
+    found = await asyncio.to_thread(recording_files_present)
+    return found and ("transcripts: " + found)
 
 
 async def boot(ring, env=None):
@@ -118,18 +141,26 @@ async def boot(ring, env=None):
         st.close()
         raise
     install(st)
+    # M3: baseline-ul lui access_gen se citeşte ÎNAINTE de a servi şi înainte de bucla de poll; o
+    # mutaţie CLI comisă după el se vede ca bump. Necitibil → `have` fals → primul poll face bump.
+    await poll_once(baseline=True)
+    start_poller()
     return st
 
 
 def install(st) -> None:
     """Make `st` the process Store (boot, or a test fixture): readopt hook, alarm sink, authz
-    listener and the access_gen poller."""
-    global _store, _poll_task
+    listener. The access_gen poller starts separately (`start_poller`), after the baseline."""
+    global _store
     _store = st
     st.on_readopt = _on_readopt
     _wrap_alarm(st)
     if _on_authz_bump not in authz.epoch_listeners:
         authz.epoch_listeners.append(_on_authz_bump)
+
+
+def start_poller() -> None:
+    global _poll_task
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -222,10 +253,12 @@ async def _read_access_gen():
 _poll_state = {"have": False, "last": None, "fails": 0}
 
 
-async def poll_once() -> None:
+async def poll_once(baseline=False) -> None:
     """Writers in another process stamp `tx_state.access_gen` in the same transaction as their
-    access change; a change, or two failed polls in a row, bumps the global counter. The first
-    read only learns the value."""
+    access change; a change, or two failed polls in a row, bumps the global counter. Only the
+    boot's baseline read (`baseline=True`, before serving) learns the value silently: any later
+    first read (the baseline failed, or a Store installed without boot) bumps, because what
+    happened before it is unknown (M3)."""
     s = _poll_state
     try:
         val = await _read_access_gen()
@@ -236,7 +269,7 @@ async def poll_once() -> None:
             bump(None)
         return
     s["fails"] = 0
-    if s["have"] and val != s["last"]:
+    if (s["have"] and val != s["last"]) or (not s["have"] and not baseline):
         bump(None)
     s["have"], s["last"] = True, val
 
@@ -271,21 +304,165 @@ def access_since(snap, sid, principal, route, *, not_after=None):
     return dataclasses.replace(acc, not_after=not_after) if not_after is not None else acc
 
 
-# ── readers for core.py (attach replay, resync, preview, closed-session replay) ──
+# ── authorization until emission (§12.11.10) ─────────────────────────────────
 
 
-async def tail_out(sid, limit, *, principal, route, end=None):
-    """(bytes, end, list_epoch) of the committed `.out` (up to `end`), or (b"", None, None) when
-    there is nothing to serve (no recording yet, revoked, a fault: fail closed, logged)."""
+def earliest(limits):
+    """The nearest deadline among `limits` (None entries ignored); None = no deadline."""
+    vals = [x for x in limits if x is not None]
+    return min(vals) if vals else None
+
+
+async def web_session_limits(tok, grants) -> list:
+    """Deadlines of a cookie-authenticated decision: the web session's absolute and idle expiry
+    and the earliest time-bound binding. The session row gone (logout) → refused."""
+    row = await db.fetchone("SELECT expires, last_seen FROM web_sessions WHERE token_hash=?",
+                            security.sha256_hex(tok or ""))
+    if row is None:
+        raise txstore.Revoked("revoked", "web session ended")
+    limits = [authz.earliest_expiry(grants.bindings), row["expires"]]
+    if row["last_seen"] is not None:
+        limits.append(row["last_seen"] + security.WEB_SESSION_IDLE)
+    return limits
+
+
+def stepup_deadline(user_id, host_id) -> float:
+    """The step-up window's end on a 2FA host (0.0 = none: already expired)."""
+    rec = security.stepup_window_record(user_id, host_id)
+    return rec[1] if rec else 0.0
+
+
+def authorizer(sid, principal, route, decide):
+    """An `authorize()` for `Grant` / `Store.open(reauthorize=)`: counters captured FIRST, then
+    `decide()` (the route's own decision from its credential and scope; it returns the deadline,
+    None = none, or raises), then an `Access` bound to those counters. A counter that moved during
+    the decision → the decision runs once more; twice → refused."""
+    async def authorize():
+        for _attempt in (0, 1):
+            snap = snapshot()
+            if snap is None:
+                raise txstore.Revoked("revoked", "encrypted recordings inactive")
+            not_after = await decide()
+            acc = access_since(snap, sid, principal, route, not_after=not_after)
+            if acc is not None:
+                return acc
+        raise txstore.Revoked("revoked", "access changed during the authorization")
+    return authorize
+
+
+class Grant:
+    """One reader's authorization for one sid until emission (§12.11.10). `authorize` is the
+    route's `authorizer`; the Grant keeps the latest `Access` (also the one the Store obtained when it
+    re-authorized mid-read) and refuses a re-authorization that would move the sid's counter: what
+    was read under one sid epoch is never emitted under the next (a sid revocation is final)."""
+
+    def __init__(self, authorize):
+        self._authorize = authorize
+        self.access = None
+
+    async def authorize(self):
+        if self._authorize is None:
+            raise txstore.Revoked("revoked", "no authorization for this reader")
+        acc = await self._authorize()
+        old = self.access
+        if old is not None and (acc.sid != old.sid or acc.sid_epoch != old.sid_epoch):
+            raise txstore.Revoked("revoked", "sid revoked since the read")
+        self.access = acc
+        return acc
+
+    def emit_ok(self) -> bool:
+        """Synchronous: the latest Access still holds (counters, fences, deadline). Call it with
+        nothing awaited between it and the hand-off to the transport."""
+        st = _store
+        if st is None or self.access is None:
+            return False
+        try:
+            st.check(self.access)
+        except txstore.TxStoreError:
+            return False
+        return True
+
+    async def before_emit(self) -> bool:
+        """The last check before emission. A sid revocation → False. A global change or the
+        deadline → the decision is re-run (new counters, same sid epoch) and checked again; True
+        means: emit NOW, with nothing awaited in between."""
+        st = _store
+        if st is None or self.access is None:
+            return False
+        try:
+            st.check(self.access)
+            return True
+        except txstore.NeedsReauth:
+            pass
+        except txstore.TxStoreError:
+            return False
+        try:
+            await st.wait_fences(self.access.sid)
+            await self.authorize()
+            st.check(self.access)
+        except Exception as e:                   # noqa: BLE001 — orice refuz = nimic emis
+            log.info("recording %s: emission refused (%s)", self.access.sid[:8],
+                     getattr(e, "reason", type(e).__name__))
+            return False
+        return True
+
+
+async def emit_chunks(grant, data, chunk=None):
+    """A response body built in memory (text view, preview, a cached redaction), emitted in
+    chunks, each one checked immediately before it is handed over; a refusal cuts the body."""
+    step = chunk or txstore.STREAM_CHUNK
+    for i in range(0, len(data), step):
+        if not await grant.before_emit():
+            raise txstore.Revoked("revoked", "access changed before emission")
+        yield data[i:i + step]
+
+
+def search_emit(snap, found, deadline):
+    """Search results at emission (synchronous, H2). None = the decision itself is stale (a
+    global counter or fence moved, or the caller's own deadline passed): re-run or refuse. Per
+    result, content (snippet, count) read under an `Access` that no longer holds is dropped; a
+    result that matched only through that content is dropped whole."""
     st = _store
-    if st is None:
+    if st is None or snap is None:
+        return None
+    if st.access_epoch != snap[1] or st.fenced(None) or (deadline is not None
+                                                         and st.clock() >= deadline):
+        return None
+    out = []
+    for res, acc, meta_hit in found:
+        if res["matches"] or res["snippet"]:
+            try:
+                if acc is None:
+                    raise txstore.Revoked("revoked", "no access")
+                st.check(acc)
+            except txstore.TxStoreError:
+                if not meta_hit:
+                    continue
+                res = dict(res, snippet="", matches=0)
+        out.append(res)
+    return out
+
+
+# ── readers for core.py (attach replay, resync, closed-session replay) ───────
+
+
+async def tail_out(sid, limit, *, grant, end=None):
+    """(bytes, end, list_epoch) of the committed `.out` (up to `end`), read under `grant` (the
+    WebSocket's own decision, §12.11.10), or (b"", None, None) when there is nothing to serve (no
+    recording yet, refused, a fault: fail closed, logged). The caller still calls
+    `grant.before_emit()` / `emit_ok()` before handing the bytes to the transport."""
+    st = _store
+    if st is None or grant is None:
         return b"", None, None
-    acc = st.access(sid, principal, route)
     try:
-        return await st.tail(sid, "out", limit, access=acc, end=end)
+        acc = await grant.authorize()
+        return await st.tail(sid, "out", limit, access=acc, end=end, reauthorize=grant.authorize)
     except txstore.TxStoreError as e:
         if e.reason != "notFound":
             log.warning("recording tail %s refused: %s", sid[:8], e.reason)
+        return b"", None, None
+    except Exception as e:                       # noqa: BLE001 — decizia a refuzat: nimic servit
+        log.info("recording tail %s refused: %s", sid[:8], type(e).__name__)
         return b"", None, None
 
 
@@ -381,6 +558,10 @@ class Recording:
         self._list_epoch = None
         self._in_sync = True
         self._retry = None
+        # M2: octeţi aruncaţi fără poziţie (plafonul de intrări atins, alt epoch decât ultima
+        # intrare): nu pot deveni marker, doar alarmă explicită la închidere
+        self.unpositioned = 0
+        self.close_report = None
 
     # ── lifecycle ──
 
@@ -478,14 +659,36 @@ class Recording:
         t.add_done_callback(_finalizers.discard)
         return t
 
+    def _unoffered(self, rec):
+        """(bytes of `rec`'s current epoch the backlog holds past `received`, holes included;
+        bytes of any other epoch or without a position). Used once, at close."""
+        re_, ro = rec.received
+        end, other = ro, self.unpositioned
+        for it in self.backlog:
+            if it.pos is not None and it.pos[0] == re_:
+                end = max(end, it.pos[1] + it.n)
+            else:
+                other += it.n
+        return end - ro, other
+
     async def _finalize(self):
+        """Drain under ONE deadline (every pending epoch switch / skip / resume, as many passes as
+        they need), then close the recorder. Whatever the backlog still holds is accounted: the
+        current epoch's bytes join the close marker (`close(unoffered=)`, durable), the rest is
+        alarmed with its size (`transcript.gapUnrecorded`). `close_report` keeps the numbers."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SHUTDOWN_SECS
+        report = self.close_report = {"unoffered": 0, "unrecorded": 0, "closed": False}
         try:
-            for _ in range(4):
+            for _ in range(256):
                 op = self.op
                 if op is not None:
-                    await asyncio.wait([op[1]], timeout=SHUTDOWN_SECS)
+                    left = deadline - loop.time()
+                    if left > 0:
+                        await asyncio.wait([op[1]], timeout=left)
                     if self.op is op:            # nu s-a rezolvat în timp
                         break
+                    continue
                 self._pump()
                 if self.op is None:
                     break
@@ -494,15 +697,31 @@ class Recording:
                 rec = self.rec
                 if rec is None or rec.state != "running":
                     break
+                same, other = self._unoffered(rec)
                 try:
-                    await asyncio.wait_for(rec.close(cast_ts=self.ts()), SHUTDOWN_SECS * 2)
+                    await asyncio.wait_for(rec.close(cast_ts=self.ts(), unoffered=same),
+                                           SHUTDOWN_SECS * 2)
                 except txstore.RecorderLost:
                     await asyncio.sleep(0)
                     continue
+                report.update(unoffered=same, unrecorded=other, closed=True)
+                self.backlog.clear()
+                self.backlog_bytes = 0
+                self.unpositioned = 0
                 break
         except Exception as e:                   # noqa: BLE001 — închiderea nu rupe teardown-ul
             log.warning("recording %s: close failed: %r", self.sid[:8], e)
         finally:
+            left = self.unpositioned + sum(it.n for it in self.backlog)
+            if not report["closed"]:
+                report["unrecorded"] = left
+            if report["unrecorded"] and _store is not None:
+                _store.alarm("transcript.gapUnrecorded",
+                             "%s: %d bytes held by the hub at close are not covered by a confirmed marker"
+                             % (self.sid, report["unrecorded"]))
+            self.backlog.clear()
+            self.backlog_bytes = 0
+            self.unpositioned = 0
             if self._retry is not None:
                 self._retry.cancel()
             if _recordings.get(self.sid) is self:
@@ -526,12 +745,23 @@ class Recording:
         self._pump()
 
     def _push(self, it):
-        if self.backlog_bytes + it.n > BACKLOG_CAP:
+        full = len(self.backlog) >= BACKLOG_MAX_ITEMS
+        if self.backlog_bytes + it.n > BACKLOG_CAP or full:
             # Plafonul backlog-ului: octeţii se pierd, dar poziţia lor rămâne ocupată → marker.
             last = self.backlog[-1] if self.backlog else None
-            if last is not None and last.data is None and last.pos is not None and it.pos is not None \
-                    and last.pos[0] == it.pos[0] and last.pos[1] + last.n == it.pos[1]:
-                last.n += it.n
+            if last is not None and last.pos is not None and it.pos is not None \
+                    and last.pos[0] == it.pos[0] and last.pos[1] + last.n <= it.pos[1] \
+                    and (last.data is None or full):
+                # acelaşi epoch: ultima intrare se extinde până la capătul celei noi (gaura dintre
+                # ele era oricum pierdută) — numărul de intrări nu creşte
+                if last.data is not None:
+                    self.backlog_bytes -= last.n
+                    last.data = None
+                last.n = it.pos[1] + it.n - last.pos[1]
+                return
+            if full:
+                # fără poziţie comparabilă: nu mai adăugăm obiecte; pierderea rămâne numărată
+                self.unpositioned += it.n
                 return
             it.data = None
             self.backlog.append(it)

@@ -2549,6 +2549,114 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   the whole decrypted `.cast` (exactly 3.7's `redact_cast`), cached per §12.11.2 "Caches", and
   emitted in 64 KiB chunks, each checked. Not yet: the per-stream `not_after` timer for a stalled
   transport (checks run per chunk only), System health surfacing of `Store.alarms` (logged only).
+- **Authorization until emission (the contract for every recording reader; PR5b review H1, H2).**
+  A reader's authorization holds until the moment a byte derived from the recording is handed to
+  the transport, not only while it is read. Every reader follows the same four rules, implemented
+  by `txhub.authorizer` + `txhub.Grant`:
+  1. *Own decision, counters first.* The `Access` comes from the reader's own decision, re-run
+     from its own credential and scope (cookie, share token, replay-link token), with the
+     revocation counters captured **before** the decision (`txhub.snapshot()`). If a counter moved
+     during the decision it is re-run once, then refused. Its `not_after` is the earliest deadline
+     the decision used.
+  2. *Checked before emission.* Immediately before the response, and before each emitted part of
+     it, `Grant.before_emit()` checks the latest `Access` (counters, fences, `not_after`); when it
+     returns True the bytes are handed over with nothing awaited in between. A sid revocation is
+     final: what was read under one sid epoch is never emitted under the next, even if the decision
+     would pass again. A global change or a passed deadline re-runs the decision (new counters,
+     same sid epoch) and checks again; a refusal emits nothing.
+  3. *Accumulated plaintext is dropped on refusal.* An in-memory body (text view, preview, the
+     cached redacted replay, the replay text view) is checked before the status line (a refusal is
+     a clean error) and then emitted in `STREAM_CHUNK` pieces, each checked (`txhub.emit_chunks`;
+     a refusal cuts the body). The text conversion runs in a worker, so the check after it matters.
+     These responses carry `Cache-Control: no-store`.
+  4. *No reader without a decision.* A reader with no decision (`decide` None) reads nothing.
+  Readers: download (`.out`/`.cast`, Range), text view, preview, public replay (`.cast`, text),
+  search, and the WebSocket history reads below.
+- **WebSocket history reads (H1).** Attach (`ws-attach`), resync (`ws-resync`) and the unlock of
+  a closed 2FA session (`ws-unlock`) are each one read under the connection's own decision
+  (`api._ws_user_decider`, `api._ws_guest_decider`, kept on the `BrowserClient` as `tx_decide`):
+  - browser: the web session still valid (`session_valid`, no slide), the account's **current**
+    access to the sid (`rw`/`ro` on a live connection, `replay` on a closed one, the same rule as
+    the socket's `_revalidate`), and, on a closed session of a 2FA host, an open step-up window.
+    Deadline: the web session's absolute and idle expiry, the earliest time-bound binding, that
+    window.
+  - share guest: the share token still valid for this live sid; deadline: the link's expiry.
+  - On a live hub the 2FA gate is the hub/client lock (the guest's verified-operator rule
+    included), re-checked synchronously right before the send, as in 3.7.
+  The history is one frame (tmux history block + recording tail, ≤ the replay window). The
+  *continuous re-check* of the history stream is therefore: the decision re-run per read, counters
+  first; `before_emit()` after the read; and a synchronous gate (`BrowserClient.send_bytes(gate=)`)
+  evaluated **after** the socket's send lock is taken (the lock and `Grant.emit_ok()`), so a
+  revocation that lands while the frame waits for the lock still stops it. A refused resync sends
+  an empty frame (the client resets with no history) and drops the queued live bytes, like a lost
+  cutoff; a refused attach sends an empty replay and no OSC 133 span. The tmux history block is
+  gated by the same decision. The live stream after the history is not a recording read: it keeps
+  the 3.7 socket re-validation (`_revalidate`, `WS_REVALIDATE_SECS`, authz wake) and the hub locks.
+- **Search (H2).** The route re-validates the cookie and re-reads the grants after the snapshot,
+  filters hosts as in 3.7, and gives each sid's `Access` the earliest of the web session /
+  binding deadline and, on a 2FA host, its step-up window. `txhub.search_emit` runs synchronously
+  at the end of the route and again inside the response body (after any middleware): a moved
+  global counter, a pending global fence or the caller's own deadline re-runs the whole search
+  once (then 503 `transcript.busy`; in the body: an empty result); a result whose content was read
+  under an `Access` that no longer holds loses its snippet and count, and disappears when it
+  matched only through that content. An automation token still gets metadata only.
+- **Replay links (M1).** The decision behind a public replay read is the link row plus the
+  issuer's current rights (`_replay_row`); its deadline is the earliest of the link's expiry and
+  the issuer's earliest time-bound binding (the same grants the decision used), so an open stream
+  re-authorizes when the issuer's binding ends instead of at the link's expiry.
+- **Finalize accounting (M2).** `Recording._finalize` drains under one deadline
+  (`SHUTDOWN_SECS`), passing through as many epoch switches, skips and resumes as it needs, then
+  closes the recorder. What the adapter's backlog still holds is accounted, never dropped
+  silently: bytes of the recorder's current epoch past `received` (holes included) go to
+  `Recorder.close(unoffered=n)` and join the close `GAP_MARKER` and its `tx_gaps` row (counted
+  once per recorder across close retries); bytes of another epoch (a switch that never committed),
+  bytes without a comparable position, and everything when the recorder is lost and not
+  re-adopted (or the close failed or timed out) raise `transcript.gapUnrecorded` with their size.
+  `close_report` keeps the numbers. The backlog is capped in bytes (8 MiB) **and** in entries
+  (`BACKLOG_MAX_ITEMS`): at the entry cap, a new item of the same epoch extends the last entry
+  into a placeholder up to its end; anything else is counted without an entry.
+- **Revocation counters (M3).** The `access_gen` baseline is read at boot before serving and
+  before the poller starts; any later first read (the baseline failed, a Store installed without
+  boot) bumps the global counter. Bulk share revocation fences and updates the **same fixed set**
+  of rows (`UPDATE … WHERE id IN (…)`); shares that appear meanwhile are taken by up to two more
+  fenced passes, then by a global fence over the predicate. Replay-link deletion takes the ids and
+  the sids from one read. Still open before activation (unchanged): role / binding / account
+  changes bump the global counter after their commit (`authz.bump_epoch`), not under a fence
+  before it; a delayed or failing `access_gen` channel is bounded only by the 1 s poll and the
+  two-failure bump; the per-stream timer for a stalled transport.
+- **Inventory of mixed formats (boot, backup).** One definition: `keys.find_reserved` /
+  `find_reserved_through_link` (the `.wt*` / `.wtx` / `.wtd` / `.idx` namespace under
+  `transcripts/` and one level of subdirectories such as `arhiva/`; a `transcripts` symlink is
+  followed once; an unreadable directory counts as found). The flag-off boot refuses when any
+  `session_keys` / `tx_descriptors` / `tx_files` / `tx_gaps` row exists or that scan finds a file
+  (`txhub.recording_files_present`, top-level key artefacts ignored). A legacy backup is taken
+  only by a booted flag-off gateway (so the inventory above already held) and only when
+  `backup.volume_kind()` is `legacy`, which runs the same scan. 3.8 restore staging
+  (`restore-pending.*`) is applied or refused by the backup code before this check. PR6 must still
+  extend the inventory to the migration and erasure artefacts before the gate is removed.
+- **Flag-off differences from 3.7.** With `WEBTERM_TX_RECORDINGS` off, recordings, readers, the
+  hub and search are 3.7 code byte for byte. The remaining differences are deliberate and
+  harmless:
+  - *Schema:* the `tx_*` / `session_keys` tables exist (additive `CREATE TABLE IF NOT EXISTS`);
+    3.7 ignores them.
+  - *Boot inventory:* after the schema step and the transcript temp clean-up, the boot reads
+    those tables and scans `transcripts/` (above) and refuses to serve when it finds an encrypted
+    recording. This is a refusal to serve, not a write-free preflight: the schema and the clean-up
+    have run by then (both are what 3.7 runs too). Without it a flag-off build would read
+    encrypted recordings as absent.
+  - *Admin CLI:* the access-changing commands (`passwd`, `disable-2fa`, `logout-all`, `promote`,
+    `sso-only`, `enable`) run exactly as in 3.7 (no transaction, no `access_gen` write) unless the
+    volume is a tx volume: the flag on in the CLI's environment, or the `tx_state.test_volume`
+    marker (the only volume a PR5 gateway serves encrypted recordings from, so a CLI started
+    without the flag still stamps it). On a tx volume the command and the stamp are one
+    transaction; the command's stdout is held until the COMMIT returned, a failed stamp or commit
+    rolls everything back, prints no success and exits non-zero.
+  - *Revocation helpers:* `revoke_all_shares` keeps the 3.7 predicate UPDATE; the fenced
+    fixed-set path and the replay-link read change only which rows are fenced (no fence exists
+    when the flag is off). `txhub.revoking*` are no-ops.
+  - *Signatures only:* `core.attach_replay` / `read_tail_tx` take a `grant` instead of a
+    principal string, and `BrowserClient.send_bytes` accepts an optional `gate` (unused when the
+    flag is off); the WebSocket routes build their decision closures without calling them.
 
 ## Appendix: Test vectors (v1)
 

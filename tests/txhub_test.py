@@ -10,11 +10,21 @@ Groups:
     plaintext offsets / 416 / If-Range, text view, preview, search, replay links (redaction across
     record boundaries, text masking), revocation mid-stream (sid bump, link revoke, role removal,
     logout), expiry (`not_after`), the access_gen poller and the admin transaction;
+  * authorization until emission (PR5b review): WebSocket history reads (attach, resync, unlock)
+    with logout / share revocation / step-up expiry landing between the read and the send, the
+    text view / preview / search emitting nothing read under an authorization that moved, replay
+    links bounded by the issuer's time-bound binding;
+  * finalize accounting (close after an overflow, a blocked skip, a pending epoch switch, a lost
+    recorder; the backlog entry cap), the access_gen baseline, fixed-set revocation fences, the
+    admin CLI (3.7 path when the volume is not a tx volume; output only after COMMIT; rollback),
+    the boot/backup file inventory;
   * flag off: the same fixed stream through the 3.7 hub writes the same .out/.cast as before
     (and the logical content of the encrypted recording), no tx rows, no generation files.
 Temp dirs + the real db module; no network, no Docker.
 """
 import asyncio
+import contextlib
+import io
 import json
 import os
 import sys
@@ -33,7 +43,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 import httpx  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
-from app import admin, api, authz, config, core, db, replay, security, share_api, txhub  # noqa: E402
+from app import admin, api, authz, config, core, db, replay, security, share_api, shares, txhub  # noqa: E402
 from app import txstore as ts  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -498,6 +508,524 @@ async def secret_recording(host_id):
     return sid
 
 
+# ── 3b. authorization until emission (PR5b review H1, H2, M1) ─────────────────
+
+
+class FakeWS:
+    def __init__(self):
+        self.bins, self.texts = [], []
+
+    async def send_bytes(self, b):
+        self.bins.append(bytes(b))
+
+    async def send_text(self, t):
+        self.texts.append(t)
+
+
+SECRET = b"secret-history-XYZ"
+
+
+def leaked(ws):
+    return any(SECRET in b for b in ws.bins)
+
+
+async def live_recorded(host_id):
+    sid = await new_session(host_id)
+    hub = await hub_for(sid)
+    await hub.ensure_attached(Ring("e1"))
+    await hub.on_output(SECRET + b"\r\n")
+    await settle(hub._tx)
+    await hub._tx.commit_through(hub._tx.out_pos())
+    return sid, hub
+
+
+async def login():
+    c = client()
+    r = await c.post("/api/login", json={"email": "o@x.co", "password": "parolabuna1"})
+    assert r.status_code == 200, r.text
+    return c, c.cookies.get(security.COOKIE_NAME)
+
+
+def ws_client(hub, uid=None, decide=None, guest=False):
+    ws = FakeWS()
+    cl = core.BrowserClient(ws, hub)
+    cl.id = ("g_" if guest else "o_") + os.urandom(4).hex()
+    cl.is_owner = not guest
+    cl.user_id = uid
+    cl.tx_decide = decide
+    return ws, cl
+
+
+async def resync_racing(cl, action):
+    """A resync whose recording read completes, then `action` lands, then the send."""
+    orig = core.read_tail_tx
+
+    async def racing(*a, **kw):
+        res = await orig(*a, **kw)
+        await action()
+        return res
+    core.read_tail_tx = racing
+    try:
+        await cl._resync(False)
+    finally:
+        core.read_tail_tx = orig
+
+
+async def g_ws_history(c, host_id, uid, token):
+    print("== WebSocket history reads: authorization until emission (H1) ==")
+    sid, hub = await live_recorded(host_id)
+    c2, tok2 = await login()
+    ws, cl = ws_client(hub, uid, api._ws_user_decider(tok2, uid, sid, live=True))
+    await cl._resync(False)
+    check("resync, nothing changed: the committed history is sent", leaked(ws), ws.bins)
+    ws, cl = ws_client(hub, uid, None)
+    await cl._resync(False)
+    check("resync without the WebSocket's decision: nothing from the recording (fail closed)",
+          not leaked(ws) and ws.bins == [b""], ws.bins)
+
+    async def bumping():
+        txhub.bump(sid)                       # o revocare în timpul fiecărei decizii
+        return None
+    data, _e, _l = await core.read_tail_tx(sid, grant=core.ws_grant(sid, "user:%d" % uid, "ws-attach",
+                                                                      bumping))
+    check("counters captured BEFORE the decision: a revocation during every decision → nothing read",
+          data == b"")
+    # Share: invitatul, revocarea între citire şi trimitere.
+    r = await c.post(f"/api/sessions/{sid}/share", json={"expires_minutes": 60})
+    check("share created", r.status_code == 200, r.text[:200])
+    gtok = r.json()["url"].rsplit("/", 1)[1]
+    gdec = api._ws_guest_decider(security.sha256_hex(gtok), sid)
+    gws, g = ws_client(hub, None, gdec, guest=True)
+    await g._resync(False)
+    check("guest resync with a valid share: history sent", leaked(gws))
+    gws, g = ws_client(hub, None, gdec, guest=True)
+
+    async def revoke_share():
+        rr = await c.delete(f"/api/sessions/{sid}/share")
+        assert rr.status_code == 200, rr.text
+    await resync_racing(g, revoke_share)
+    check("share revoked between the guest's read and the send → nothing emitted", not leaked(gws), gws.bins)
+    # Logout în timpul unui resync deja pornit.
+    ws, cl = ws_client(hub, uid, api._ws_user_decider(tok2, uid, sid, live=True))
+
+    async def logout():
+        rr = await c2.post("/api/logout")
+        assert rr.status_code == 200, rr.text
+    await resync_racing(cl, logout)
+    check("logout between the resync's read and the send → nothing emitted", not leaked(ws), ws.bins)
+    # Ataşare: citire autorizată, logout înainte de trimitere.
+    c3, tok3 = await login()
+    grant = core.ws_grant(sid, "user:%d" % uid, "ws-attach", api._ws_user_decider(tok3, uid, sid, live=True))
+    data = await core.attach_replay(sid, hub, 0, 0, grant=grant)
+    ok_before = SECRET in data and grant.emit_ok()
+    await c3.post("/api/logout")
+    check("attach: authorized read, logout before the send → before_emit refuses",
+          ok_before and not await grant.before_emit())
+    grant = core.ws_grant(sid, "user:%d" % uid, "ws-attach", api._ws_user_decider(token, uid, sid, live=True))
+    await core.attach_replay(sid, hub, 0, 0, grant=grant)
+    authz.bump_epoch()
+    check("a global change with the rights kept → re-authorized at emission", await grant.before_emit())
+    grant = core.ws_grant(sid, "user:%d" % uid, "ws-attach", api._ws_user_decider(token, uid, sid, live=True))
+    await core.attach_replay(sid, hub, 0, 0, grant=grant)
+    txhub.bump(sid)
+    check("a sid revocation after the read → refused, never re-authorized", not await grant.before_emit())
+    ws, cl = ws_client(hub, uid, api._ws_user_decider(token, uid, sid, live=True))
+    await resync_racing(cl, lambda: hub.lock("stepup"))
+    check("hub locked between the read and the send → nothing emitted (lock re-checked at the send)",
+          not leaked(ws))
+    hub.locked = False
+    for x in list(hub.clients):
+        hub.clients.discard(x)
+    await close_hub(hub)
+    # Step-up pe un host 2FA: sesiune închisă, calea de deblocare (fără hub).
+    await db.execute("UPDATE sessions SET state='closed', closed_at=? WHERE id=?", time.time(), sid)
+    await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", host_id)
+    try:
+        security.open_stepup_window(uid, host_id)
+        grant = core.ws_grant(sid, "user:%d" % uid, "ws-unlock",
+                              api._ws_user_decider(token, uid, sid, live=False))
+        data, _e, _l = await core.read_tail_tx(sid, grant=grant)
+        good = SECRET in data and grant.emit_ok()
+        opened = security.stepup_window_record(uid, host_id)[0]
+        security._stepup_windows[(uid, host_id)] = (opened, time.time() - 1)
+        st = txhub.store()
+        real = st.clock
+        st.clock = lambda: real() + 400
+        try:
+            refused = not await grant.before_emit()
+        finally:
+            st.clock = real
+        check("closed 2FA session: read inside the step-up window, window expired before the send → refused",
+              good and refused)
+        security._stepup_windows.pop((uid, host_id), None)
+        grant = core.ws_grant(sid, "user:%d" % uid, "ws-unlock",
+                              api._ws_user_decider(token, uid, sid, live=False))
+        data, _e, _l = await core.read_tail_tx(sid, grant=grant)
+        check("closed 2FA session without a step-up window → nothing read", data == b"")
+    finally:
+        await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", host_id)
+    return sid
+
+
+async def g_emission(c, uid, token, big, data):
+    print("== HTTP readers: authorization until emission (H2, M1) ==")
+    cookie = {"cookie": f"{security.COOKIE_NAME}={token}"}
+    resp = await share_api._tx_transcript(mkreq(cookie), big, "txt", False)
+    check("text view: no-store, Content-Length", resp.headers.get("cache-control") == "no-store"
+          and int(resp.headers.get("content-length", "0")) > ts.STREAM_CHUNK, dict(resp.headers))
+    it = resp.body_iterator
+    txhub.bump(big)
+    check("text view: revoked between the last check and the first chunk → nothing emitted",
+          await araises(it.__anext__(), ts.Revoked))
+    await it.aclose()
+    resp = await share_api._tx_transcript(mkreq(cookie), big, "txt", False)
+    it = resp.body_iterator
+    first = await it.__anext__()
+    txhub.bump(big)
+    check("text view: revoked mid-body → the next chunk is refused",
+          0 < len(first) <= ts.STREAM_CHUNK and await araises(it.__anext__(), ts.Revoked))
+    await it.aclose()
+    orig_text = core.text_of_output
+
+    def converting(raw):
+        out = orig_text(raw)
+        txhub.store().bump(big)          # revocarea cade cât rulează conversia (worker)
+        return out
+    core.text_of_output = converting
+    try:
+        ok = await araises(share_api._tx_transcript(mkreq(cookie), big, "txt", False), api.ApiError)
+    finally:
+        core.text_of_output = orig_text
+    check("text view: revoked during the conversion → refused before any byte (no response)", ok)
+    resp = await share_api._tx_preview(mkreq(cookie), big)
+    it = resp.body_iterator
+    txhub.bump(big)
+    check("preview: revoked before the send → nothing emitted", await araises(it.__anext__(), ts.Revoked))
+    await it.aclose()
+    # Căutare: revocarea unui sid în timpul acumulării → conţinutul lui nu iese.
+    st = txhub.store()
+    orig_tail = st.search_tail
+
+    async def tail_then_revoke(sid, **kw):
+        out = await orig_tail(sid, **kw)
+        if sid == big:
+            st.bump(big)
+        return out
+    st.search_tail = tail_then_revoke
+    try:
+        r = await c.get("/api/search?q=0007:")
+    finally:
+        st.search_tail = orig_tail
+    hits = [s["id"] for s in r.json().get("sessions", [])]
+    check("search: control — the content is searchable", big in [s["id"] for s in (await c.get(
+        "/api/search?q=0007:")).json().get("sessions", [])])
+    check("search: sid revoked after its read, before the response → its content is not emitted",
+          r.status_code == 200 and big not in hits, r.text[:200])
+    check("search response: no-store", r.headers.get("cache-control") == "no-store")
+    c5, tok5 = await login()
+
+    async def tail_then_logout(sid, **kw):
+        out = await orig_tail(sid, **kw)
+        await db.execute("DELETE FROM web_sessions WHERE token_hash=?", security.sha256_hex(tok5))
+        st.bump(None)
+        return out
+    st.search_tail = tail_then_logout
+    try:
+        r = await c5.get("/api/search?q=0007:")
+    finally:
+        st.search_tail = orig_tail
+    check("search: logout during the accumulation → re-run → refused, nothing emitted",
+          r.status_code == 401 and "0007" not in r.text, (r.status_code, r.text[:200]))
+    user = await db.fetchone("SELECT * FROM users WHERE id=?", uid)
+    resp = await api._search_tx(mkreq(cookie), user, "0007:")
+    st.bump(None)                                 # după ultima verificare din rută, înainte de corp
+    body = b"".join([x async for x in resp.body_iterator])
+    check("search: a global change between the route's check and the body → empty result",
+          json.loads(body) == {"sessions": []}, body[:200])
+    resp = await api._search_tx(mkreq(cookie), user, "0007:")
+    body = b"".join([x async for x in resp.body_iterator])
+    check("search: control — the body carries the hit when nothing moved",
+          big in [s["id"] for s in json.loads(body)["sessions"]])
+    # M1: link-ul de replay se re-autorizează la expirarea legăturii temporare a emitentului.
+    role = await db.fetchone("SELECT role_id FROM role_bindings WHERE user_id=? LIMIT 1", uid)
+    soon = time.time() + 120
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source, expires,"
+                     " created) VALUES(?,?,?,?,?,?,?)", uid, role["role_id"], "tag", "txhub-m1", "manual",
+                     soon, time.time())
+    authz.bump_epoch()
+    try:
+        r = await c.post(f"/api/sessions/{big}/replay-links", json={"expires_hours": 24, "redact": False})
+        tokl = r.json()["url"].rsplit("/", 1)[1]
+        req = mkreq({"x-replay-token": tokl})
+        row = await share_api._replay_lookup(req)
+        acc = await share_api._tx_link_authorizer(req, row, "replay-cast").authorize()
+        check("replay link: not_after = the issuer's earliest time-bound binding (not the link's expiry)",
+              acc.not_after is not None and abs(acc.not_after - soon) < 1 and acc.not_after < row["expires"],
+              (acc.not_after, soon, row["expires"]))
+        await c.delete(f"/api/replay-links/{r.json()['id']}")
+    finally:
+        await db.execute("DELETE FROM role_bindings WHERE scope_value='txhub-m1'")
+        authz.bump_epoch()
+
+
+# ── 3c. finalize accounting, counters, admin, inventory (PR5b review M2–M4) ───
+
+
+class Pending:
+    """A never-resolving adapter operation (a blocked skip / epoch switch)."""
+
+    def __init__(self):
+        self.fut = None
+
+    def __call__(self, *a, **kw):
+        self.fut = asyncio.get_running_loop().create_future()
+        return self.fut
+
+
+async def fresh_rec(host_id):
+    sid = await new_session(host_id)
+    hub = await hub_for(sid)
+    await hub.ensure_attached(Ring("e1"))
+    await hub.on_output(b"base\r\n")
+    await settle(hub._tx)
+    return sid, hub, hub._tx
+
+
+async def g_finalize(host_id):
+    print("== finalize accounting (M2) ==")
+    st = txhub.store()
+    old_secs = txhub.SHUTDOWN_SECS
+    txhub.SHUTDOWN_SECS = 0.3
+    try:
+        # Skip blocat: backlog-ul rămas intră în markerul de close (durabil).
+        sid, hub, r = await fresh_rec(host_id)
+        e, o = r.rec.received
+        r.rec.skip_to = Pending()
+        r.feed((e, o + 10), b"x" * 5)
+        r.feed((e, o + 15), b"y" * 7)
+        held = 10 + 5 + 7
+        await close_hub(hub)
+        gaps = [(g.size, g.reason) for g in r.rec.gaps]
+        check("blocked skip at close: the held bytes (hole included) become the close marker",
+              r.close_report == {"unoffered": held, "unrecorded": 0, "closed": True}
+              and gaps[-1:] == [(held, "close")], (r.close_report, gaps))
+        check("blocked skip at close: recording sealed and verified", (await st.verify(sid)).get("ok"))
+        # Comutare de epoch blocată: octeţii altui epoch nu pot deveni marker → alarmă explicită.
+        sid, hub, r = await fresh_rec(host_id)
+        r.rec.change_epoch = Pending()
+        r.feed(("e2", 0), b"z" * 9)
+        r.feed(("e2", 9), b"z" * 4)
+        n0 = len(st.alarms)
+        await close_hub(hub)
+        al = [a for a in st.alarms[n0:] if a[0] == "transcript.gapUnrecorded"]
+        check("pending epoch switch at close: the other epoch's 13 bytes are alarmed with their size",
+              r.close_report["unrecorded"] == 13 and r.close_report["closed"] and al
+              and " 13 bytes" in al[-1][1], (r.close_report, al))
+        # Recorder pierdut, fără readoptare: tot backlog-ul e alarmat.
+        sid, hub, r = await fresh_rec(host_id)
+        real = r.rec
+        r.rec.skip_to = Pending()
+        e, o = real.received
+        r.feed((e, o + 3), b"q" * 6)
+
+        class Lost:
+            state = "lost"
+            received = real.received
+        r.op = None
+        r.rec = Lost()
+        n0 = len(st.alarms)
+        await close_hub(hub)
+        al = [a for a in st.alarms[n0:] if a[0] == "transcript.gapUnrecorded"]
+        check("lost recorder at close (no re-adoption): the backlog is alarmed, never silent",
+              r.close_report["closed"] is False and r.close_report["unrecorded"] == 6 and al, (r.close_report, al))
+        await real.close()
+        # Close imediat după un overflow: contabilitate completă (înregistrat + goluri = oferit).
+        sid, hub, r = await fresh_rec(host_id)
+        old_cap = st.pending_cap
+        st.pending_cap = 1500
+        offered = len(b"base\r\n")
+        try:
+            for i in range(8):
+                chunk = bytes([65 + i]) * 400
+                await hub._process_output(chunk)
+                offered += len(chunk)
+            hub.teardown()                        # fără settle: chiar după overflow
+            await r.close_task
+        finally:
+            st.pending_cap = old_cap
+        out = await decrypt(sid)
+        n = out.count(ts.GAP_MARKER)
+        recorded = len(out) - n * len(ts.GAP_MARKER)
+        lost = sum(g.size for g in r.rec.gaps)
+        check("close right after an overflow: recorded + every gap = everything offered",
+              r.close_report["closed"] and recorded + lost == offered and n == len(r.rec.gaps),
+              (recorded, lost, offered, n, r.close_report))
+    finally:
+        txhub.SHUTDOWN_SECS = old_secs
+    # Plafonul de intrări: placeholder-ele nu cresc nelimitat.
+    sid, hub, r = await fresh_rec(host_id)
+    old_items = txhub.BACKLOG_MAX_ITEMS
+    txhub.BACKLOG_MAX_ITEMS = 4
+    try:
+        e, o = r.rec.received
+        r.rec.skip_to = Pending()
+        for k in range(12):
+            r.feed((e, o + 10 + k * 20), b"p" * 5)
+        last = r.backlog[-1]
+        check("backlog entry cap: never more than BACKLOG_MAX_ITEMS entries, positions still covered",
+              len(r.backlog) <= 4 and last.pos[1] + last.n == o + 10 + 11 * 20 + 5,
+              (len(r.backlog), last.pos, last.n))
+    finally:
+        txhub.BACKLOG_MAX_ITEMS = old_items
+    old_secs = txhub.SHUTDOWN_SECS
+    txhub.SHUTDOWN_SECS = 0.3
+    try:
+        await close_hub(hub)
+    finally:
+        txhub.SHUTDOWN_SECS = old_secs
+
+
+async def g_counters(c, host_id, uid, big):
+    print("== access_gen baseline and fixed-set revocation fences (M3) ==")
+    st = txhub.store()
+    txhub._poll_state.update(have=False, last=None, fails=0)
+    e0 = st.access_epoch
+    await txhub.poll_once(baseline=True)
+    check("boot baseline read: learns access_gen without a bump", st.access_epoch == e0)
+    txhub._poll_state.update(have=False, last=None, fails=0)
+    await txhub.poll_once()
+    check("a first read that is not the boot baseline bumps (what came before is unknown)",
+          st.access_epoch == e0 + 1)
+    a = await new_session(host_id)
+    b = await new_session(host_id)
+    r = await c.post(f"/api/sessions/{a}/share", json={"expires_minutes": 60})
+    check("share on A", r.status_code == 200, r.text[:200])
+    fenced = []
+    orig = txhub.revoking_many
+
+    @contextlib.asynccontextmanager
+    async def spy(sids):
+        sids = set(sids)
+        fenced.append(sids)
+        if len(fenced) == 1:
+            # un share nou apare între SELECT şi UPDATE (pe B)
+            await db.execute("UPDATE sessions SET share_token=?, share_expires=?, share_by_id=? WHERE id=?",
+                             security.sha256_hex("late-" + b), time.time() + 3600, uid, b)
+        async with orig(sids):
+            yield
+    txhub.revoking_many = spy
+    try:
+        await shares.revoke_all_shares(None, uid)
+    finally:
+        txhub.revoking_many = orig
+    rows = await db.fetchall("SELECT id, share_token FROM sessions WHERE id IN (?,?)", a, b)
+    check("revoke-all: a share created between the SELECT and the UPDATE is fenced and revoked too",
+          all(x["share_token"] is None for x in rows) and a in fenced[0] and any(b in f for f in fenced),
+          (fenced, [dict(x) for x in rows]))
+    check("revoke-all: the first fence covers exactly the selected rows (no unfenced extra)",
+          b not in fenced[0], fenced)
+    r = await c.post(f"/api/sessions/{big}/replay-links", json={"expires_hours": 1, "redact": False})
+    check("replay link for the deletion test", r.status_code == 200, r.text[:200])
+    fenced.clear()
+    txhub.revoking_many = lambda sids: _rec_fence(fenced, orig, sids)
+    try:
+        n = await shares.delete_replay_links(" WHERE id=?", r.json()["id"])
+    finally:
+        txhub.revoking_many = orig
+    check("replay-link deletion: the fence comes from the same read as the deleted ids",
+          n == 1 and fenced == [{big}], (n, fenced))
+
+
+def _rec_fence(log_, orig, sids):
+    sids = set(sids)
+    log_.append(sids)
+    return orig(sids)
+
+
+async def g_admin():
+    print("== admin CLI: 3.7 path off a tx volume, output after COMMIT, rollback (M4) ==")
+    check("the test volume is a tx volume for the CLI (marker), whatever its flag", await admin.tx_volume())
+    gen0 = (await db.fetchone("SELECT value FROM tx_state WHERE key='access_gen'"))["value"]
+
+    async def change(_args):
+        await db.execute("INSERT INTO app_settings(key, value) VALUES('txhub-m4', 'x')")
+        print("✓ done")
+    orig_vol = admin.tx_volume
+
+    async def no():
+        return False
+    admin.tx_volume = no
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            await admin.dispatch("promote", change, None)
+    finally:
+        admin.tx_volume = orig_vol
+    gen1 = (await db.fetchone("SELECT value FROM tx_state WHERE key='access_gen'"))["value"]
+    check("not a tx volume: the command runs as in 3.7 (no access_gen write), output printed",
+          gen1 == gen0 and out.getvalue() == "✓ done\n"
+          and await db.fetchone("SELECT 1 FROM app_settings WHERE key='txhub-m4'"), (gen0, gen1, out.getvalue()))
+    await db.execute("DELETE FROM app_settings WHERE key='txhub-m4'")
+    orig_bump = admin._bump_tx_access_gen
+
+    async def broken_stamp():
+        raise RuntimeError("stamp failed")
+    admin._bump_tx_access_gen = broken_stamp
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            ok = await araises(admin.dispatch("promote", change, None), RuntimeError)
+    finally:
+        admin._bump_tx_access_gen = orig_bump
+    gen2 = (await db.fetchone("SELECT value FROM tx_state WHERE key='access_gen'"))["value"]
+    check("stamp failure: rolled back, no success printed, the error propagates (non-zero exit)",
+          ok and out.getvalue() == "" and gen2 == gen0
+          and not await db.fetchone("SELECT 1 FROM app_settings WHERE key='txhub-m4'"), (out.getvalue(), gen2))
+    conn = db._conn
+    orig_commit = conn.commit
+
+    async def broken_commit():
+        raise RuntimeError("commit failed")
+    conn.commit = broken_commit
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            ok = await araises(admin.dispatch("promote", change, None), RuntimeError)
+    finally:
+        conn.commit = orig_commit
+    gen3 = (await db.fetchone("SELECT value FROM tx_state WHERE key='access_gen'"))["value"]
+    check("commit failure: rolled back, no success printed, the error propagates",
+          ok and out.getvalue() == "" and gen3 == gen0
+          and not await db.fetchone("SELECT 1 FROM app_settings WHERE key='txhub-m4'"), (out.getvalue(), gen3))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        await admin.dispatch("promote", change, None)
+    gen4 = (await db.fetchone("SELECT value FROM tx_state WHERE key='access_gen'"))["value"]
+    check("tx volume: committed with the access_gen stamp, output printed after the COMMIT",
+          out.getvalue() == "✓ done\n" and gen4 != gen0)
+    await db.execute("DELETE FROM app_settings WHERE key='txhub-m4'")
+
+
+def g_inventory():
+    print("== boot / backup inventory of mixed formats ==")
+    d = tempfile.mkdtemp(prefix="wt-txinv-")
+    try:
+        os.makedirs(os.path.join(d, "transcripts", "arhiva"))
+        open(os.path.join(d, "keys.wtk"), "wb").close()
+        open(os.path.join(d, "transcripts", "a" * 32 + ".out"), "wb").close()
+        open(os.path.join(d, "transcripts", "arhiva", "b" * 32 + ".cast"), "wb").close()
+        check("legacy files only (keys.wtk at the top ignored): nothing found",
+              txhub.recording_files_present(d) == "")
+        gen = "c" * 32 + ".out." + "d" * 32 + ".wtx"
+        open(os.path.join(d, "transcripts", "arhiva", gen), "wb").close()
+        found = txhub.recording_files_present(d)
+        check("a generation file in transcripts/arhiva/ is found (same definition as backup/restore)",
+              found == "transcripts/arhiva/" + gen, found)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ── 4. flag off: 3.7 files, byte for byte ───────────────────────────────────
 
 
@@ -575,6 +1103,13 @@ async def main():
         await g_stream_revocation(c, uid, token, big, data)
         await g_logout(big)
         await g_access_gen()
+        c, token = await login()             # cookie-ul iniţial a expirat în g_stream_revocation
+        await g_ws_history(c, host_id, uid, token)
+        await g_emission(c, uid, token, big, data)
+        await g_finalize(host_id)
+        await g_counters(c, host_id, uid, big)
+        await g_admin()
+        g_inventory()
         stream = [b"hello\r\n", b"\x1b[1mbold\x1b[0m\r\n", "ünï\r\n".encode(), b"x" * 3000]
         tx_sid = await stream_session(host_id, stream)
         await g_flag_off(host_id, stream, tx_sid)

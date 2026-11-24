@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -450,7 +451,7 @@ async def session_preview(sid: str, request: Request,
         raise ApiError(404, "session.missing", "no such session")
     await stepup.require_session_host_stepup(sid, user)
     if txhub.active():
-        return Response(content=await _tx_preview(request, sid), media_type="application/octet-stream")
+        return await _tx_preview(request, sid)
     data = await asyncio.to_thread(core.read_tail, sid, limit=32 * 1024)
     return Response(content=data, media_type="application/octet-stream")
 
@@ -460,7 +461,9 @@ async def session_preview(sid: str, request: Request,
 # capturează ÎNAINTE de decizie (txhub.snapshot), decizia se reface (cookie → grant-uri proaspete →
 # recording.view pe host → step-up), iar `not_after` = cea mai apropiată limită de timp folosită
 # (sesiunea web: absolută + inactivitate, legătura temporară, fereastra de step-up, link-ul de replay).
-# Aceeaşi funcţie e şi re-autorizarea unui flux după un bump global sau o expirare.
+# Aceeaşi funcţie e şi re-autorizarea unui flux după un bump global sau o expirare. Autorizarea ţine
+# PÂNĂ LA EMITERE (§12.11.10): fiecare bucată a unui corp (flux, text, previzualizare, cache) e
+# re-verificată (`txhub.Grant.before_emit`) imediat înainte de a fi predată transportului.
 _REDACTED_CACHE = {}
 
 
@@ -506,42 +509,30 @@ async def _tx_user_access(request: Request, sid: str, route: str):
         if "recording.view" not in await authz.perms_on(g, srow["host_id"]):
             raise ApiError(404, "session.missing", "no such session")
         await stepup.require_session_host_stepup(sid, user)
-        limits = [authz.earliest_expiry(g.bindings)]
-        ws = await db.fetchone("SELECT expires, last_seen FROM web_sessions WHERE token_hash=?",
-                               security.sha256_hex(tok or ""))
-        if ws is not None:
-            limits.append(ws["expires"])
-            if ws["last_seen"] is not None:
-                limits.append(ws["last_seen"] + security.WEB_SESSION_IDLE)
+        limits = await txhub.web_session_limits(tok, g)
         hrow = await db.fetchone("SELECT require_2fa FROM hosts WHERE id=?", srow["host_id"])
         if hrow is not None and hrow["require_2fa"]:
-            rec = security.stepup_window_record(user["id"], srow["host_id"])
-            limits.append(rec[1] if rec else 0.0)
-        not_after = min((x for x in limits if x is not None), default=None)
-        acc = txhub.access_since(snap, sid, "user:%d" % user["id"], route, not_after=not_after)
+            limits.append(txhub.stepup_deadline(user["id"], srow["host_id"]))
+        acc = txhub.access_since(snap, sid, "user:%d" % user["id"], route,
+                                 not_after=txhub.earliest(limits))
         if acc is not None:
             return acc
     raise txstore.Revoked("revoked", "access changed during the authorization")
 
 
-async def _tx_check(st, acc, authorize):
-    """Check point (b)/(c) for a body that is not read through a Snapshot (a cached response)."""
-    try:
-        st.check(acc)
-        return acc
-    except txstore.NeedsReauth:
-        await st.wait_fences(acc.sid)
-        new = await authorize()
-        st.check(new)
-        return new
-
-
-async def _tx_open(sid: str, kind: str, authorize):
+async def _tx_open(sid: str, kind: str, grant):
     st = txhub.store()
     try:
-        return await st.open(sid, kind, access=await authorize(), reauthorize=authorize)
-    except txstore.TxStoreError as e:
+        return await st.open(sid, kind, access=await grant.authorize(), reauthorize=grant.authorize)
+    except (txstore.TxStoreError, ApiError) as e:
         raise _tx_api_error(e) from None
+
+
+async def _tx_emit_ready(grant, on_refuse) -> None:
+    """Before the status line of an in-memory body: the authorization still holds (H2). A refusal
+    here is a clean error response; after the headers each chunk is checked (`txhub.emit_chunks`)."""
+    if not await grant.before_emit():
+        raise on_refuse(txstore.Revoked("revoked", "access changed before emission"))
 
 
 async def _tx_transcript(request: Request, sid: str, fmt: str, tail: bool):
@@ -552,19 +543,26 @@ async def _tx_transcript(request: Request, sid: str, fmt: str, tail: bool):
 
     async def authorize():
         return await _tx_user_access(request, sid, route)
-    snap = await _tx_open(sid, kind, authorize)
+    grant = txhub.Grant(authorize)
+    snap = await _tx_open(sid, kind, grant)
     if fmt == "txt":
         try:
             start = max(0, snap.length - TEXT_VIEW_TAIL) if tail else 0
-            raw = await snap.read(start, snap.length, reauthorize=authorize)
-        except txstore.TxStoreError as e:
+            raw = await snap.read(start, snap.length, reauthorize=grant.authorize)
+        except (txstore.TxStoreError, ApiError) as e:
             raise _tx_api_error(e) from None
         finally:
             snap.close()
-        text = await asyncio.to_thread(core.text_of_output, raw)
-        return Response(content=text, media_type="text/plain; charset=utf-8",
-                        headers={} if tail else
-                        {"Content-Disposition": 'attachment; filename="%s.txt"' % sid[:8]})
+        text = (await asyncio.to_thread(core.text_of_output, raw)).encode("utf-8")
+        del raw
+        # H2: conversia a durat (worker): autorizarea se re-verifică înainte de antete şi apoi
+        # înaintea fiecărei bucăţi; un refuz nu emite nimic din textul acumulat
+        await _tx_emit_ready(grant, _tx_api_error)
+        headers = {"Cache-Control": "no-store", "Content-Length": str(len(text))}
+        if not tail:
+            headers["Content-Disposition"] = 'attachment; filename="%s.txt"' % sid[:8]
+        return StreamingResponse(txhub.emit_chunks(grant, text),
+                                 media_type="text/plain; charset=utf-8", headers=headers)
     length = snap.length
     status, start, end = txstore.parse_range(request.headers.get("range"), length)
     if request.headers.get("if-range"):
@@ -573,7 +571,7 @@ async def _tx_transcript(request: Request, sid: str, fmt: str, tail: bool):
         snap.close()
         return Response(status_code=416, headers={"Content-Range": "bytes */%d" % length,
                                                   "Cache-Control": "no-store"})
-    it = snap.iter(start, end, reauthorize=authorize)
+    it = snap.iter(start, end, reauthorize=grant.authorize)
     first = None
     try:
         if end > start:
@@ -612,18 +610,22 @@ async def _tx_transcript(request: Request, sid: str, fmt: str, tail: bool):
                              headers=headers)
 
 
-async def _tx_preview(request: Request, sid: str) -> bytes:
+async def _tx_preview(request: Request, sid: str):
     async def authorize():
         return await _tx_user_access(request, sid, "preview")
+    grant = txhub.Grant(authorize)
     st = txhub.store()
     try:
-        data, _e, _le = await st.tail(sid, "out", 32 * 1024, access=await authorize(),
-                                      reauthorize=authorize)
-    except txstore.TxStoreError as e:
-        if e.reason == "notFound":
-            return b""                        # ca read_tail: nimic înregistrat încă
+        data, _e, _le = await st.tail(sid, "out", 32 * 1024, access=await grant.authorize(),
+                                      reauthorize=grant.authorize)
+    except (txstore.TxStoreError, ApiError) as e:
+        if getattr(e, "reason", "") == "notFound":
+            return Response(content=b"", media_type="application/octet-stream")  # ca read_tail
         raise _tx_api_error(e) from None
-    return core.ALT_SCREEN_RE.sub(b"", data)
+    data = core.ALT_SCREEN_RE.sub(b"", data)
+    await _tx_emit_ready(grant, _tx_api_error)
+    return StreamingResponse(txhub.emit_chunks(grant, data), media_type="application/octet-stream",
+                             headers={"Cache-Control": "no-store", "Content-Length": str(len(data))})
 
 
 # ── [replay] Link-uri de replay (3.5.12): sesiune ÎNCHISĂ, partajată public, doar-citire ───────
@@ -780,19 +782,25 @@ async def revoke_all_replay_links(request: Request, user=Depends(security.requir
     return {"ok": True, "revoked": n}
 
 
-async def _replay_issuer_ok(row) -> bool:
+async def _replay_issuer_ok(row, limits: Optional[list] = None) -> bool:
     """Emitentul are ACUM `share.replay` pe hostul înregistrării (cont activ, legături neexpirate:
     `grants_for_user` le citeşte pe toate) şi, dacă a publicat înregistrarea ALTCUIVA, şi
     `session.manage`, ca la creare. Sesiunea nu e un terminal root de mentenanţă (link-urile create
-    înainte de regula de la creare cad şi ele aici). Orice lipsă = refuz."""
+    înainte de regula de la creare cad şi ele aici). Orice lipsă = refuz.
+    3.8 (M1): `limits` primeşte termenul CONSERVATOR al acestei decizii — cea mai apropiată expirare
+    a legăturilor emitentului (aceleaşi grant-uri cu care s-a decis), ca fluxul să se re-autorizeze
+    atunci, nu abia la expirarea link-ului."""
     if sessctl.session_origin(row) in sessctl.ROOT_TERMINAL_ORIGINS:
         return False
     if row["host_id"] is None or row["user_id"] is None:
         return False
     g = await authz.grants_for_user(row["user_id"])
     have = await authz.perms_on(g, row["host_id"])
-    return "share.replay" in have and \
+    ok = "share.replay" in have and \
         shares.may_publish_recording(have, row["s_created_by_id"], row["user_id"])
+    if ok and limits is not None:
+        limits.append(authz.earliest_expiry(g.bindings))
+    return ok
 
 
 async def _recording_exists(sid: str) -> bool:
@@ -806,9 +814,10 @@ async def _recording_exists(sid: str) -> bool:
     return core.transcript_paths(sid)[1].exists()
 
 
-async def _replay_row(h: str):
+async def _replay_row(h: str, limits: Optional[list] = None):
     """The link row for a token hash, with every check of `_replay_lookup` (also the re-check of a
-    replay stream after a revocation bump); None = the same 404."""
+    replay stream after a revocation bump); None = the same 404. `limits` (3.8): receives the
+    deadlines of this decision (the link's expiry, the issuer's earliest binding expiry)."""
     row = await db.fetchone(
         "SELECT r.*, s.title, s.state, s.created AS s_created, s.closed_at, s.rows, s.cols,"
         " s.host_id, s.origin, s.created_by_id AS s_created_by_id, u.email AS owner_email"
@@ -821,12 +830,14 @@ async def _replay_row(h: str):
         if row["state"] != "closed" or not core.valid_sid(row["sid"]) \
                 or not await _recording_exists(row["sid"]):
             row = None
-    if row is not None and not await _replay_issuer_ok(row):
+    if row is not None and not await _replay_issuer_ok(row, limits):
         # INV-05 (docs/design/INVARIANTS.md): link-ul de replay moare cu dreptul celui care l-a dat, verificat la fiecare citire.
         # Curăţarea periodică (`revoke_unauthorized_derived`, expirarea rolurilor) rămâne, dar nu
         # mai e ea bariera: cu planificatorul oprit sau întârziat, linkul tot nu mai deschide nimic.
         await shares.delete_replay_links(" WHERE id=?", row["id"])
         row = None
+    if row is not None and limits is not None:
+        limits.append(row["expires"])
     return row
 
 
@@ -921,24 +932,20 @@ async def replay_text(request: Request):
 
 # ── [replay] 3.8: public replay readers on encrypted recordings ───────────────────────────────────
 def _tx_link_authorizer(request: Request, row, route: str):
-    """`Access` from the LINK TOKEN (never from an authenticated download's authorization):
+    """`Grant` from the LINK TOKEN (never from an authenticated download's authorization):
     counters captured first, then the link row re-checked (`_replay_row`: expiry, revocation,
-    issuer's rights, recording state); `not_after` = the link's expiry."""
+    issuer's rights, recording state); `not_after` = the earliest of the link's expiry and the
+    issuer's time-bound bindings (M1: the same grants the decision used)."""
     h = security.sha256_hex(request.headers.get("x-replay-token") or "")
     sid, link_id = row["sid"], row["id"]
 
-    async def authorize():
-        for _attempt in (0, 1):
-            snap = txhub.snapshot()
-            r = await _replay_row(h)
-            if r is None or r["id"] != link_id or r["sid"] != sid:
-                raise txstore.Revoked("revoked", "replay link no longer valid")
-            acc = txhub.access_since(snap, sid, "replay-link:%d" % link_id, route,
-                                     not_after=r["expires"])
-            if acc is not None:
-                return acc
-        raise txstore.Revoked("revoked", "access changed during the authorization")
-    return authorize
+    async def decide():
+        limits = []
+        r = await _replay_row(h, limits)
+        if r is None or r["id"] != link_id or r["sid"] != sid:
+            raise txstore.Revoked("revoked", "replay link no longer valid")
+        return txhub.earliest(limits)
+    return txhub.Grant(txhub.authorizer(sid, "replay-link:%d" % link_id, route, decide))
 
 
 def _tx_link_error(request: Request, e) -> ApiError:
@@ -953,9 +960,10 @@ async def _tx_replay_cast(request: Request, row):
     """`.cast` from the decrypted logical stream (record boundaries invisible to the redaction);
     every emitted chunk (≤ 64 KiB) is checked against the revocation counters and the link expiry."""
     st = txhub.store()
-    authorize = _tx_link_authorizer(request, row, "replay-cast")
+    grant = _tx_link_authorizer(request, row, "replay-cast")
     try:
-        snap = await st.open(row["sid"], "cast", access=await authorize(), reauthorize=authorize)
+        snap = await st.open(row["sid"], "cast", access=await grant.authorize(),
+                             reauthorize=grant.authorize)
     except (txstore.TxStoreError, ApiError) as e:
         raise _tx_link_error(request, e) from None
     try:
@@ -967,13 +975,14 @@ async def _tx_replay_cast(request: Request, row):
             key = cache.key(snap, replay.REDACTION_POLICY, representation="redacted")
             data = cache.get(key, snap.access)
             if data is None:
-                raw = b"".join([c async for c in snap.iter(0, snap.length, reauthorize=authorize)])
+                raw = b"".join([c async for c in snap.iter(0, snap.length,
+                                                          reauthorize=grant.authorize)])
                 data = await asyncio.to_thread(replay.redact_cast, raw)
                 cache.put(key, data, snap.access)
         else:
             data = None
             # brut: fluxul decriptat, verificat la fiecare chunk
-            it = snap.iter(0, snap.length, reauthorize=authorize)
+            it = snap.iter(0, snap.length, reauthorize=grant.authorize)
             first = None
             try:
                 first = await it.__anext__()
@@ -985,17 +994,13 @@ async def _tx_replay_cast(request: Request, row):
     except BaseException:
         snap.close()
         raise
+    if data is not None:
+        snap.close()
+        # (b) înainte de antete, apoi înaintea fiecărei bucăţi (txhub.emit_chunks)
+        await _tx_emit_ready(grant, lambda e: _tx_link_error(request, e))
     await _replay_opened(request, row, "played")
     if data is not None:
-        acc = snap.access
-        snap.close()
-
-        async def cached():
-            cur = acc
-            for i in range(0, len(data), txstore.STREAM_CHUNK):
-                cur = await _tx_check(st, cur, authorize)     # (b) înainte de fiecare chunk
-                yield data[i:i + txstore.STREAM_CHUNK]
-        return StreamingResponse(cached(), media_type="application/octet-stream",
+        return StreamingResponse(txhub.emit_chunks(grant, data), media_type="application/octet-stream",
                                  headers={**_REPLAY_HEADERS, "Content-Length": str(len(data))})
 
     async def raw_body():
@@ -1013,18 +1018,25 @@ async def _tx_replay_cast(request: Request, row):
 
 async def _tx_replay_text(request: Request, row):
     st = txhub.store()
-    authorize = _tx_link_authorizer(request, row, "replay-text")
+    grant = _tx_link_authorizer(request, row, "replay-text")
     try:
-        snap = await st.open(row["sid"], "out", access=await authorize(), reauthorize=authorize)
+        snap = await st.open(row["sid"], "out", access=await grant.authorize(),
+                             reauthorize=grant.authorize)
         try:
             raw = await snap.read(max(0, snap.length - TEXT_VIEW_TAIL), snap.length,
-                                  reauthorize=authorize)
+                                  reauthorize=grant.authorize)
         finally:
             snap.close()
     except (txstore.TxStoreError, ApiError) as e:
         raise _tx_link_error(request, e) from None
     text = await asyncio.to_thread(core.text_of_output, raw)
+    del raw
     if row["redact"]:
         text = await asyncio.to_thread(replay.mask_secrets, text)
+    body = text.encode("utf-8")
+    del text
+    # H2: conversia şi mascarea au durat — re-verificat înainte de antete şi pe fiecare bucată
+    await _tx_emit_ready(grant, lambda e: _tx_link_error(request, e))
     await _replay_opened(request, row, "read as text")
-    return Response(content=text, media_type="text/plain; charset=utf-8", headers=_REPLAY_HEADERS)
+    return StreamingResponse(txhub.emit_chunks(grant, body), media_type="text/plain; charset=utf-8",
+                             headers={**_REPLAY_HEADERS, "Content-Length": str(len(body))})

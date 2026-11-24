@@ -783,7 +783,7 @@ def _flushed_size(hub) -> Optional[int]:
 
 
 async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
-                        span: Optional[dict] = None, principal: str = "ws") -> bytes:
+                        span: Optional[dict] = None, grant=None) -> bytes:
     """Replay-ul unei ataşări PROASPETE: [istoric tmux + îmbinare] + coada de transcript.
 
     Istoricul se cere ÎNAINTE de citirea cozii: coada rămâne cât mai aproape de momentul în care
@@ -794,7 +794,10 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
     `span` (3.6.13, OSC 133): dacă e dat, se completează cu fereastra EXACTĂ a cozii din transcript
     (`end`, `limit`, `gen`) — doar când e sigur că `read_tail` a citit [end-limit, end): nicio
     rescriere (`out_gen`) şi niciun flush (mărimea de pe disc) în timpul citirii. Altfel rămâne gol
-    şi `SessionHub.osc133_state` nu va spune „sincronizat"."""
+    şi `SessionHub.osc133_state` nu va spune „sincronizat".
+
+    3.8 (txhub activ): `grant` = decizia PROPRIE a WS-ului (`txhub.Grant`, §12.11.10); fără el nu se
+    citeşte nimic. Apelantul face `grant.before_emit()` imediat înainte de a trimite rezultatul."""
     block = b""
     if hub is not None and scrollback > 0:
         raw = await fetch_tmux_history(hub._source(), sid, min(scrollback, HISTORY_MAX_LINES))
@@ -803,7 +806,7 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
                                             rows or hub.rows)
     limit = config.BROWSER_TAIL_BYTES if block else replay_tail_limit(scrollback, stream_is_plain(hub))
     if txhub.active():
-        return block + await _attach_tail_tx(sid, hub, limit, span, principal)
+        return block + await _attach_tail_tx(sid, hub, limit, span, grant)
     before = None
     if span is not None and hub is not None:
         before = (hub.out_gen, _flushed_size(hub))
@@ -814,20 +817,28 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
 
 
 async def read_tail_tx(sid: str, limit: int = config.BROWSER_TAIL_BYTES, end: Optional[int] = None,
-                       principal: str = "ws", route: str = "ws-tail") -> tuple:
+                       grant=None) -> tuple:
     """`read_tail` pe înregistrarea criptată (§12.11.2: `tail(sid, out, limit, end=)`): coada
     COMISĂ (acelaşi „flushed boundary" ca în 3.7: amândouă se mişcă la checkpoint), cu aceeaşi
-    curăţare de alt-screen. → (bytes, end, list_epoch); (b"", None, None) când nu e nimic de servit."""
-    data, e, le = await txhub.tail_out(sid, limit, principal=principal, route=route, end=end)
+    curăţare de alt-screen. → (bytes, end, list_epoch); (b"", None, None) când nu e nimic de servit.
+    `grant` (txhub.Grant) = autorizarea WS-ului; apelantul verifică `before_emit()` înainte de trimitere."""
+    data, e, le = await txhub.tail_out(sid, limit, grant=grant, end=end)
     return ALT_SCREEN_RE.sub(b"", data), e, le
 
 
-async def _attach_tail_tx(sid: str, hub, limit: int, span: Optional[dict], principal: str) -> bytes:
+def ws_grant(sid: str, principal: str, route: str, decide):
+    """The `txhub.Grant` of one WebSocket history read (attach / resync / unlock): the WS's own
+    decision (`decide`, from the connection's credential and scope) re-run with the counters
+    captured first. `decide` None → a Grant that refuses (fail closed)."""
+    return txhub.Grant(txhub.authorizer(sid, principal, route, decide) if decide is not None else None)
+
+
+async def _attach_tail_tx(sid: str, hub, limit: int, span: Optional[dict], grant) -> bytes:
     """Coada unei ataşări proaspete; `span` = (capătul comis, limit, generaţia) DOAR dacă nici
     generaţia (`out_gen`, mutată de un marker / cap / readoptare) nici `list_epoch` nu s-au mişcat
     cât am citit (înlocuieşte `_flushed_size`)."""
     gen = hub.out_gen if hub is not None else None
-    tail, end, le = await read_tail_tx(sid, limit, principal=principal, route="ws-attach")
+    tail, end, le = await read_tail_tx(sid, limit, grant=grant)
     if span is not None and hub is not None and end is not None and hub._tx is not None:
         rec = hub._tx.rec
         if (hub.out_gen == gen and rec is not None and rec.list_epoch == le
@@ -914,6 +925,9 @@ class BrowserClient:
         # vechi / client de test). Refolosit de resync-ul FULL, care altfel ar da `term.reset()`
         # şi ar lăsa tabul revenit din fundal doar cu coada — adică exact simptomul reparat.
         self.replay_sb = 0
+        # 3.8 (§12.11.10): decizia WS-ului pentru citirile de istoric (resync), setată de ruta WS;
+        # None = nicio citire din înregistrarea criptată (fail-closed)
+        self.tx_decide = None
 
     def tx_principal(self) -> str:
         return ("user:%s" % self.user_id) if self.user_id is not None else ("guest:%s" % self.id)
@@ -983,9 +997,14 @@ class BrowserClient:
         async with self._send_lock:
             await self.ws.send_text(s)
 
-    async def send_bytes(self, b: bytes) -> None:
+    async def send_bytes(self, b: bytes, gate=None) -> bool:
+        """`gate` (sincron) se verifică DUPĂ lock, imediat înainte de predarea către transport:
+        un istoric nu pleacă dacă autorizarea/blocarea s-a schimbat cât aştepta lock-ul."""
         async with self._send_lock:
+            if gate is not None and not gate():
+                return False
             await self.ws.send_bytes(b)
+            return True
 
     async def _resync(self, full: bool = False) -> None:
         # GARDĂ DE SECURITATE, prima: un client BLOCAT (idle-lock 2FA, sau invitat prin
@@ -1074,11 +1093,17 @@ class BrowserClient:
         # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
         # Fereastra: cea de la ataşare DOAR pe full; lossy (client lent) rămâne pe cea istorică —
         # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
+        grant = None
         if tx is not None:
             if cutoff is not None and not await tx.commit_through(cutoff):
                 gen = None                    # commit eşuat / listă mutată: calea de dedup de mai jos
-            tail, _e, _le = await read_tail_tx(self.hub.sid, limit, end=cutoff,
-                                               principal=self.tx_principal(), route="ws-resync")
+            grant = ws_grant(self.hub.sid, self.tx_principal(), "ws-resync", self.tx_decide)
+            tail, _e, _le = await read_tail_tx(self.hub.sid, limit, end=cutoff, grant=grant)
+            # §12.11.10: autorizarea până la emitere — decizia WS-ului, re-verificată ACUM; refuzat →
+            # nimic din înregistrare şi nici istoricul tmux (aceeaşi decizie), doar resetul gol
+            if not await grant.before_emit():
+                block = tail = b""
+                cutoff = None
         else:
             tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
         # aşteptarea de mai sus (I/O pe thread) e o fereastră în care clientul/hub-ul se poate
@@ -1086,7 +1111,16 @@ class BrowserClient:
         if self.locked or self.hub.locked:
             self._drain_queue()
             return
-        await self.send_bytes(block + tail)
+
+        def gate():
+            # 3.8, sincron, după lock-ul de trimitere: blocarea şi autorizarea chiar înainte de predare
+            # (cu flag-ul oprit nu există gate: calea 3.7 neschimbată)
+            if self.locked or self.hub.locked:
+                return False
+            return not (block or tail) or grant.emit_ok()
+        if not await self.send_bytes(block + tail, gate=gate if grant is not None else None):
+            self._drain_queue()
+            return
         self._sent_since_ping += len(block) + len(tail)
         # Garanția „≤ cutoff în tail, > cutoff în coadă" cade în două cazuri:
         #  · cutoff=None — lossy, sau flush eșuat: citirea a fost nemărginită;
@@ -4039,11 +4073,13 @@ def _search_result(row, snippet: str, count: int) -> dict:
             "snippet": snippet, "matches": count}
 
 
-async def search_transcripts_tx(rows, query: str, principal: str, snap) -> list:
+async def search_transcripts_tx(rows, query: str, principal: str, snap, not_after=None) -> list:
     """`search_transcripts` pe înregistrările criptate (§12.11.2: `tail(sid, out, SEARCH_READ_CAP)`
     per sesiune, SEARCH_TOTAL_CAP numărat pe octeţii decriptaţi; peste buget doar metadate). `snap`
     = contoarele capturate ÎNAINTE de decizia de autorizare a rutei: un sid revocat de atunci
-    rămâne doar cu metadate."""
+    rămâne doar cu metadate. `not_after(row)` = termenul Access-ului fiecărui sid.
+    → [(rezultat, Access-ul sub care s-a citit conţinutul sau None, potrivire doar pe metadate)];
+    ruta le trece prin `txhub.search_emit` imediat înainte de emitere (H2)."""
     st = txhub.store()
     needle = query.lower().encode("utf-8", errors="ignore")
     budget = {"used": 0, "results": 0}
@@ -4052,7 +4088,8 @@ async def search_transcripts_tx(rows, query: str, principal: str, snap) -> list:
         meta_hit = (query.lower() in (row["title"] or "").lower()
                     or query.lower() in (row["note"] or "").lower())
         snippet, count = "", 0
-        acc = txhub.access_since(snap, row["id"], principal, "search")
+        acc = txhub.access_since(snap, row["id"], principal, "search",
+                                 not_after=not_after(row) if not_after is not None else None)
         if acc is not None and st is not None:
             try:
                 chunk = await st.search_tail(row["id"], access=acc, budget=budget)
@@ -4063,7 +4100,7 @@ async def search_transcripts_tx(rows, query: str, principal: str, snap) -> list:
             if chunk is not None:
                 snippet, count = await asyncio.to_thread(_search_match, chunk, needle)
         if meta_hit or count:
-            results.append(_search_result(row, snippet, count))
+            results.append((_search_result(row, snippet, count), acc, meta_hit))
             budget["results"] = len(results)
             if len(results) >= SEARCH_MAX_RESULTS:
                 break

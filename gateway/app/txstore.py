@@ -1070,6 +1070,10 @@ class Store:
                 del self._fences[sid]
             ev.set()
 
+    def fenced(self, sid=None) -> bool:
+        """A fence is pending on `sid` (None = a global one): a decision taken now may be stale."""
+        return sid in self._fences
+
     async def wait_fences(self, sid):
         for scope in (sid, None):
             for ev in list(self._fences.get(scope, ())):
@@ -2015,6 +2019,7 @@ class Recorder:
         # până la commit-ul care publică markerul ei (R-H2).
         self._loss = self._new_loss(None)
         self._close_gap = None                    # markerul datorat la close, păstrat între încercări
+        self._unoffered_taken = False             # `close(unoffered=)` contabilizat o singură dată
         self.gap_pending = []                     # Gap-uri ale markerelor încă în `pending`
         self._gaps_unpub = []                     # scrise în writer, încă nepublicate
         self.gaps = []
@@ -2416,12 +2421,16 @@ class Recorder:
     def checkpoint(self):
         return self._submit("checkpoint")
 
-    def close(self, cast_ts=0.0):
+    def close(self, cast_ts=0.0, unoffered=0):
         """Close: ingress stops NOW (later bytes are refused, counted in `rejected`); the finalize
         job drains everything accepted before, seals and publishes. An overflow still open then is
         recorded as one GAP_MARKER at the end (`cast_ts` for its `.cast` event), its size in
-        `gaps` and the result's `lost`, and alarmed."""
-        fut = self._submit("finalize", cast_ts)
+        `gaps` and the result's `lost`, and alarmed. `unoffered` = upstream bytes of the current
+        epoch the hub held past `received` and never offered (its backlog at close, PR5b M2): they
+        join the same close marker, counted once per recorder even when close() is retried."""
+        if not isinstance(unoffered, int) or unoffered < 0:
+            raise TxStoreError("badInput", "unoffered")
+        fut = self._submit("finalize", cast_ts, unoffered)
         self.closing = True
         return fut
 
@@ -3350,7 +3359,7 @@ class Recorder:
         self._recount_pos()
         return self.agent_committed
 
-    async def _job_finalize(self, cast_ts=0.0):
+    async def _job_finalize(self, cast_ts=0.0, unoffered=0):
         """Close: drain (final checkpoint of everything accepted before close; a failed one is
         published or abandoned), then ONE GAP_MARKER for everything not recorded (an overflow
         still open, abandoned bytes), SEAL both kinds, publish; retire never-published
@@ -3362,6 +3371,10 @@ class Recorder:
         self.closing = True
         await self._checkpoint_or_flush()
         L = self._loss
+        if unoffered and not self._unoffered_taken:
+            # octeţii pe care hub-ul nu i-a mai putut oferi: pierdere terminală, în ACELAŞI marker
+            self._unoffered_taken = True
+            self._lose(unoffered, 0, 0)
         if self._close_gap is None and (self.overflow or any(L[k] for k in ("agent", "out", "cast"))):
             ce, co = self._covered
             self._close_gap = {"agent": 0, "out": 0, "cast": 0, "gap": None, "epoch": self.agent_epoch,
