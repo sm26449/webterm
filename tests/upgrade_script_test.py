@@ -42,9 +42,17 @@ case "$*" in
   *image.version*) echo "${IMG_LABEL:-}"; exit 0 ;;
   # R-H1: planul compose (JSON) + cititorul lui (rulat cu python-ul gazdei), montarea containerului vechi
   *"config --format json"*)
+    # RC3-H1: planul randat (.wt-plan.*) e citit aşa cum e; altfel services.app.image = ${WEBTERM_IMAGE}
+    for a in "$@"; do case "$a" in .wt-plan.*) cat "$a"; exit 0 ;; esac; done
+    img="${WEBTERM_IMAGE:-$(grep -m1 '^WEBTERM_IMAGE=' .env 2>/dev/null | cut -d= -f2-)}"
     if grep -q REMAP docker-compose.prod.yml 2>/dev/null; then
-      printf '%s' '{"services":{"app":{"image":"x","volumes":[{"type":"volume","source":"b","target":"/data"}]}},"volumes":{"b":{"name":"webterm_b"}}}'; exit 0; fi
-    printf '%s' '{"services":{"app":{"image":"x","volumes":[{"type":"volume","source":"webterm-data","target":"/data"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0 ;;
+      printf '%s' '{"name":"webterm","services":{"app":{"image":"'"$img"'","volumes":[{"type":"volume","source":"b","target":"/data"}]}},"volumes":{"b":{"name":"webterm_b"}}}'; exit 0; fi
+    if grep -q DATABIND docker-compose.prod.yml 2>/dev/null; then
+      printf '%s' '{"name":"webterm","services":{"app":{"image":"'"$img"'","volumes":[{"type":"bind","source":"/srv/wt-data","target":"/data"}]}},"volumes":{}}'; exit 0; fi
+    if grep -q IMGBIND docker-compose.prod.yml 2>/dev/null; then
+      printf '%s' '{"name":"webterm","services":{"app":{"image":"'"$img"'","volumes":[{"type":"volume","source":"webterm-data","target":"/data"},{"type":"bind","source":"/srv/'"$img"'","target":"/x"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0; fi
+    printf '%s' '{"name":"webterm","services":{"app":{"image":"'"$img"'","volumes":[{"type":"volume","source":"webterm-data","target":"/data"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0 ;;
+  *wt-compose-render*) eval "prog=\${$#}"; exec python3 -I -c "$prog" ;;
   *wt-compose-plan*) eval "prog=\${$#}"; exec python3 -I -c "$prog" ;;
   *'"/data"'*) printf 'volume\twebterm_webterm-data\n'; exit 0 ;;
   *"--entrypoint ls"*) printf '%b' "${VOL_LS:-}"; exit 0 ;;
@@ -67,7 +75,7 @@ case "$1" in
       *RepoDigests*)  [ -n "${NO_DIGEST:-}" ] || echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST"; exit 0 ;;
       *Config.Image*) echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST" ;;
       *Config.Env*)   printf '%b\n' "${IMG_ENV-WEBTERM_DATA_DIR=/data}" ;;
-      *"{{.Image}}"*|*"{{.Id}}"*) echo "sha256:imgid-$WANT_TAG" ;;
+      *"{{.Image}}"*|*"{{.Id}}"*) echo "sha256:$(printf 'imgid-%s' "$WANT_TAG" | sha256sum | cut -c1-64)" ;;
       *)              echo healthy ;;
     esac
     exit 0 ;;
@@ -232,6 +240,28 @@ def pre38_checks(tmp):
     out = r.stdout + r.stderr
     check("R-H1: trusa schimbă montarea /data → refuz înainte de deploy.sh",
           r.returncode != 0 and "deploy.sh" not in calls and "data mount or the image changed" in out, out[-500:])
+    # RC3-H1: trusa aduce un compose în care WEBTERM_IMAGE schimbă şi o sursă bind → refuz (orice ţintă)
+    for lbl, vl in (("v3.7.1", "webterm.db\nsecret\n"), ("v3.8.0", "keys.wtk\n")):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / "kit" / "docker-compose.prod.yml").write_text("services: {app: {}}   # IMGBIND\n")
+        r, calls = run(d, ["-y"], IMG_LABEL=lbl, VOL_LS=vl)
+        out = r.stdout + r.stderr
+        check(f"RC3-H1: trusa aduce un compose cu WEBTERM_IMAGE şi într-un bind (ţintă {lbl}) → refuz înainte de deploy.sh",
+              r.returncode != 0 and "deploy.sh" not in calls and "changing WEBTERM_IMAGE also changes" in out
+              and not any(p.name.startswith(".wt-plan.") for p in d.iterdir()), out[-500:])
+    # RC3-M1: /data pe bind, ţintă < 3.8 → refuz înainte de backup/trusă/deploy; ţintă 3.8 → merge
+    for lbl, ok_ in (("v3.7.1", False), ("", False), ("v3.8.0", True)):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / "docker-compose.prod.yml").write_text("services: {app: {}}   # DATABIND\n")
+        (d / "kit" / "docker-compose.prod.yml").write_text("services: {app: {}}   # DATABIND\n")
+        r, calls = run(d, ["-y"], IMG_LABEL=lbl, VOL_LS="webterm.db\nsecret\n")
+        out = r.stdout + r.stderr
+        if ok_:
+            check("RC3-M1: /data pe bind, ţintă 3.8 → neafectată, merge", r.returncode == 0 and "deploy.sh" in calls, out[-400:])
+        else:
+            check(f"RC3-M1: /data pe bind, ţintă {lbl or 'necunoscută'} → refuz înainte de backup şi deploy.sh",
+                  r.returncode != 0 and "bind mount" in out and "deploy.sh" not in calls and "backup.sh" not in calls,
+                  out[-400:])
     d = sandbox(tempfile.mkdtemp(dir=tmp))
     import fcntl
     fd = os.open(str(d / ".deploy.lock"), os.O_RDWR | os.O_CREAT, 0o600)

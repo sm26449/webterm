@@ -973,7 +973,7 @@ tested in isolation; these are not implemented and each needs its own change and
    `restore.sh` hold one host lock for their whole run (`flock` on `.deploy.lock` in the install
    directory; a child run inherits it, a concurrent one is refused). The pre-3.8 start guard checks
    the `/data` mount of the `app` service in `docker compose config --format json` (a named volume
-   with its effective name, or a bind directory read on the host): a divergent `WEBTERM_VOLUME`, an
+   with its effective name; a bind directory was read on the host until RC3-M1, below): a divergent `WEBTERM_VOLUME`, an
    existing app container with another `/data` mount, any other mount kind, a second mount under
    `/data`, or an unreadable config are refused; the same plan is re-checked right before `up`
    (rollback.sh restores `.env` / `.prev-image` on a mismatch; upgrade.sh re-checks after syncing
@@ -1000,7 +1000,22 @@ tested in isolation; these are not implemented and each needs its own change and
    `Config.Env` (missing, empty or another path = refused). Third recheck RC2-M1: the fingerprint
    also records the `ON CONFLICT` resolution of every NOT NULL / UNIQUE / PRIMARY KEY (column and
    table constraints; an absent clause counts as ABORT, the SQLite default), and table-level
-   PRIMARY KEY / UNIQUE constraints with their columns. The lock is per install directory: one kit per volume. An image without a version label is `unknown` (refused on a migrated volume)
+   PRIMARY KEY / UNIQUE constraints with their columns. Fourth recheck RC3-H1: the plan that
+   starts is rendered once (`render_checked`: `docker compose --profile '*' config --format json`
+   with `WEBTERM_IMAGE=<checked ID>`, all profiles so `--remove-orphans` still knows inactive
+   services) into a private `.wt-plan.*` file (0600, install directory, deleted at exit) with
+   `services.app.image` set to the ID; `guard_recheck` checks that file and `up_checked` runs
+   `docker compose -p <project> -f <that file> up -d --pull never --no-build`. The config is
+   rendered twice, with the human reference and with the ID: any difference other than
+   `services.app.image` and the `WEBTERM_IMAGE_REF`/`WEBTERM_IMAGE_TAG` environment (e.g. a bind
+   source or volume name interpolated from `WEBTERM_IMAGE`), or an `app.image` that does not follow
+   `WEBTERM_IMAGE`, is refused for every image. The SSO re-up in deploy.sh re-renders (the OIDC
+   settings are new) and accepts only `WEBTERM_OIDC_ISSUER`, `_CLIENT_ID`, `_PROVIDER_NAME` as
+   differences from the started plan, then re-checks it. deploy.sh compares the started container's
+   image ID with the checked one (no automatic rollback on a mismatch). RC3-M1: for a pre-3.8 or
+   unknown target only a whole named volume at `/data` is accepted (listed through the daemon); a
+   bind mount is refused, so a bind-mount installation goes back to 3.7 only by restoring the
+   pre-migration backup. The lock is per install directory: one kit per volume. An image without a version label is `unknown` (refused on a migrated volume)
    unless the operator sets `WEBTERM_IMAGE_ERA=3.8` for that run; no file-existence heuristic.
    Recheck R-M1: `python3 -m app.hostops stage-restore` exits 0 only when the flag is published and
    its directory fsynced (`backup.StageProgress.committed`), 3 when it refused before the first

@@ -708,19 +708,25 @@ installation without any it creates a new `data/secret` and starts with a vault 
 the protected values. 3.8 then refuses the volume (`ambiguous`, *secret next to keys.wtk*) until
 that stray file is removed. That is why `deploy.sh`, `rollback.sh` and `upgrade.sh` refuse to start
 a pre-3.8 image on a migrated volume. The volume they check is the one compose will actually mount
-at `/data` (read from `docker compose config --format json`: a named volume with its project prefix,
-or a bind-mounted directory); they refuse when `WEBTERM_VOLUME` names another volume, when the
+at `/data` (read from `docker compose config --format json`: a named volume with its project prefix);
+they refuse when `WEBTERM_VOLUME` names another volume, when the
 existing app container mounts something else (a remapped volume), when the mount is of any other
 kind, or when the config cannot be read, and check the same plan again right before starting.
-Only a whole named volume or a plain bind mount at `/data` can be checked, so for a pre-3.8 image
-they also refuse `volume.subpath`, a volume whose `driver_opts` set `device` or `o: bind`,
-non-default bind propagation or SELinux options, `consistency` and a read-only `/data`; and a bind
-mount is checked only when Docker runs on this host (a remote context or `DOCKER_HOST` is
-refused). The image is checked by its ID: if a pull re-points the tag between the check and the
-start, or compose would start another image than the one checked, they refuse and ask you to run
-them again; the start itself uses the checked image ID with `--pull never --no-build` (`.env`
-keeps the tag or digest), so an `app` service with `build:` or a `pull_policy` other than
-`missing`/`never` is refused, and `upgrade.sh` installs a pre-3.8 version only by digest. A
+Only a whole named volume at `/data` can be checked, so for a pre-3.8 image they also refuse a
+**bind mount** at `/data` (a host directory listed by the script need not be what the Docker daemon
+mounts: an installation that keeps its data in a bind-mounted directory goes back to 3.7 only by
+restoring the pre-migration backup), `volume.subpath`, a volume whose `driver_opts` set `device`
+or `o: bind`, `consistency` and a read-only `/data`. The image is checked by its ID: if a pull
+re-points the tag between the check and the start, they refuse and ask you to run them again. The
+compose configuration is rendered **once**, with the checked image ID, into a private
+`.wt-plan.*` file in the install directory (mode 0600, removed when the script ends); the check
+and the start (`docker compose -p <project> -f <that file> up -d --pull never --no-build`) use
+exactly that file, and `.env` keeps the tag or digest. A compose file in which `WEBTERM_IMAGE`
+changes anything other than the `app` image (for example a mount path built from it), or whose
+`app` image does not come from `WEBTERM_IMAGE`, is refused for any version; so is an `app` service
+with `build:` or a `pull_policy` other than `missing`/`never`. `deploy.sh` also confirms that the
+started container runs the checked image ID, and `upgrade.sh` installs a pre-3.8 version only by
+digest. A
 custom `WEBTERM_DATA_DIR` (anything but `/data`, in the compose environment or the image) is not
 supported by the downgrade guard and is refused for a pre-3.8 image. An
 image without a version label counts as of an unknown version, which is refused on a migrated

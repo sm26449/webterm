@@ -292,6 +292,19 @@ echo "  image pulled: gateway v$NEW_VER, agent v$NEW_AGENT"
 # RC2-H2: gateway-ul îşi ia datele din WEBTERM_DATA_DIR (config.py), nu neapărat din /data. Pentru
 # o imagine < 3.8 valoarea EFECTIVĂ (environment-ul serviciului din plan, cu .env/env_file deja
 # rezolvate de compose, altfel ENV-ul imaginii verificate) trebuie să fie exact /data; altfel refuz.
+# RC3-H1 (al patrulea recheck): WEBTERM_IMAGE=<ID> injectat abia la `up` re-randa compose cu alt
+# mediu decât cel verificat (o sursă bind interpolată şi din WEBTERM_IMAGE schimba planul fără nicio
+# cursă). Acum planul se randează O SINGURĂ DATĂ (render_checked: `config --format json`, toate
+# profilele, cu WEBTERM_IMAGE=<ID>) într-un fişier privat .wt-plan.* (0600, în directorul instalării),
+# services.app.image = ID-ul verificat, iar garda (guard_recheck) şi `up` (`-p <proiect> -f <plan>`)
+# folosesc EXACT acel fişier. Randarea se face de două ori (referinţa umană şi ID-ul): orice diferenţă
+# în afară de services.app.image şi WEBTERM_IMAGE_REF/TAG = refuz, pentru orice imagine. Re-up-ul după
+# SSO re-randează (.env are acum setările OIDC) şi acceptă faţă de planul pornit DOAR cele trei chei
+# WEBTERM_OIDC_* pe care le scrie provizionarea.
+# RC3-M1: un bind la /data s-ar lista pe filesystem-ul clientului, care nu e neapărat cel montat de
+# daemon (proxy, alt namespace). Pentru o ţintă < 3.8 / necunoscută se acceptă DOAR un volum numit
+# montat întreg; un bind = refuz (o instalare pe bind revine la 3.7 doar prin restaurarea backup-ului
+# de dinainte de migrare). Ţintele 3.8 nu sunt afectate.
 image_era() {   # image_era IMAGE → 38 | pre38 | unknown
   local v
   v=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null) \
@@ -424,24 +437,12 @@ data_plan() {   # data_plan COMPOSE_FILE IMAGE → 0 + DATA_PLAN ("volume<TAB>na
   PLAN_ERR="the compose config could not be read"
   return 1
 }
-docker_is_local() {   # 0 = daemonul e atins printr-un socket unix local (contextul curent, DOCKER_HOST inclus)
-  local h
-  h=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
-  case "$h" in unix:///*) return 0 ;; esac
-  return 1
-}
-volume_38_markers() {   # volume_38_markers TYPE SOURCE IMAGE → names on stdout; 0 listed, 2 confirmed absent, 1 error
+volume_38_markers() {   # volume_38_markers VOLUME IMAGE → names on stdout; 0 listed, 2 confirmed absent, 1 error
+  # RC3-M1: doar volume numite, listate prin daemonul care va porni serviciul (bind-ul e refuzat înainte)
   local all ls
-  if [ "$1" = bind ]; then
-    # un bind e un director al gazdei: îl listăm direct (lipsă = nimic de protejat; compose îl creează gol)
-    [ -e "$2" ] || [ -L "$2" ] || return 2
-    { [ -d "$2" ] && [ ! -L "$2" ]; } || return 1
-    ls=$(ls -A1 -- "$2") || return 1
-  else
-    all=$(docker volume ls -q) || return 1
-    printf '%s\n' "$all" | grep -qxF "$2" || return 2
-    ls=$(docker run --rm --network none -v "$2:/data:ro" --entrypoint ls "$3" -A1 /data) || return 1
-  fi
+  all=$(docker volume ls -q) || return 1
+  printf '%s\n' "$all" | grep -qxF "$1" || return 2
+  ls=$(docker run --rm --network none -v "$1:/data:ro" --entrypoint ls "$2" -A1 /data) || return 1
   printf '%s\n' "$ls" | grep -E '^(keys\.wtk.*|migrating\.wtm.*|master\.key.*|erasures\.wtj|\.restore|restore-pending\..+|.*\.wt[a-z0-9]*)$' || true
 }
 guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, GUARD_ID, GUARD_ERA); 1 refused
@@ -471,24 +472,27 @@ guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, 
     echo "✗ Refusing to start $1: it is not a 3.8 image (${era}) and the /data mount compose would start" >&2
     echo "  cannot be determined or is not supported ($PLAN_ERR), so it cannot be checked for the 3.8" >&2
     echo "  encryption-at-rest migration." >&2
-    echo "  Nothing was changed. Only a whole named volume or a plain bind mount at /data is" >&2
-    echo "  checked (no volume.subpath, no driver_opts device, default mount options, WEBTERM_DATA_DIR" >&2
-    echo "  unset or /data). An image built" >&2
+    echo "  Nothing was changed. Only a whole named volume at /data is checked (no bind mount, no" >&2
+    echo "  volume.subpath, no driver_opts device, default mount options, WEBTERM_DATA_DIR unset or" >&2
+    echo "  /data). An image built" >&2
     echo "  locally without a version label can be declared 3.8 explicitly for one run:" >&2
     echo "  WEBTERM_IMAGE_ERA=3.8 $0 …" >&2
     return 1
   fi
   typ=${DATA_PLAN%%$'\t'*} src=${DATA_PLAN#*$'\t'}
-  if [ -n "${WEBTERM_VOLUME:-}" ] && { [ "$typ" != volume ] || [ "$WEBTERM_VOLUME" != "$src" ]; }; then
+  # RC3-M1: un bind nu se poate verifica prin daemon fără a-l lista pe gazdă → doar volume numite
+  if [ "$typ" != volume ]; then
+    echo "✗ Refusing to start $1 (${era}): /data is a bind mount ('$src'). Before an image older than 3.8" >&2
+    echo "  (or of an unknown version) starts, only a whole named volume is checked: a host directory" >&2
+    echo "  listed here need not be what the Docker daemon mounts. Nothing was changed." >&2
+    echo "  A bind-mount installation goes back to 3.7 only by restoring the backup taken BEFORE the" >&2
+    echo "  migration (docs/INSTALL.md → Encryption at rest, \"Going back to 3.7\")." >&2
+    return 1
+  fi
+  if [ -n "${WEBTERM_VOLUME:-}" ] && [ "$WEBTERM_VOLUME" != "$src" ]; then
     echo "✗ Refusing to start $1 (${era}): WEBTERM_VOLUME=$WEBTERM_VOLUME, but compose would mount $typ '$src'" >&2
     echo "  at /data. WEBTERM_VOLUME does not change what compose mounts: unset it, or change the compose" >&2
     echo "  file. Nothing was changed." >&2
-    return 1
-  fi
-  if [ "$typ" = bind ] && ! docker_is_local; then
-    echo "✗ Refusing to start $1 (${era}): /data is a bind mount ('$src') and Docker is reached through a" >&2
-    echo "  remote context or DOCKER_HOST, so this host's directory may not be the one the daemon mounts." >&2
-    echo "  Run this on the Docker host itself (local unix socket). Nothing was changed." >&2
     return 1
   fi
   cids=$(docker compose -f "$2" ps -a -q app 2>/dev/null) || {
@@ -504,7 +508,7 @@ guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, 
       return 1
     fi
   done
-  marks=$(volume_38_markers "$typ" "$src" "$id") || rc=$?
+  marks=$(volume_38_markers "$src" "$id") || rc=$?
   if [ "$rc" = 2 ]; then GUARD_PLAN="$DATA_PLAN" GUARD_ID=$id; return 0; fi
   if [ "$rc" != 0 ]; then
     echo "✗ Refusing to start $1 (${era}): the data $typ '$src' could not be inspected for the 3.8" >&2
@@ -521,17 +525,115 @@ guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, 
   echo "  (docs/INSTALL.md → Encryption at rest, \"Going back to 3.7\")." >&2
   return 1
 }
-up_checked() {   # up_checked IMAGE_ID LABEL COMPOSE_FILE [up args / services…] → `up` pe EXACT ID-ul verificat
-  # RC2-H1: WEBTERM_IMAGE=<ID> doar pentru acest apel (compose acceptă un ID ca `image:`), fără pull şi
-  # fără build: un tag mutabil re-indicat între verificare şi `up` nu mai schimbă ce porneşte.
-  # LABEL ţine WEBTERM_IMAGE_REF (ce afişează aplicaţia) pe referinţa umană, nu pe ID.
+# Programul care randează planul final (RC3-H1); rulează în imaginea verificată (ca ID), fără reţea.
+# stdin: referinţa umană, ID-ul, apoi un tablou JSON [config cu referinţa, config cu ID-ul, planul de
+# bază sau null]. Ieşire: „name<TAB>proiect" + planul JSON pe o linie, sau „refuse<TAB>motiv".
+COMPOSE_RENDER_PY='# wt-compose-render (RC3-H1)
+import json, re, sys
+def refuse(msg):
+    print("refuse\t" + msg)
+    sys.exit(0)
+try:
+    ref, iid, rest = sys.stdin.read().split("\n", 2)
+    by_ref, by_id, base = json.loads(rest)
+    for c in (by_ref, by_id):
+        assert isinstance(c, dict) and isinstance(c["services"]["app"], dict)
+    assert base is None or isinstance(base, dict)
+except (ValueError, KeyError, TypeError, AssertionError):
+    refuse("the compose config could not be read")
+if by_ref["services"]["app"].get("image") != ref or by_id["services"]["app"].get("image") != iid:
+    refuse("services.app.image does not follow WEBTERM_IMAGE (it must be exactly the WEBTERM_IMAGE variable, so the checked image is the one started)")
+name = by_id.get("name")
+if not isinstance(name, str) or not re.match(r"^[a-z0-9][a-z0-9_-]*$", name):
+    refuse("the compose project has no usable name")
+def without(c, image, env_keys):
+    c = json.loads(json.dumps(c))
+    app = c["services"]["app"]
+    if image:
+        app.pop("image", None)
+    env = app.get("environment")
+    if isinstance(env, dict):
+        for k in env_keys:
+            env.pop(k, None)
+    return c
+def diff(a, b, path, out):
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b), key=str):
+            if k not in a or k not in b:
+                out.append(path + "." + str(k))
+            else:
+                diff(a[k], b[k], path + "." + str(k), out)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i in range(len(a)):
+            diff(a[i], b[i], "%s[%d]" % (path, i), out)
+    elif type(a) is not type(b) or a != b:
+        out.append(path or ".")
+    return out
+d = diff(without(by_ref, True, ("WEBTERM_IMAGE_REF", "WEBTERM_IMAGE_TAG")),
+         without(by_id, True, ("WEBTERM_IMAGE_REF", "WEBTERM_IMAGE_TAG")), "", [])
+if d:
+    refuse(("changing WEBTERM_IMAGE also changes %s (only services.app.image may follow it)" % ", ".join(d[:3]))[:300])
+by_id["services"]["app"]["image"] = iid
+if base is not None:
+    sso = ("WEBTERM_OIDC_ISSUER", "WEBTERM_OIDC_CLIENT_ID", "WEBTERM_OIDC_PROVIDER_NAME")
+    d = diff(without(base, False, sso), without(by_id, False, sso), "", [])
+    if d:
+        refuse(("the configuration changed since it was started, beyond the SSO settings (%s)" % ", ".join(d[:3]))[:300])
+print("name\t" + name)
+print(json.dumps(by_id, sort_keys=True))
+'
+PLAN_FILE="" PLAN_NAME="" PLAN_FILES=""
+plan_cleanup() {   # şterge planurile randate de această rulare (conţin mediul rezolvat al serviciilor)
+  local f
+  for f in $PLAN_FILES; do rm -f -- "$f"; done
+  PLAN_FILES=""
+}
+render_checked() {   # render_checked COMPOSE_FILE IMAGE_REF IMAGE_ID LABEL [BASE_PLAN] → 0 + PLAN_FILE, PLAN_NAME; 1 refused
+  # RC3-H1: planul se randează o singură dată, cu mediul din `up` (WEBTERM_IMAGE=<ID>, eticheta), şi se
+  # scrie într-un fişier privat; garda şi `up` folosesc exact acel fişier. Toate profilele (`*`): un
+  # serviciu dintr-un profil inactiv rămâne cunoscut, altfel `--remove-orphans` i-ar şterge containerele.
+  local f="$1" ref="$2" id="$3" label="$4" base=null by_ref by_id out name tmp
+  PLAN_FILE="" PLAN_NAME=""
+  if ! [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || [ -z "$ref" ] || [[ "$ref$label" == *[[:cntrl:]]* ]]; then
+    echo "✗ Refusing to start ${ref:-?}: the checked image '${id:-?}' or its reference cannot be used. Nothing was started." >&2
+    return 1
+  fi
+  if [ -n "${5:-}" ]; then
+    base=$(cat -- "$5") || { echo "✗ Refusing to start $ref: the started plan $5 cannot be read. Nothing was started." >&2; return 1; }
+  fi
+  by_ref=$(WEBTERM_IMAGE="$ref" WEBTERM_IMAGE_TAG="$label" docker compose --profile '*' -f "$f" config --format json 2>/dev/null) \
+    && by_id=$(WEBTERM_IMAGE="$id" WEBTERM_IMAGE_TAG="$label" docker compose --profile '*' -f "$f" config --format json 2>/dev/null) \
+    && out=$(printf '%s\n%s\n[%s,%s,%s]' "$ref" "$id" "$by_ref" "$by_id" "$base" \
+             | docker run --rm -i --network none --entrypoint python3 "$id" -I -c "$COMPOSE_RENDER_PY" 2>/dev/null) \
+    || out=""
+  case "$out" in
+    refuse$'\t'*)
+      echo "✗ Refusing to start $ref: ${out#refuse$'\t'}. Nothing was started." >&2
+      return 1 ;;
+    name$'\t'*$'\n'\{*) name=${out%%$'\n'*}; name=${name#name$'\t'}; out=${out#*$'\n'} ;;
+    *) echo "✗ Refusing to start $ref: the compose plan could not be rendered (docker compose config --format json). Nothing was started." >&2
+       return 1 ;;
+  esac
+  tmp=$(umask 077; mktemp .wt-plan.XXXXXX) || { echo "✗ Refusing to start $ref: cannot create the plan file. Nothing was started." >&2; return 1; }
+  PLAN_FILES="$PLAN_FILES $tmp"
+  printf '%s\n' "$out" > "$tmp" || { echo "✗ Refusing to start $ref: cannot write the plan file. Nothing was started." >&2; return 1; }
+  PLAN_FILE=$tmp PLAN_NAME=$name
+}
+up_checked() {   # up_checked IMAGE_ID LABEL PLAN_FILE [up args / services…] → `up` pe EXACT planul randat
+  # RC2-H1: fără pull şi fără build: un tag mutabil re-indicat între verificare şi `up` nu schimbă ce
+  # porneşte. RC3-H1: compose citeşte planul randat şi verificat (services.app.image = ID-ul), cu
+  # proiectul lui; nimic nu se mai interpolează din mediu (WEBTERM_IMAGE=<ID> rămâne doar ca plasă).
   local id="$1" label="$2" f="$3"
   shift 3
   if ! [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "✗ Refusing to start: the checked image '${id:-?}' is not a sha256 image ID. Nothing was started." >&2
     return 1
   fi
-  WEBTERM_IMAGE="$id" WEBTERM_IMAGE_TAG="$label" docker compose -f "$f" up -d --pull never --no-build "$@"
+  if [ -z "$f" ] || [ "$f" != "$PLAN_FILE" ] || [ -z "$PLAN_NAME" ] || [ ! -f "$f" ] || [ -L "$f" ]; then
+    echo "✗ Refusing to start: '${f:-?}' is not the plan that was rendered and checked. Nothing was started." >&2
+    return 1
+  fi
+  WEBTERM_IMAGE="$id" WEBTERM_IMAGE_TAG="$label" docker compose -p "$PLAN_NAME" -f "$f" up -d --pull never --no-build "$@"
 }
 guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the same plan and image still hold; 1 refused
   # R-H1: chiar înainte de `up`: aceeaşi verificare, iar planul trebuie să fie EXACT cel verificat
@@ -565,6 +667,7 @@ guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the s
   fi
   return 0
 }
+# ── sfârşitul gărzii 3.8 (bloc identic în deploy.sh, rollback.sh, upgrade.sh) ──
 # H1: o ţintă mai veche de 3.8 pe un volum migrat se refuză ÎNAINTE de backup, de trusa de pe
 # host (deploy.sh-ul ţintei n-ar mai avea garda) şi de deploy
 guard_pre38 "$IMAGE" "$FILE" || die "refusing to install a pre-3.8 image on this migrated volume"
@@ -783,7 +886,12 @@ say "Applying $TARGET ($IMAGE)"
 # ţinte < 3.8 nu are garda): planul /data se re-verifică pe fişierul care va porni, sub lacăt
 # RC-H1: planul se citeşte cu imaginea pe care deploy.sh o va exporta (WEBTERM_IMAGE bate .env la
 # compose), ca services.app.image să fie legată de ID-ul verificat; într-un subshell, fără efecte
-( export WEBTERM_IMAGE="$IMAGE"; guard_recheck "$IMAGE" "$FILE" "$CHECKED_PLAN" "$CHECKED_ID" ) \
+# RC3-H1: şi planul randat cu ID-ul trebuie să difere de cel cu referinţa DOAR prin services.app.image
+# (un Compose în care WEBTERM_IMAGE mută şi altceva = refuz); planul temporar se şterge în subshell
+( export WEBTERM_IMAGE="$IMAGE"
+  render_checked "$FILE" "$IMAGE" "$CHECKED_ID" "$TARGET" \
+    && guard_recheck "$IMAGE" "$PLAN_FILE" "$CHECKED_PLAN" "$CHECKED_ID"
+  rc=$?; plan_cleanup; exit "$rc" ) \
   || die "the data mount or the image changed since it was checked (e.g. with the host kit) — nothing deployed (run ./upgrade.sh <a 3.8.x version> to restore the 3.8 kit)"
 ./deploy.sh "$IMAGE" --tag "$TARGET"
 
