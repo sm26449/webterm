@@ -893,6 +893,13 @@ say "Applying $TARGET ($IMAGE)"
     && guard_recheck "$IMAGE" "$PLAN_FILE" "$CHECKED_PLAN" "$CHECKED_ID"
   rc=$?; plan_cleanup; exit "$rc" ) \
   || die "the data mount or the image changed since it was checked (e.g. with the host kit) — nothing deployed (run ./upgrade.sh <a 3.8.x version> to restore the 3.8 kit)"
+# RC4-M1: ID-ul imaginii care rula ÎNAINTE de deploy — singurul reper prin care „a revenit la
+# vechea imagine" (rollback real) se poate deosebi de „rulează altceva" după deploy
+BEFORE_CID=$($COMPOSE -f "$FILE" ps -q app 2>/dev/null | head -1 || true)
+BEFORE_ID=""
+if [ -n "$BEFORE_CID" ]; then
+  BEFORE_ID=$(docker inspect "$BEFORE_CID" --format '{{.Image}}' 2>/dev/null || true)
+fi
 ./deploy.sh "$IMAGE" --tag "$TARGET"
 
 # ── 7. final check: what is running NOW ──────────────────────────────────────
@@ -900,11 +907,15 @@ say "Verify"
 # the container comes from compose, not from a fixed name: on a machine with two deployments,
 # `webterm-app-1` could belong to a DIFFERENT instance
 APP_CID=$($COMPOSE -f "$FILE" ps -q app 2>/dev/null | head -1)
-RUNNING=$(docker inspect "${APP_CID:-nimic}" --format '{{.Config.Image}}' 2>/dev/null || echo "?")
-STATE=$(docker inspect "${APP_CID:-nimic}" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo "?")
-echo "  image: ${RUNNING:-?}"
-echo "  state: $STATE"
-[ "$STATE" = healthy ] || warn "the container is NOT healthy — see 'docker logs ${APP_CID:-<container>}' and ./rollback.sh"
+# RC4-M1: ce rulează se citeşte ca ID efectiv (.Image), nu ca .Config.Image: containerul pornit din
+# planul verificat are în Config.Image ID-ul local sha256, nu referinţa repo@sha256 din manifest, deci
+# comparaţia pe şir declara „rollback" un upgrade reuşit (cu volumul poate deja migrat)
+RUNNING_ID=$(docker inspect "${APP_CID:-nimic}" --format '{{.Image}}' 2>/dev/null || echo "?")
+HEALTH_STATE=$(docker inspect "${APP_CID:-nimic}" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo "?")
+echo "  image: $IMAGE"
+echo "  running image id: ${RUNNING_ID:-?} (checked: $CHECKED_ID)"
+echo "  state: $HEALTH_STATE"
+[ "$HEALTH_STATE" = healthy ] || warn "the container is NOT healthy — see 'docker logs ${APP_CID:-<container>}' and ./rollback.sh"
 
 # ── 7b. prune old images: keep the last N versions for rollback, drop the rest ────────────────
 # Fiecare upgrade lăsa imaginea veche pe disc (~300MB fiecare) → zeci de GB în timp. Păstrăm
@@ -1107,12 +1118,26 @@ fi
 # nouă nu devine healthy, iar un rollback reuşit iese cu 0 — deci upgrade.sh continua şi anunţa
 # verde „Upgrade complet: v2.1.0" pe o instalare care tocmai revenise la v2.0.0. Comparăm cu
 # imaginea care rulează chiar acum, citită mai sus la pasul de verificare.
-if [ "$RUNNING" = "$IMAGE" ]; then
-  printf '\n\033[32m✓ Upgrade complet: %s (gateway v%s, agent v%s)\033[0m\n' "$TARGET" "$NEW_VER" "$NEW_AGENT"
+# RC4-M1: trei stări distincte, fiecare din ce s-a citit, nu dedusă: ID-ul verificat + healthy = aplicat;
+# ID-ul verificat dar nu healthy = aplicat, NU sănătos (fără „rollback" — nu a avut loc); ID-ul de dinainte
+# = rollback real; orice alt ID = stare necunoscută. Doar primul caz iese cu 0.
+if [ -n "$CHECKED_ID" ] && [ "$RUNNING_ID" = "$CHECKED_ID" ] && [ "$HEALTH_STATE" = healthy ]; then
+  printf '\n\033[32m✓ Upgrade complete: %s (gateway v%s, agent v%s)\033[0m\n' "$TARGET" "$NEW_VER" "$NEW_AGENT"
   echo "  pinned: $IMAGE"
+  echo "  running: $RUNNING_ID (the checked image), healthy"
+elif [ -n "$CHECKED_ID" ] && [ "$RUNNING_ID" = "$CHECKED_ID" ]; then
+  printf '\n\033[1;33m! Upgrade APPLIED but the container is NOT healthy (%s)\033[0m\n' "$HEALTH_STATE"
+  echo "  The checked image $TARGET is running ($RUNNING_ID); no rollback took place."
+  echo "  See 'docker logs ${APP_CID:-<container>}' and Settings → System health."
+  exit 1
+elif [ -n "$BEFORE_ID" ] && [ "$RUNNING_ID" = "$BEFORE_ID" ]; then
+  printf '\n\033[1;33m! Upgrade ROLLED BACK: the previous image is running again (%s), not %s\033[0m\n' "$RUNNING_ID" "$TARGET"
+  echo "  The new image did not become healthy and deploy.sh rolled back (state now: $HEALTH_STATE)."
+  echo "  See 'docker logs ${APP_CID:-<container>}' for the reason."
+  exit 1
 else
-  printf '\n\033[1;33m! Upgrade NEAPLICAT: rulează %s, nu %s\033[0m\n' "${RUNNING:-?}" "$IMAGE"
-  echo "  Imaginea nouă nu a devenit healthy, iar deploy.sh a făcut rollback automat."
-  echo "  Vezi 'docker logs ${APP_CID:-<container>}' pentru motiv."
+  printf '\n\033[1;31m✗ Upgrade state UNKNOWN: running image id %s is neither the checked one (%s) nor the previous one (%s)\033[0m\n' \
+    "${RUNNING_ID:-?}" "${CHECKED_ID:-?}" "${BEFORE_ID:-none}"
+  echo "  State: $HEALTH_STATE. Check 'docker ps' / 'docker logs ${APP_CID:-<container>}' before doing anything else."
   exit 1
 fi

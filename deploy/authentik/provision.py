@@ -475,7 +475,7 @@ def provision(call, *, ak, wt_domain, provider_name="Authentik", prefix="wt", ou
         "WEBTERM_OIDC_SSO_ONLY": "1",
         "WEBTERM_OIDC_SESSION_MAX_HOURS": str(RECOMMENDED_SESSION_MAX_HOURS),
     }
-    out("\n# ---- pune astea în .env-ul WebTerm (apoi: docker compose -f docker-compose.prod.yml up -d app) ----")
+    out("\n# ---- put these into the WebTerm .env (then, from the WebTerm install dir: ./deploy.sh) ----")
     for k, v in env.items():
         out("%s=%s" % (k, v))
     out("#")

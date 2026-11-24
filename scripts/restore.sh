@@ -236,7 +236,7 @@ APP_ERR=""
 find_app || refuse "REFUSING: cannot identify the app container of '$VOLUME' ($APP_ERR) — nothing was changed."
 [ -n "$APP_CID" ] || refuse \
   "REFUSING: no app container uses volume '$VOLUME': the archive is checked and staged with the app's" \
-  "          own code. Start the installation once (docker compose up -d), then run this again."
+  "          own code. Start the installation once (./deploy.sh), then run this again."
 
 # ── 2. verificarea cu codul gateway-ului ─────────────────────────────────────
 if app_running; then VMODE=live; else

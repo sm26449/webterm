@@ -41,6 +41,7 @@ import stat
 import tarfile
 import tempfile
 import time
+import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -1699,8 +1700,13 @@ def _unpack_verified(reader, dest, db_dest=None) -> tuple:
 
 def _check_db(path: str):
     """R-M2 restorable check: SQLite integrity AND the gateway's minimal schema (the tables every
-    EverShell database has), opened read-only. → MIN(users.created)."""
-    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    EverShell database has), opened read-only. → MIN(users.created).
+    RC4 (e2e): immutable=1, ca la proba legacyvault — o copie 3.7 făcută cu API-ul de backup SQLite
+    (scripts/backup.sh) are antetul în modul WAL, iar o deschidere `mode=ro` obişnuită crea
+    webterm.db-wal/-shm în setul din staging, pe care verificarea arborelui îl refuza apoi („unexpected
+    file”): restaurarea copiei de dinainte de migrare era imposibilă. Setul e privat (nimeni nu scrie
+    în el) şi un -wal venit din arhivă e refuzat de verificarea arborelui, deci immutable nu ascunde nimic."""
+    con = sqlite3.connect("file:%s?mode=ro&immutable=1" % urllib.parse.quote(path, safe="/"), uri=True)
     try:
         try:
             r = con.execute("PRAGMA integrity_check").fetchone()[0]

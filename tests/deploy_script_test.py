@@ -78,7 +78,10 @@ case "$*" in
   *"ps -q app"*) echo "cid-app-1"; exit 0 ;;
   # RC2-H1: ce imagine porneşte `up` (WEBTERM_IMAGE din mediul apelului) = ce raportează containerul
   *"compose "*" up "*) echo "up-image=${WEBTERM_IMAGE:-} up-label=${WEBTERM_IMAGE_TAG:-} up-plan=${PIMG:-none}" >> "$CALLS"
-    printf '%s\n' "${PIMG:-$img}" > "$CALLS.started"; exit ${UP_FAILS:-0} ;;
+    # RC4-M2: STARTED_AFTER_SSO = ID-ul pe care îl raportează containerul după re-up-ul SSO (OIDC în .env)
+    if [ -n "${STARTED_AFTER_SSO:-}" ] && grep -q '^WEBTERM_OIDC_ISSUER=.' .env 2>/dev/null; then
+      printf '%s\n' "$STARTED_AFTER_SSO" > "$CALLS.started"
+    else printf '%s\n' "${PIMG:-$img}" > "$CALLS.started"; fi; exit ${UP_FAILS:-0} ;;
   # RC2-H2: ENV-ul imaginii verificate
   *Config.Env*) printf '%b\n' "${IMG_ENV-PATH=/usr/bin\nWEBTERM_DATA_DIR=/data}"; exit 0 ;;
   *"compose -f"*"pull"*) exit ${PULL_FAILS:-0} ;;
@@ -94,7 +97,8 @@ case "$1" in
       *"{{.Image}}"*)
         case "$*" in *cid-app-1*) if [ -s "$CALLS.started" ]; then cat "$CALLS.started"; else sid foreign-uses; fi ;;
                      *) sid foreign-uses ;; esac ;;
-      *) echo "${HEALTH:-healthy}" ;;
+      *) if [ -n "${HEALTH_AFTER_SSO:-}" ] && grep -q '^WEBTERM_OIDC_ISSUER=.' .env 2>/dev/null; then
+           echo "$HEALTH_AFTER_SSO"; else echo "${HEALTH:-healthy}"; fi ;;
     esac; exit 0 ;;
   image)
     case "$*" in
@@ -911,7 +915,7 @@ def rc3_checks(tmp):
           and "Rollback" not in out, out[-400:])
 
     # re-up după SSO: planul re-randat poate diferi DOAR prin cheile OIDC
-    def sso(after=None):
+    def sso(after=None, **kw):
         d = sandbox(tempfile.mkdtemp(dir=tmp))
         with open(d / ".env", "a") as f:
             f.write("AUTHENTIK_DOMAIN=ak.test\n")
@@ -922,8 +926,8 @@ def rc3_checks(tmp):
         js = json.loads(DEFAULT_JSON)
         js["services"]["app"]["environment"] = {"WEBTERM_OIDC_ISSUER": "@OIDC@"}
         extra = {"JSON_AFTER_SSO": after(js)} if after else {}
-        r, calls = run(d, "deploy.sh", [NEW, "--with-authentik"], IMG_LABEL="v3.8.0", AK_CODE="200",
-                       COMPOSE_JSON=json.dumps(js), **extra)
+        r, calls = run(d, "deploy.sh", [NEW, "--with-authentik"], IMG_LABEL="v3.8.0",
+                       COMPOSE_JSON=json.dumps(js), **{"AK_CODE": "200", **extra, **kw})
         ups = [ln for ln in calls.splitlines() if ln.startswith("docker compose") and " up " in ln]
         return d, r, calls, ups, r.stdout + r.stderr
 
@@ -932,6 +936,20 @@ def rc3_checks(tmp):
           r.returncode == 0 and len(ups) == 2 and ups[1].endswith("--pull never --no-build app")
           and ups[0].split(" -f ")[1].split()[0] != ups[1].split(" -f ")[1].split()[0]
           and "SSO linked" in out and "NOT reloaded" not in out and plans(d) == [], (out + "\n".join(ups))[-700:])
+
+    # RC4-M2: SSO se anunţă activ doar după ce re-up-ul rulează ID-ul verificat şi e healthy
+    d, r, calls, ups, out = sso(HEALTH_AFTER_SSO="unhealthy")
+    check("RC4-M2: re-up SSO → app unhealthy → exit ≠ 0, fără rollback automat, fără „WebTerm is running”",
+          r.returncode != 0 and len(ups) == 2 and "reloaded app did not become healthy (status: unhealthy)" in out
+          and "Rollback" not in out and "WebTerm is running" not in out and "rollback.sh" not in calls, out[-600:])
+    d, r, calls, ups, out = sso(STARTED_AFTER_SSO="sha256:" + "7" * 64)
+    check("RC4-M2: re-up SSO → containerul rulează alt ID → exit ≠ 0, „not the checked”, fără „WebTerm is running”",
+          r.returncode != 0 and len(ups) == 2 and "not the checked" in out and "WebTerm is running" not in out,
+          out[-600:])
+    d, r, calls, ups, out = sso(AK_CODE="000")
+    check("RC4-M2: Authentik indisponibil → instrucţiunea e ./deploy.sh, niciodată `compose … up` direct",
+          r.returncode == 0 and "and run: cd " in out and "./deploy.sh" in out.split("and run: cd ")[1].splitlines()[0]
+          and " up -d" not in out and len(ups) == 1, out[-600:])
 
     def extra_vol(js):
         js = json.loads(json.dumps(js))

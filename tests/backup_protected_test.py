@@ -1317,6 +1317,49 @@ def pr4_second_recheck_tests():
           refused(lambda: backup.stage_restore(good, PASS, keys=hk, progress=pr)) and not pr.mutated and nothing_staged())
 
 
+def _with_wal_header(raw):
+    """Arhiva 3.7 (tar.gz) cu webterm.db trecut în modul WAL (antet 18/19 = 2), ca o copie făcută cu
+    API-ul de backup SQLite de scripts/backup.sh pe un gateway în WAL; restul membrilor neschimbaţi."""
+    src = tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz")
+    out = io.BytesIO()
+    with tempfile.TemporaryDirectory() as td, tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for m in src.getmembers():
+            data = src.extractfile(m).read() if m.isfile() else None
+            if m.name == "webterm.db":
+                fp = os.path.join(td, "webterm.db")
+                with open(fp, "wb") as f:
+                    f.write(data)
+                con = sqlite3.connect(fp)
+                con.execute("PRAGMA journal_mode=WAL")
+                con.close()
+                data = open(fp, "rb").read()
+                assert data[18:20] == b"\x02\x02", data[18:20]
+                m.size = len(data)
+            dst.addfile(m, io.BytesIO(data) if data is not None else None)
+    return out.getvalue()
+
+
+def rc4_wal_header_tests():
+    """RC4 (e2e pe copie): copia de dinainte de migrare făcută de scripts/backup.sh are webterm.db cu
+    antet WAL; verificarea DB-ului din staging nu are voie să creeze -wal/-shm în set (verificarea
+    arborelui l-ar refuza şi calea documentată înapoi la 3.7 ar fi imposibilă)."""
+    _n, _KL = volume("RC4L", protected=False, email="legacy@rc4")
+    wal = backup.encrypt(_with_wal_header(backup.decrypt(backup.make_encrypted(PASS), PASS)), PASS)
+    pr = backup.StageProgress()
+    backup.stage_restore(wal, PASS, progress=pr)
+    rd = config.DATA_DIR / "restore-pending"
+    names = sorted(p.name for p in rd.iterdir())
+    check("RC4: arhivă 3.7 cu DB în modul WAL → staging pe volum legacy reuşeşte, fără -wal/-shm în set",
+          pr.committed and not any(n.startswith("webterm.db-") for n in names), names)
+    check("RC4: …şi boot-ul 3.7 îl aplică", backup.apply_pending_restore() and db_email() == "legacy@rc4")
+    hk, _K = volume("RC4P")
+    pr = backup.StageProgress()
+    backup.stage_restore(wal, PASS, keys=hk, legacy_import=True, progress=pr)
+    names = sorted(str(p.relative_to(config.DATA_DIR)) for p in config.DATA_DIR.rglob("webterm.db*"))
+    check("RC4: aceeaşi arhivă WAL → import legacy pe volum protejat reuşeşte, fără -wal/-shm în set",
+          pr.committed and not any("webterm.db-" in n and not n.startswith("webterm.db-") for n in names), names)
+
+
 def recheck_tests():
     rh1_tests()
     rh2_tests()
@@ -1578,6 +1621,7 @@ def main():
     recheck_tests()
     pr4_recheck_tests()
     pr4_second_recheck_tests()
+    rc4_wal_header_tests()
 
     print(f"\n{ok}/{total} passed")
     shutil.rmtree(ROOT, ignore_errors=True)

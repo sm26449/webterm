@@ -769,22 +769,28 @@ up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$CHECKED_RUN" --remove-orphans || exi
 # Prinde imaginile care nu pornesc (crash loop, config stricat). Un frontend
 # that only breaks in the browser is NOT visible here — the CI smoke test covers
 # that (the image is never published) along with failsafe.js in the page.
-APP_ID=$($COMPOSE -f "$FILE" ps -q app)
 # RC3-H1: ce RULEAZĂ trebuie să fie ID-ul verificat (ca la rollback); altfel nu raportăm nimic ca reuşit
-# şi nici nu pornim rollback-ul automat (ar porni încă o imagine peste aceleaşi date): operatorul decide
-RUNNING_ID=$(docker inspect -f '{{.Image}}' "$APP_ID" 2>/dev/null || echo "?")
-if [ "$RUNNING_ID" != "$CHECKED_ID" ]; then
-  echo "✗ The app container is running image ${RUNNING_ID:-?}, not the checked $TARGET_IMG ($CHECKED_ID)." >&2
-  echo "  Something else started or re-pointed the container. Check 'docker compose -f $FILE ps' before" >&2
-  echo "  running ./deploy.sh again." >&2
-  exit 1
-fi
-st=starting
-for _ in $(seq 1 60); do
-  st=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$APP_ID" 2>/dev/null || echo missing)
-  [ "$st" = healthy ] && break
-  sleep 2
-done
+# şi nici nu pornim rollback-ul automat (ar porni încă o imagine peste aceleaşi date): operatorul decide.
+# RC4-M2: aceeaşi verificare (ID + sănătate) şi după re-up-ul SSO, înainte de a anunţa SSO activ.
+# Setează APP_ID şi st; 1 = rulează alt ID (mesajul e tipărit aici), 0 = ID-ul verificat (st = starea).
+checked_app_state() {
+  APP_ID=$($COMPOSE -f "$FILE" ps -q app)
+  RUNNING_ID=$(docker inspect -f '{{.Image}}' "$APP_ID" 2>/dev/null || echo "?")
+  if [ "$RUNNING_ID" != "$CHECKED_ID" ]; then
+    echo "✗ The app container is running image ${RUNNING_ID:-?}, not the checked $TARGET_IMG ($CHECKED_ID)." >&2
+    echo "  Something else started or re-pointed the container. Check 'docker compose -f $FILE ps' before" >&2
+    echo "  running ./deploy.sh again." >&2
+    return 1
+  fi
+  st=starting
+  for _ in $(seq 1 60); do
+    st=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$APP_ID" 2>/dev/null || echo missing)
+    [ "$st" = healthy ] && break
+    sleep 2
+  done
+  return 0
+}
+checked_app_state || exit 1
 if [ "$st" != healthy ]; then
   echo "✗ The app did not become healthy within 120s (status: $st). Logs:"
   docker logs --tail 30 "$APP_ID" 2>/dev/null || true
@@ -834,7 +840,16 @@ if { [ -n "$WITH_AUTHENTIK" ] || printf '%s' "${COMPOSE_PROFILES:-}" | grep -qw 
       # trece din nou prin gardă, apoi porneşte exact acel fişier
       if render_checked "$FILE" "$TARGET_IMG" "$CHECKED_ID" "$CHECKED_LABEL" "$CHECKED_RUN" \
          && guard_recheck "$TARGET_IMG" "$PLAN_FILE" "$CHECKED_PLAN" "$CHECKED_ID"; then
-        up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$PLAN_FILE" app
+        up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$PLAN_FILE" app || exit 1
+        # RC4-M2: SSO se anunţă activ doar dacă rulează ID-ul verificat şi e healthy; fără rollback
+        # automat (aceeaşi imagine, doar setările OIDC s-au schimbat): operatorul decide
+        checked_app_state || exit 1
+        if [ "$st" != healthy ]; then
+          echo "✗ SSO is linked in .env, but the reloaded app did not become healthy (status: $st)." >&2
+          docker logs --tail 30 "$APP_ID" 2>/dev/null || true
+          echo "  Nothing was rolled back. See the logs above, fix the cause and run ./deploy.sh again." >&2
+          exit 1
+        fi
       else
         echo "✗ SSO is linked in .env, but the app was NOT reloaded (see above). WebTerm is up without" >&2
         echo "  SSO; run ./deploy.sh again to pick up the OIDC settings." >&2
@@ -849,7 +864,8 @@ if { [ -n "$WITH_AUTHENTIK" ] || printf '%s' "${COMPOSE_PROFILES:-}" | grep -qw 
     echo "    cd $(pwd) && AUTHENTIK_DOMAIN=$AUTHENTIK_DOMAIN WEBTERM_DOMAIN=$WEBTERM_DOMAIN \\"
     echo "      AUTHENTIK_API_TOKEN=\"\$(cat secrets/authentik_bootstrap_token)\" python3 $PROV"
     echo "    then: WEBTERM_OIDC_CLIENT_SECRET → secrets/webterm_oidc_client_secret, the other"
-    echo "    WEBTERM_OIDC_* lines → .env, and run: $COMPOSE -f $FILE up -d app"
+    # RC4-M2: niciodată `compose up` direct — ./deploy.sh randează, verifică şi porneşte planul
+    echo "    WEBTERM_OIDC_* lines → .env, and run: cd $(pwd) && ./deploy.sh"
   fi
 fi
 

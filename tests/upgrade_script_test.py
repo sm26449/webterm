@@ -73,10 +73,18 @@ case "$1" in
     [ "$1" = image ] && [ "$2" = rm ] && exit 0
     case "$*" in
       *RepoDigests*)  [ -n "${NO_DIGEST:-}" ] || echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST"; exit 0 ;;
-      *Config.Image*) echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST" ;;
+      # RC4-M1: un container pornit din planul verificat are în Config.Image ID-ul LOCAL (sha256:…),
+      # nu referinţa repo@sha256 din manifest; ce rulează efectiv e .Image (ID-ul imaginii)
+      *Config.Image*) echo "sha256:$(printf 'imgid-%s' "$WANT_TAG" | sha256sum | cut -c1-64)" ;;
       *Config.Env*)   printf '%b\n' "${IMG_ENV-WEBTERM_DATA_DIR=/data}" ;;
-      *"{{.Image}}"*|*"{{.Id}}"*) echo "sha256:$(printf 'imgid-%s' "$WANT_TAG" | sha256sum | cut -c1-64)" ;;
-      *)              echo healthy ;;
+      # .Image al containerului: implicit ID-ul verificat; RUN_ID_SEQ = câte un ID per apel (înainte de
+      # deploy, după deploy, …) ca testele să modeleze un rollback real sau o imagine necunoscută
+      *"{{.Image}}"*)
+        if [ -n "${RUN_ID_SEQ:-}" ] && [ -s "$RUN_ID_SEQ" ]; then
+          head -1 "$RUN_ID_SEQ"; [ "$(wc -l < "$RUN_ID_SEQ")" -gt 1 ] && sed -i 1d "$RUN_ID_SEQ"
+        else echo "sha256:$(printf 'imgid-%s' "$WANT_TAG" | sha256sum | cut -c1-64)"; fi ;;
+      *"{{.Id}}"*) echo "sha256:$(printf 'imgid-%s' "$WANT_TAG" | sha256sum | cut -c1-64)" ;;
+      *)              echo "${HEALTH:-healthy}" ;;
     esac
     exit 0 ;;
   run)
@@ -216,8 +224,14 @@ def pre38_checks(tmp):
     backup, de trusa de pe host şi de deploy (deploy.sh-ul ţintei n-ar mai avea garda)."""
     print("── pre-3.8 target on a migrated volume")
     d = sandbox(tempfile.mkdtemp(dir=tmp))
+    kitfiles = ("deploy.sh", "rollback.sh", "upgrade.sh", "docker-compose.prod.yml", "scripts/backup.sh")
+    before = {f: (d / f).read_bytes() for f in kitfiles}
     r, calls = run(d, ["-y"], IMG_LABEL="v3.7.1", VOL_LS="webterm.db\nkeys.wtk\n.lock\n")
     out = r.stdout + r.stderr
+    # RC3-M2: trusa unei ţinte mai vechi nu se sincronizează peste trusa 3.8 pe un volum migrat
+    check("RC3-M2: ţintă < 3.8 pe volum migrat → trusa de pe host (deploy/rollback/upgrade/compose/scripts) rămâne neatinsă",
+          all((d / f).read_bytes() == before[f] for f in kitfiles)
+          and not (d / "upgrade.sh.new").exists() and not (d / "upgrade.sh.bak").exists(), out[-400:])
     check("ţintă v3.7.1 pe volum cu keys.wtk → refuz", r.returncode != 0 and "migrated to 3.8" in out, out[-600:])
     check("…înainte de backup, de sincronizarea trusei şi de deploy",
           "backup.sh" not in calls and "deploy.sh" not in calls and "deploy-kit" not in calls, calls)
@@ -273,6 +287,40 @@ def pre38_checks(tmp):
     check("R-H1: upgrade.sh cât alt lifecycle ţine .deploy.lock → refuz, niciun pull/deploy",
           r.returncode != 0 and "another deploy" in (r.stdout + r.stderr) and "pull" not in calls
           and "deploy.sh" not in calls, (r.stdout + r.stderr)[-300:])
+
+
+def verify_checks(tmp):
+    """RC4-M1: raportul final citeşte ID-ul EFECTIV (.Image) şi îl compară cu ID-ul verificat; sănătatea
+    se raportează separat. Config.Image al unui container pornit din plan e ID-ul local, nu digestul din
+    registry, deci comparaţia veche pe şir declara „rollback" un upgrade reuşit."""
+    print("── final verify: effective image id vs checked id")
+    checked = "sha256:" + __import__("hashlib").sha256(b"imgid-v1.0.30").hexdigest()
+    old_id = "sha256:" + "0" * 64
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, ["-y"])
+    out = r.stdout + r.stderr
+    check("RC4-M1: Config.Image = ID local, .Image = ID-ul verificat, healthy → succes (exit 0)",
+          r.returncode == 0 and "Upgrade complete" in out and "ROLLED BACK" not in out
+          and f"running: {checked}" in out, out[-600:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, ["-y"], HEALTH="unhealthy")
+    out = r.stdout + r.stderr
+    check("RC4-M1: ID-ul verificat rulează dar unhealthy → exit 1, „APPLIED but NOT healthy”, fără „rolled back”",
+          r.returncode == 1 and "APPLIED but the container is NOT healthy (unhealthy)" in out
+          and "ROLLED BACK" not in out and "Upgrade complete" not in out, out[-600:])
+    seq = d / "seq"
+    seq.write_text(f"{old_id}\n")                    # înainte şi după deploy: aceeaşi imagine veche
+    r, calls = run(d, ["-y"], RUN_ID_SEQ=str(seq))
+    out = r.stdout + r.stderr
+    check("RC4-M1: după deploy rulează iar imaginea de dinainte → rollback real, exit 1",
+          r.returncode == 1 and "Upgrade ROLLED BACK" in out and old_id in out and "Upgrade complete" not in out,
+          out[-600:])
+    seq.write_text(f"{old_id}\nsha256:{'9' * 64}\n")  # alt ID decât cel vechi şi cel verificat
+    r, calls = run(d, ["-y"], RUN_ID_SEQ=str(seq))
+    out = r.stdout + r.stderr
+    check("RC4-M1: rulează un ID nici verificat, nici cel vechi → „state UNKNOWN”, exit 1, fără succes/rollback",
+          r.returncode == 1 and "Upgrade state UNKNOWN" in out and "ROLLED BACK" not in out
+          and "Upgrade complete" not in out, out[-600:])
 
 
 def main():
@@ -621,6 +669,7 @@ def main():
         reexec_checks(tmp)
         old_style_checks(tmp)
         pre38_checks(tmp)
+        verify_checks(tmp)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

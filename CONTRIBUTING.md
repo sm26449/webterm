@@ -25,7 +25,7 @@ For logos, product copy and branded artwork, use the [EverShell identity guide](
 make dev          # or: uvicorn app.main:app --reload  (from gateway/, in .venv) + npm run dev (from frontend/)
 ```
 
-Prod: `docker compose -f docker-compose.prod.yml up` (see README).
+Prod: `./deploy.sh` (renders and checks the compose plan; see README).
 
 ## Tests
 

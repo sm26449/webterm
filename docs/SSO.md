@@ -537,7 +537,7 @@ sudo ./install.sh --domain term.example.com --email you@example.com \
 #  already installed:  cd /opt/webterm && ./deploy.sh --with-authentik   (AUTHENTIK_DOMAIN in .env)
 ```
 
-This sets `COMPOSE_PROFILES=authentik` in `.env` (so every later `docker compose up -d` and
+This sets `COMPOSE_PROFILES=authentik` in `.env` (so every later `./deploy.sh` and
 `./upgrade.sh` bring Authentik along), **generates** `AUTHENTIK_SECRET_KEY` / `PG_PASS` /
 `AUTHENTIK_BOOTSTRAP_PASSWORD` / `AUTHENTIK_BOOTSTRAP_TOKEN` unique to that install (never shared
 defaults), starts the stack, waits for Authentik, runs `provision.py` and writes the
@@ -559,7 +559,8 @@ cp .env.prod.example .env      # AUTHENTIK_DOMAIN, WEBTERM_DOMAIN, secrets (open
 docker compose -f docker-compose.prod.yml up -d
 # 3. create the OIDC app + print the WEBTERM_OIDC_* block:
 ./provision.sh
-# 4. paste those lines into WebTerm's .env, then:  docker compose -f docker-compose.prod.yml up -d app
+# 4. paste those lines into WebTerm's .env, then (from the WebTerm install dir):  ./deploy.sh
+#    (never `docker compose up` the WebTerm app by hand: deploy.sh renders and checks the plan)
 ```
 
 `provision.sh` reads `.env`, mints an API token via `ak shell` if needed, then (idempotently)

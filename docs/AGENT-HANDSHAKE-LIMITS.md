@@ -196,11 +196,11 @@ The change has two parts, and either one can be undone on its own.
 
 - **Proxy layer.** Set very high limits in `.env`, for example `WEBTERM_AGENT_RL_IP_BURST=100000`,
   `WEBTERM_AGENT_RL_IP_AVERAGE=100000`, `WEBTERM_AGENT_RL_GLOBAL_BURST=100000` and
-  `WEBTERM_AGENT_RL_GLOBAL_AVERAGE=100000`, then `docker compose up -d app`. Same image; the app
+  `WEBTERM_AGENT_RL_GLOBAL_AVERAGE=100000`, then `./deploy.sh`. Same image; the app
   container is recreated, so the gateway restarts for a few seconds and agents reconnect. For a full rollback, go back to the previous release with `rollback.sh`: the router and
   middlewares disappear with the labels, and the agent path falls back to the main `webterm` router.
 - **Gateway layer.** It lives in the image; `rollback.sh` to the previous release removes it.
-- **Allow/deny lists only.** Set `WEBTERM_AGENT_LISTS_DIR=off` and run `docker compose up -d app`, then
+- **Allow/deny lists only.** Set `WEBTERM_AGENT_LISTS_DIR=off` and run `./deploy.sh`, then
   empty the file: `docker compose exec app sh -c ': > /edge/agent-lists.yaml'`. Traefik drops the two
   routers at once.
 

@@ -358,7 +358,8 @@ Nothing inside WebTerm can report that WebTerm itself is down. Set `WEBTERM_HEAR
 gateway sends a GET every `WEBTERM_HEARTBEAT_MINUTES` (default 5) while it is healthy (event
 loop and database answer). When the pings stop, the monitor alerts you. The URL is treated as a
 secret (`WEBTERM_HEARTBEAT_URL_FILE` works too) and never shown or logged. Apply with
-`docker compose -f docker-compose.prod.yml up -d app`.
+`cd /opt/webterm && ./deploy.sh` (it renders and checks the compose plan before starting it; never
+`docker compose up` the app by hand).
 
 ### Optional: single sign-on with Authentik
 
@@ -377,8 +378,8 @@ sudo ./install.sh --domain term.example.com --email you@example.com \
 #   already installed?  cd /opt/webterm && ./deploy.sh --with-authentik   (set AUTHENTIK_DOMAIN in .env)
 ```
 
-Under the hood it sets `COMPOSE_PROFILES=authentik` in `.env` (so every later `docker compose up
--d` / `./upgrade.sh` keeps Authentik too), generates `AUTHENTIK_*`/`PG_PASS`, waits for Authentik,
+Under the hood it sets `COMPOSE_PROFILES=authentik` in `.env` (so every later `./deploy.sh` /
+`./upgrade.sh` keeps Authentik too), generates `AUTHENTIK_*`/`PG_PASS`, waits for Authentik,
 then runs the provisioner and writes the `WEBTERM_OIDC_*` lines back. Re-running is safe.
 
 **B) You already run Authentik.** Don't bundle a second one — point WebTerm at yours. Either create
@@ -685,8 +686,9 @@ boots exactly as before (`upgrade.sh` never creates a key). To turn protection o
    The file must be owned by 10001 and not readable by group or others: the gateway refuses a key
    file with a looser mode (`bad-mode`) or another owner (`bad-owner`). Docker keeps the host
    owner and mode on the bind mount.
-4. Add `WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key` to `.env` and recreate the app:
-   `sudo docker compose -f docker-compose.prod.yml up -d app`.
+4. Add `WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key` to `.env` and recreate the app with the
+   checked path: `cd /opt/webterm && sudo ./deploy.sh` (it renders the compose plan, checks the image
+   and the `/data` mount, and starts exactly that plan; never `docker compose up` the app by hand).
 5. Verify: the log shows `encryption at rest: protected (key source file) — migrated from 3.7 on
    this boot`; System health shows *Encryption at rest is on*; `docker exec webterm-app-1 ls /data`
    lists `keys.wtk` and no longer `secret`. Every stored credential still works (the old key became
@@ -731,9 +733,40 @@ custom `WEBTERM_DATA_DIR` (anything but `/data`, in the compose environment or t
 supported by the downgrade guard and is refused for a pre-3.8 image. An
 image without a version label counts as of an unknown version, which is refused on a migrated
 volume; a locally built 3.8 image can be declared for one run with `WEBTERM_IMAGE_ERA=3.8 ./deploy.sh
-…` (never put it in `.env`). The only way back is to restore the backup from step 2 — taken
-**before** the migration — into a new volume with a 3.7 image, or to stay on 3.8 and fix forward
-(`./deploy.sh <a 3.8.x version>`). Older
+…` (never put it in `.env`).
+
+**The only way back after the migration** is the backup taken **before** it (step 2, or the
+`.tar.gz.enc` that `upgrade.sh` made before installing 3.8, in `/var/backups/webterm`), restored
+into a **new volume** with the **3.8 kit's** `scripts/restore.sh`. The alternative is to stay on
+3.8 and fix forward (`./deploy.sh <a 3.8.x version>`). `rollback.sh` and `upgrade.sh <3.7.x>`
+refuse on the migrated volume and change nothing, and `upgrade.sh` never syncs an older host kit
+over the 3.8 one there. The 3.8 `restore.sh` checks and stages the archive with the gateway's own
+code, so the new volume is served by the 3.8 image (without a key, in legacy mode) during the
+restore, and only then switched to 3.7. Everything goes through `./deploy.sh` (never `docker
+compose up` by hand), and the migrated volume is never touched:
+
+```sh
+cd /opt/webterm && sudo docker compose -f docker-compose.prod.yml stop   # keep the migrated install as it is
+sudo cp -a /opt/webterm /opt/webterm37 && cd /opt/webterm37               # new directory = new compose project = new volume
+sudo rm -f .deploy.lock .prev-image .prev-image-tag secrets/master-key/master.key
+sudo sed -i '/^WEBTERM_MASTER_KEY_FILE=/d' .env                           # no key: the new volume stays pre-3.8
+sudo docker volume create webterm37_webterm-data   # exists → deploy.sh does not create a master key for it
+sudo ./deploy.sh ghcr.io/sm26449/webterm@sha256:<3.7.x digest>   # 1. a fresh 3.7 install on the new volume
+sudo ./deploy.sh ghcr.io/sm26449/webterm@sha256:<3.8.x digest>   # 2. 3.8 in legacy mode (no key) for the restore
+sudo WEBTERM_VOLUME=webterm37_webterm-data WEBTERM_BACKUP_PASSPHRASE=… \
+     scripts/restore.sh /var/backups/webterm/<pre-migration archive>.tar.gz.enc   # 3. checked, staged, applied at boot
+sudo ./deploy.sh ghcr.io/sm26449/webterm@sha256:<3.7.x digest>   # 4. back on 3.7 with the restored data
+```
+
+Step 1 exists because 3.8 does not start on an empty volume without a key, and step 2 because
+`restore.sh` runs the restore checks with the app image (`app.hostops`), which 3.7 does not have.
+The guard lets 3.7 start in step 4 because the new volume holds no `keys.wtk`. Use the 3.8 kit in
+`/opt/webterm37` (`./deploy.sh <digest>`), not `upgrade.sh <3.7.x>`, while you stay on 3.7. The new
+directory also gets new Traefik certificates (a new `traefik-acme` volume), and the host timers
+(backup, host health) still belong to `/opt/webterm`: point them at the new directory (`WEBTERM_VOLUME`
+in `/etc/default/webterm-backup`, the units' `WorkingDirectory`) or re-run the installer there. Remove the old,
+migrated volume only once you no longer need it. This path was rehearsed end to end on a
+throwaway copy: 3.7.1 → 3.8 legacy → opt-in → refused rollback → the four steps above. Older
 backups (`*.wtsnap`, `pre-restore-*.wtsnap.keep`, and any off-host copy made before the migration)
 still contain the old vault key in clear; System health counts them. Scheduled `.wtsnap` files
 expire after 7 days; delete the `.keep` files once you no longer need them.
