@@ -28,7 +28,7 @@ from . import webauthn_api
 from . import (accounts, alert_history, audit, authz, backup, certmon, cmdguard, config,
                agentca, agentgate, core, db, edgeguard, edgelists, edgemtls, email_alerts, errors, fserrors, health, healthcmd, hostcmd, hostmodel, idlesess, push,
                pyruntime, replay, scim, security, sessctl, shares, conntypes, fwddomain, signing, ssomap,
-               stepup, syshealth, totp, updatecheck, watermark)
+               stepup, syshealth, totp, txhub, updatecheck, watermark)
 
 log = logging.getLogger("webterm")
 # Garda de la nivel de router (3.6, fail-closed): o rută care nu-şi declară permisiunea
@@ -420,7 +420,9 @@ async def logout(request: Request, response: Response):
     security.bump_forward_epoch(u["id"])
     # doar share-urile CONTULUI care se deconectează — vezi shares.revoke_all_shares
     await shares.revoke_all_shares(u["email"], u["id"])
-    await security.destroy_web_session(tok)
+    # 3.8: un flux de înregistrare deschis de această sesiune se re-autorizează (şi cade) după logout
+    async with txhub.revoking(None):
+        await security.destroy_web_session(tok)
     security.clear_session_cookie(response)
     return {"ok": True}
 
@@ -4550,9 +4552,16 @@ async def search(q: str, request: Request, user=Depends(authz.perm('recording.vi
     # CE s-a căutat, nu doar că s-a căutat: „a rulat o căutare" nu răspunde la întrebarea
     # de după un cookie furat, iar interogarea E lucrul care spune ce urmărea atacatorul.
     audit.detail(request, "search: " + q)
+    # 3.8: contoarele de revocare ale înregistrărilor criptate, capturate ÎNAINTEA deciziei (§12.11.2);
+    # grant-urile se recitesc după captură. Un token de automatizare primeşte doar metadate.
+    is_token = isinstance(user, dict) and bool(user.get("is_token"))
+    txsnap = txhub.snapshot() if txhub.active() and not is_token else None
+    grants = authz.grants_of(request)
+    if txsnap is not None:
+        grants = await authz.grants_for_user(user["id"])
     # 3.6 (§A.11.12): filtrul de vizibilitate e în SQL, ÎNAINTE de a citi vreun transcript —
     # filtrat după citire ar fi şi o scurgere prin timp, şi un amplificator de DoS.
-    vis = await authz.visible_hosts(authz.grants_of(request), "recording.view")
+    vis = await authz.visible_hosts(grants, "recording.view")
     if vis is None:
         rows = await db.fetchall("SELECT * FROM sessions ORDER BY created DESC LIMIT 500")
     elif vis:
@@ -4571,6 +4580,9 @@ async def search(q: str, request: Request, user=Depends(authz.perm('recording.vi
         # read-only: o căutare nu trebuie să prelungească fereastra de step-up pe hosturile potrivite
         allowed = {hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
+    if txhub.active():
+        results = await core.search_transcripts_tx(rows, q, "user:%s" % user["id"], txsnap)
+        return {"sessions": results}
     loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(None, core.search_transcripts, rows, q)
     return {"sessions": results}
@@ -4758,6 +4770,9 @@ def _last_output(row) -> float | None:
     hub = core.hubs.get(row["id"])
     if hub is not None and hub.last_output_at:
         return hub.last_output_at
+    if txhub.active():
+        # 3.8 (§12.11.6): momentul ultimului commit (niciun mtime de generaţie nu se citeşte)
+        return txhub.committed_at.get(row["id"])
     try:
         return core.transcript_paths(row["id"])[0].stat().st_mtime
     except (OSError, ValueError):
@@ -5183,7 +5198,8 @@ async def kill_session(sid: str, request: Request,
     if srow:   # H1: a termina o sesiune pe un host cu 2FA e o acţiune de host → cere step-up
         await stepup.require_host_stepup(srow["host_id"], user)
     try:
-        await core.kill_session(sid)
+        async with txhub.revoking(sid):       # 3.8: citirile în curs ale înregistrării se reverifică
+            await core.kill_session(sid)
     except KeyError:
         raise ApiError(404, "session.missing", "no such live session")
     except core.AgentGone:
@@ -5204,12 +5220,16 @@ async def delete_session(sid: str, request: Request,
     await stepup.require_host_stepup(row["host_id"], user)
     if row["state"] in ("creating", "live"):
         raise ApiError(409, "session.live", "the session is live; close it first")
-    await db.execute("DELETE FROM sessions WHERE id=?", sid)
+    async with txhub.revoking(sid):           # 3.8: fluxurile deschise ale înregistrării cad
+        await db.execute("DELETE FROM sessions WHERE id=?", sid)
     await shares.delete_replay_links(" WHERE sid=?", sid)     # înregistrarea nu mai e de partajat
     await core.prune_split_views()                      # split-urile care o refereau (3.6.12)
     # nu ștergem transcriptul pe loc: îl arhivăm (recuperabil ~120 zile), apoi
     # janitor-ul îl curăță definitiv după retenție
-    core.archive_transcript(sid)
+    if txhub.active():
+        await txhub.archive(sid)              # 3.8: arhivarea e o stare în DB
+    else:
+        core.archive_transcript(sid)
     return {"ok": True}
 
 
@@ -6303,7 +6323,8 @@ async def shared_ws(ws: WebSocket, token: str):
     osc_span: dict = {}
     replay_sent = False
     if not start_locked:
-        replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows, span=osc_span)
+        replay_bytes = await core.attach_replay(row["id"], hub, sb, sb_rows, span=osc_span,
+                                                principal="guest:" + client.id)
         if hub and (hub.locked or (share_2fa and not hub.has_operator())):
             start_locked = True          # blocată / owner plecat cât aşteptam agentul → nimic scurs
         else:
@@ -6553,7 +6574,8 @@ async def browser_ws(ws: WebSocket, sid: str):
     osc_span: dict = {}
     replay_sent = False
     if not start_locked:
-        replay = await core.attach_replay(sid, hub, sb, sb_rows, span=osc_span)
+        replay = await core.attach_replay(sid, hub, sb, sb_rows, span=osc_span,
+                                          principal="user:%s" % user["id"])
         if hub and hub.locked:
             # blocată (idle-lock) cât aşteptam istoricul de la agent: nu scurgem nimic; calea
             # `start_locked` de mai jos ne blochează clientul şi trimite „locked"
@@ -6703,7 +6725,12 @@ async def browser_ws(ws: WebSocket, sid: str):
                         else:
                             start_locked = False
                             await ws.send_text(json.dumps({"type": "unlocked"}))
-                            await ws.send_bytes(await asyncio.to_thread(core.read_tail, sid))
+                            if txhub.active():
+                                tail, _e, _le = await core.read_tail_tx(
+                                    sid, principal="user:%s" % user["id"], route="ws-unlock")
+                                await ws.send_bytes(tail)
+                            else:
+                                await ws.send_bytes(await asyncio.to_thread(core.read_tail, sid))
                 continue
             if msg.get("bytes") is not None and hub:
                 if client.writable:          # 3.6: un client read-only nu scrie în PTY

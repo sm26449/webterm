@@ -1,5 +1,7 @@
 """SQLite access layer (aiosqlite, no ORM)."""
 
+import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -1185,9 +1187,45 @@ async def fetchall(sql: str, *args):
         return await cur.fetchall()
 
 
+# 3.8: o tranzacţie de scriere pentru un proces cu UN SINGUR flux (CLI-ul admin), vezi `transaction`.
+_txn = contextvars.ContextVar("webterm_db_txn", default=None)
+
+
+@contextlib.asynccontextmanager
+async def transaction():
+    """ONE write transaction for a single-flow process (`python3 -m app.admin`): the first write
+    opens it (BEGIN IMMEDIATE, so a prompt before it holds no lock on the gateway's database),
+    every `execute` inside joins it, the end commits and an exception rolls everything back.
+    Never in the gateway: its coroutines share one connection."""
+    state = {"open": False}
+    tok = _txn.set(state)
+    try:
+        yield
+        if state["open"]:
+            await _conn.commit()
+    except BaseException:
+        if state["open"]:
+            await _conn.rollback()
+        raise
+    finally:
+        _txn.reset(tok)
+
+
+async def _joined() -> bool:
+    state = _txn.get()
+    if state is None:
+        return False
+    if not state["open"]:
+        await _conn.execute("BEGIN IMMEDIATE")
+        state["open"] = True
+    return True
+
+
 async def execute(sql: str, *args) -> int:
+    joined = await _joined()
     cur = await _conn.execute(sql, args)
-    await _conn.commit()
+    if not joined:
+        await _conn.commit()
     return cur.lastrowid
 
 
@@ -1200,8 +1238,10 @@ async def execute_returning(sql: str, *args):
     # oricărei alte corutine din acel interval eşua cu „cannot commit transaction - SQL statements in
     # progress" (văzut în producţie pe 3.7.0-rc2: reconciliere eşuată la reconectarea în masă a
     # agenţilor; reprodus: 200 din 400 de scrieri concurente).
+    joined = await _joined()
     rows = await _conn.execute_fetchall(sql, args)
-    await _conn.commit()
+    if not joined:
+        await _conn.commit()
     return rows[0] if rows else None
 
 

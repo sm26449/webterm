@@ -191,6 +191,13 @@ def prepare(env=None, data_dir=None, hold_maintenance=False):
     return res
 
 
+def protected_keyring():
+    """The opened keyring of a protected volume (None on a legacy one / before prepare())."""
+    if _boot is None or _boot.state.mode == "legacy":
+        return None
+    return _boot.keyring
+
+
 def describe_refusal(e: BaseException) -> str:
     """One log line for a refused boot: reason code, subject (a name, never a value), kind, and
     what to do. Never key material (BootRefused carries none)."""

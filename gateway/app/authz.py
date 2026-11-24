@@ -177,6 +177,9 @@ _CACHE_TTL = 30.0
 _cache: dict[int, tuple[int, float, Optional[float], "Grants"]] = {}
 _waiters: set = set()                  # asyncio.Event per live WebSocket / forward socket
 bindings_lock = asyncio.Lock()         # serialises binding mutations (check-then-act)
+# Ascultători sincroni ai unui bump (3.8, txhub: contorul global de acces al înregistrărilor
+# criptate). Gol când înregistrările criptate sunt oprite — comportamentul rămâne cel din 3.7.
+epoch_listeners: list = []
 
 
 def epoch() -> int:
@@ -191,6 +194,11 @@ def bump_epoch() -> None:
     _cache.clear()
     for ev in list(_waiters):
         ev.set()
+    for fn in list(epoch_listeners):
+        try:
+            fn()
+        except Exception:                  # noqa: BLE001 — un ascultător nu opreşte invalidarea
+            log.exception("authz epoch listener failed")
 
 
 def forget_cached(user_id: int) -> None:

@@ -23,7 +23,7 @@ import logging
 import time
 from typing import Optional
 
-from . import authz, core, db, email_alerts, sessctl
+from . import authz, core, db, email_alerts, sessctl, txhub
 
 log = logging.getLogger("webterm")
 
@@ -150,7 +150,12 @@ async def last_activity(row, hub) -> Optional[float]:
         return None
     if hub.clients:
         return time.time()
-    mt = await asyncio.to_thread(_transcript_mtime, row["id"])
+    if hub._tx is not None:
+        # 3.8 (§12.11.6): ultimul output viu al hub-ului / ultimul commit; necunoscut (recorder
+        # degradat, nepornit, checkpoint în urmă) → None: absenţa nu se citeşte drept inactivitate
+        mt = txhub.last_output_at(row["id"], hub)
+    else:
+        mt = await asyncio.to_thread(_transcript_mtime, row["id"])
     if mt is None:
         return None                           # transcript ilizibil: nu putem dovedi inactivitatea
     if hub.clients:                           # s-a ataşat cineva cât citeam

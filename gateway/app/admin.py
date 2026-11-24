@@ -102,6 +102,25 @@ async def _bump_authz_epoch() -> None:
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value", "%.6f" % time.time())
 
 
+# Comenzile care schimbă accesul cuiva (3.8, ENCRYPTION-AT-REST.md §12.11.2 "Commit/bump fence"):
+# rulează într-O tranzacţie care creşte şi `tx_state.access_gen`; gateway-ul (alt proces) îl citeşte
+# la fiecare secundă şi re-autorizează fluxurile de înregistrare deschise.
+ACCESS_CHANGES = frozenset({"passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable"})
+
+
+async def _bump_tx_access_gen() -> None:
+    await db.execute(
+        "INSERT INTO tx_state(key, value) VALUES('access_gen', '1') ON CONFLICT(key) DO UPDATE"
+        " SET value = CAST(COALESCE(CAST(value AS INTEGER), 0) + 1 AS TEXT)")
+
+
+async def run_access_change(fn, args) -> None:
+    """`fn(args)` and the access_gen bump in ONE transaction (both or neither)."""
+    async with db.transaction():
+        await fn(args)
+        await _bump_tx_access_gen()
+
+
 async def cmd_list(_args) -> None:
     rows = await db.fetchall(
         "SELECT u.id, u.email, u.created, u.totp_enabled, COALESCE(u.disabled, 0) AS disabled,"
@@ -502,11 +521,15 @@ async def main() -> None:
             lock.release()
         raise
     try:
-        await {"list": cmd_list, "passwd": cmd_passwd,
-               "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
-               "roles": cmd_roles, "promote": cmd_promote,
-               "sso-only": cmd_sso_only, "enable": cmd_enable,
-               "vacuum": cmd_vacuum}[args.cmd](args)
+        fn = {"list": cmd_list, "passwd": cmd_passwd,
+              "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
+              "roles": cmd_roles, "promote": cmd_promote,
+              "sso-only": cmd_sso_only, "enable": cmd_enable,
+              "vacuum": cmd_vacuum}[args.cmd]
+        if args.cmd in ACCESS_CHANGES:
+            await run_access_change(fn, args)
+        else:
+            await fn(args)
     finally:
         await db.close()
         os.close(maint)

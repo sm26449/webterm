@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from . import authz, core, db
+from . import authz, core, db, txhub
 
 # INV-05 (docs/design/INVARIANTS.md): accesul derivat moare odată cu cel care l-a dat (logout, parolă, rol pierdut).
 async def revoke_all_shares(owner_email: str | None = None,
@@ -36,9 +36,11 @@ async def revoke_all_shares(owner_email: str | None = None,
         where = " WHERE share_token IS NOT NULL"
         args = ()
     rows = await db.fetchall("SELECT id, share_expires FROM sessions" + where, *args)
-    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                     " share_writable=0" + where, *args)
     sids = {r["id"] for r in rows}
+    # 3.8: gardul de revocare al înregistrărilor criptate pe fiecare sid atins (no-op când e oprit)
+    async with txhub.revoking_many(sids):
+        await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                         " share_writable=0" + where, *args)
     for sid, hub in list(core.hubs.items()):
         if sid in sids:
             await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
@@ -53,11 +55,16 @@ async def delete_replay_links(where: str, *args) -> int:
     if not rows:
         return 0
     ids = [r["id"] for r in rows]
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        marks = ",".join("?" * len(chunk))
-        await db.execute("DELETE FROM replay_opens WHERE link_id IN (%s)" % marks, *chunk)
-        await db.execute("DELETE FROM replay_links WHERE id IN (%s)" % marks, *chunk)
+    sids = ()
+    if txhub.active():
+        sids = {r["sid"] for r in await db.fetchall("SELECT DISTINCT sid FROM replay_links" + where, *args)}
+    # 3.8: un flux de replay deschis cu un link revocat cade la următorul chunk (gardul §12.11.2)
+    async with txhub.revoking_many(sids):
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            await db.execute("DELETE FROM replay_opens WHERE link_id IN (%s)" % marks, *chunk)
+            await db.execute("DELETE FROM replay_links WHERE id IN (%s)" % marks, *chunk)
     now = time.time()
     return sum(1 for r in rows if r["expires"] > now)
 
@@ -81,8 +88,9 @@ async def revoke_unauthorized_derived(uid: int) -> None:
     for r in rows:
         have = await authz.perms_on(g, r["host_id"])
         if "share.live" not in have or (r["share_writable"] and "share.live_write" not in have):
-            await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                             " share_writable=0 WHERE id=?", r["id"])
+            async with txhub.revoking(r["id"]):
+                await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                                 " share_writable=0 WHERE id=?", r["id"])
             hub = core.hubs.get(r["id"])
             if hub:
                 await hub.revoke_shares()

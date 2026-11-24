@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 import asyncssh
 import telnetlib3
 
-from . import authz, bgtasks, config, conntypes, db, email_alerts, osc133, push, security, signing, telnet
+from . import authz, bgtasks, config, conntypes, db, email_alerts, osc133, push, security, signing, telnet, txhub
 
 log = logging.getLogger("webterm")
 
@@ -461,6 +461,14 @@ async def archive_closed_transcripts(now: Optional[float] = None) -> int:
         "SELECT id FROM sessions WHERE state='closed'"
         " AND COALESCE(closed_at, created) < ?", cutoff)
     moved = 0
+    if txhub.active():
+        # 3.8: arhivarea e o stare în DB (`archived_at`), fişierele generaţiilor nu se mută
+        for r in rows:
+            if await db.fetchone("SELECT 1 FROM tx_descriptors WHERE sid=? AND archived_at IS NULL",
+                                 r["id"]):
+                await txhub.archive(r["id"])
+                moved += 1
+        return moved
     for r in rows:
         out_path, cast_path = transcript_paths(r["id"])
         if not out_path.exists() and not cast_path.exists():
@@ -775,7 +783,7 @@ def _flushed_size(hub) -> Optional[int]:
 
 
 async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
-                        span: Optional[dict] = None) -> bytes:
+                        span: Optional[dict] = None, principal: str = "ws") -> bytes:
     """Replay-ul unei ataşări PROASPETE: [istoric tmux + îmbinare] + coada de transcript.
 
     Istoricul se cere ÎNAINTE de citirea cozii: coada rămâne cât mai aproape de momentul în care
@@ -794,6 +802,8 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
             block = await asyncio.to_thread(build_history_block, raw, scrollback,
                                             rows or hub.rows)
     limit = config.BROWSER_TAIL_BYTES if block else replay_tail_limit(scrollback, stream_is_plain(hub))
+    if txhub.active():
+        return block + await _attach_tail_tx(sid, hub, limit, span, principal)
     before = None
     if span is not None and hub is not None:
         before = (hub.out_gen, _flushed_size(hub))
@@ -801,6 +811,29 @@ async def attach_replay(sid: str, hub, scrollback: int = 0, rows: int = 0,
     if before is not None and before[1] is not None and (hub.out_gen, _flushed_size(hub)) == before:
         span.update(end=before[1], limit=limit, gen=before[0])
     return block + tail
+
+
+async def read_tail_tx(sid: str, limit: int = config.BROWSER_TAIL_BYTES, end: Optional[int] = None,
+                       principal: str = "ws", route: str = "ws-tail") -> tuple:
+    """`read_tail` pe înregistrarea criptată (§12.11.2: `tail(sid, out, limit, end=)`): coada
+    COMISĂ (acelaşi „flushed boundary" ca în 3.7: amândouă se mişcă la checkpoint), cu aceeaşi
+    curăţare de alt-screen. → (bytes, end, list_epoch); (b"", None, None) când nu e nimic de servit."""
+    data, e, le = await txhub.tail_out(sid, limit, principal=principal, route=route, end=end)
+    return ALT_SCREEN_RE.sub(b"", data), e, le
+
+
+async def _attach_tail_tx(sid: str, hub, limit: int, span: Optional[dict], principal: str) -> bytes:
+    """Coada unei ataşări proaspete; `span` = (capătul comis, limit, generaţia) DOAR dacă nici
+    generaţia (`out_gen`, mutată de un marker / cap / readoptare) nici `list_epoch` nu s-au mişcat
+    cât am citit (înlocuieşte `_flushed_size`)."""
+    gen = hub.out_gen if hub is not None else None
+    tail, end, le = await read_tail_tx(sid, limit, principal=principal, route="ws-attach")
+    if span is not None and hub is not None and end is not None and hub._tx is not None:
+        rec = hub._tx.rec
+        if (hub.out_gen == gen and rec is not None and rec.list_epoch == le
+                and rec.committed_len("out") == end):
+            span.update(end=end, limit=limit, gen=gen)
+    return tail
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +914,9 @@ class BrowserClient:
         # vechi / client de test). Refolosit de resync-ul FULL, care altfel ar da `term.reset()`
         # şi ar lăsa tabul revenit din fundal doar cu coada — adică exact simptomul reparat.
         self.replay_sb = 0
+
+    def tx_principal(self) -> str:
+        return ("user:%s" % self.user_id) if self.user_id is not None else ("guest:%s" % self.id)
 
     def _request_resync(self, level: int) -> None:
         # combină prin max — un „full" cerut de unlock nu poate fi degradat de
@@ -1004,7 +1040,14 @@ class BrowserClient:
         cutoff = None
         gen = None
         limit = self.replay_limit if full else config.BROWSER_TAIL_BYTES
-        if full and not self.hub.closed:
+        tx = self.hub._tx
+        if tx is not None:
+            # Criptat: cutoff-ul = poziţia logică .out în ACELAŞI pas sincron cu drain-ul, doar când
+            # adaptorul e la zi (fără backlog / operaţie în curs); commit-ul forţat de mai jos îl acoperă.
+            if full and not self.hub.closed and tx.in_sync():
+                cutoff = tx.out_pos()
+                gen = self.hub.out_gen
+        elif full and not self.hub.closed:
             try:
                 # cutoff-ul vine DOAR din out_f (`read_tail` citește .out); .cast se
                 # flush-uiește separat, best-effort — un eșec acolo nu aruncă un cutoff
@@ -1031,7 +1074,13 @@ class BrowserClient:
         # care sunt DEJA în coada noastră — fără margine ar ajunge și în tail, și din coadă.
         # Fereastra: cea de la ataşare DOAR pe full; lossy (client lent) rămâne pe cea istorică —
         # 2 MiB trimişi exact clientului care nu ţine pasul ar întreţine bucla de overflow.
-        tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
+        if tx is not None:
+            if cutoff is not None and not await tx.commit_through(cutoff):
+                gen = None                    # commit eşuat / listă mutată: calea de dedup de mai jos
+            tail, _e, _le = await read_tail_tx(self.hub.sid, limit, end=cutoff,
+                                               principal=self.tx_principal(), route="ws-resync")
+        else:
+            tail = await asyncio.to_thread(read_tail, self.hub.sid, limit=limit, end=cutoff)
         # aşteptarea de mai sus (I/O pe thread) e o fereastră în care clientul/hub-ul se poate
         # BLOCA — re-verificăm garda chiar înainte de a trimite scrollback-ul (fail-closed)
         if self.locked or self.hub.locked:
@@ -1144,6 +1193,10 @@ class BrowserClient:
 # ── [hub] SessionHub (one session, fan-out to browsers/guests, lock/unlock) ───────────────────────
 
 class SessionHub:
+    # 3.8 (PR5b): înregistrarea criptată a sesiunii (txhub.Recording) când txhub e activ; None =
+    # fişierele .out/.cast din 3.7, neschimbate. Atribut de clasă: hub-urile de test fără __init__.
+    _tx = None
+
     def __init__(self, row):
         self.sid: str = row["id"]
         self.host_id: int = row["host_id"]
@@ -1183,6 +1236,7 @@ class SessionHub:
         # (4410) din browser_ws/shared_ws rămâne pregătit pentru închiderea automată din 3.8.
         self.idle_closing = False
         self.keep_open = bool(row["keep_open"]) if "keep_open" in row.keys() else False   # sincron (re-review 3.7.1)
+        self._owner_id_from_row: Optional[int] = row["created_by_id"] if "created_by_id" in row.keys() else None
         # Plafonul ABSOLUT de step-up (3.5.13): pe un host require_2fa, terminalul se blochează
         # când au trecut STEPUP_WINDOW_MAX secunde de la factorul care l-a autorizat — oricât de
         # activ ar fi folosit (idle-lock-ul singur nu-l prindea niciodată pe un terminal în uz).
@@ -1202,6 +1256,9 @@ class SessionHub:
         self._cap_abort: Optional[threading.Event] = None
         self._cap_not_before = 0.0
 
+        if txhub.active():
+            self._init_tx()
+            return
         out_path, cast_path = transcript_paths(self.sid)
         is_new = not cast_path.exists()
         self.out_f = open(out_path, "ab")
@@ -1227,6 +1284,32 @@ class SessionHub:
             self.cast_f.write(json.dumps(header) + "\n")
             self.cast_f.flush()
 
+    def _init_tx(self) -> None:
+        """Înregistrarea criptată (ENCRYPTION-AT-REST.md §12.11): fără fişiere deschise aici; recorderul
+        porneşte la ataşare (`ensure_attached`), înainte de orice octet admis. Poziţiile .out sunt
+        cele LOGICE ale înregistrării (`list_epoch` ţine locul lui `out_gen`)."""
+        self.out_f = self.cast_f = None
+        self.out_gen = 0
+        self.osc = osc133.Osc133Scanner(on_mark=self._detect_task_event)
+        self._owner_id = self._owner_id_from_row
+        self._task_started_at = None
+        self._last_push_at = 0.0
+
+        def desync():
+            # poziţia prezisă nu mai e sigură (backlog, marker, readoptare): starea OSC 133 devine
+            # „necunoscută" şi orice replay capturat înainte nu mai e „sincronizat"
+            self.osc.gap()
+            self.out_gen += 1
+
+        def rebase():
+            self.osc.rebase()
+            self.out_gen += 1
+        self._tx = txhub.Recording(
+            self.sid, self.created, self.cols, self.rows,
+            live_end=lambda: (self.agent_epoch, self.agent_offset),
+            on_desync=desync, on_rebase=rebase)
+        self.out_pos = self._tx.out_pos()
+
     # -- transcript ---------------------------------------------------------
 
     def _cast_event(self, kind: str, data: bytes) -> None:
@@ -1242,6 +1325,8 @@ class SessionHub:
         self._flush()
 
     def _flush(self) -> None:
+        if self._tx is not None:
+            return                            # înregistrarea criptată: checkpoint-urile recorderului
         self.out_f.flush()
         self.cast_f.flush()
 
@@ -1435,6 +1520,16 @@ class SessionHub:
         if not force and self._unpersisted < 65536 and now - self._last_checkpoint < 2.0:
             self._schedule_idle_flush()       # nu scriem ACUM, dar nu uităm nici la nesfârşit
             return
+        if self._tx is not None:
+            # Aceleaşi praguri; jobul de checkpoint al recorderului publică octeţii ŞI poziţia
+            # agentului în aceeaşi tranzacţie (sessions.agent_offset e scris DOAR de el). Nu-l
+            # aşteptăm pe calea fierbinte; unul deja în zbor = reîncercăm la flush-ul de inactivitate.
+            if not self._tx.checkpoint():
+                self._schedule_idle_flush()
+                return
+            self._last_checkpoint = now
+            self._unpersisted = 0
+            return
         self._flush()
         self._maybe_cap()                     # doar declanşează: copierea e pe thread
         try:
@@ -1488,7 +1583,7 @@ class SessionHub:
         synced = False
         if replay is not None and st["last"] is not None and osc.last_start is not None:
             try:
-                pos = self.out_f.tell()
+                pos = self.out_f.tell() if self._tx is None else self._tx.out_pos()
             except (OSError, ValueError):
                 pos = None
             end = replay.get("end")
@@ -1508,6 +1603,9 @@ class SessionHub:
             return
         async with self._attach_lock:
             if self.attached or self.closed:
+                return
+            if self._tx is not None:
+                await self._ensure_attached_tx(source)
                 return
             if source.epoch != self.agent_epoch:
                 # agent restarted: its offsets reset; replay from its ring base
@@ -1554,6 +1652,46 @@ class SessionHub:
                 pass
             await self._checkpoint(force=True)
 
+    async def _ensure_attached_tx(self, source: "SessionSource") -> None:
+        """`ensure_attached` cu înregistrarea criptată (§12.11.10 Admission): recorderul porneşte
+        ÎNAINTE de ataşare (o cheie / un volum defect = nu ataşăm: o sesiune protejată nu rulează
+        neînregistrată). Golurile nu se mai scriu aici: noul epoch al agentului devine
+        `change_epoch`, un `replay_start` peste poziţia recorderului devine `skip_to`, iar o
+        suprapunere se taie — toate în adaptor, din poziţiile pe care le dăm mai jos."""
+        if not await self._tx.start(ring=bool(getattr(source, "has_ring", False))):
+            return
+        if source.epoch != self.agent_epoch:
+            from_offset = None
+        else:
+            from_offset = self.agent_offset
+        self._attach_buffer = []
+        self._replay_end.clear()
+        try:
+            resp = await source.attach(self.sid, from_offset)
+        except (AgentGone, asyncio.TimeoutError):
+            resp = {}
+        buffered, self._attach_buffer = self._attach_buffer, None
+        if not resp.get("ok"):
+            log.warning("attach %s failed: %s", self.sid, resp.get("code"))
+            for chunk in buffered:
+                await self._process_output(chunk)
+            return
+        replay_start = resp.get("replay_start", 0)
+        if (from_offset is not None and replay_start > from_offset) or source.epoch != self.agent_epoch:
+            self.osc.gap()                    # octeţi pierduţi / alt agent: ultimul marcaj nu mai e sigur
+        self.agent_epoch = source.epoch
+        self.agent_offset = replay_start
+        self.attached = True
+        self._tx.poke()                       # noul epoch / saltul se înregistrează chiar fără output
+        for chunk in buffered:
+            await self._process_output(chunk)
+        self._last_resize = (self.rows, self.cols)
+        try:
+            await source.resize(self.sid, self.rows, self.cols)
+        except (AgentGone, asyncio.TimeoutError):
+            pass
+        await self._checkpoint(force=True)
+
     async def wait_replay_end(self, timeout: float = 10.0) -> None:
         try:
             await asyncio.wait_for(self._replay_end.wait(), timeout)
@@ -1577,6 +1715,9 @@ class SessionHub:
     async def _process_output(self, data: bytes) -> None:
         if self.closed:
             return
+        if self._tx is not None:
+            await self._process_output_tx(data)
+            return
         self.agent_offset += len(data)
         self._unpersisted += len(data)
         try:
@@ -1590,6 +1731,29 @@ class SessionHub:
         if getattr(self, "idle_pending", False):   # hub-uri de test fără __init__
             self._idle_activity()
         self._cast_event("o", data)
+        for client in self.clients:
+            client.push(data)
+        await self._checkpoint()
+
+    async def _process_output_tx(self, data: bytes) -> None:
+        """`_process_output` cu înregistrarea criptată: un apel `feed` per bucată, cu poziţia ei în
+        fluxul sursei (`at`); browserele şi scannerul OSC 133 lucrează pe fluxul live, neţinute de
+        recorder."""
+        tx = self._tx
+        at = (self.agent_epoch, self.agent_offset)
+        self.agent_offset += len(data)
+        self._unpersisted += len(data)
+        self.out_pos = tx.out_pos()
+        try:
+            self.osc.feed(data, self.out_pos)
+        except Exception:                     # noqa: BLE001 — un bug de parser nu rupe fluxul
+            log.exception("osc133 scan %s failed", self.sid)
+            self.osc.gap()
+        tx.feed(at, data, round(time.time() - self.created, 6))
+        self.out_pos = tx.out_pos()
+        self.last_output_at = time.time()
+        if getattr(self, "idle_pending", False):
+            self._idle_activity()
         for client in self.clients:
             client.push(data)
         await self._checkpoint()
@@ -1740,6 +1904,9 @@ class SessionHub:
             self._cap_abort.set()
         hubs.pop(self.sid, None)
         session_sources.pop(self.sid, None)   # plasă de siguranță; sursa își face close-ul
+        if self._tx is not None:
+            self._tx.begin_close()            # finalizarea (checkpoint, SEAL, publicare) pe fundal
+            return
         try:
             self._flush()
             self.out_f.close()
@@ -2281,6 +2448,9 @@ async def wrap_tls_forward(fs: "ForwardStream",
 # ── [agent] AgentConnection (one connected agent) ─────────────────────────────────────────────────
 
 class AgentConnection(SessionSource):
+    # agentul ţine un ring de output: o ataşare de la un offset re-trimite octeţii de acolo
+    has_ring = True
+
     def __init__(self, ws, host_id: int):
         self.ws = ws
         self.host_id = host_id
@@ -3524,11 +3694,15 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
         if hub is not None:
             hub.teardown()
         session_sources.pop(sid, None)
+        if txhub.active():
+            await txhub.archive(sid)          # 3.8: arhivarea e o stare în DB (archived_at)
+            continue
         try:
             archive_transcript(sid)
         except ValueError:          # sid invalid în DB (nu se poate forma o cale) — nimic de mutat
             pass
-    await db.execute("DELETE FROM sessions WHERE host_id=?", host_id)
+    async with txhub.revoking_many(r["id"] for r in srows):    # 3.8: citirile în curs cad
+        await db.execute("DELETE FROM sessions WHERE host_id=?", host_id)
     await prune_split_views()        # panourile de split ale sesiunilor şterse (3.6.12)
 
     # forward-uri: tunelurile vii cad odată cu sursa (apelantul o deconectează); biletele sunt
@@ -3773,6 +3947,12 @@ def transcript_text(sid: str, tail_bytes: int = 0) -> str:
             raw = f.read()
     except OSError:
         return ""
+    return text_of_output(raw)
+
+
+def text_of_output(raw: bytes) -> str:
+    """Transformarea lui `transcript_text` pe octeţii .out deja citiţi (3.8: şi din înregistrarea
+    criptată, aceeaşi ieşire pentru aceeaşi istorie)."""
     raw = CURSOR_FWD_RE.sub(lambda m: b" " * min(int(m.group(1) or 1), 200), raw)
     raw = CURSOR_MOVE_RE.sub(b"\n", raw)
     raw = ANSI_RE.sub(b"", raw).replace(b"\r\n", b"\n")
@@ -3827,24 +4007,64 @@ def search_transcripts(rows, query: str):
                     f.seek(size - SEARCH_READ_CAP)
                 chunk = f.read()
                 total_read += len(chunk)
-                text = ANSI_RE.sub(b"", chunk)
-            lower = text.lower()
-            pos = lower.find(needle)
-            if pos >= 0:
-                count = lower.count(needle)
-                start = max(0, pos - 60)
-                raw = text[start:pos + len(needle) + 60]
-                snippet = raw.decode("utf-8", errors="replace")
-                snippet = "".join(c if c.isprintable() or c == " " else " " for c in snippet)
-                snippet = " ".join(snippet.split())
+            snippet, count = _search_match(chunk, needle)
         except OSError:
             pass
         if meta_hit or count:
-            results.append({
-                "id": row["id"], "title": row["title"], "host_id": row["host_id"],
-                "state": row["state"], "created": row["created"],
-                "snippet": snippet, "matches": count,
-            })
+            results.append(_search_result(row, snippet, count))
+            if len(results) >= SEARCH_MAX_RESULTS:
+                break
+    return results
+
+
+def _search_match(chunk: bytes, needle: bytes) -> tuple:
+    """(snippet, matches) for `needle` in one transcript tail (3.7 rules, shared with 3.8)."""
+    snippet, count = "", 0
+    text = ANSI_RE.sub(b"", chunk)
+    lower = text.lower()
+    pos = lower.find(needle)
+    if pos >= 0:
+        count = lower.count(needle)
+        start = max(0, pos - 60)
+        raw = text[start:pos + len(needle) + 60]
+        snippet = raw.decode("utf-8", errors="replace")
+        snippet = "".join(c if c.isprintable() or c == " " else " " for c in snippet)
+        snippet = " ".join(snippet.split())
+    return snippet, count
+
+
+def _search_result(row, snippet: str, count: int) -> dict:
+    return {"id": row["id"], "title": row["title"], "host_id": row["host_id"],
+            "state": row["state"], "created": row["created"],
+            "snippet": snippet, "matches": count}
+
+
+async def search_transcripts_tx(rows, query: str, principal: str, snap) -> list:
+    """`search_transcripts` pe înregistrările criptate (§12.11.2: `tail(sid, out, SEARCH_READ_CAP)`
+    per sesiune, SEARCH_TOTAL_CAP numărat pe octeţii decriptaţi; peste buget doar metadate). `snap`
+    = contoarele capturate ÎNAINTE de decizia de autorizare a rutei: un sid revocat de atunci
+    rămâne doar cu metadate."""
+    st = txhub.store()
+    needle = query.lower().encode("utf-8", errors="ignore")
+    budget = {"used": 0, "results": 0}
+    results = []
+    for row in rows:
+        meta_hit = (query.lower() in (row["title"] or "").lower()
+                    or query.lower() in (row["note"] or "").lower())
+        snippet, count = "", 0
+        acc = txhub.access_since(snap, row["id"], principal, "search")
+        if acc is not None and st is not None:
+            try:
+                chunk = await st.search_tail(row["id"], access=acc, budget=budget)
+            except Exception as e:            # noqa: BLE001 — fără conţinut: doar metadatele
+                if getattr(e, "reason", "") != "notFound":
+                    log.warning("search: recording %s refused: %s", row["id"][:8], e)
+                chunk = None
+            if chunk is not None:
+                snippet, count = await asyncio.to_thread(_search_match, chunk, needle)
+        if meta_hit or count:
+            results.append(_search_result(row, snippet, count))
+            budget["results"] = len(results)
             if len(results) >= SEARCH_MAX_RESULTS:
                 break
     return results

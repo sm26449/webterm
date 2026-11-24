@@ -153,6 +153,9 @@ def redact_cast(raw: bytes) -> bytes:
 
 
 _cache: dict = {"key": None, "data": b""}
+# Versiunea regulilor de mascare: parte din cheia cache-ului de replay al înregistrărilor criptate
+# (ENCRYPTION-AT-REST.md §12.11.2 "Caches"); creşte la orice schimbare a lui `redact_events`.
+REDACTION_POLICY = 1
 
 
 def redacted_cast_file(path) -> bytes:

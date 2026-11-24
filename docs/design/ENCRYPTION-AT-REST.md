@@ -2526,6 +2526,30 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   the coordinated actors (lease, pins), with no anti-TOCTOU promise against an external
   replacement. The `renameat2` scheme stays for PR6 migration.
 
+- **PR5b wiring (`gateway/app/txhub.py`).** Active only when the flag is on **and** boot opened a
+  Store (test gate + test volume); otherwise every call site keeps the 3.7 code. Boot
+  (`txhub.boot`, after `db.connect`, before reconcile): a `test_volume` marker outside a test gate,
+  or encrypted rows / generation files with the flag off, refuse the boot; the flag on without a
+  protected keyring or on a volume the Store refuses also refuses it. The hub adapter
+  (`txhub.Recording`) follows the Admission contract above with one documented simplification:
+  after an overflow it calls `resume()` and then `skip_to` the hub's live position (one marker for
+  everything dropped); it does **not** re-attach the agent to replay the ring to the recorder only.
+  Ringless sources (SSH, telnet, serial, telnet-over-agent) use `track_agent=False` and a virtual
+  offset counted by the adapter. Routes build their `Access` from their own authorization re-run
+  after `txhub.snapshot()` (cookie → fresh grants → `recording.view` → step-up; replay links: the
+  link row via `_replay_row`); `not_after` = the earliest of the web session's absolute and idle
+  expiry, a time-bound binding, the step-up window on a 2FA host, the link's expiry. Fences
+  (`revoking`) wrap: live-share revoke, replay-link deletion (every path through
+  `shares.delete_replay_links`), session kill / delete, host purge, logout; `authz.bump_epoch`
+  bumps the global counter synchronously **after** its caller's commit (role, binding, account
+  changes are not fenced before their commit yet). `python3 -m app.admin` access changes run in
+  one `db.transaction()` that also increments `tx_state.access_gen`; the gateway polls it every
+  second (two failed polls also bump). Downloads have no ETag yet, so `If-Range` always serves the
+  full body; a 206 is sent with `Content-Encoding: identity`. The redacted replay is computed on
+  the whole decrypted `.cast` (exactly 3.7's `redact_cast`), cached per §12.11.2 "Caches", and
+  emitted in 64 KiB chunks, each checked. Not yet: the per-stream `not_after` timer for a stalled
+  transport (checks run per chunk only), System health surfacing of `Store.alarms` (logged only).
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to

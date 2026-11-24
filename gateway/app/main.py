@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .errors import ApiError
 from . import (api, audit, authz, backup_api, bootkeys, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
-               hosts_api, idlesess, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
+               hosts_api, idlesess, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth, txhub,
                webauthn_api)
 
 logging.basicConfig(level=logging.INFO,
@@ -245,6 +245,15 @@ async def lifespan(app: FastAPI):
     core.cleanup_cap_temps()
     await db.connect()
     bootkeys.end_maintenance()
+    # 3.8 (ENCRYPTION-AT-REST.md §12.11 PR5/PR6): înregistrările criptate — oprite implicit. Cu
+    # flag-ul oprit şi înregistrări criptate pe volum → refuz (nu le citim drept absente); pornit
+    # pe un volum care nu e de test → refuz. Crash recovery ÎNAINTE de reconcile şi de orice hub.
+    try:
+        await txhub.boot(bootkeys.protected_keyring())
+    except txhub.BootRefused as e:
+        log.critical("boot refused: %s", e)
+        await db.close()
+        raise RuntimeError("boot refused (see the line above)") from None
     # Instalare NOUĂ → cheie proprie din prima secundă. Sursa publică a agentului are încorporată
     # cheia MENTAINERULUI; fără o cheie de deployment, fiecare instalare din lume ar împărţi
     # aceeaşi ancoră de încredere pentru update-uri, iar o scurgere a acelei chei ar însemna cod
@@ -316,6 +325,7 @@ async def lifespan(app: FastAPI):
     await edgemtls.startup()      # CA + secret + fişier ÎNAINTE să acceptăm agenţi
     mtlst = asyncio.create_task(edgemtls.loop())
     yield
+    await txhub.shutdown()        # no-op când înregistrările criptate sunt oprite
     listst.cancel()
     mtlst.cancel()
     edget.cancel()
