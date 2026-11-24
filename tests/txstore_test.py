@@ -1218,13 +1218,14 @@ async def g_review_h1():
     feed_at(rec, b"x" * 200)                       # overflow
     C = await rec.resume()
     st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
-    await araises(rec.skip_to("e1", 210, "ring", cast_ts=1.0), sqlite3.OperationalError)
+    # R2-H1: o publicare eşuată o dată e reluată în jobul skip-ului (_flush_dirty); viitorul reuşeşte
+    # doar pentru că rândul şi cursorul sunt comise, iar markerul nu e consumat de eşec.
+    res = await rec.skip_to("e1", 210, "ring", cast_ts=1.0)
     st.fault = None
-    gaps_after_fail = list(rec.gaps)
     await rec.checkpoint()
     check("gap recorded only once its marker is published (not consumed by a failed publication)",
-          gaps_after_fail == [] and gp(rec) == [(10, 200)]
-          and await read_all(st, sid) == b"a" * 10 + ts.GAP_MARKER and C[1] == 10, (gaps_after_fail, rec.gaps))
+          res["agent"] == ("e1", 210) and gp(rec) == [(10, 200)]
+          and await read_all(st, sid) == b"a" * 10 + ts.GAP_MARKER and C[1] == 10, (res, rec.gaps))
     # Publicare eşuată, apoi overflow + resume: C include octeţii scrişi (publicaţi la resync).
     feed_at(rec, b"X")
     st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
@@ -2430,6 +2431,288 @@ async def g_recheck2():
     st.close()
 
 
+async def _gaprows3(sid):
+    return await db.fetchall("SELECT gap_id, epoch, upstream_start, upstream_size, reason, op_nonce, out_pos, "
+                             "cast_pos, published_at FROM tx_gaps WHERE sid=? ORDER BY upstream_start", sid)
+
+
+async def _fresh(pending_cap=512, **kw):
+    st = store(pending_cap=pending_cap, total_cap=1 << 20, **kw)
+    st.readopt_enabled = False
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    feed_at(rec, b"abcd")
+    await rec.checkpoint()
+    return st, sid, rec
+
+
+async def g_recheck3():
+    print("== recheck 1824838: R2-H1 skip job, R2-M1 gap identity, R2-M2 epoch/skip serialization ==")
+    # R2-H1, proba recenzentului: cap 512, 4 comişi, skip_to 30 şi feed 600 la 30 în acelaşi tick.
+    st, sid, rec = await _fresh()
+    f = rec.skip_to("e1", 30, "ring")
+    sk = dict(rec._skip)
+    buf0, loss0 = st.buffered_total, rec.loss
+    held = _raises_reason(lambda: rec.feed(b"x" * 600, b"", at=("e1", 30)), "busy")
+    inside = _raises_reason(lambda: rec.feed(b"y", b"", at=("e1", 5)), "position")
+    cast_held = _raises_reason(lambda: rec.feed_cast_only(b'[0.1, "r", "80x24"]\n', at=("e1", 30)), "busy")
+    recv = rec.received
+    still = (st.buffered_total, rec.loss, rec.ingress()) == (buf0, loss0, "open")
+    res = await f
+    rows = await _gaprows3(sid)
+    check("R2-H1 probe: ingress at replay_start is held (busy, nothing admitted or counted) while the skip "
+          "is pending; the future resolves only with its row and the new cursor committed",
+          held and inside and cast_held and recv == ("e1", 30) and still and res["agent"] == ("e1", 30)
+          and await _ag(sid) == ("e1", 30) and len(rows) == 1 and rows[0][0] == sk["gap_id"]
+          and rows[0][5] == sk["nonce"] and rows[0][8] is not None
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER, (held, inside, recv, res, rows))
+    after = rec.feed(b"x" * 600, b"", at=("e1", 30))
+    check("R2-H1 probe: after the commit the same chunk meets the normal admission (here an overflow), the "
+          "published marker is untouched",
+          after is False and rec.ingress() == "overflow" and len(await _gaprows3(sid)) == 1
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER)
+    C = await rec.resume()
+    check("R2-H1 probe: resume returns the skip's cursor", C[:2] == ("e1", 30), C)
+    await rec.close()
+    st.close()
+
+    # Overflow ÎNAINTE de captură: un checkpoint anterior pică la fsync → overflow → skip refuzat explicit.
+    st, sid, rec = await _fresh()
+    feed_at(rec, b"efg")
+    st.fault = faults({"fsync"}, exc=OSError, times=1)
+    f0 = rec.checkpoint()
+    f = rec.skip_to("e1", 30, "ring")
+    c_err = await araises(f0, ts.TxStoreError, "writeFailed")
+    refused = await araises(f, ts.Refused, "skip-refused")
+    st.fault = None
+    loss = rec.loss
+    check("R2-H1: overflow before the skip's capture → the future fails explicitly (skip-refused), no row, "
+          "cursor unchanged; loss = the real bytes before the skip only (not the interval, not the marker)",
+          c_err and refused and await _gaprows3(sid) == [] and await _ag(sid) == ("e1", 4)
+          and loss == {"epoch": "e1", "agent": 3, "out": 3, "cast": 0} and rec._skip is None
+          and rec.received == ("e1", 7), (loss, rec.received))
+    C = await rec.resume()
+    await rec.skip_to("e1", 30, "ring")
+    rows = await _gaprows3(sid)
+    check("R2-H1: after resume + re-attach the skip from C publishes ONE marker for [C, replay_start)",
+          C[:2] == ("e1", 4) and len(rows) == 1 and tuple(rows[0][2:4]) == (4, 26) and await _ag(sid) == ("e1", 30)
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER, (C, rows))
+    await rec.close()
+    st.close()
+
+    # Eşec de fsync ÎN jobul skip-ului.
+    st, sid, rec = await _fresh()
+    feed_at(rec, b"efg")
+    st.fault = faults({"fsync"}, exc=OSError, times=1)
+    bad = await araises(rec.skip_to("e1", 30, "ring", cast_ts=1.0), ts.TxStoreError, "skipNotPublished")
+    st.fault = None
+    loss = rec.loss
+    check("R2-H1: fsync failure in the skip job → skipNotPublished, no row, cursor unchanged, overflow at the "
+          "skip's start; loss = real bytes before the skip (marker bytes and the interval excluded)",
+          bad and await _gaprows3(sid) == [] and await _ag(sid) == ("e1", 4) and rec.ingress() == "overflow"
+          and rec.received == ("e1", 7) and loss == {"epoch": "e1", "agent": 3, "out": 3, "cast": 0},
+          (loss, rec.received))
+    C = await rec.resume()
+    await rec.skip_to("e1", 30, "ring")
+    rows = await _gaprows3(sid)
+    check("R2-H1: the re-skip after the fsync failure is published once",
+          C[:2] == ("e1", 4) and len(rows) == 1 and tuple(rows[0][2:4]) == (4, 26)
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER and await _ag(sid) == ("e1", 30), rows)
+    await rec.close()
+    st.close()
+
+    # Markerul atinge limita tare a generaţiei: SEAL + generaţie nouă în acelaşi job, un singur commit.
+    st = store(gen_limits=(1000, 64), pending_cap=512, total_cap=1 << 20)
+    st.readopt_enabled = False
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    feed_at(rec, b"a" * 60)
+    await rec.checkpoint()
+    res = await rec.skip_to("e1", 100, "ring")
+    d = await desc(st, sid)
+    rows = await _gaprows3(sid)
+    check("R2-H1: a marker crossing the generation's hard limit is split over a new generation in the same "
+          "job and published once with its cursor",
+          res["agent"] == ("e1", 100) and len(d.generations) >= 2 and len(rows) == 1
+          and await read_all(st, sid) == b"a" * 60 + ts.GAP_MARKER and await _ag(sid) == ("e1", 100),
+          (len(d.generations), rows))
+    feed_at(rec, b"b" * 10)
+    v0 = (await desc(st, sid)).version
+    st.fault = faults({"header"}, exc=OSError, times=1)
+    lost = await araises(rec.skip_to("e1", 200, "ring"), ts.RecorderLost)
+    st.fault = None
+    await asyncio.sleep(0.01)
+    check("R2-H1: no generation can be opened at the limit → re-adoption; nothing published (no row, cursor "
+          "and descriptor unchanged)",
+          lost and rec.state == "lost" and len(await _gaprows3(sid)) == 1 and await _ag(sid) == ("e1", 100)
+          and (await desc(st, sid)).version == v0)
+    st.close()
+
+    # Două skip-uri concurente + serializare cu resume / change_epoch.
+    st, sid, rec = await _fresh()
+    f1 = rec.skip_to("e1", 30, "ring")
+    second = _raises_reason(lambda: rec.skip_to("e1", 40, "ring"), "busy")
+    no_resume = await araises(rec.resume(), ts.TxStoreError, "busy")
+    no_cut = _raises_reason(lambda: rec.change_epoch("e2"), "busy")
+    no_same = _raises_reason(lambda: rec.change_epoch("e1"), "busy")
+    await f1
+    await rec.skip_to("e1", 40, "ring")
+    rows = await _gaprows3(sid)
+    check("R2-H1: a second skip, a resume or an epoch change while a skip is pending → busy; afterwards the "
+          "second skip publishes its own row (distinct gap ids and nonces)",
+          second and no_resume and no_cut and no_same and len(rows) == 2
+          and [tuple(r[2:4]) for r in rows] == [(4, 26), (30, 10)] and rows[0][0] != rows[1][0]
+          and rows[0][5] != rows[1][5] and await _ag(sid) == ("e1", 40)
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER * 2, rows)
+    # close() cu un skip în aşteptare: skip-ul (admis înainte) se publică, apoi finalize.
+    f = rec.skip_to("e1", 50, "ring")
+    fc = rec.close()
+    r1, r2 = await f, await fc
+    check("R2-H1: close() while a skip is pending: the skip commits first, then the close (FIFO)",
+          r1["agent"] == ("e1", 50) and r2["lost"] is None and len(await _gaprows3(sid)) == 3)
+    st.close()
+
+    # Sursă fără ring (track_agent=False): acelaşi blocaj; nicio poziţie durabilă a agentului.
+    st = store(pending_cap=512, total_cap=1 << 20)
+    st.readopt_enabled = False
+    sid = new_sid()
+    rec = await st.start_recorder(sid, track_agent=False)
+    feed_at(rec, b"abcd")
+    f = rec.skip_to(None, 30, "source")
+    held = _raises_reason(lambda: rec.feed(b"z", b"", at=(None, 30)), "busy")
+    await f
+    ok = rec.feed(b"z", b"", at=(None, 30))
+    await rec.checkpoint()
+    rows = await _gaprows3(sid)
+    crash_recorder(st, rec)
+    st2 = store()
+    st2.readopt_enabled = False
+    await st2.recover()
+    r2 = await st2.start_recorder(sid, track_agent=False)
+    check("R2-M2: ringless source: skip held the same way; after a restart there is no durable agent offset "
+          "(received starts fresh at (None, 0)); the recording keeps the marker",
+          held and ok and len(rows) == 1 and rows[0][1] is None and r2.received == (None, 0)
+          and r2.agent_committed == (None, 0) and await read_all(st2, sid) == b"abcd" + ts.GAP_MARKER + b"z",
+          (r2.received, rows))
+    await r2.close()
+    st2.close()
+
+    # R2-M1: identitatea gap-ului.
+    a = ts.gap_id_for("s", "e1", 10, 20, "n1")
+    check("R2-M1: gap id = operation + interval: stable for the same op, differs by size / nonce / start / "
+          "epoch; canonical (no field bleeds into another)",
+          a == ts.gap_id_for("s", "e1", 10, 20, "n1") and a != ts.gap_id_for("s", "e1", 10, 21, "n1")
+          and a != ts.gap_id_for("s", "e1", 10, 20, "n2") and a != ts.gap_id_for("s", "e1", 11, 20, "n1")
+          and a != ts.gap_id_for("s", "e2", 10, 20, "n1") and a != ts.gap_id_for("s", None, 10, 20, "n1")
+          and ts.gap_id_for("s|e", "1", 10, 20, "n") != ts.gap_id_for("s", "e|1", 10, 20, "n"))
+
+    # gap-dup într-un checkpoint generic → readoptare deterministă (nu un recorder „running" blocat).
+    st, sid, rec = await _fresh()
+    g = rec._add_gap(7, 0.0, reason="close", epoch="e1", start=4, nonce="n-dup")
+    await db.execute("INSERT INTO tx_gaps(sid, gap_id, epoch, upstream_start, upstream_size, reason, op_nonce, "
+                     "out_pos, cast_pos, published_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     sid, g.gap_id, "e1", 4, 7, "close", "n-dup", 4, 0, 1.0)
+    v0 = (await desc(st, sid)).version
+    lost = await araises(rec.checkpoint(), ts.RecorderLost)
+    await asyncio.sleep(0.01)
+    check("R2-M1: gap-dup in a generic checkpoint → re-adoption (recorder lost, nothing published), never a "
+          "running recorder with a dirty batch",
+          lost and rec.state == "lost" and (await desc(st, sid)).version == v0
+          and any(a[0] == "transcript.publishRefused" and "gap-dup" in a[1] for a in st.alarms))
+    st.close()
+
+    # Rând nepublicat: completat DOAR de aceeaşi operaţie; alt nonce sub acelaşi id = conflict.
+    for same in (True, False):
+        st, sid, rec = await _fresh()
+        g = rec._add_gap(7, 0.0, reason="epoch-cut", epoch="e1", start=4, nonce="n-op")
+        await db.execute("INSERT INTO tx_gaps(sid, gap_id, epoch, upstream_start, upstream_size, reason, "
+                         "op_nonce, out_pos, cast_pos, published_at) VALUES(?,?,?,?,?,?,?,NULL,NULL,NULL)",
+                         sid, g.gap_id, "e1", 4, 7, "epoch-cut", "n-op" if same else "n-other")
+        if same:
+            await rec.checkpoint()
+            rows = await _gaprows3(sid)
+            check("R2-M1: an unpublished row of the SAME operation is upgraded (positions + published_at)",
+                  len(rows) == 1 and rows[0][8] is not None and (rows[0][6], rows[0][7]) == (g.out_pos, g.cast_pos)
+                  and rows[0][5] == "n-op", rows)
+            await rec.close()
+        else:
+            lost = await araises(rec.checkpoint(), ts.RecorderLost)
+            rows = await _gaprows3(sid)
+            check("R2-M1: an unpublished row with the same id but another operation → gap-conflict, re-adoption, "
+                  "row untouched",
+                  lost and len(rows) == 1 and rows[0][8] is None and rows[0][5] == "n-other", rows)
+        st.close()
+
+    # _resolve compară şi poziţiile markerului.
+    st, sid, rec = await _fresh()
+    st.fault = _sql_hook("post-commit", "UPDATE tx_gaps SET out_pos=out_pos+1 WHERE sid=?", (sid,))
+    lost = await araises(rec.skip_to("e1", 30, "ring"), ts.RecorderLost)
+    st.fault = None
+    check("R2-M1: uncertain COMMIT with the gap row's position moved → not taken as committed (re-adoption)",
+          lost and rec.state == "lost")
+    st.close()
+    st, sid, rec = await _fresh()
+    st.fault = faults({"post-commit"}, exc=sqlite3.OperationalError)
+    res = await rec.skip_to("e1", 30, "ring")
+    st.fault = None
+    rows = await _gaprows3(sid)
+    check("R2-M1: uncertain COMMIT that did commit → resolved as committed (row, positions, nonce match), "
+          "the skip future resolves",
+          res["agent"] == ("e1", 30) and len(rows) == 1 and rows[0][6] == 4 and rec.gaps[0].gap_id == rows[0][0])
+    # Poziţii istorice: un cap ulterior nu rescrie rândul.
+    feed_at(rec, b"t" * 20)
+    await rec.checkpoint()
+    await rec.cap_now()
+    rows2 = await _gaprows3(sid)
+    check("R2-M1: tx_gaps positions are historical (at publication): a later cap does not rewrite them",
+          rows2 == rows, (rows, rows2))
+    await rec.close()
+    st.close()
+
+    # R2-M2: change_epoch cu o comutare în curs.
+    st, sid, rec = await _fresh()
+    f1 = rec.change_epoch("e2")
+    f2 = rec.change_epoch("e2")
+    other = _raises_reason(lambda: rec.change_epoch("e3"), "busy")
+    back = _raises_reason(lambda: rec.change_epoch("e1"), "busy")
+    r1 = await f1
+    r2 = await f2
+    check("R2-M2: change_epoch to the target of a pending switch returns THAT future (resolves at the "
+          "committed switch, not a no-op with the old position); another target → busy",
+          f2 is f1 and r1 == r2 == ("e2", 0) and other and back and await _ag(sid) == ("e2", 0), (r1, r2))
+    same = await rec.change_epoch("e2")
+    check("R2-M2: once committed, the same epoch is a no-op", same == ("e2", 0))
+    await rec.close()
+    st.close()
+
+    # Intercalare: received → resume → skip; cast-only refuzat; apoi reluare.
+    st, sid, rec = await _fresh(pending_cap=64)
+    feed_at(rec, b"e" * 10)
+    ov = rec.feed(b"f" * 100, b"", at=("e1", 14))
+    rz = rec.feed_cast_only(b'[0.5, "r", "90x30"]\n', at=("e1", 114))
+    recv = rec.received
+    C = await rec.resume()
+    f = rec.skip_to("e1", 60, "ring")
+    busy = _raises_reason(lambda: rec.feed_cast_only(b'[0.6, "r", "90x30"]\n', at=("e1", 60)), "busy")
+    await f
+    rs = rec.feed_cast_only(b'[0.6, "r", "90x30"]\n', at=("e1", 60))
+    tail = rec.feed(b"g" * 30, b"", at=("e1", 60))
+    await rec.checkpoint()
+    rows = await _gaprows3(sid)
+    check("R2-M2: received → resume → skip: received is past the committed cursor during the overflow, resume "
+          "returns C, the skip covers [C, replay_start); a cast-only resize refused in the overflow is lost "
+          "and re-sent at the new cursor (held while the skip is pending)",
+          ov is False and rz is False and recv == ("e1", 114) and C[:2] == ("e1", 4) and busy and rs and tail
+          and len(rows) == 1 and tuple(rows[0][2:4]) == (4, 56) and await _ag(sid) == ("e1", 90)
+          and await read_all(st, sid) == b"abcd" + ts.GAP_MARKER + b"g" * 30
+          and (await read_all(st, sid, "cast")).endswith(b'[0.6, "r", "90x30"]\n'),
+          (busy, rs, tail, [tuple(r) for r in rows], await _ag(sid)))
+    await rec.close()
+    st.close()
+
+
 async def _mk_dir(tdir, db_path=None):
     return ts.Store(transcripts_dir=tdir, kwk=KWK, installation_id=INST,
                     **({"db_path": db_path} if db_path else {}))
@@ -2457,6 +2740,7 @@ async def main():
         await g_review_m()
         await g_recheck()
         await g_recheck2()
+        await g_recheck3()
     finally:
         await db.close()
 

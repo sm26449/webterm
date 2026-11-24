@@ -529,8 +529,13 @@ CREATE TABLE IF NOT EXISTS tx_state (
 );
 -- tx_gaps: fiecare GAP_MARKER al unei înregistrări criptate (§12.11.10), scris în ACEEAŞI tranzacţie
 -- cu octeţii markerului, ca asocierea marker ↔ epoch ↔ interval upstream să supravieţuiască unui
--- crash şi auditul să o poată referi după gap_id (determinist). published_at NULL = pierdere al
--- cărei marker nu s-a putut publica (alarmată transcript.gapUnrecorded).
+-- crash şi auditul să o poată referi după gap_id. published_at NULL = pierdere al cărei marker nu
+-- s-a putut publica (alarmată transcript.gapUnrecorded).
+-- gap_id = H(sid, epoch, upstream_start, upstream_size, op_nonce) (R2-M1): identitatea operaţiei şi a
+-- intervalului, nu a motivului afişat sau a proiecţiei; op_nonce e aleator per operaţie şi stocat aici.
+-- out_pos/cast_pos sunt ISTORICE (poziţiile logice la publicare): un cap/merge ulterior nu le rescrie.
+-- Retenţie: rândurile rămân cât există înregistrarea sid-ului; se şterg odată cu ea la erasure/purge
+-- (PR6). Tabela e nouă în 3.8 (nelansată), de aceea op_nonce e în CREATE, nu într-o migrare.
 CREATE TABLE IF NOT EXISTS tx_gaps (
     sid TEXT NOT NULL,
     gap_id TEXT NOT NULL,
@@ -538,6 +543,7 @@ CREATE TABLE IF NOT EXISTS tx_gaps (
     upstream_start INTEGER,
     upstream_size INTEGER NOT NULL,
     reason TEXT NOT NULL,                       -- skip:<why> | epoch-cut | close
+    op_nonce TEXT NOT NULL,
     out_pos INTEGER,
     cast_pos INTEGER,
     published_at REAL,

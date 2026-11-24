@@ -2371,8 +2371,8 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   `recovered` at its committed counts, unpublished → retired), and the offset never covers bytes
   that are not published. An uncertain COMMIT is resolved by re-reading the descriptors, the agent
   position and the ledger rows in one read transaction.
-- **Admission (the contract the PR5b hub must follow; rechecks 059f21a R-H2 and 5053fbd RC-H2,
-  RC-M2).** Two positions exist per sid: the **received** position (`Recorder.received`: the end
+- **Admission (the contract the PR5b hub must follow; rechecks 059f21a R-H2, 5053fbd RC-H2,
+  RC-M2 and 1824838 R2-H1, R2-M2).** Two positions exist per sid: the **received** position (`Recorder.received`: the end
   of everything offered in the current epoch, admitted or counted lost) and the **committed**
   position (`agent_committed`, `sessions.agent_epoch/agent_offset`, published together with the
   bytes it covers). The hub follows these rules:
@@ -2397,25 +2397,62 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
     `rejected`) and a stopped recorder (`lost`/`replaced`/`closed`, counted in `refused`) stop
     ingress at once. After `close()` or a re-adoption, no later chunk reaches the recorder; the
     hub feeds the re-adopted recorder from its committed position.
+  - *Four outcomes, never mixed.* (1) **Offer refused, retryable:** `TxStoreError` `position`,
+    `busy` or `badInput` from `feed` / `feed_cast_only` / `skip_to` / `change_epoch` / `resume`.
+    Nothing was admitted, counted or moved; the hub re-reads `received` and offers again. (2)
+    **Interval replayable later:** `feed` returned `False` with `ingress() == "overflow"`. The
+    bytes are counted in `loss` (keyed by position) but the agent ring may still have them:
+    after `resume()` the hub replays from C, and `resume()` resets the count. (3) **Terminal loss:**
+    the ring no longer has [C, replay_start) (a skip), the old epoch's uncovered bytes at a cut, or
+    what is left unrecorded at close. Each becomes ONE marker with a `tx_gaps` row; a marker that
+    cannot be published is `transcript.gapUnrecorded` and a row with `published_at` NULL. Refused
+    `.cast`-only events are terminal at once (they are not in the ring). (4) **Marker accepted:**
+    only a resolved `skip_to` future, a resolved `change_epoch` future or a resolved `close()`
+    means the marker, its row and the cursor are committed.
   - *Attach answers:* with `replay_start` == C there is nothing to do. With `replay_start` > C
     in the same epoch (the ring lost the prefix), the hub calls `skip_to(epoch, replay_start,
-    reason)`. That writes ONE `GAP_MARKER` for [C, replay_start) and moves the cursor to
-    `replay_start` in the same tick, so the marker, its `tx_gaps` row and the new cursor are
-    published in the same transaction. A crash before that commit leaves C, and the re-attach
-    skips again, once. A crash after it leaves `replay_start`, and the re-attach is a no-op. With
-    `replay_start` < C the hub trims the overlap and feeds from C (`skip_to` refuses it). A source
-    without a ring (or a sid recorded with `track_agent=False`) works the same way: after an
-    overflow, `resume()` and then `skip_to` to the source position the hub reached. That is a
-    terminal loss, made visible by the marker.
+    reason)`. It is a dedicated job carrying the operation's identity (a random op nonce and its
+    `gap_id`) and the interval [C, replay_start). Until it commits, `received` is `replay_start`
+    and any offer at or after it answers `busy` (below it: `position`), so nothing can overflow
+    and drop the marker. The marker, its `tx_gaps` row and the new cursor are published in one
+    transaction, and the future resolves only when the committed state holds exactly that row and
+    `(epoch, replay_start)`. Otherwise it fails explicitly: `skip-refused` (the cursor moved
+    before the capture, e.g. an earlier checkpoint hit a write fault: nothing counted for the
+    interval), `skipNotPublished` (the write or the publication failed: the bytes admitted before
+    the skip count as loss, the interval and the synthetic marker bytes do not, and the recorder
+    is in overflow at the skip's start), or re-adoption (`RecorderLost`, e.g. a refused or unknown
+    commit). After a failure the hub calls `resume()`, re-attaches from C and skips again; the
+    next skip covers the interval. A second `skip_to`, a `resume` or a `change_epoch` while a
+    skip is pending answers `busy`; `close()` is queued after it. A crash before the commit leaves
+    C, and the re-attach skips again, once. A crash after it leaves `replay_start`, and the
+    re-attach is a no-op. With `replay_start` < C the hub trims the overlap and feeds from C
+    (`skip_to` refuses it). A source without a ring (or a sid recorded with `track_agent=False`)
+    works the same way within one recorder: after an overflow, `resume()` and then `skip_to` to the
+    source position the hub reached; that is a terminal loss, made visible by the marker. Such a
+    sid has **no durable agent offset** (`sessions.agent_offset` is not published): a restarted or
+    re-adopted recorder starts at `(None, 0)`, and the hub feeds the source's live position from
+    there; nothing is replayed after a restart.
   - *Same-epoch reattach (RC-H1):* `change_epoch(e)` with `e` equal to the current epoch is a
-    no-op: no cut and no offset reset. The publication transaction and the uncertain-COMMIT
+    no-op: no cut and no offset reset. While a switch is pending (R2-M2), `change_epoch` to the
+    same target returns that switch's future (it resolves at the committed `(e, 0)`, never with
+    the old position), and to any other target it answers `busy`: the adaptor serializes epoch
+    transitions and never treats a no-op as the completion of a pending cut. The publication transaction and the uncertain-COMMIT
     resolver accept an offset reset to 0 only when the epoch value actually changes. The hub
     trims the replayed overlap.
   - *Effects outside the recorder:* a refusal, an overflow or a skip changes only the
     recording. Browser delivery and the OSC 133 scanner work on the live stream and are not held
     back by the recorder. When a skip marker or an epoch-cut marker is published, the hub resets
     its OSC 133 prompt cache for the recording (`osc.gap()`, as 3.7 does for a transcript gap), and
-    a resync of the recording reads the committed bounds again, never `received`.
+    a resync of the recording reads the committed bounds again, never `received`. The hub resets
+    the OSC cache and emits its own audit of a gap only once the operation's future resolved; the
+    `transcript.gap` alarm comes from the commit itself.
+  - *Uncertain COMMIT (obligations):* the recorder re-reads the descriptors, the cursor, the
+    ledger and the `tx_gaps` rows (interval, nonce and marker positions). If the outcome is not
+    exactly "committed" or "not committed", the sid is re-adopted and the operation's future fails
+    with `RecorderLost`. The hub then treats the gap as unknown: it re-reads `tx_gaps` and the
+    committed bounds of the re-adopted recorder before any audit entry or OSC reset, does not
+    re-write the `.cast` header when the committed `.cast` is non-empty, and re-sends the current
+    size as a `.cast`-only resize at the re-adopted C.
   - *Cast header and time:* the hub writes the asciicast header once, as the first `.cast`-only
     event of a sid whose committed `.cast` is empty. A re-adopted recorder with a committed
     `.cast` never writes it again. Event times are seconds since the header timestamp, from the
@@ -2441,13 +2478,24 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
 - A gap is written as 3.7's `GAP_MARKER` bytes plus a `.cast` gap event. Its marker bytes are
   synthetic and never count as loss. Each published marker is a `Gap` in `gaps` (`.out` and
   `.cast` positions, upstream start and size, per-kind real bytes when known, epoch, reason
-  `skip:<why> | epoch-cut | close`) and a row in `tx_gaps` (sid, deterministic `gap_id`, epoch,
-  upstream interval, reason, positions, `published_at`). The row is written in the same
+  `skip:<why> | epoch-cut | close`) and a row in `tx_gaps` (sid, `gap_id`, epoch, upstream
+  interval, reason, `op_nonce`, positions, `published_at`). The row is written in the same
   transaction as the marker bytes, so the marker ↔ epoch ↔ interval association survives a
   crash, for example after a cut marker is published and before the switch commits. The
-  `transcript.gap` alarm (audit) names the `gap_id`. A second publication of an id that is
-  already published is refused (`gap-dup`, re-adoption), and the uncertain-COMMIT resolver also
-  checks the rows. A marker that cannot be published is alarmed as `transcript.gapUnrecorded`
+  `transcript.gap` alarm (audit) names the `gap_id`. **Identity (R2-M1):** `gap_id` =
+  SHA-256 over the canonical JSON `["wtgap2", sid, epoch, upstream_start, upstream_size,
+  op_nonce]` (first 32 hex), where `op_nonce` is random per operation (one skip, one cut, one
+  close) and stored with the row. It does not depend on the display reason or on the logical
+  `.out` / `.cast` projection, so a retry of the same operation keeps its id, and two operations
+  or two intervals never share one. The stored `out_pos` / `cast_pos` are **historical**: the
+  logical positions at publication; a later cap or merge does not rewrite them. A second
+  publication of an id that is already published is refused (`gap-dup`). A row with
+  `published_at` NULL is completed only by the same operation (same epoch, interval and nonce);
+  anything else is `gap-conflict`. Either refusal, in a skip, a cut, a close or a generic
+  checkpoint, re-adopts the sid (never a running recorder with a dirty batch). The
+  uncertain-COMMIT resolver compares the interval, the nonce and the marker positions. Retention:
+  `tx_gaps` rows are kept as long as the sid's recording exists and are deleted with it by
+  erasure / purge (PR6). A marker that cannot be published is alarmed as `transcript.gapUnrecorded`
   with its id, and the alarm says that re-adoption does not repair the loss. It is kept, best
   effort, as a row with `published_at` NULL.
 - `resume` re-reads the descriptors and the agent position in one read transaction and adopts them
