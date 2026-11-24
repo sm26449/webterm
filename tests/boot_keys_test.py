@@ -10,7 +10,9 @@ Scenarii end-to-end pe volume temporare:
   * volum protejat + cheie greşită / lipsă → refuz, identic la două porniri;
   * restore 3.8 în staging + cheie greşită → refuz înainte de orice swap; cu cheia bună → aplicat,
     keys.wtk redeschis; restore 3.7 în staging + cheie → întâi restore, apoi migrare;
-  * al doilea proces → refuz (`locked`); comenzile admin care scriu refuză cât ţine gateway-ul lock-ul;
+  * al doilea proces → refuz (`locked`); `admin vacuum` refuză cât ţine gateway-ul lock-ul, iar
+    comenzile break-glass doar-DB (passwd, disable-2fa, promote, enable, logout-all) rulează, fără
+    să atingă cheile;
   * volum gol fără cheie → refuz; cu WEBTERM_KEY_IN_VOLUME=1 → „reduced”;
   * ordinea reală din main.lifespan: cheie greşită + staging + temporare de plafon → refuz ÎNAINTE de
     clean-up (temporarele şi staging-ul rămân)."""
@@ -384,24 +386,100 @@ def test_exclusion():
         second = x
     check("al doilea boot pe acelaşi volum → locked", second is not None and second.reason == "locked", second)
     try:
-        admin._writer_lock("passwd")
+        admin._writer_lock("vacuum")
         refused_admin = False
     except SystemExit as x:
         refused_admin = x.code == 3
-    check("admin passwd cu gateway-ul pornit → refuz (exit 3)", refused_admin)
-    check("admin list/roles nu iau lock-ul", admin._writer_lock("list") is None and admin._writer_lock("roles") is None)
-    check("toate comenzile care scriu sunt în WRITERS", {"passwd", "disable-2fa", "logout-all", "promote",
-                                                         "sso-only", "enable", "vacuum"} == set(admin.WRITERS))
+    check("admin vacuum cu gateway-ul pornit → refuz (exit 3)", refused_admin)
+    check("admin list/roles şi comenzile doar-DB nu iau lock-ul",
+          all(admin._writer_lock(c) is None for c in ("list", "roles", *admin.DB_ONLY)))
+    check("doar vacuum cere lock-ul; break-glass-ul doar-DB e complet",
+          set(admin.NEEDS_LOCK) == {"vacuum"}
+          and set(admin.DB_ONLY) == {"passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable"})
     bootkeys.release()
-    lk = admin._writer_lock("promote")
-    check("cu gateway-ul oprit, admin ia lock-ul", lk is not None)
+    lk = admin._writer_lock("vacuum")
+    check("cu gateway-ul oprit, vacuum ia lock-ul", lk is not None)
     try:
         keys.boot(str(d), {})
         blocked = False
     except keys.BootRefused as x:
         blocked = x.reason == "locked"
-    check("…iar gateway-ul nu porneşte cât rulează comanda", blocked)
+    check("…iar gateway-ul nu porneşte cât rulează vacuum", blocked)
     lk.release()
+
+
+def test_admin_db_only_while_running():
+    """Decizia lui Stefan (2026-11-24): comenzile break-glass doar-DB rulează ca în 3.7, cu
+    gateway-ul pornit (alt proces ţine lock-ul), pe un volum PROTEJAT, fără să atingă cheile."""
+    print("── admin passwd/disable-2fa/promote/enable/logout-all/sso-only cu gateway-ul pornit, volum protejat")
+    from app import db
+    d = Path(ROOT) / "admin-live"
+    d.mkdir()
+    use(d)
+    kf, _mk = key_file("admin-live")
+    prepare({"WEBTERM_MASTER_KEY_FILE": kf})          # „gateway-ul”: ţine lock-ul pe tot testul
+
+    async def seed():
+        await db.connect()
+        await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
+                         "ana@x.co", security.hash_password("vechea-parola-lunga"), 1000.0)
+        await db.execute("INSERT INTO users(email, password_hash, created, sso_subject) VALUES(?,?,?,?)",
+                         "bob@x.co", security.hash_password("alta-parola-lunga"), 1001.0, "sub-bob")
+        await db.close()
+    run(seed())
+    keys_before = (d / "keys.wtk").read_bytes()
+    # nicio comandă doar-DB nu are voie să atingă seiful: dacă ar cripta/decripta ceva, ar avea
+    # nevoie de keyring — testul ar prinde-o aici
+    saved = security.encrypt_secret, security.decrypt_secret
+
+    def boom(*_a, **_k):
+        raise AssertionError("an admin DB-only command touched the vault")
+    security.encrypt_secret = security.decrypt_secret = boom
+    orig_pw, orig_argv = admin._read_new_password, sys.argv
+    admin._read_new_password = lambda: "parola-noua-lunga-1"
+    results = {}
+    try:
+        for cmd, *rest in (("passwd", "ana@x.co"), ("disable-2fa", "ana@x.co"), ("promote", "ana@x.co"),
+                           ("enable", "ana@x.co"), ("logout-all", "ana@x.co"),
+                           ("sso-only", "bob@x.co", "--force")):
+            sys.argv = ["app.admin", cmd, *rest]
+            try:
+                run(admin.main())
+                results[cmd] = 0
+            except SystemExit as x:
+                results[cmd] = x.code
+            except AssertionError as x:
+                results[cmd] = str(x)
+    finally:
+        security.encrypt_secret, security.decrypt_secret = saved
+        admin._read_new_password, sys.argv = orig_pw, orig_argv
+    check("toate rulează cât gateway-ul ţine lock-ul, fără să atingă seiful",
+          all(v == 0 for v in results.values()), results)
+
+    async def row():
+        await db.connect()
+        try:
+            u = await db.fetchone("SELECT password_hash FROM users WHERE email='ana@x.co'")
+            own = await db.fetchone("SELECT COUNT(*) FROM role_bindings b JOIN roles r ON r.id=b.role_id"
+                                    " WHERE r.key='owner' AND b.scope_kind='all'")
+            return u["password_hash"], own[0]
+        finally:
+            await db.close()
+    h, owners_n = run(row())
+    check("…parola schimbată şi contul e Owner", security.verify_password("parola-noua-lunga-1", h)
+          and owners_n >= 1, owners_n)
+    check("…keys.wtk neatins, nimic publicat", (d / "keys.wtk").read_bytes() == keys_before
+          and not (d / "keys.wtk.tmp").exists())
+    sys.argv = ["app.admin", "vacuum"]
+    try:
+        run(admin.main())
+        vac = None
+    except SystemExit as x:
+        vac = x.code
+    finally:
+        sys.argv = orig_argv
+    check("…vacuum, în schimb, refuză (exit 3)", vac == 3, vac)
+    bootkeys.release()
 
 
 def test_empty_volume():
@@ -461,6 +539,7 @@ def main_():
     test_protected_staged_restore()
     test_legacy_staged_restore_then_migrate()
     test_exclusion()
+    test_admin_db_only_while_running()
     test_empty_volume()
     test_lifespan_order()
     print(f"\n{ok}/{total} passed")

@@ -125,28 +125,30 @@ There is **no password-reset email for login** — by design: a self-hosted tool
 administrator is you. Recovery means server access, which you have, and there is a command for it:
 
 ```sh
-cd /opt/webterm
-# read-only, any time:
 docker exec -it webterm-app-1 python3 -m app.admin list
+docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin disable-2fa you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
 docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
+docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+```
 
-# commands that change something: stop the gateway, run them, start it again (3.8+)
+These run while the gateway is up, as before 3.8, also on a volume with encryption at rest: they
+change only rows in the database (argon2 hashes, deleted sessions, role bindings) and never open
+or write the keys. The one exception is `vacuum` (System health "compact the database"), which
+rewrites the whole database file and so needs the data directory to itself: it takes the
+gateway's lock and refuses while the gateway runs. Stop the gateway, run it, start it again:
+
+```sh
+cd /opt/webterm
 docker compose -f docker-compose.prod.yml stop app
-docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin passwd you@example.com
-docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin disable-2fa you@example.com
-docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin logout-all you@example.com
-docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin promote you@example.com
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin vacuum
 docker compose -f docker-compose.prod.yml start app
 ```
 
-Since 3.8 the commands that write (`passwd`, `disable-2fa`, `logout-all`, `promote`, `enable`,
-`sso-only`, `vacuum`) take the same lock on the data directory as the gateway (encryption at rest:
-one writer per volume). With the gateway running they refuse and print the three commands above;
-`docker compose run` goes through the image's entrypoint, so the command runs as the service user.
-
 `promote` (3.6) makes the account **Owner over all hosts** — the way back when no Owner is left
-(for example after a partial restore). `roles` shows an account's bindings. The gateway reads the
-change when it starts again; the promotion is recorded in the audit log.
+(for example after a partial restore). `roles` shows an account's bindings. The running gateway
+picks the change up within about a minute; the promotion is recorded in the audit log.
 
 Prefer it over the raw SQL below. It hashes with the application's own argon2 parameters, and it
 also **deletes the open web sessions and share links** — the hand-written `UPDATE` did not, so
@@ -329,11 +331,17 @@ credentials** recovered and decryptable.
    stops the app, **extracts to staging + verifies `integrity_check` BEFORE**
    touching the current data (a corrupt archive can no longer destroy anything),
    moves the old state to `/data/.restore-prev` (safety net), then restarts.
-   `.enc` archives require the passphrase.
-3. **The golden rule**: the vault key (`data/secret`) is in the archive. Without
-   it, agent tokens and encrypted SSH credentials are UNRECOVERABLE — boot
-   explicitly refuses to start with a regenerated key over encrypted data.
-   Periodically verify that you have a copy of the backup off the server.
+   `.enc` archives require the passphrase. The data directory's `.lock` stays in place.
+   An archive of a **protected** volume (3.8, `keys.wtk`) is restored only when the master
+   key this installation is configured with opens its `keys.wtk`; that is checked with the
+   app image before the app is stopped, and a refusal names the key id the archive needs.
+3. **The golden rule**: on a pre-3.8 volume the vault key (`data/secret`) is in the archive.
+   Without it, agent tokens and encrypted SSH credentials are UNRECOVERABLE — boot
+   explicitly refuses to start with a regenerated key over encrypted data. On a protected
+   volume the archive holds `keys.wtk` and **not** the master key: keep
+   `secrets/master-key/master.key` apart (docs/INSTALL.md, *Encryption at rest*); without it
+   the archive cannot be opened. Periodically verify that you have a copy of the backup off
+   the server.
 
 ### What the archive does NOT contain
 
@@ -343,10 +351,11 @@ it — which is fine while the host exists, and a disaster the moment you rebuil
 | In the archive | Not in the archive |
 |---|---|
 | `webterm.db` — accounts, hosts, sessions, forwards, snippets, audit log | **The archive's own passphrase** (`/etc/default/webterm-backup`) |
-| `secret` — the vault key that decrypts every stored credential | `/opt/webterm/.env` — domain, ACME email, `CF_DNS_API_TOKEN`, `WEBTERM_SETUP_TOKEN`, `FORWARD_DOMAIN`, image pin |
+| `secret` — the vault key that decrypts every stored credential (pre-3.8 volume); `keys.wtk` on a protected volume (useless without the master key) | `/opt/webterm/.env` — domain, ACME email, `CF_DNS_API_TOKEN`, `WEBTERM_SETUP_TOKEN`, `FORWARD_DOMAIN`, image pin |
 | `agent-signing.key` / `.pub` — the fleet key | The TLS certificates (a separate `*_traefik-acme` volume) |
 | The agents' CA (3.7.0+, inside `webterm.db`, encrypted with the vault key): agents keep their certificates after a restore | The `edge-lists` volume (Traefik's allow/deny lists and mTLS file): the gateway rewrites it at start |
 | `transcripts/` — session recordings | The operator scripts in `/opt/webterm` (they come back with the image, via `upgrade.sh`) |
+| | **The master key** of a protected volume (`secrets/master-key/master.key`, or `/data/master.key` with `WEBTERM_KEY_IN_VOLUME=1`): never archived on purpose |
 
 The first row is the one that ends badly. **The passphrase lives on the machine you are
 about to wipe.** Lose it and the encrypted archives are mathematically unrecoverable — no
@@ -359,6 +368,7 @@ the same domain can lock you out of HTTPS for days.
 ```bash
 mkdir -p ~/webterm-recovery
 sudo cp /etc/default/webterm-backup   ~/webterm-recovery/    # THE PASSPHRASE — first
+sudo cp -p /opt/webterm/secrets/master-key/master.key ~/webterm-recovery/ 2>/dev/null || true  # 3.8 master key, if protected
 sudo cp /opt/webterm/.env             ~/webterm-recovery/
 sudo cp /var/backups/webterm/*.enc    ~/webterm-recovery/    # the archives are root-only, 600
 sudo chown -R "$(id -un)" ~/webterm-recovery

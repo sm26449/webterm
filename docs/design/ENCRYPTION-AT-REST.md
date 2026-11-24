@@ -870,6 +870,9 @@ tested in isolation; these are not implemented and each needs its own change and
    (through the pinned `DATA_DIR` fd; no `-wal`/`-shm` is created), collects every `*_encrypted`
    column and every `app_settings` value that is a Fernet token or a JSON object holding one
    (SMTP, cloud, the agents' CA key), and requires at least one to decrypt with `secret`.
+   **Proof rule (owner decision, 2026-11-24): at least one value decrypts.** One decrypting value
+   proves the key; the remaining values are not checked one by one, and a value that does not
+   decrypt does not refuse the migration when another one does.
    **Eligibility rule:** a database with no encrypted value at all (or no database) is eligible,
    because nothing exists that a wrong key could make unreadable; a non-empty `-wal` with no
    ciphertext in the checkpointed file is refused (`legacy-db-wal-pending`: the probe cannot see
@@ -895,10 +898,17 @@ tested in isolation; these are not implemented and each needs its own change and
 7. *Resume and mixed-artefact gate:* unchanged and green (`keys` 229/229); the new branches
    (`before_migrate`, the re-open after apply) never publish a keyring: the first reads only, the
    second opens.
-8. *Process exclusion:* the gateway holds the lock for its life; `admin.py` takes the same lock for
-   every command that writes (`WRITERS`: passwd, disable-2fa, logout-all, promote, sso-only,
-   enable, vacuum) and refuses with the stop / run / start commands while the gateway runs. The
-   read-only commands (list, roles, health) do not lock. There is no rotation or restore CLI yet.
+8. *Process exclusion:* the gateway holds the lock for its life; `admin.py` takes the same lock
+   only for `vacuum` (`NEEDS_LOCK`: it rewrites the whole database file) and refuses with the
+   stop / run / start commands while the gateway runs. Owner decision (2026-11-24): the
+   break-glass commands that change only database rows (`DB_ONLY`: passwd, disable-2fa,
+   logout-all, promote, sso-only, enable) run while the gateway is up, as in 3.7, without the
+   lock: none of them encrypts, decrypts, opens `keys.wtk` or publishes anything (argon2 hashes,
+   deleted rows, `totp_secret_encrypted` set to NULL). A future command that writes an encrypted
+   value must open the keyring read-only through `keys` or join `NEEDS_LOCK`. The read-only
+   commands (list, roles, health) do not lock. There is no rotation or restore CLI yet; the host
+   `scripts/restore.sh` stops the app and refuses while any container uses the volume, and never
+   removes `.lock`.
 9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but `.lock`, twice);
    legacy + key (migrated, proven, old values decrypt, new values `FK:`, forward tokens still
    valid); foreign `secret` refused unchanged; no ciphertext eligible; WAL pending refused; mixed

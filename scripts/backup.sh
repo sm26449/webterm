@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# Crash-consistent backup of WebTerm data (SQLite + transcripts + vault key).
+# Crash-consistent backup of WebTerm data (SQLite + transcripts + key files).
 # The SQLite copy is taken with the online backup API (checkpoints the WAL into
 # a single self-contained file) so it is restorable even while the app is live —
 # tarring the raw webterm.db + -wal + -shm at different instants was torn.
+#
+# Key files (3.8, encryption at rest): a pre-3.8 ("legacy") volume is archived with its vault key
+# `data/secret`, as before. A PROTECTED volume (`data/keys.wtk`) is archived with keys.wtk, which
+# is useless without the master key, and NEVER with the master key itself: the key file
+# (secrets/master-key/master.key in the install directory, or /data/master.key with
+# WEBTERM_KEY_IN_VOLUME=1) is not in the archive. Keep a copy of it apart (recovery kit,
+# docs/INSTALL.md): restore.sh refuses a protected archive unless the configured key opens it.
 #
 #   WEBTERM_VOLUME              Docker volume name  (default webterm_webterm-data)
 #   WEBTERM_BACKUP_DIR          where archives go   (default /var/backups/webterm)
 #   WEBTERM_BACKUP_KEEP         how many to keep    (default 14)
 #   WEBTERM_TOOL_IMAGE          image with python3  (default python:3.12-alpine)
 #   WEBTERM_BACKUP_PASSPHRASE   if set, encrypt the archive (openssl AES-256) — RECOMMENDED:
-#                               the archive contains the vault key (data/secret), which
-#                               decrypts every stored SSH credential. An unencrypted copy
-#                               that leaves the host (rsync/cloud sync) exposes them all.
+#                               a legacy archive contains the vault key (data/secret), which
+#                               decrypts every stored SSH credential; a protected one still
+#                               holds the database (metadata) and the fleet signing key. An
+#                               unencrypted copy that leaves the host (rsync/cloud) exposes them.
 #   Off-host copy (encrypted archive only; each destination is independent, use any/all):
 #     WEBTERM_BACKUP_RSYNC=user@host:/path/   rsync-over-SSH (key auth); + _RSYNC_KEEP_DAYS=N
 #     WEBTERM_BACKUP_FTPS=ftp://host/path/    FTP over TLS (curl --ssl-reqd); + _FTPS_USER/_FTPS_PASSWORD
@@ -98,34 +106,101 @@ docker volume inspect "$VOLUME" >/dev/null 2>&1 || {
 }
 
 BK_REASON="the snapshot of the data volume failed"
-docker run --rm -i --entrypoint python3 \
+BK_RUN=$(docker run --rm -i --entrypoint python3 \
   -v "$VOLUME":/data -v "$OUT":/out -e STAMP="$STAMP" "$IMAGE" - <<'PY'
-import sqlite3, sys, tarfile, os
+import sqlite3, stat, sys, tarfile, os
 stamp = os.environ["STAMP"]
-# ...şi conţinutul trebuie să fie al unei instalări reale. Fără `secret`, arhiva nu poate
-# decripta nimic la restaurare — e o pierdere totală care arată ca un backup.
-for required in ("webterm.db", "secret"):
-    if not os.path.exists(os.path.join("/data", required)):
-        sys.exit("REFUSING: /data/%s missing — this volume is not a WebTerm data volume" % required)
-tmp = "/tmp/webterm.db"
-src = sqlite3.connect("/data/webterm.db")
+# WT_DATA/WT_OUT: doar pentru testul hermetic (tests/host_backup_script_test.py); în container
+# rămân /data şi /out — nimeni altcineva nu dă -e aici
+D, O = os.environ.get("WT_DATA", "/data"), os.environ.get("WT_OUT", "/out")
+
+
+def regular(name):
+    try:
+        st = os.lstat(os.path.join(D, name))
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit("REFUSING: /data/%s is not a regular file" % name)
+    return True
+
+
+def present(name):
+    return os.path.lexists(os.path.join(D, name))
+
+
+# ...şi conţinutul trebuie să fie al unei instalări reale: fără DB nu există nimic de salvat.
+if not regular("webterm.db"):
+    sys.exit("REFUSING: /data/webterm.db missing — this volume is not a WebTerm data volume")
+# 3.8 (INV-14, docs/design/INVARIANTS.md): un volum PROTEJAT are keys.wtk (cheile învelite sub
+# cheia master, inutil fără ea) şi NU mai are `secret`. Arhiva lui ia keys.wtk şi niciodată
+# cheia master (master.key, în volum doar la WEBTERM_KEY_IN_VOLUME=1) — cheia stă separat de date,
+# altfel protecţia n-ar exista pentru cine are arhiva. Stările intermediare ale protocolului de chei
+# (migrare în curs, temporare) nu se arhivează: gateway-ul le termină la pornire.
+if regular("keys.wtk"):
+    for n in ("migrating.wtm", "migrating.wtm.tmp", "keys.wtk.tmp", "master.key.tmp"):
+        if present(n):
+            sys.exit("REFUSING: /data/%s — a key operation is unfinished; start the gateway once "
+                     "(it completes it), then back up again" % n)
+    if present("secret"):
+        sys.exit("REFUSING: /data/secret next to keys.wtk — the volume mixes old and new key files "
+                 "(docs/INSTALL.md, Encryption at rest: `ambiguous`)")
+    kind = "reduced" if present("master.key") else "protected"
+    names = ("keys.wtk", "agent-signing.key", "agent-signing.pub", "transcripts")
+else:
+    # fără keys.wtk: 3.7, exact ca înainte. Dar urme ale formatului nou fără manifest = volum
+    # inconsistent (acelaşi refuz ca backup.volume_kind în gateway), nu „legacy".
+    for n in ("migrating.wtm", "migrating.wtm.tmp", "keys.wtk.tmp", "master.key", "master.key.tmp",
+              "erasures.wtj"):
+        if present(n):
+            sys.exit("REFUSING: /data/%s without keys.wtk — an inconsistent volume; start the "
+                     "gateway once and read its log" % n)
+    # Fără `secret`, arhiva nu poate decripta nimic la restaurare — e o pierdere totală care
+    # arată ca un backup.
+    if not regular("secret"):
+        sys.exit("REFUSING: /data/secret missing — this volume is not a WebTerm data volume")
+    kind = "legacy"
+    names = ("secret", "agent-signing.key", "agent-signing.pub", "transcripts")
+tmp = "/tmp/webterm-%s.db" % stamp
+src = sqlite3.connect(os.path.join(D, "webterm.db"))
 dst = sqlite3.connect(tmp)
 with dst:
     src.backup(dst)                 # online backup API — consistent snapshot
 dst.close(); src.close()
-out = "/out/webterm-%s.tar.gz" % stamp
+out = os.path.join(O, "webterm-%s.tar.gz" % stamp)
 with tarfile.open(out, "w:gz") as t:
     t.add(tmp, arcname="webterm.db")            # the consistent copy
     # `agent-signing.key/.pub`: fără ele, un restore reface datele dar flota devine
     # NE-actualizabilă — agenţii au pubkey-ul vechi încorporat şi refuză (corect) update-uri
     # semnate cu o cheie nouă. Backupul din UI le includea deja (backup.py); timer-ul systemd,
     # nu. Adică exact copia pe care te bazezi la dezastru era cea incompletă.
-    for name in ("secret", "agent-signing.key", "agent-signing.pub", "transcripts"):
-        p = os.path.join("/data", name)
+    for name in names:
+        p = os.path.join(D, name)
         if os.path.exists(p):
             t.add(p, arcname=name)
+os.unlink(tmp)
 print("backup:", out)
+print("kind:", kind)
 PY
+)
+printf '%s\n' "$BK_RUN" | grep -v '^kind: ' || true
+VOLKIND=$(printf '%s\n' "$BK_RUN" | sed -n 's/^kind: //p')
+case "$VOLKIND" in
+  legacy) HOLDS="the vault key (data/secret)" ;;
+  protected|reduced)
+    HOLDS="the database and the fleet signing key"
+    # Cheia master NU e în arhivă, cu bună ştiinţă: fără ea arhiva nu se poate restaura.
+    echo "note: the data volume is protected (keys.wtk): the master key is NOT in this archive."
+    if [ "$VOLKIND" = reduced ]; then
+      echo "      The key is inside the volume (WEBTERM_KEY_IN_VOLUME=1, /data/master.key): restore.sh"
+      echo "      reuses it only on this same volume; keep a copy of it apart for any other case."
+    else
+      echo "      Restoring it needs the same key file (secrets/master-key/master.key in the install"
+      echo "      directory): keep a copy off this machine (recovery kit, docs/INSTALL.md)."
+    fi
+    ;;
+  *) BK_REASON="the snapshot did not report the volume kind"; echo "REFUSING: unknown volume kind" >&2; exit 1 ;;
+esac
 
 ARCHIVE="$OUT/webterm-$STAMP.tar.gz"
 BK_REASON=""
@@ -151,11 +226,11 @@ if [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ]; then
     BK_ARCHIVE=$(basename "$ARCHIVE") BK_ENCRYPTED=true
     echo "ENCRYPTED backup: $ARCHIVE"
   else
-    echo "WARNING: openssl is missing — the archive stays UNENCRYPTED (it holds the vault key)."
+    echo "WARNING: openssl is missing — the archive stays UNENCRYPTED (it holds $HOLDS)."
   fi
 elif [ -t 1 ] || [ "${WEBTERM_BACKUP_ALLOW_PLAINTEXT:-0}" = "1" ]; then
   # rulare INTERACTIVĂ (sau refuz explicit): avertizăm zgomotos şi mergem mai departe
-  echo "WARNING: WEBTERM_BACKUP_PASSPHRASE is not set — the archive holds the vault key in CLEARTEXT."
+  echo "WARNING: WEBTERM_BACKUP_PASSPHRASE is not set — the archive holds $HOLDS in CLEARTEXT."
   echo "         Set a passphrase (AES encryption), or keep $OUT strictly private and encrypted off-host."
 else
   # rulare NEINTERACTIVĂ (timer systemd, cron): un avertisment pe care nu-l citeşte nimeni
@@ -165,7 +240,7 @@ else
   rm -f "$ARCHIVE"
   BK_REASON="refused: no WEBTERM_BACKUP_PASSPHRASE for an automated backup"
   echo "REFUSING: an automated backup without WEBTERM_BACKUP_PASSPHRASE." >&2
-  echo "       The archive would hold the vault key in cleartext; it has been deleted." >&2
+  echo "       The archive would hold $HOLDS in cleartext; it has been deleted." >&2
   echo "       Put the passphrase in /etc/default/webterm-backup, or, if you really want cleartext," >&2
   echo "       set WEBTERM_BACKUP_ALLOW_PLAINTEXT=1 (not recommended)." >&2
   exit 1
@@ -180,7 +255,7 @@ fi
 if [ -n "${WEBTERM_BACKUP_REMOTE:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
-    echo "REFUSING the off-host upload: the archive is UNENCRYPTED (it holds the vault key)." >&2
+    echo "REFUSING the off-host upload: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
     exit 1
   elif ! command -v rclone >/dev/null 2>&1; then
@@ -206,7 +281,7 @@ fi
 if [ -n "${WEBTERM_BACKUP_RSYNC:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
-    echo "REFUSING the rsync off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
+    echo "REFUSING the rsync off-host copy: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
     exit 1
   elif ! command -v rsync >/dev/null 2>&1; then
@@ -234,7 +309,7 @@ fi
 if [ -n "${WEBTERM_BACKUP_FTPS:-}" ]; then
   if [ "${ARCHIVE##*.}" != "enc" ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
-    echo "REFUSING the FTPS off-host copy: the archive is UNENCRYPTED (it holds the vault key)." >&2
+    echo "REFUSING the FTPS off-host copy: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     exit 1
   elif ! command -v curl >/dev/null 2>&1; then
     echo "WARNING: WEBTERM_BACKUP_FTPS is set but curl is missing — the archive stays local only."

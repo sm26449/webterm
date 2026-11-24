@@ -21,7 +21,10 @@ proces se spune explicit, în loc să se pretindă făcut.
     docker exec -it webterm-app-1 python3 -m app.admin sso-only someone@example.com [--force]
     docker exec -it webterm-app-1 python3 -m app.admin enable someone@example.com
     docker exec webterm-app-1 python3 -m app.admin health [--json] [--all] [--wait S --newer-than T]
-    docker exec -u webterm webterm-app-1 python3 -m app.admin vacuum
+    # vacuum (3.8): singura care cere gateway-ul oprit — vezi NEEDS_LOCK mai jos
+    docker compose -f docker-compose.prod.yml stop app
+    docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin vacuum
+    docker compose -f docker-compose.prod.yml start app
 
 `promote` (3.6) e calea break-glass a rolurilor: face contul Owner peste toată flota. Cine are
 shell pe server are deja DB-ul şi cheia seifului, deci comanda nu acordă nimic nou — doar
@@ -386,15 +389,22 @@ async def cmd_vacuum(_args) -> None:
     print("✓ %.1f MB → %.1f MB" % (before / 1024 ** 2, after / 1024 ** 2))
 
 
-# INV-14 (docs/design/INVARIANTS.md), ENCRYPTION-AT-REST.md §12.9 item 8: comenzile care SCRIU iau acelaşi
-# lock de proces ca gateway-ul (DATA_DIR/.lock), ţinut cât rulează comanda. Cu gateway-ul pornit
-# sunt refuzate: un al doilea scriitor pe acelaşi volum e exact ce protocolul de chei exclude.
-# Cele care doar citesc (list, roles, health) rulează oricând.
-WRITERS = frozenset(("passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable", "vacuum"))
+# INV-14 (docs/design/INVARIANTS.md), ENCRYPTION-AT-REST.md §12.9 item 8: doar `vacuum` ia lock-ul
+# de proces al gateway-ului (DATA_DIR/.lock) şi refuză cu gateway-ul pornit — rescrie tot fişierul
+# DB-ului, deci are nevoie de volum pentru el singur. Comenzile break-glass doar-DB (passwd,
+# disable-2fa, logout-all, promote, sso-only, enable) rulează ca în 3.7, cu gateway-ul pornit şi
+# FĂRĂ lock (decizia lui Stefan, 2026-11-24): sunt calea de intrare când eşti blocat afară, iar a
+# cere oprirea serviciului pentru ele ar fi fost o regresie. Nu ating nicio cheie: hash argon2,
+# rânduri şterse sau puse pe NULL (totp_secret_encrypted), niciun encrypt_secret/decrypt_secret —
+# deci nu deschid keys.wtk şi nu publică nimic. O comandă nouă care ar scrie o valoare criptată
+# trebuie fie să deschidă keyring-ul read-only prin keys (fără lock, fără publicare), fie să intre
+# în NEEDS_LOCK. Cele care doar citesc (list, roles, health) rulează oricând.
+NEEDS_LOCK = frozenset(("vacuum",))
+DB_ONLY = frozenset(("passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable"))
 
 
 def _writer_lock(cmd: str):
-    if cmd not in WRITERS:
+    if cmd not in NEEDS_LOCK:
         return None
     try:
         return keys.acquire_lock(str(config.DATA_DIR))

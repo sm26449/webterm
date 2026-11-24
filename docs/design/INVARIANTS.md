@@ -310,12 +310,18 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
 - A 3.7 volume with **no** key source configured boots exactly as before (legacy state, nothing
   written but `.lock`): upgrading the image changes nothing until the operator provides a key. A
   configured key migrates it once; the old 32-byte key becomes `FK_legacy` only after it has been
-  proven to decrypt the database's encrypted values (a volume with no encrypted value is eligible;
-  a foreign key file is refused). A staged 3.7 restore is applied first, under the old key, then
-  migrated in the same boot.
+  proven on the database. The proof is **at least one stored encrypted value decrypts with it**
+  (Stefan's decision, 2026-11-24: one value is enough; the others are not checked one by one). A
+  database with encrypted values none of which decrypts is refused (a foreign key file never
+  becomes `FK_legacy`); a database with no encrypted value at all is eligible. A staged 3.7
+  restore is applied first, under the old key, then migrated in the same boot.
 - A new, empty volume needs an external key, or `WEBTERM_KEY_IN_VOLUME=1` (reduced protection,
-  shown as such). One process at a time: the gateway and every admin command that writes hold the
-  same lock on the data directory.
+  shown as such). One process at a time on the keys: the gateway and `app.admin vacuum` hold the
+  same lock on the data directory. The break-glass admin commands that change only database rows
+  (`passwd`, `disable-2fa`, `logout-all`, `promote`, `sso-only`, `enable`) run while the gateway
+  holds that lock, as in 3.7: they never open, write or publish key material (Stefan's decision,
+  2026-11-24). A new admin command that writes an encrypted value must open the keyring read-only
+  or take the lock.
 - Every backup and snapshot of a protected volume is a `WTS1` container that needs the key held
   apart from the data; it never contains the master key or the old key in clear. Older 3.7 backups
   that do hold the old key are listed in System health until they are deleted.
@@ -326,5 +332,5 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `WRITERS`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
 **Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`.

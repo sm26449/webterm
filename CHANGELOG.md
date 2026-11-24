@@ -34,12 +34,20 @@ back.
   naming the reason and never the key. There is no fallback to the old key. A new, empty volume does
   not start without a key at all (or `WEBTERM_KEY_IN_VOLUME=1` for test setups, shown as reduced
   protection).
-- **Admin commands that write now run with the gateway stopped.** `python3 -m app.admin passwd`,
-  `disable-2fa`, `logout-all`, `promote`, `enable`, `sso-only` and `vacuum` take the same lock on the
-  data directory as the gateway (one writer per volume, which the key protocol relies on); while the
-  gateway runs they refuse and print the stop / `docker compose run` / start commands. `list`,
-  `roles` and `health` still work any time. The System health "compact the database" command was
-  updated accordingly.
+- **`python3 -m app.admin vacuum` now runs with the gateway stopped.** It rewrites the whole database
+  file, so it takes the same lock on the data directory as the gateway (one process at a time on
+  a protected volume) and, while the gateway runs, refuses and prints the stop / `docker compose
+  run` / start commands; the System health "compact the database" command does exactly that. The
+  break-glass commands (`passwd`, `disable-2fa`, `logout-all`, `promote`, `enable`, `sso-only`)
+  still work with `docker exec` while the gateway runs, as before: being locked out is exactly when
+  you cannot afford to stop the service, and they change only database rows, never the keys.
+- **The host backup and restore scripts understand protected volumes.** `scripts/backup.sh` on a
+  protected volume archives `keys.wtk` instead of `data/secret` and never the master key: keep the
+  key file (`secrets/master-key/master.key`) apart, since the archive cannot be restored without
+  it. `scripts/restore.sh` accepts such an archive only when the master key this installation is
+  configured with opens the archive's `keys.wtk` (checked with the app image before the app is
+  stopped), refuses archives that mix `secret` and `keys.wtk` or carry key material, and no
+  longer moves the data directory's `.lock` aside. Pre-3.8 volumes and archives work as before.
 
 ## [3.7.1] — 2026-11-22 · agent (61)
 

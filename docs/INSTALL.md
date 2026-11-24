@@ -684,8 +684,11 @@ boots exactly as before (`upgrade.sh` never creates a key). To turn protection o
    lists `keys.wtk` and no longer `secret`. Every stored credential still works (the old key became
    `FK_legacy` inside `keys.wtk`; new values are written under a new key).
 
-The migration first proves that the old key decrypts the database's encrypted values; a key file
-that belongs to another installation is refused before anything is written. A restore staged
+The migration first proves the old key on the database: **at least one stored encrypted value must
+decrypt with it** (the project's rule; one value is enough, the others are not checked one by
+one). If the database holds encrypted values and none decrypts, the old key belongs to another
+installation and the boot is refused (`legacy-key-unproven`) before anything is written; a
+database with no encrypted value at all is migrated as is. A restore staged
 before the restart is applied first, then migrated. If the database's WAL was not checkpointed
 (an unclean stop), it refuses with `legacy-db-wal-pending`: start once without the key, stop
 cleanly, then start with it.
@@ -708,18 +711,30 @@ no key material:
 | `missing`, `no-source` | no key file where it is configured, or none at all on a protected volume |
 | `bad-mode`, `bad-owner`, `symlink`, `key-in-data-dir` | the key file's permissions or location (see step 3) |
 | `legacy-key-unproven` | `data/secret` does not decrypt this database (a mixed or foreign volume) |
-| `locked` | another process holds the data directory (a second gateway, or an admin command) |
+| `locked` | another process holds the data directory (a second gateway, or `app.admin vacuum`) |
 | `ambiguous` | the volume mixes old and new key files (for example a 3.7 image was started on a migrated volume and created a new `data/secret`) |
 
-The gateway never falls back to another key. Admin commands that write now need the gateway
-stopped ([RUNBOOK §5](RUNBOOK.md#5-locked-out-of-your-own-account)). Rotating the master key is
-not exposed as a command yet.
+The gateway never falls back to another key. The recovery commands (`python3 -m app.admin
+passwd`, `promote`, `disable-2fa`…) still run with the gateway up, as before: they change only
+database rows and never touch the keys; only `vacuum` needs the gateway stopped
+([RUNBOOK §5](RUNBOOK.md#5-locked-out-of-your-own-account)). Rotating the master key is not
+exposed as a command yet.
 
 ## Backup
 
 Everything that matters is in the `webterm-data` volume (`/data`): `webterm.db`,
 `transcripts/`, `secret`, and `agent-signing.key` — the last being the one artefact whose
 loss is irreversible: without it the fleet can never be updated again.
+
+**On a protected volume (3.8, encryption at rest)** `secret` is replaced by `keys.wtk`, and the
+host scripts follow: `scripts/backup.sh` archives `keys.wtk` (useless without the master key) and
+**never the master key itself**: neither `secrets/master-key/master.key` nor, with
+`WEBTERM_KEY_IN_VOLUME=1`, `/data/master.key`. Keep the key file apart (password manager / recovery
+kit): the archive cannot be restored without it. `scripts/restore.sh` checks, with the app image
+and before it stops the app, that the master key this installation is configured with opens the
+archive's `keys.wtk`, and refuses otherwise (the message gives the key id the archive needs). It
+also refuses archives that mix `secret` and `keys.wtk` or contain key material, and never moves the
+data directory's `.lock`. Pre-3.8 volumes and archives behave as before.
 
 What is **not** in the volume, and therefore not in the archive: the archive's own
 passphrase (`/etc/default/webterm-backup`), `/opt/webterm/.env`, and the TLS certificates.

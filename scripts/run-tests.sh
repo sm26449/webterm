@@ -63,7 +63,7 @@ CI_TESTS="agent_hardening agent_reliability agent_tmux_hygiene ed25519_kat
           snippet_targets host_test_connection hosts_csv alert_history replay_links share_ratelimit
           changelog_section rbac_matrix rbac_filter rbac_escalation rbac_ws rbac_migration rbac_secreview
           rbac_roles rbac_oidc sso_rolemap authentik_provision certmon cert_renew_script
-          syshealth host_health_script upload_root_move pyruntime
+          syshealth host_health_script host_backup_script upload_root_move pyruntime
           last_login rbac_explain rbac_expiry rbac_crown rbac_token_role
           scim_protocol scim_accounts push git_panel push_events session_idle
           txformat keyring keys snapshot backup_protected boot_keys"
