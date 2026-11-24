@@ -486,23 +486,25 @@ reviewed before the PR that turns writers, migration, backup or erasure on:
    offset in one transaction; exact canonical encoding and list order; at most one live generation
    per kind; `phys_len` per state (SEAL included once sealed); a recovery table for every
    interruption point; the rollback guarantee limited to "across a key-manifest epoch change"
-   unless a per-commit monotonic marker outside the restorable set is added.
+   unless a per-commit monotonic marker outside the restorable set is added. *Descriptor part
+   designed in §12.11.1 (PR5, under review).*
 2. **Range vs full integrity (V3-H3):** a range read is served only through an authentic index bound
    to the exact descriptor, or after a verified parse of the needed prefix within a budget; a full
    integrity check (all records, SEAL, size) is a separate operation (System health, backup,
-   restore); rules for `recovered` generations and for a live prefix inside a backup.
+   restore); rules for `recovered` generations and for a live prefix inside a backup. *Designed in §12.11.2.*
 3. **Erasure continuity (V3-H4):** a journal head attested off-volume, backups bound to the head
    they contain, continuity checks, tombstones re-applied at every boot before readers; without
    proof of continuity, the recordings that could be affected stay quarantined; an Owner "recover
    anyway" is a recovery mode with the erasure guarantee suspended, recent re-auth, restricted
-   access and audit.
+   access and audit. *Designed in §12.11.4.*
 4. **Snapshot container bytes (V3-M1):** per-envelope algorithm and purpose key, canonical AAD,
    nonce and strict counter, frame and decompression limits, single final frame, new key on retry
    after an ambiguous write; the passphrase is mandatory for downloads and for any remote profile
    that promises "two secrets". *Written in §12.10 (PR3).*
 5. **Backup snapshot coherence (V3-M2):** descriptors and keyring read from the same snapshot as the
    DB; the list of mutations that take the barrier; pins on immutable references (fds), released
-   only after the worker really finished; all I/O off the loop with budgets.
+   only after the worker really finished; all I/O off the loop with budgets. *Designed in
+   §12.11.3.*
 6. **Boot inventory (V3-M3):** accepted artefacts for bootstrap, lock taken without changing the
    classification, leftover `keys.wtk.tmp` handled, `fstat` on the same fd, regular file, no
    symlinks, canonical encodings and size limits for manifest, envelopes and descriptors; the
@@ -1402,6 +1404,773 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
   extended before recordings or erasures are written (the §12.4 recovery and erasure promises).
 - The API does not pass `mk`, `prefer` or `legacy_import` yet (no UI to enter an operator MK);
   until then those routes surface `backup.needsMasterKey` and the operator uses a future CLI.
+
+### 12.11 Recordings: publication, readers, backup coherence, erasure (PR5 design)
+
+Normative design, **no code yet**. Closes, for review, the descriptor part of §12.8 contract 1 and
+contracts 2, 3 and 5. Where §4, §5, §6 or §12.1–§12.5 are vaguer or differ, this section wins; in
+particular (a) an index is rebuilt only by a **verified parse**, never by a length scan (§12.1
+"Index"), and (b) generation files never move to `arhiva/` (§4.4 "Archive moves sealed
+segments"). It applies only to a protected volume (`keys.wtk` present, §12.10 "Which path"); a
+legacy volume keeps the 3.7 recording code unchanged. Writers stay disabled until this section has
+passed review and the tests of §12.11.7 pass. Revised after the independent review of 2026-11-24
+(findings H1–H5, M1–M6, L1 → §12.11.9); the §12.8 pointers to contracts 1, 2, 3 and 5 stay "in
+review" until a second review closes §12.11.9. PR5 may land `txstore` and its fixtures before
+then, with writers and migration **not** enabled.
+
+#### 12.11.0 Layout and tables
+
+- **Files:** `transcripts/<sid>.<k>.<gen>.wtx` (`k` = `out` | `cast`, `gen` = the gen_id as 32
+  lowercase hex) and the optional cache `transcripts/<sid>.<k>.<gen>.idx`; both names are in the
+  reserved namespace (`keys.is_reserved_name`, imported, not restated). All WTX1 files stay at the
+  top level of `transcripts/`; archiving is a database state. A generation file is created with
+  `openat(transcripts_fd, name, O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW|O_CLOEXEC, 0600)` and, once
+  published, is **never renamed, truncated or rewritten**; the only removal is `retire(gen_id)`
+  (deferred while pinned, §12.11.3). Readers open it with `O_RDONLY|O_NOFOLLOW` and check on the fd:
+  regular file, `st_nlink == 1`, size ≥ the descriptor's `phys_len`.
+- **Tables** (new, `CREATE TABLE IF NOT EXISTS` in `db.SCHEMA`; no foreign key to `sessions`: a
+  recording outlives its session row, `delete_session` only archives it):
+
+| Table | Columns | Role |
+|---|---|---|
+| `session_keys` | `sid` PK, `envelope` (type 6 RK envelope under KWK, §12.2), `created`, `origin` (`session` \| `migrated` \| `orphan`) | The RK. Deleting the row is destroying the key. |
+| `tx_descriptors` | (`sid`, `kind`) PK, `blob` (WTD1, §12.3), `version`, `committed_at`, `archived_at`, `status` (`ok` \| `quarantined` \| `recovery` \| `damaged` \| `absent`) | The authenticated generation list, plus housekeeping columns. |
+| `tx_files` | `gen_id` PK, `sid`, `kind`, `state` (`reserved` \| `created` \| `collision` \| `published` \| `retired` \| `gone`), `dev`, `ino` (set at `created`), `created` | Ledger of every generation name ever reserved. Only a `created` row (an `O_EXCL` create that **this** operation performed, inode recorded) gives a right to unlink, and only that inode. |
+| `tx_migration` | (`sid`, `kind`) PK, `dir` (`transcripts` \| `arhiva`), `name`, `dev`, `ino`, `size`, `mtime_ns`, `sha256`, `state` (`pending` \| `converted` \| `unlinked` \| `missing` \| `failed` \| `orphan`), `error` | Durable inventory of plaintext recordings, taken once (§12.11.5). |
+| `tx_state` | `key` PK, `value` | `erasure_head` (n, mac), `attested_heads` (per destination: n, time, object name), `keyring_epoch` (epoch, mac), `recordings_format`, `revocation_epoch` (global, §12.11.2). |
+
+- **WTD1 flags.** The descriptor's `reserved u16` becomes `flags u16` (bit 0 = `converted`: the
+  recording was migrated from plaintext; any other bit set → decode refused). Covered by the
+  descriptor MAC, so a converted session is known as converted from authenticated data. No WTD1
+  descriptor exists outside tests yet (writers are disabled), so `ver` stays 1; `txdesc.py` and its
+  vectors change in PR5. The decoder keeps the wire cap of 4096 generations; the **operational**
+  cap is 256: a larger descriptor (restore of an older build, interrupted merge) is accepted and
+  merged down by the next janitor pass, never refused at restore for its size alone.
+- **Keyring epoch binding (M1).** WTD1 carries no epoch. Each `keys.wtk` publication writes, in the
+  same barrier, `tx_state.keyring_epoch = (epoch, HMAC(K_desc, "wt/v1/kepoch" ‖ installation id ‖
+  epoch))`. Every boot compares it with `keys.wtk`: DB epoch lower than the file's (DB rolled back
+  alone) or a bad MAC → every recording quarantined (§12.11.4), System health critical. A DB epoch
+  higher than the file's is the restore case the §12.10 stage already handles. Nothing else is
+  promised about rollback (§12.11.1 "Rollback limit").
+- **Ledger compaction.** A `retired` row becomes `gone` once its unlink is confirmed (directory
+  fsynced); `gone` and `collision` rows older than 90 days are deleted. After that, gen_id
+  uniqueness rests on the 128-bit CSPRNG alone, as it already does after a restore (§12.11.1).
+
+- `version` must equal the version inside `blob` (mismatch = `damaged`). The unauthenticated columns
+  (`committed_at`, `archived_at`, `status`, the ledger) are hints for UI, retention and recovery:
+  none of them can make a reader serve a byte the authentic descriptor does not cover, and **no
+  recovery step deletes a file that an authentic descriptor lists**, whatever the ledger says
+  (integrity alarm instead). Their tampering needs a write to the database, which is outside the
+  phase-1 promise (§8).
+
+#### 12.11.1 Writer lifecycle and publication (contract 1)
+
+**Locks.** `txstore.lease(sid)`: one in-process `asyncio.Lock` per sid (§5). `txstore.barrier`:
+one process-wide `asyncio.Lock` (§12.4). Lock order is always lease → barrier; inside the barrier
+only the DB transaction (or the backup snapshot of §12.11.3, or the erasure journal append of
+§12.11.4, the one fsync allowed there) runs; record fsync and file I/O happen **before** the
+barrier is taken; no network I/O, off-host upload or unbounded `await` runs under either lock.
+Cross-process exclusivity is the boot lock (§12.2); §12.11.3 says how the host-side backup meets it.
+
+**Per-session coordinator (H1).** Each recorded sid has exactly one `txstore.Recorder`: a single
+worker task with a FIFO job queue. It alone owns the writers and their fds (closed only by the
+worker, after its last job), and it is the only code that runs **checkpoint, seal, roll, cap/merge
+publication, finalize, writer change (start, re-adoption after teardown, agent epoch change) and
+the migration of a live session**. A job holds the sid's lease from start to end, end to end:
+capture → append → fsync → DB commit → `hub.committed` update. Two jobs of one sid therefore never
+overlap, so a later checkpoint cannot be captured before an earlier one commits. The loop side
+never touches a writer: `_process_output` only appends to the kind's *pending buffer*; a job starts
+by **swapping** that buffer for an empty one (synchronous, one tick), so output arriving while the
+job runs goes to the new buffer and never into the batch in flight. Callers await a job's future
+through `asyncio.shield`: cancelling a caller (request, teardown) never cancels a job that has
+begun; teardown enqueues `finalize` behind it. Other modules (reconcile, `delete_session`, archive,
+purge, migration of closed sessions, erasure) take the same lease, so they serialise with the
+coordinator; on a protected volume `sessions.agent_epoch/agent_offset` is written **only** by a
+coordinator job (a source-scan test lists the writers of those columns).
+
+**Isolated transaction.** `db.execute` commits on its own, so publication never uses the shared
+helpers: `txstore` opens its own connection, used only under the barrier, and runs `BEGIN
+IMMEDIATE` … `COMMIT` with no other statement interleaved and no `await` other than the DB thread
+hop. Inside the transaction, before writing, it checks (CAS + monotonicity, refused → `ROLLBACK`):
+
+- each descriptor row's `version` equals the version the job started from, and the job's writer
+  token equals the hub's current one (a job of a replaced writer is dropped, its fds closed);
+- **checkpoint / seal / roll:** the new generation list *extends* the committed one: same gen_ids in
+  the same order, every count (`data_count`, `plain_len`, `phys_len`) ≥ the committed one, a
+  committed `sealed`/`recovered` never changes, at most one new `live` at the end;
+- **cap / merge:** a typed operation: the committed list starts with exactly the pinned P (gen_ids
+  and counts), the tail L is preserved unchanged, `list_epoch` bump only for a cap;
+- the agent position: same `agent_epoch` and `agent_offset` ≥ the committed one; an epoch change
+  only in a writer-change job, which also opens a new generation.
+
+**A checkpoint that loses** (CAS or monotonic check fails — impossible with the queue, so treated as
+a bug: audited, System health warning) publishes nothing; its records stay in the file past
+`phys_len` (never read) and the next job of the **same** writer re-captures a superset. It is never
+retried with its old capture. **Uncertain outcome** (an exception at or after `COMMIT`): the job
+does not assume a rollback; it re-reads the rows on a fresh connection: version = target and blob
+hash = the job's → committed (update `hub.committed`); version = start → not committed (retry the
+same capture once, then break the writer as below); anything else → the sid is re-adopted through
+crash recovery (§12.11.1 table) before any further job.
+
+**RK.** At the first writer start of a session on a protected volume (SessionHub creation, before
+any output is accepted): if `session_keys` has no row, RK = `secrets.token_bytes(32)`, wrapped under
+KWK, `INSERT` committed under lease → barrier before any generation is reserved. Both kinds use the
+same RK (their descriptors carry the same RK hash). The unwrapped RK lives in the hub and in the
+bounded txstore key cache (≤ 256, `repr` hidden), dropped on erasure. An envelope that does not
+unwrap, or a descriptor whose RK hash differs → the hub does **not** start (attach refused with
+`transcript.keyError`, System health alarm): a protected session is never run unrecorded because
+of a key fault.
+
+**Generation start (reservation, private).** `gen_id = os.urandom(16)`; under lease → barrier
+`INSERT tx_files(gen_id, sid, kind, 'reserved')` committed (a UNIQUE violation → new id); then the
+`O_EXCL` create. EEXIST → the row becomes `collision` (the existing file is **not ours**: never
+unlinked by us, reported as an orphan if it is in the reserved namespace), new id. Success →
+`fstat`, row → `created` with (`dev`, `ino`) committed **before** `txformat.Writer` writes the
+header.
+Nothing of this is in a descriptor: readers cannot see it. A generation is opened at writer start
+and right after each roll, so the synchronous flush always has a writer; one that is never
+published (no data before close) is retired at close, never published empty.
+
+**Uniqueness proof (§12.8 PR1 note).** `Writer` has no reopen: each one is built on a fresh fd
+from an `O_EXCL` create, under a gen_id drawn at random and reserved UNIQUE; its keys derive from
+(RK, kind, gen_id); a broken writer's gen_id is never reused (its row stays until retired). So
+every (K_rec, nonce) is new across all attempts, crashes included. A restore brings back an older
+ledger but no older gen_id is reused except by a 128-bit RNG collision; a VM clone with RAM stays
+the stated limit (§12.1).
+
+**Hot path and checkpoint** (same triggers as today: 64 KiB unpersisted or 2 s, idle flush after
+2.5 s, forced on resume/unlock, after a gap marker and at close):
+
+1. `_process_output` (loop, synchronous): append the plaintext to the kind's pending buffer,
+   `agent_offset += len`, OSC 133 scanner on `out_pos` (logical offset). No file I/O on the loop.
+2. Checkpoint job (coordinator, lease held): swap the pending buffers and, **in the same tick**,
+   take `(agent_epoch, agent_offset)` of their end. Off the loop (worker thread): cut each batch into
+   DATA records of ≤ 64 KiB and `Writer.append` them; before each record and before SEAL the job
+   reserves room against the §12.1 **hard** limits (records, bytes, SEAL size): a batch that would
+   cross them is split, the generation sealed and a new one opened inside the same job, so a burst
+   that jumps over the 90 % roll mark never overruns a limit. Then capture `S = {per kind: gen_id,
+   data_count, plain_len, phys_len} + (agent_epoch, agent_offset)`.
+3. Still off the loop: `fsync` every writer fd written since the last commit (**both** kinds;
+   today only `.out`), and the `transcripts/` directory when S contains a generation not yet
+   published.
+4. Lease (still held) → barrier → **one isolated transaction** with the checks above: both
+   descriptors re-encoded with `version + 1` and the live entry's counts from S;
+   `tx_files.state = 'published'` for a newly listed generation; `committed_at = now` when the
+   `.out` plain_len grew; `sessions.agent_epoch, agent_offset` from S (never the current values).
+   Commit → `hub.committed = S`. Exclusive watermark = `data_count`.
+
+**Backpressure (M4).** The pending buffers are capped at 8 MiB per sid. While a job (or a barrier
+held by a backup's `VACUUM INTO`) delays the next checkpoint, output keeps going to browsers and
+into the buffer; past the cap the recorder stops buffering, records the gap position (the `.out`
+logical end at that instant) and rewinds `agent_offset` to the committed value, exactly the
+failure path below: the bytes come back from the agent ring when the queue drains, or as a
+`GAP_MARKER` at the recorded position when the ring no longer has them. A single record append is
+bounded (≤ 64 KiB, one `os.write`) and never runs on the loop.
+5. Readers trust exactly `hub.committed` / the descriptor. Because step 2 captures the offset and
+   the counts together, the committed agent offset is always the end of the committed prefix: a
+   restart replays from there into a new generation, so the 3.7 duplicate after a crash (bytes in
+   the file past the committed offset) disappears.
+
+**Failures.** A DB error advances nothing; the next checkpoint publishes a superset. An fsync error
+or an ambiguous write breaks the writer (§12.1): the generation is abandoned without SEAL (the next
+publication marks it `recovered` at its last committed counts), a new generation is opened, and
+the hub rewinds `agent_offset` to the committed value and re-attaches the agent stream from it (the
+existing replay path: bytes the agent ring no longer has → `GAP_MARKER`, as today); replayed bytes
+up to the pre-failure offset go to the recorder only, never again to browsers. Repeated failure
+(ENOSPC) → recorder `degraded`: terminal I/O continues, retry every `CAP_RETRY_SECS`, `GAP_MARKER`
+at resumption, System health alarm. *(Availability choice, see §12.11.8 Q5.)* The gap marker sits at
+the `.out` logical offset where recording resumed (the committed end); the same position goes to
+`.cast` as a gap event. Web replay and the recorder see the same marker. An agent epoch change
+while degraded (agent restarted) → nothing is replayed from the old ring, the marker is written,
+the writer-change job opens a new generation. SSH, telnet and serial sources have no agent ring:
+bytes lost while degraded are gone, the marker records that. A key fault is different: it
+**refuses** the hub (above); only write faults degrade.
+
+**Seal, roll, close.**
+
+- `phys_len`: `live` and `recovered` = 96 + Σ(25 + len) over the committed DATA; `sealed` = that +
+  73. At most one `live` per kind, always last; `sealed` and `recovered` never become live again.
+- **Roll** at 90 % of a §12.1 limit (`Writer.should_roll()`), after a successful checkpoint: SEAL
+  (loop) → fsync → publish `sealed` → open the next generation.
+- **Close** (exit, teardown, kill): final checkpoint, seal both kinds, publish. `teardown()` stays
+  synchronous and schedules `finalize()`; shutdown awaits pending finalizers ≤ 5 s. A finalize that
+  never ran is the crash case below.
+
+**Cap** (replaces `_maybe_cap`'s copy, catch-up and `os.replace`; the live writer is never touched):
+
+1. Trigger at a checkpoint when Σ plain_len of a kind ≥ `TRANSCRIPT_MAX_BYTES` (env unchanged).
+2. Roll both kinds (sealed + new live generation, published as above); output keeps flowing.
+3. Off the loop, from a reader snapshot of the prefix P (every generation before the new live
+   ones): build one new generation T per kind with exactly 3.7's kept content (`.out`:
+   `GAP_MARKER` + the last `TRANSCRIPT_KEEP_BYTES`; `.cast`: header line ≤ `CAP_HEADER_MAX` + gap
+   event + whole lines of the last KEEP bytes), reserved and created like any generation, sealed,
+   fsynced (+ directory), then `verify_full` read-back.
+   The compactor pins P (gen_ids, counts and its own fds) at step 3 and reads only through them.
+4. A coordinator job (lease) → barrier → one isolated transaction per session: the typed cap check
+   above revalidates that the committed list still starts with exactly P and that `list_epoch` is
+   the one seen at step 3; a stale result (P changed, the session was erased, archived, migrated or
+   its writer replaced) → T retired, nothing published. Otherwise each descriptor P ‖ L → T ‖ L
+   (L = the committed generations after P, read inside the transaction), T `published`, P
+   `retired`. Then `list_epoch += 1` (today's `out_gen`), then `retire(P)`.
+5. Abort (teardown, I/O error, ENOSPC): T retired, nothing published, retry after
+   `CAP_RETRY_SECS`.
+
+**Merge.** When a descriptor would exceed 256 generations (many writer restarts), the same
+procedure without truncation: T = the exact concatenation of P, offsets unchanged, no `list_epoch`
+bump. A merged `recovered` generation becomes part of a sealed T (the mark described how it
+ended, not its content).
+
+**Crash recovery** (at every boot, after keyring, restore apply and schema, **before** reconcile
+creates hubs and before recording routes serve; the same reconcile runs for one sid at writer
+start). The directory is listed through its fd without following links and compared with the
+ledger and the descriptors:
+
+| Interrupted after | Found | Recovery |
+|---|---|---|
+| RK drawn, insert not committed | nothing | nothing |
+| RK committed | `session_keys` row, no descriptor | nothing (empty recording) |
+| reservation committed, create not recorded | `reserved` row, file absent | delete the row |
+| reservation committed, create not recorded | `reserved` row, file present | **ambiguous ownership**: row → `collision`, file left in place as an orphan (never unlinked by recovery) |
+| create recorded; header partial, or records written (fsynced or not, either kind, directory fsynced or not), publication not committed | `created` row (± file) | unlink only if `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` matches the row's (`dev`, `ino`) and no authentic descriptor lists the gen; row → `gone`. Never committed, the DB offset predates it → replayed from the agent ring at the next attach |
+| publication committed | `live` entry, maybe bytes past `phys_len` | `live` → `recovered` at the committed counts (one publication); bytes past `phys_len` are never read, sealed or served |
+| SEAL written, not published | `live` entry without the SEAL | `recovered` (the SEAL is a trailing byte) |
+| seal published | `sealed` | nothing |
+| cap/merge T written, not published | T `created` | unlink T (identity check as above) |
+| cap/merge published, P not unlinked | P `retired` | unlink P (identity check as above) |
+| migration generation written, not published | `created` + plaintext | unlink the generation; plaintext stays (`tx_migration` still `pending`), retried |
+| migration published, plaintext not unlinked (one or both kinds) | descriptor + `tx_migration` `converted` | §12.11.5 step 6, per kind |
+| — | file with no ledger row, a `collision` row, a `created` row whose inode differs, or a header that does not authenticate under its sid's RK | **orphan**: left in place, never served or backed up, listed in System health (Owner can delete it from there, audited) |
+| — | ledger `reserved`/`created`/`retired` but an authentic descriptor lists the gen | never deleted; integrity alarm |
+| — | descriptor lists a file that is missing or shorter than `phys_len` | `status = damaged`; readers refuse (`transcript.damaged`); alarm |
+
+**`recovered` means:** the generation ended without its SEAL (crash, kill, I/O error) at its last
+committed prefix. It is information about how the generation ended, not a certificate of its bytes:
+those are proven only by a verified read. Recovery never resumes its nonce sequence, never appends
+to it and never seals an unknown tail. Readers treat it like a sealed generation for ranges; the
+full check (§12.11.2) proves the prefix and reports "ended by interruption" as information. The
+codec accepts a generation with zero DATA records (needed by the test vectors and by a SEAL-only
+roll edge); the runtime never publishes one (an unpublished empty writer is retired at close).
+
+**Rollback limit** (V3-H2): a MAC stops edits, not the replay of an older authentic DB together with
+older files (N5); the `keys.wtk` epoch, compared with `tx_state.keyring_epoch` at boot (§12.11.0),
+only catches a DB older than the key file across an epoch change. No per-commit marker outside the
+restorable set is added in 3.8.
+
+#### 12.11.2 Readers (contract 2)
+
+One module, `gateway/app/txstore.py`; nothing else opens a generation, decodes a descriptor or
+unwraps an RK (a source-scan test, like `conntypes_test`).
+
+| Call | Does |
+|---|---|
+| `open(sid, kind, *, access)` → `Snapshot` | `access` is the `txstore.Access` object produced by the route's own authorization step (principal, route, the authz decision and the revocation epochs read **before** that decision), never a purpose string. Decode the descriptor (MAC, installation, sid, kind, flags, RK envelope hash), refuse tombstoned / `damaged` / `absent` / corrupt always, and `quarantined` unless `access` comes from the Owner-recovery route (§12.11.4: it lifts **only** the continuity quarantine), unwrap the RK, open and check the fds of the generations, verify each header against the descriptor's `hdr_mac`, record `list_epoch`; then the linearisation check below. Plaintext (`PlainSnapshot`, same API, one fd) only for a (sid, kind) whose `tx_migration` row is `pending` and whose file still matches the row's (`dev`, `ino`, `size`, `mtime_ns`). Refused as a downgrade (`transcript.downgrade`, alarm): a plaintext file for a sid that has a descriptor, an RK, a descriptor with the `converted` flag, or a `tx_migration` row in any other state (`converted`, `unlinked`, …) — **even if its descriptor is missing** — a plaintext not in the inventory, and any plaintext once `recordings_format = wtx1`. |
+| `Snapshot.length` | committed logical length (Σ plain_len) |
+| `Snapshot.read(start, end, *, budget)` / `iter(start, end, *, chunk, budget)` | plaintext of [start, end) |
+| `tail(sid, kind, limit, *, end=None)` | (bytes, end, epoch) of the last `limit` committed bytes, or up to `end` |
+| `verify(sid, *, budget)` | full integrity report (below) |
+| `exists`, `last_output_at`, `stats` | descriptor data, no file I/O |
+
+**Range rule (V3-H3).** The bytes returned are reached only through (a) an index authentic under
+K_idx for exactly the descriptor entry's (gen_id, data_count), its entries checked against
+`plain_len`/`phys_len`, then a forward parse from the nearest entry ≤ start that verifies every
+record (tag, seq succession, type) up to the last byte returned; or (b) a verified parse from
+seq 0, within the budget, refused beyond it. The offset of a returned byte = authenticated entry
+offset + Σ len of verified records. A rebuilt index is the by-product of a verified parse, written
+as `.idx` (tmp `O_EXCL` → rename) for `sealed`/`recovered` generations only, one entry per 1 MiB of
+plaintext; the hub keeps an in-memory index of its own live generation, built from the records it
+wrote, for live tails. A range read proves the returned bytes, their offsets and the descriptor;
+**not** the records outside its window (that is `verify`). Bytes past the committed prefix are
+never read; inside it, a short file, bad tag, gap or a SEAL below the watermark → `transcript.corrupt`
+(System health alarm, audited, never cached).
+
+**Snapshot isolation.** The fds are opened at `open()`, so a concurrent cap, merge, archive, purge
+or migration cannot change what a snapshot reads (an unlinked inode stays readable through the fd).
+A reader whose offsets must match the hub (resume, OSC 133) compares `list_epoch` exactly as it
+compares `out_gen` today and falls back the same way.
+
+**Revocation and the linearisation point (H4).** Two in-memory counters, both bumped
+**synchronously on the loop** (no `await` between the state change and the bump):
+`revocation_epoch[sid]` (erasure, quarantine change, archive/purge, live-share or replay-link revoke
+of that sid) and the global `access_epoch` (any role, binding, permission, account disable, token
+or session revoke). Erasure step 1 (§12.11.4) adds the tombstone and bumps the sid's counter in the
+same synchronous section, before any unlink. A snapshot is valid only if, **after** all its fds are
+open, a synchronous check on the loop finds both counters equal to the values captured in `access`
+before the authorization decision, the sid not tombstoned and not quarantined (unless Owner
+recovery). That check is the linearisation point: the snapshot is as if authorization, descriptor
+read and fd open all happened at that instant. A failed check closes every fd of the snapshot and
+retries once from the authorization step; a second failure → refused (the route's own 404/403).
+
+**Check points while serving.** The same synchronous check runs (a) before a cached response is
+served and again before a computed one is put in a cache, (b) before **each** emitted chunk of a
+stream (≤ 64 KiB plaintext, one DATA record or less; also for `PlainSnapshot` and for redacted
+output), and (c) before a single-shot response is handed to the transport. A changed sid counter
+or a tombstone → the stream is aborted (connection reset, no trailer; audited). A changed global
+counter → the stream pauses and re-runs the route's own authorization for its principal (the same
+dependency, share-token or replay-token lookup); denied → aborted. **Max delay** after the
+linearisation of a revocation: the chunk already being written plus what the transport already
+holds, ≤ 64 KiB + the server's write buffer high-water mark (64 KiB), and no new decrypt. Bytes
+already handed to the transport before the revocation are not recalled (stated limit).
+
+**Caches** are keyed by (sid, kind, descriptor version, generation-list digest, redaction policy
+version, `revocation_epoch[sid]`, `access_epoch`) and are dropped on any bump of those counters;
+an entry whose key no longer matches is never served.
+
+| Reader today | Protected volume | Behaviour kept |
+|---|---|---|
+| `read_tail(sid, limit)`, fresh attach (`attach_replay`) | `tail(sid, out, limit)` | up to the last commit (= today's flushed boundary: both move at the checkpoint); `ALT_SCREEN_RE` stripping unchanged; `span` = (committed `.out` end, limit, `list_epoch`) only if both are unchanged across the read (replaces `_flushed_size`) |
+| `read_tail(…, end=cutoff)`, resume/unlock (`_resync`) | `S = await hub.commit_now()` (forced checkpoint), then `tail(sid, out, limit, end=S.out_len)`; cutoff = `S.out_len` | exact logical offset; a failed commit → cutoff `None` → today's drain-queue path |
+| attach/resync of a session the user may control | as the two rows above, under the websocket's own authorization (`access` built from the ws principal) | unchanged |
+| `/api/sessions/{sid}/preview` | `tail(sid, out, 32 KiB)` | unchanged |
+| `transcript_text` (txt view, `/api/replay/text`) | `Snapshot.read` of the last `TEXT_VIEW_TAIL` or all | same transformation, same masking |
+| `search_transcripts` | `tail(sid, out, SEARCH_READ_CAP)` per session; `SEARCH_TOTAL_CAP` counted on decrypted bytes | past the budget, metadata only (as today) |
+| `/api/sessions/{sid}/transcript?format=out\|cast` (`FileResponse`, authenticated download, unredacted) | streamed from `Snapshot.iter`: `Content-Length` = length, `Accept-Ranges: bytes`, one Range on **plaintext** offsets clamped to the logical length (206; start ≥ length → 416 with `Content-Range: bytes */<length>`; several ranges → 200 full), ETag = SHA-256(sid ‖ kind ‖ descriptor version ‖ generation list ‖ committed watermark), `If-Range` only on an equal ETag, `Cache-Control: no-store`. Headers are sent only after the parse up to the first returned byte has verified; corruption found later aborts the connection (no trailer, `transcript.corrupt` audited) | byte-identical to the plaintext file the same committed history produces (the generations concatenated); RBAC, step-up and token checks run before `open` |
+| replay link creation (`share_api.py` `[replay]`) | `exists(sid, cast)`, not tombstoned / quarantined / `recovery`, under the creator's authorization | no link for a `recovery` recording |
+| replay link lookup (`cast_path.exists()`) | `exists(sid, cast)` and not erased / quarantined / `recovery`; `access` built from the link token, **not** from the authenticated-download authorization | the same 404 for every failure |
+| `/api/replay/cast` (public, `redacted_cast_file`) | `.cast` via `Snapshot.iter` into an incremental `redact_cast` (line buffer ≤ `CAP_HEADER_MAX`, longer lines refused), on the decrypted logical stream (record boundaries invisible to the redactor) | cache key as above, with the redaction policy version; checked before publish and before serve |
+| `/api/replay/text` (public, conditional masking) | `Snapshot.read` of the last `TEXT_VIEW_TAIL` through the same masking as today, link-token `access` | same output; same cache rules |
+| OSC 133 (`out_pos`, scanner, `span`) | logical offsets of the `.out` stream; `out_gen` → `list_epoch` (bumped only by a cap or by a migration of a live session) | unchanged |
+| `transcript_stats` stat-walk | Σ `phys_len` from descriptors (+ legacy dirs until migrated) | — |
+
+**Budgets** (constants in `txstore.py`, each with a test):
+
+| What | Limit |
+|---|---|
+| request-path decrypt workers (all readers) | one global semaphore of 4; wait ≤ 5 s, then 503 `transcript.busy` |
+| parse before the first returned byte | ≤ 1 MiB with an index; ≤ `TRANSCRIPT_MAX_BYTES` + `TRANSCRIPT_KEEP_BYTES` without, then `transcript.limitExceeded` |
+| index | `verify_index(max_entries=65 536)` |
+| search | 4 MiB per session, 128 MiB per query, 20 results (unchanged) |
+| `verify` from System health | ≤ 256 MiB per pass, background, off the loop; a resumable cursor (sid, kind, gen_id, seq, offset) carries a larger generation over several passes; the cursor is discarded if the descriptor version changes |
+| open snapshots / fds | ≤ 64 snapshots process-wide, ≤ 4 096 generation fds; beyond → 503 `transcript.busy`; a snapshot with no read for 60 s is closed |
+| bytes processed per request | ≤ the route's own cap (download: the logical length requested; replay cast/text: `TRANSCRIPT_MAX_BYTES` + KEEP; preview/tail: 1 MiB + its limit), counted across **all** generations of the request, not per generation |
+| bootstrap / resume scans | the index rule above per generation, and ≤ 2 × `TRANSCRIPT_MAX_BYTES` parsed per request in total |
+| a worker after cancel | checks a cancel flag between records; stops within one record (≤ 64 KiB decrypt); its fds are closed in its own `finally` |
+| caches | descriptors keyed (sid, kind, version); RK ≤ 256; redacted cast 1 entry; all keyed and dropped as in "Caches" above |
+
+Each route of the table above has an admission check (semaphore + fd budget) before `open` and a
+cleanup in the route's `finally` (snapshot closed, semaphore released) — a test per route.
+
+**Full integrity check** (`verify`, never on a request path): descriptor; per generation: header,
+every record, seq succession, count / plain_len / phys_len equal to the descriptor; `sealed`: SEAL,
+the tag hash and EOF exactly at `phys_len` (a trailing byte is an error); `live` / `recovered`:
+prefix only (trailing bytes reported as information); both kinds present with the same RK hash,
+except a historical pair recorded with one kind only (a 3.7 session without `.cast`, inventoried as
+`missing`, or a descriptor of one kind created by migration): reported as "one kind only", not as
+corruption. Used by System health (rolling), by backup (on the bytes it copies), by restore (every
+staged recording) and by migration (read-back).
+
+#### 12.11.3 Backup coherence (contract 5)
+
+**Mutations that take the barrier** (exhaustive; a test enumerates the call sites): RK creation;
+generation reservation and `created` record; checkpoint publication; seal; roll; writer change
+(including the agent offset/epoch: no other code writes `sessions.agent_epoch/agent_offset` on a
+protected volume); cap and merge publication; migration inventory, publication and per-kind
+`unlinked` record; `recordings_format`; archive (`archived_at`) by **both** paths
+(`archive_closed_transcripts` and `delete_session`/`purge_host`); purge; adoption or deletion of a
+session row that owns a recording; boot/housekeeping recovery writes (ledger, `status`); erasure;
+quarantine and recovery-status changes; `keys.wtk` publication (MK rotation) with
+`keyring_epoch`. Unlinks never take it: they go through `retire(gen_id)` (and the migration's
+identity-checked unlink), which defer while the gen or the legacy inode is pinned.
+
+**One snapshot function, every path (H2).** `txstore.backup_snapshot()` is the only way any backup
+reads recordings. Who calls it:
+
+| Path | Snapshot taken by |
+|---|---|
+| in-app download, scheduled, cloud / SFTP / FTPS upload, safety copy before a restore, backup "without recordings" | the gateway process, under its barrier |
+| `hostops backup --live` (host script, other process) | the running gateway, through a local control socket `DATA_DIR/.ctl/backup.sock` (directory 0700, owned by the gateway uid; peer checked with `SO_PEERCRED`: uid 0 or the gateway uid); the gateway runs the same function and streams the WTS1 file back. No socket answer while the boot lock is held by a running gateway → **refused** (never a direct read of a live volume) |
+| `hostops backup` with the app stopped | the host process itself, after taking the boot lock (§12.2: process exclusivity stands in for the barrier), same function |
+| verify / staging of an archive | no snapshot: reads the archive only (§12.10) |
+
+Backup "without recordings" still snapshots the journal head and lists every recording as
+`not-requested`, so a restore never mistakes it for a backup that lost them.
+
+**Backup snapshot** (`backup_snapshot`):
+
+1. Await the barrier. On the DB thread: `VACUUM INTO` a private temp file (time budget 120 s:
+   `sqlite3` interrupt beyond it, backup fails `backup.busy`, barrier released); read the
+   `keys.wtk` bytes and the volume journal bytes up to its head (member, length and SHA-256 fixed
+   here); pin every gen_id listed by the descriptors **read from the VACUUM copy** (never from the
+   live connection) and open their fds; for each `tx_migration` `pending` row, open and pin the
+   legacy plaintext fd (identity checked against the row), so a migration cannot unlink it before
+   it is copied. Release. The barrier is held for the whole `VACUUM INTO` (it is not
+   "milliseconds"): it delays publications only (the §12.11.1 backpressure applies); terminal output
+   keeps flowing. Duration is measured in the performance gate (§9).
+2. Ownership of the pins and fds passes to the worker **at submit**: a cancellation before submit
+   releases them in the coroutine; from submit on, only the worker's own `finally` releases them
+   (through the thread future's done-callback), never the awaiting coroutine — a cancelled request
+   does not unpin a running copy. `retire` then unlinks what it deferred.
+3. Worker, **per recording pair** (all generations of `.out` and `.cast` of one sid), two passes on
+   the pinned fds:
+   - *Verify pass* (nothing emitted): every generation of both kinds, exactly `phys_len` bytes,
+     header, every record, counts, SEAL for sealed, with the RK from the VACUUM copy. A pair that
+     fails is **excluded as a unit** (§12.11.8 Q3): no member of it is written, manifest entry
+     `excluded` with the reason, System health alarm naming it, the backup continues.
+   - *Emit pass:* copy exactly `phys_len` bytes per generation into `transcripts/<name>.wtx` (tar
+     size = `phys_len`), re-verifying while copying. A mismatch here (the media changed under a pin)
+     cannot be withdrawn from a streamed WTS1, so the container is **abandoned** (temp removed) and
+     rebuilt once from step 1 with a new content key and that pair excluded; a second failure fails
+     the backup.
+   No plaintext is written to disk by either pass (decrypted bytes live only in bounded memory for
+   the verification). `.idx` files are never archived. Legacy plaintext is copied from its pinned fd
+   through the current allowlist and listed as `legacy`.
+4. **Corruption ≠ fault.** Only an authentication / structure failure of the recording itself
+   excludes a pair. An I/O error (EIO), disk full, a DB, keyring or journal error, or a budget
+   overrun fails the whole backup: temp removed, pins released, nothing published (§12.10). The
+   worker keeps the §12.10 budgets.
+
+**Content manifest** `wts-content-2` = v1 + `recordings: [{sid, kind, state, generations: [{gen,
+phys_len, state}]}]` with `state` ∈ `included` \| `legacy` \| `excluded` (+ `reason`) \|
+`not-requested` \| `one-kind` (the other kind never existed); `erasure_journal: {member:
+"erasures.wtj", length, sha256, head: {n, mac}, attested: [{destination id, n, time}]}`. Member
+allowlist: the v1 members, `transcripts/<sid>.<k>.<gen>.wtx` named by an `included` entry,
+legacy files named by a `legacy` entry, `erasures.wtj`; nothing else. The manifest, the journal
+member, the descriptors and RK envelopes of the DB copy, `keys.wtk` and the DB's `erasure_head`
+must agree (head in DB = head in manifest = last entry of the member). The restore reader accepts
+v1 and v2; a **v1** content (PR4-era backup) may contain plaintext 3.7 transcripts: they are
+restored as `legacy` and migrated (§12.11.5), never treated as "no recordings".
+
+**Restore of recordings** (extends §12.10 stage/apply):
+
+- *Stage:* every `.wtx` member is listed in the manifest and named by a descriptor of the staged DB
+  (otherwise refused); every staged descriptor is decoded with the staged keyring and RK envelope
+  and every generation passes `verify` within the restore budget; member size == `phys_len`
+  exactly. A descriptor whose generation is absent → refused, unless the manifest lists that
+  recording as `excluded` or `not-requested` → `status = absent` ("not in this backup"); `one-kind`
+  → the missing kind is `absent` without alarm. The journal member must match the manifest's
+  length, SHA-256 and head.
+- *Apply:* the §12.10 flag journal, unchanged. Immediately before the switch, under the boot lock,
+  the erasure sources are reconciled **again** (§12.11.4 "Continuity at restore"): an erasure made
+  between stage and apply is in the live volume journal, which is kept next to the staging and is
+  never replaced by a shorter candidate. At the boot after it, before readers: erasure re-apply,
+  `live` → `recovered`, ledger rebuilt from the restored DB against the files present. Both steps
+  are idempotent after a crash. Files present that no restored descriptor lists (the R-M1 "live transcripts kept" case,
+  same installation) are orphans (listed, never served); another installation's live `transcripts/`
+  goes to quarantine as in R-M1.
+
+#### 12.11.4 Erasure (contract 3)
+
+**Four operations, kept apart:**
+
+| Operation | Effect | Survives a restore? |
+|---|---|---|
+| archive (`archive_closed_transcripts`, `delete_session`, `purge_host`) | `archived_at` set; never served (as in 3.7, archived files are not readable through the app) | yes, archived — **unless** the backup was taken before the archive: then the recording comes back un-archived (readable again). The UI says so next to the backup date ("recordings archived after this backup are restored as active") |
+| purge (janitor, `archived_at` + `ARCHIVE_RETENTION_DAYS`) | descriptors, RK and files deleted; **no tombstone** | the restored copy keeps the state it had in the backup (archived → purged again by the next janitor pass; active → see the row above). Only an erasure is guaranteed to survive a restore |
+| erasure (explicit, §12.11.8 Q1) | tombstone + RK destroyed + files retired | re-applied (below) |
+| quarantine | recordings not served pending proof | — |
+
+**What "key destroyed" means.** The active RK envelope row is deleted and the unwrapped RK dropped
+from memory caches. Copies may remain, outside this guarantee, in the SQLite WAL and free pages
+until checkpoint/VACUUM, in filesystem or VM snapshots, in process memory already paged out, and in
+backups taken earlier (which are authorized copies and expire with their retention, §11.4). The
+journal keeps the sid, the time and the RK hash: metadata that can be correlated with other logs,
+though it holds no terminal content.
+
+**Journal** `DATA_DIR/erasures.wtj` (§12.5), all integers little-endian:
+header `"WTJ1"` | ver u8 = 1 | reserved 3 B = 0 | installation id 16 B (24 B); then entries of 97 B:
+`n u64 (1, 2, … no gap) | time u64 ms | sid 16 B | kinds u8 (1 = out, 2 = cast, 3 = both; other
+values refused) | rk_hash 32 B | mac 32 B`, mac = HMAC-SHA-256(K_erase, `"wt/v1/wtj-entry"` ‖
+installation id ‖ previous mac (32 zero bytes for n = 1) ‖ entry without mac), K_erase =
+HKDF(KWK, "wt/v1/erase"). Head = (n, time, mac). Cap: 2²⁰ entries (≈ 100 MiB); at 90 % a System
+health warning, at the cap erasure is refused (`transcript.erasureJournalFull`) until a later PR
+defines compaction — the confirmed history is never truncated. Appended with `O_APPEND`, fsync
+(+ directory at creation). **Committed head** = the DB's `erasure_head`, written in step 2 below.
+**Incomplete tail:** bytes after the last whole authentic entry are allowed only beyond the
+committed head (a crash during step 1): the boot copies the journal up to the last authentic entry
+into a new file (tmp `O_EXCL` → fsync → rename → directory fsync) and keeps the cut bytes as
+`erasures.wtj.tail-<time>` for diagnosis. A partial or non-authentic entry at or before the
+committed head is never repaired: it is the quarantine case below.
+
+**Order of `erase(sid)`** (session not live, else 409 as `delete_session`):
+
+1. Lease → barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
+   with its own time budget, 5 s, beyond → the route answers 503 and the boot decides from the
+   file). In the same synchronous section, before releasing the barrier: add the sid to the
+   in-memory tombstone set and bump `revocation_epoch[sid]` (§12.11.2): from here `open` refuses it,
+   open snapshots and streams stop at their next check point, caches are dropped.
+2. Same barrier, one isolated transaction: revoke the live share and the replay links (`shares`
+   helpers), `DELETE session_keys`, delete both descriptors, ledger → `retired`, `erasure_head =
+   (n, time, mac)`. Release.
+3. `retire` the files (deferred while a running backup pins them: that backup's DB copy predates
+   the erasure and still holds the RK — the accepted "copies in backups expire" limit, §11.4).
+4. **Attestation (off the barrier, janitor):** per configured off-host destination, upload the
+   journal as an **immutable** object `<installation id>.erasures.<n as 16 hex>.wtj` (never
+   overwritten; a destination that cannot refuse overwrites uses a fresh name per upload and the
+   reader takes the highest valid n), then read it back and authenticate it. Success for that
+   destination → `attested_heads[destination] = (n, time, object name)`, committed. The erasure is
+   **attested** when every configured destination holds a head ≥ its n. Failure → retry with
+   backoff; System health: "erasure n not attested on <destination> since …", per destination.
+
+The route answers `{erased: true, attested: bool}`; until attested, the UI says the erasure
+survives restores on this volume only. Crash points: before 1 is durable → not erased (the route
+never said so); between 1 and 2 → the boot re-applies; between 2 and 3 → ledger `retired` → unlinked
+at boot; before 4 → retried. **Per-host erasure** (§12.11.8 Q1): the list of sids is fixed when the
+Owner confirms it (sids of that host the Owner is authorized for, shown before confirming); each
+sid is a separate `erase` with its own tombstone; live sessions are skipped and listed (409 each);
+the result lists erased / skipped / failed per sid, and a partial failure is not reported as done.
+
+**Every boot** (after keyring, restore apply and schema, before recovery of §12.11.1 and before
+readers): verify the journal (installation id, chain, MACs, n without gaps). Missing journal with
+`erasure_head.n > 0`, a journal whose entry n = `erasure_head.n` has a different mac (fork), a
+journal shorter than the committed head (rollback), or a broken chain at or before the committed
+head → **every recording is quarantined**, System health critical with the diagnosis (prefix /
+fork / rollback); terminals and new recordings (new RKs) keep working. Journal ahead of the DB head
+(crash after step 1) → re-apply steps 2–3 for the missing entries. Any tombstoned sid that still
+has an RK (a restore) → destroyed the same way. Each step is repeatable after a crash.
+
+**Freshness (H3).** A MAC chain proves authenticity and order, not freshness: an authentic but old
+head (delayed upload, destination rolled back to an older version) is still authentic. Rules:
+
+- Every source is compared on (installation id, n, mac of entry n, time). The **newest authentic
+  head wins**: the longest chain that every other authentic source is a prefix of. An authentic
+  source with a smaller n never overrides a larger one; two authentic sources that differ at the
+  same n are a fork → refused.
+- A destination whose newest object has n lower than the `attested_heads` recorded for it in **any**
+  source (volume DB, backup manifest, another destination's knowledge) is **rolled back**: it is
+  not proof, System health names it.
+- Proof of freshness for a restore exists only if: the live volume journal J_v of the same
+  installation is present, **or every** destination configured in the staged DB and on the current
+  host answered with an authentic, non-rolled-back head. One unreachable destination, with no J_v,
+  is no proof (strict choice: the erasure may have been attested only there).
+
+**Continuity at restore** (V3-H4): candidates are the backup's journal J_b (bound by the manifest's
+`erasure_journal`), the volume journal J_v (same installation, authentic) and the off-host objects
+J_d (fetched from every configured destination). All must authenticate under the staged keyring's
+K_erase and lie on **one** chain (each a prefix of the longest, J*); two authentic journals that
+diverge → stage refused (`backup.erasureConflict`). The reconciliation runs at stage **and again
+under the boot lock immediately before apply** (above), and before any quarantine is lifted.
+**With proof** (rule above), every tombstone in J* is applied before access and J* becomes the
+volume journal (never a shorter one), published durably together with the dataset state, repeatable
+after a crash. Erasures not yet attested when the volume was lost cannot be known: that window is
+the one the route and System health report while attestation is pending. **Without proof** (new
+host, no destination, a destination unreachable or rolled back): the restore may proceed, but every
+restored recording gets `status = quarantined`, System health says "erasures after <backup date>
+cannot be proven"; a later janitor pass that obtains proof applies the tombstones of J* and lifts
+the quarantine. With no independent freshness reference at all, the quarantine stays: that is the
+stated limit, not a defect.
+
+**Owner recovery mode** (route in a later PR): owner-level account, fresh factor
+(`stepup.require_fresh_factor`), typed confirmation naming the backup date, audited, security
+e-mail. Effect: recordings quarantined **for missing continuity proof only** move to `status =
+recovery`: readable by Owners only, no live share, no replay link, no search hit for anyone else,
+each read audited, UI banner "recovered without erasure proof"; the erasure guarantee is suspended
+for them. A known tombstone, a corrupt or damaged recording, an absent one and a keyring-epoch
+quarantine are **never** opened by recovery mode. Releasing to normal access is one recording at a
+time (no "release all"), each release a separate Owner action with a fresh factor, audited, with a
+security e-mail; re-quarantine is allowed. The permission is bound to the recovery route's own
+authorization (`access`, §12.11.2), not to a parameter.
+
+#### 12.11.5 Migration of plaintext recordings
+
+A background job (janitor), one session at a time **under its lease**: closed sessions first, then
+`arhiva/` files, then `lost` sessions. A live session is converted at its writer start, under the
+lease, before the hub opens its first generation (attach waits, bounded by 2 × 64 MiB of AES; at
+most 2 conversions at once during the boot reconcile); `list_epoch` is bumped for it.
+
+**Inventory (H5).** At the first boot of a protected volume, before any migration or writer, one
+listing of `transcripts/` and `arhiva/` through their fds (no links followed) fills `tx_migration`
+in one transaction: per (sid, kind) the directory, name, `dev`, `ino`, `size`, `mtime_ns`, state
+`pending`; a kind of a sid that has the other kind but not this one → `missing` (a legitimate
+one-kind recording, not an error); an `arhiva/` file whose session row is gone → `orphan` (migrated
+like the others with `origin = orphan`; readable only by owner-level accounts through the
+authenticated download route, listed in System health). Anything outside the §12.10 allowlist, a
+link, a non-regular file or `st_nlink ≠ 1` → `failed` with the reason, never migrated, listed. A
+plaintext file that appears later and is not in the inventory is never served and is reported.
+The inventory is the only source of "this sid may still be plaintext" (§12.11.2 `open`).
+
+**Exclusivity.** Each step below runs under the sid's lease, which the coordinator, archive,
+purge, erasure and reconcile also take, so no other modifier of that sid runs meanwhile.
+
+Per session (`.out` and `.cast` as a pair; each kind tracked separately in `tx_migration`):
+
+1. Open the plaintext through the `transcripts/` (or `arhiva/`) dir fd with `O_RDONLY|O_NOFOLLOW`;
+   `fstat` must match the inventory row (`dev`, `ino`, `size`, `mtime_ns`), regular, `st_nlink ==
+   1`; otherwise → `failed` (changed since inventory), listed. Free space ≥ 2 × size + 64 MiB, else
+   postponed (`disk`). The fd is kept until step 6.
+2. RK: create if absent (`origin = migrated`, or `orphan`).
+3. Per kind: reserve, create, encrypt from the pinned fd while hashing the plaintext (SHA-256),
+   seal, fsync, directory fsync. No truncation: the generation holds the whole file.
+4. `verify_full` read-back: decrypted SHA-256 and length equal the plaintext's, and the pinned fd's
+   `fstat` is still the row's (otherwise retry later). The SHA-256 goes into the row.
+5. Lease → barrier, one transaction: both descriptors (`sealed`, flag `converted`), ledger
+   `published`, `tx_migration` → `converted` with the SHA-256, `archived_at` = the file's mtime for
+   `arhiva/` files (the retention clock is kept), `list_epoch` bump for a live session. From this
+   commit, plaintext for this sid is a refused downgrade (§12.11.2), even if its descriptor were to
+   vanish later.
+6. Per kind, **identity-checked unlink**: `renameat2(dirfd, name, dirfd, ".wt-del-<random>",
+   RENAME_NOREPLACE)`, then `fstatat(dirfd, ".wt-del-<random>", AT_SYMLINK_NOFOLLOW)` must equal
+   the pinned fd's (`dev`, `ino`, `size`, `mtime_ns`) and the row's; then `unlinkat` of that private
+   name, directory fsync (the effective directory: `transcripts/` or `arhiva/`), row → `unlinked`
+   (committed per kind). A mismatch renames the file back (`RENAME_NOREPLACE`; if that fails it
+   stays under the private name, listed), keeps it, sets `failed` and raises an alarm. **Only the
+   verified inode is ever deleted; unverified plaintext is never deleted.**
+
+**Crash and partial unlink.** At boot, per row: `converted` with the file present → repeat step 4
+against the published generation, then step 6; `converted` with the file already absent (crash
+after `unlinkat`, before the row update) → `unlinked` after checking that no `.wt-del-*` name
+holds it (a leftover private name with the row's identity is unlinked; with another identity it is
+listed); `pending` with a published descriptor cannot occur (step 5 is one transaction) and is an
+integrity alarm. A layout outside this model (both a descriptor without `converted` and a
+`pending` row, two files for one row) is refused and listed, never guessed.
+
+Errors leave the plaintext in place, retry with backoff (1 h). System health shows "recordings:
+migrating n / N (bytes), converted c, one-kind m, failed k, orphans o, last error". Leftover
+`.cap-tmp` files are removed at boot as today, before the inventory. The global flag
+`tx_state.recordings_format = wtx1` is published only when **no row is `pending` or `failed`**
+(failed rows must be retried or deleted by an Owner, audited); then `arhiva/` is removed if empty,
+and from then on any plaintext under `transcripts/` is refused by readers and reported. The
+protection state of recordings is "protected" only then (and only with the MK outside the volume,
+§2).
+
+#### 12.11.6 Idle detection and other mtime users
+
+| Code | Today | Protected volume |
+|---|---|---|
+| `idlesess._transcript_mtime` | `.out` mtime | the newest of the hub's live `last_output_at` (in memory, includes output not yet committed) and `tx_descriptors.committed_at` of (sid, out); a `pending` legacy sid keeps its file mtime while the plaintext exists; **unknown → `None`** (fail closed: no auto-close) when the recorder is `degraded`, the key is invalid, the writer is not yet adopted after a restart, a checkpoint is behind (pending buffer not empty or a job in flight), the recording is quarantined, or there is no source at all. Absent is never read as idle. The agent-side guards stay. |
+| `api._last_output` | hub `last_output_at`, else `.out` mtime | hub, else `committed_at`; same "unknown" cases |
+| `purge_archive` | file mtime (reset by `archive_transcript`) | `archived_at` |
+| `archive_closed_transcripts` "already archived" | the files are gone | `archived_at IS NOT NULL` |
+| `replay.redacted_cast_file` cache | (path, mtime_ns, size) | §12.11.2 key |
+| `transcript_stats` | stat-walk | descriptors |
+
+`committed_at` moves only when the `.out` plain_len grows, so a roll, seal, cap or migration does
+not look like activity (a migration sets it to the plaintext's mtime, never to now); a restore
+keeps the restored values; a cap does not move it. Times are wall-clock: a clock step backwards
+makes an idle age negative → treated as "active" (no auto-close), a step forward can close a
+session early only by the size of the step, the same as 3.7. No code reads a generation file's
+mtime (source-scan test).
+
+#### 12.11.7 INV-14, phase 2 (recordings), and acceptance tests
+
+Text to add to INV-14 when the writers ship:
+
+*On a protected volume every recording is written only as WTX1 generations under its own session
+key, and nothing else under `transcripts/` holds its plaintext once it is migrated. A writer uses
+exactly one generation at a time, and a generation is never written twice: fresh random gen_id,
+reserved, created exclusively, never reopened. One coordinator per session serialises every
+checkpoint end to end, and the DB publishes both prefixes and the upstream agent offset in one
+isolated transaction that can only extend what is committed. A reader serves only the committed
+prefix of an authentic descriptor, reaching each returned byte through an authentic index or a
+verified parse; bytes past the watermark are never served; plaintext is refused for any session
+that is converted or not in the migration inventory (per session and kind, not only after the
+global flag). Authorization, descriptor and file handles are fixed together at one check, and a
+revocation stops every open stream at its next chunk and every cache before it serves. A backup
+reports only a coherent set: the committed prefixes named by the descriptors of its own DB
+snapshot, taken by the same function on every path, with a recording pair included or excluded
+as a unit. An erasure is journalled before its key is destroyed and re-applied at every boot
+before any reader; removing live access is immediate, the restore of an older copy re-applies it
+only with a fresh proof of the newest erasure head, and historical backups keep their copies
+until they expire. A restore without that proof serves the restored recordings to nobody but an
+Owner in recovery mode, and recovery mode never reopens a known erasure. Only a verified,
+identity-checked plaintext file is ever deleted.*
+
+Acceptance tests (each named in the PR; fault injection at every fsync and every transaction):
+
+1. Crash at every row of the recovery table → the stated recovery; boot twice is idempotent.
+2. Nonce: a broken writer, a crash and a restore never reuse (RK, kind, gen_id); `O_EXCL`
+   collision and UNIQUE collision retry with a new id.
+3. Commit atomicity: offset and both descriptors move together (DB failure injected between
+   statements); a restart after a crash replays from the committed offset with no duplicate.
+4. Readers: bytes past the watermark are never returned, even when they authenticate; a tampered
+   interior record outside the read window is caught by `verify`, not by the range read; an index
+   for another gen / data_count, a stale index, a length-scan-consistent but tampered prefix are
+   refused; budgets refuse with their codes.
+5. Each reader of the §12.11.2 table, concurrent with cap, merge, migration, archive, purge and
+   erasure: no mixed inodes, `list_epoch` fallback, resume at the exact logical offset, OSC 133
+   span, preview, search budgets, redacted replay across record boundaries.
+6. Downloads byte-identical to the 3.7 plaintext for the same input (including after cap, roll and
+   writer restarts); Range on plaintext offsets, 416, multi-range → 200, `If-Range`.
+7. Cap output byte-identical to 3.7's `_maybe_cap` for the same input.
+8. Backup: barrier call-site enumeration; descriptors from the VACUUM copy; pins survive request
+   cancellation and are released only when the worker ends; copied size == `phys_len`; a corrupt
+   recording is excluded and reported; disk full during the copy.
+9. Restore: unlisted member, size ≠ `phys_len`, a foreign descriptor, an absent generation, a
+   backup without recordings (`absent`), orphans after an apply.
+10. Erasure: crash between every step; open download cut at the next record; share and replay
+    links dead; journal missing / truncated / forked / foreign → quarantine or refusal; continuity
+    with J_v, with J_d, without proof → quarantine; Owner recovery mode access rules and audit.
+11. Migration: closed, archived, orphan, lost, live-at-writer-start; disk full; plaintext changed
+    while converting; crash after publish (re-verify before unlink); downgrade refused per sid
+    once converted and globally after `recordings_format = wtx1`.
+12. Markers: a known plaintext marker written into a session is absent, as plaintext, from every
+    in-scope artefact — every file under `DATA_DIR` except the DB (phase 1) and the inventoried
+    legacy files not yet migrated (listed exceptions), backups, temp spool and restore staging —
+    **and** round-trips: reading the recording through the app with the right key returns it, and
+    decrypting each artefact with the right key finds it where expected. Absence from compressed
+    bytes alone is not accepted as proof.
+13. No generation mtime read anywhere; idle detection from hub + `committed_at`; unknown, degraded,
+    invalid key, writer not adopted, checkpoint behind → no auto-close; clock stepped back and
+    forward.
+14. Coordinator: S2 captured after S1 but committing first is impossible; forced out-of-order
+    commit is refused by the CAS / monotonic check (no smaller prefix, no older agent offset);
+    cancellation of the caller before submit, during append, during fsync, after commit; teardown
+    and re-adoption with a job in flight; checkpoint concurrent with cap revalidation and with
+    migration of a live session; uncertain `COMMIT` outcome (committed / not committed / unknown)
+    resolved from the DB; a burst crossing the 90 % mark and the hard limit in one batch;
+    backpressure cap → gap at the recorded position.
+15. Readers × revocation: erasure, share revoke, replay-link revoke and role change between
+    authorization and fd open (snapshot refused and fds closed), during a stream (cut at the next
+    chunk, max delay measured), with a cached and a just-computed redacted response (never
+    served); Owner recovery cannot open a tombstoned, corrupt or absent recording; public replay
+    routes do not accept the authenticated download's authorization; budgets per route and in
+    aggregate (many small generations); Range 416 with `Content-Range`, corruption after headers
+    → abort.
+16. Backup: in-app, scheduled, cloud, safety copy, `hostops backup --live` (through the gateway,
+    refused when the socket is not reachable) and with the app stopped; include / exclude as a
+    pair (a corrupt `.cast` after a good `.out`: nothing of the pair emitted; a mismatch during
+    emission → container rebuilt with a new CK); corruption vs EIO / ENOSPC / DB / keyring /
+    journal faults (only corruption excludes); cancellation before submit, during copy, after
+    emission; legacy plaintext pinned against a concurrent migration unlink; manifest v1 with
+    plaintext transcripts, v2 with zero recordings, one kind only, `not-requested`.
+17. Erasure freshness: erase after stage and before apply (re-applied); uploads completing out of
+    order; a destination rolled back to an older object; two divergent authentic sources; one
+    destination offline out of several (no proof → quarantine); incomplete journal tail beyond and
+    at the committed head; journal at the cap; fsync of the journal uncertain.
+18. Migration: inventory with one kind only, orphan, failed; file replaced by another inode
+    between read and unlink (not deleted, renamed back); crash between the two unlinks of a pair,
+    and after `unlinkat` before the row update; plaintext reappearing for a converted sid whose
+    descriptor was removed (refused); global flag withheld while a row is `pending` or `failed`.
+19. Performance gate on every supported platform: slow fsync (injected latency) and a large
+    `VACUUM INTO` while sessions stream: loop latency, backlog, backpressure gaps, barrier hold
+    time.
+
+#### 12.11.8 Owner decisions (2026-11-24) and the original questions
+
+Decided by the owner on 2026-11-24, each the recommended default below: **Q1** erasure = only an
+explicit Owner action with a fresh factor (retention purge writes no tombstone); **Q2** an erasure is
+done locally at once and shown as "not yet attested off-host" with a System health warning until the
+upload succeeds; **Q3** a backup excludes a recording that fails its integrity check and raises an
+alarm naming it; **Q5** a live session whose recording writes fail keeps running, marked "recording
+degraded", with an alarm and an audit entry (availability over strict compliance, by choice); **Q4**
+the recommended default stands (Owners only, every read audited, released one recording at a time).
+
+| # | Question | Recommended default |
+|---|---|---|
+| Q1 | Which operations are erasures in 3.8.0? | Only an explicit "Erase recording" (per session and per host), Owner-level with a fresh factor; archive and retention purge stay non-journalled. |
+| Q2 | Is an erasure "done" before its head is attested off-host? | Yes, done locally, reported `attested: false` with a System health warning until uploaded; with no destination configured, the UI says it survives restores on this volume only. |
+| Q3 | A backup meets a corrupt recording. | Exclude that recording, list it in the manifest, alarm; do not fail the whole backup. |
+| Q4 | Owner recovery mode access. | Owners only, per-read audit, released per recording by an explicit Owner action. |
+| Q5 | Disk full / repeated write errors on a live session. | Keep the terminal running with the recording `degraded` (gap-marked, alarmed), as an unrecorded terminal is better than a dead one on a full disk; the stricter alternative is to lock the session's input until recording resumes. |
+
+#### 12.11.9 Review (2026-11-24) → resolution
+
+Independent design review of §12.11 (static, no code). Each finding and where it is now resolved.
+Owner decisions (§12.11.8) unchanged; M5 tightened their wording in §12.11.4, not their substance.
+
+| Finding | Resolution |
+|---|---|
+| H1 checkpoint not serialised end to end; S2 can commit before S1; autocommit helpers; uncertain commit; stale compactor; roll overrun | §12.11.1 "Per-session coordinator" (one queue per sid, lease held capture → fsync → commit, buffer swap, shielded jobs), "Isolated transaction" (own connection, CAS on version + writer token, monotonic prefix and agent offset, typed cap/merge), "A checkpoint that loses", "Uncertain outcome"; hot path step 2 (hard-limit reservation per record); Cap step 4 (revalidation); tests §12.11.7 #14 |
+| H2 per-pair exclusion impossible while streaming; host live backup not under the barrier | §12.11.3 "One snapshot function, every path" (control socket for `hostops backup --live`, boot lock offline, refusal otherwise), snapshot steps 1–4 (legacy fds pinned, ownership at submit, verify pass then emit pass, rebuild with new CK, corruption ≠ fault), manifest v2 states; test #16 |
+| H3 authentic but stale erasure head; stage/apply window | §12.11.4 journal format, attestation (immutable per-head objects, per-destination read-back), "Freshness" (newest authentic head wins, rollback detection, all destinations or J_v), "Continuity at restore" (reconcile again before apply and before lifting quarantine); §12.11.3 *Apply*; test #17 |
+| H4 no common linearisation point for revocation and open; caches and streams after revoke | §12.11.2 `open(…, access)`, "Revocation and the linearisation point", "Check points while serving" (max delay stated), "Caches"; Owner recovery limited to the continuity quarantine (§12.11.4); test #15 |
+| H5 unlink does not prove identity; partial unlink; global marker too coarse | §12.11.0 `tx_migration` and WTD1 `converted` flag; §12.11.5 inventory, identity-checked unlink (`renameat2` + `fstatat` + `unlinkat` on the dir fd), crash rules, global flag only with no `pending`/`failed`; §12.11.2 per-sid downgrade refusal; test #18 |
+| M1 ledger may unlink a pre-existing file; ambiguous pending; no epoch in WTD1 | §12.11.0 `tx_files` states + inode, ledger compaction, keyring epoch binding; §12.11.1 reservation (`collision`), recovery table rows |
+| M2 manifest v2 and WTJ1 under-specified | §12.11.3 manifest (states, journal member, allowlist, binding, v1 legacy); §12.11.4 journal (endianness, kinds, MAC domain, cap, committed head, incomplete tail) |
+| M3 reader routes, budgets, Range, ETag, rolling verify, one-kind pairs | §12.11.2 reader table (attach/resync, link creation and lookup, public replay text/cast), budgets table (aggregate, fds, cancel, verify cursor), Range/416/headers, ETag with watermark, "one kind only" |
+| M4 sync I/O on the loop, VACUUM backlog, incomplete mutation list, degraded gap rules | §12.11.1 hot path (append off the loop), "Backpressure", degraded rules; §12.11.3 exhaustive mutation list, VACUUM budget; §12.11.4 journal fsync exception; test #19 |
+| M5 retention vs restore, "release all", key-destruction wording, per-host erasure | §12.11.4 retention table, "What key destroyed means", per-host erasure, Owner recovery (per recording, fresh factor) |
+| M6 last committed output is not proof of idleness | §12.11.6 table and clock rules; test #13 |
+| L1 normative clarifications | §12.11 intro (pointers stay "in review"), §12.11.0 (256 vs 4096), §12.11.1 `recovered` and zero-DATA generation |
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
