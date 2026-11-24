@@ -2399,15 +2399,19 @@ class Recorder:
 
     # ── jobs ──
 
-    def _submit(self, op, *args):
+    def _submit_raw(self, op, *args):
+        """The job's own future (never handed to a caller directly: see `_submit`)."""
         if self.state != "running":
             raise RecorderLost("lost", f"recorder {self.state}")
         fut = asyncio.get_running_loop().create_future()
         # Rezultatul e citit şi când apelantul a renunţat (wait_for, shutdown): fără avertismente.
         fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         self._queue.put_nowait((op, args, fut))
-        # Anularea apelantului nu anulează un job început.
-        return asyncio.shield(fut)
+        return fut
+
+    def _submit(self, op, *args):
+        # Anularea apelantului nu anulează un job început: fiecare apelant primeşte PROPRIUL scut.
+        return asyncio.shield(self._submit_raw(op, *args))
 
     def checkpoint(self):
         return self._submit("checkpoint")
@@ -2434,7 +2438,9 @@ class Recorder:
             # R2-M2: o comutare spre ACELAŞI epoch deja în curs → viitorul ei (nu un no-op cu poziţia
             # veche: tăietura nu e încă comisă); spre alt epoch → busy (adaptorul serializează).
             if new_epoch == self._switch["new"]:
-                return self._switch["fut"]
+                # Recheck b0ce65f: un scut NOU pentru fiecare apelant în jurul aceluiaşi job — anularea
+                # unui apelant nu poate anula viitorul celuilalt.
+                return asyncio.shield(self._switch["fut"])
             raise TxStoreError("busy", "epoch change in progress")
         if self._skip is not None:
             raise TxStoreError("busy", "skip in progress")
@@ -2442,11 +2448,12 @@ class Recorder:
             # RC-H1: o reataşare în acelaşi epoch NU e o tăietură; offsetul 0 ar re-înregistra octeţi
             # deja comişi ca fiind contigui. Hub-ul continuă de la `received` (taie suprapunerea).
             return self._done(self.agent_committed)
-        fut = self._submit("epoch", new_epoch)
+        inner = self._submit_raw("epoch", new_epoch)
+        fut = asyncio.shield(inner)
         # Segmentul vechi (cu markerele lui şi pierderea vechiului epoch) se mută în tăietură: din
         # acest moment niciun overflow al noului epoch nu-l mai atinge (R-H1).
         self._switch = {"old": self._held_end(), "bufs": self.pending, "gaps": self.gap_pending,
-                        "new": new_epoch, "loss": self._loss, "owed": None, "fut": fut}
+                        "new": new_epoch, "loss": self._loss, "owed": None, "fut": inner}
         self.pending = {k: bytearray() for k in KIND_NAMES}
         self.gap_pending = []
         self._loss = self._new_loss(new_epoch)

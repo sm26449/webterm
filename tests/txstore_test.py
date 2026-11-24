@@ -2681,9 +2681,25 @@ async def g_recheck3():
     r2 = await f2
     check("R2-M2: change_epoch to the target of a pending switch returns THAT future (resolves at the "
           "committed switch, not a no-op with the old position); another target → busy",
-          f2 is f1 and r1 == r2 == ("e2", 0) and other and back and await _ag(sid) == ("e2", 0), (r1, r2))
+          f2 is not f1 and r1 == r2 == ("e2", 0) and other and back and await _ag(sid) == ("e2", 0), (r1, r2))
     same = await rec.change_epoch("e2")
     check("R2-M2: once committed, the same epoch is a no-op", same == ("e2", 0))
+    await rec.close()
+    st.close()
+
+    # Recheck b0ce65f: anularea unui apelant nu anulează viitorul celuilalt (scut propriu pe apelant).
+    st, sid, rec = await _fresh()
+    g1 = rec.change_epoch("e2")
+    g2 = rec.change_epoch("e2")
+    g1.cancel()
+    try:
+        r2 = await g2
+        other_ok = True
+    except asyncio.CancelledError:
+        r2, other_ok = None, False
+    check("recheck b0ce65f: cancelling one caller's epoch future leaves the other caller's future intact "
+          "and the switch committed", g1.cancelled() and other_ok and r2 == ("e2", 0)
+          and await _ag(sid) == ("e2", 0), (other_ok, r2))
     await rec.close()
     st.close()
 
