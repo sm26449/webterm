@@ -179,7 +179,19 @@ def detections():
              lambda s: s.replace("email TEXT UNIQUE NOT NULL", "email TEXT UNIQUE NOT NULL CHECK (length(email) > 3)", 1)),
             ("un CHECK la nivel de tabelă", "app_settings",
              lambda s: s.rstrip().rstrip(")") + ", CHECK (key <> 'x'))"),
-            ("STRICT", "app_settings", lambda s: s.rstrip() + " STRICT")):
+            ("STRICT", "app_settings", lambda s: s.rstrip() + " STRICT"),
+            # RC2-M1: aceeaşi constrângere, altă politică de conflict (REPLACE înlocuieşte rândul)
+            ("UNIQUE → UNIQUE ON CONFLICT REPLACE", "users",
+             lambda s: s.replace("email TEXT UNIQUE NOT NULL", "email TEXT UNIQUE ON CONFLICT REPLACE NOT NULL", 1)),
+            ("NOT NULL → NOT NULL ON CONFLICT IGNORE", "users",
+             lambda s: s.replace("email TEXT UNIQUE NOT NULL", "email TEXT UNIQUE NOT NULL ON CONFLICT IGNORE", 1)),
+            ("PRIMARY KEY pe coloană cu ON CONFLICT REPLACE", "app_settings",
+             lambda s: s.replace("key TEXT PRIMARY KEY", "key TEXT PRIMARY KEY ON CONFLICT REPLACE", 1)),
+            ("PRIMARY KEY la nivel de tabelă cu ON CONFLICT IGNORE", "seen_logins",
+             lambda s: s.replace("PRIMARY KEY (user_id, ip_hash)", "PRIMARY KEY (user_id, ip_hash) ON CONFLICT IGNORE", 1))):
+        # rebuild() citeşte DDL-ul din fişierul curent: pornim de la baza bună, nu de la încercarea precedentă
+        fresh_dir()
+        config.DB_PATH.write_bytes(good)
         got = attempt(rebuild(table, fn))
         check(f"RC-M2: {label} → refuz, nicio conexiune deschisă", got == (False, False), got)
     # DEFAULT: unul diferit (literal) → refuz; acelaşi DEFAULT scris altfel (spaţii, majuscule) → acceptat
@@ -207,6 +219,26 @@ def detections():
     check("RC-M2: _norm_sql păstrează literalul şi scoate IF NOT EXISTS",
           db._norm_sql("create  index if not exists i ON t(x) WHERE y = 'Ab  c'")
           == "CREATE INDEX I ON T ( X ) WHERE Y = 'Ab  c'", db._norm_sql("create index if not exists i ON t(x) WHERE y = 'Ab  c'"))
+    # RC2-M1: politica de conflict, în memorie (contraexemplul din recheck: UNIQUE vs UNIQUE ON CONFLICT REPLACE)
+    con = sqlite3.connect(":memory:")
+    for n, ddl in (("u0", "x TEXT UNIQUE, y INT"), ("u1", "x TEXT UNIQUE ON CONFLICT REPLACE, y INT"),
+                   ("u2", "x TEXT UNIQUE ON CONFLICT ABORT, y INT"), ("u3", "x TEXT unique  on conflict replace, y INT"),
+                   ("t0", "x TEXT, y INT, UNIQUE (x, y)"), ("t1", "x TEXT, y INT, CONSTRAINT k UNIQUE (\"X\", y) ON CONFLICT IGNORE"),
+                   ("t2", "x TEXT, y INT, UNIQUE (y, x)"), ("t3", "x TEXT, y INT, CONSTRAINT other UNIQUE (x, y)"),
+                   ("p0", "x INTEGER PRIMARY KEY, y INT NOT NULL"),
+                   ("p1", "x INTEGER PRIMARY KEY ON CONFLICT REPLACE, y INT NOT NULL"),
+                   ("p2", "x INTEGER PRIMARY KEY, y INT NOT NULL ON CONFLICT FAIL")):
+        con.execute("CREATE TABLE %s(%s)" % (n, ddl))
+    f = db._schema_of(con)
+    con.close()
+    check("RC2-M1: UNIQUE ≠ UNIQUE ON CONFLICT REPLACE", f["u0"] != f["u1"])
+    check("RC2-M1: UNIQUE = UNIQUE ON CONFLICT ABORT (ABORT e implicitul)", f["u0"] == f["u2"], (f["u0"], f["u2"]))
+    check("RC2-M1: majusculele / spaţiile clauzei nu contează", f["u1"] == f["u3"], (f["u1"], f["u3"]))
+    check("RC2-M1: UNIQUE(x, y) de tabelă ≠ CONSTRAINT k UNIQUE(x, y) ON CONFLICT IGNORE", f["t0"] != f["t1"])
+    check("RC2-M1: numele constrângerii de tabelă nu contează", f["t0"] == f["t3"], (f["t0"], f["t3"]))
+    check("RC2-M1: ordinea coloanelor din UNIQUE de tabelă contează", f["t0"] != f["t2"])
+    check("RC2-M1: INTEGER PRIMARY KEY ON CONFLICT REPLACE (fără index) ≠ PRIMARY KEY", f["p0"] != f["p1"])
+    check("RC2-M1: NOT NULL ON CONFLICT FAIL ≠ NOT NULL", f["p0"] != f["p2"])
     # o diferenţă de ordine DESC / colaţie pe un index explicit
     got = attempt("DROP INDEX idx_sessions_share; CREATE INDEX idx_sessions_share ON sessions(share_token DESC) "
                   "WHERE share_token IS NOT NULL;")

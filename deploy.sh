@@ -360,6 +360,13 @@ fi
 # iar re-verificarea cere ca imaginea din ACELAŞI plan (services.app.image) să aibă acelaşi ID
 # (un pull care re-indică tag-ul între verificare şi `up` = refuz). Un bind se listează pe gazdă,
 # deci doar cu un daemon local (socket unix); un context Docker remote ar lista alt filesystem.
+# RC2-H1 (al treilea recheck): `up` nu mai re-rezolvă nimic — porneşte EXACT ID-ul verificat
+# (up_checked: WEBTERM_IMAGE=<sha256:ID> doar pentru apel, `--pull never --no-build`); un serviciu
+# app cu `build:` sau cu pull_policy în afară de missing/never = refuz, pentru orice imagine. `.env`
+# păstrează referinţa umană (tag/digest), deci .prev-image şi rollback-ul rămân pe referinţe.
+# RC2-H2: gateway-ul îşi ia datele din WEBTERM_DATA_DIR (config.py), nu neapărat din /data. Pentru
+# o imagine < 3.8 valoarea EFECTIVĂ (environment-ul serviciului din plan, cu .env/env_file deja
+# rezolvate de compose, altfel ENV-ul imaginii verificate) trebuie să fie exact /data; altfel refuz.
 image_era() {   # image_era IMAGE → 38 | pre38 | unknown
   local v
   v=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null) \
@@ -378,9 +385,10 @@ image_era() {   # image_era IMAGE → 38 | pre38 | unknown
   if [ "${WEBTERM_IMAGE_ERA:-}" = 3.8 ]; then echo 38; else echo unknown; fi
 }
 # Programul care citeşte planul compose (stdin: `docker compose config --format json`); rulează în
-# imaginea ţintă, fără reţea. Ieşire: „image<TAB>services.app.image" pe prima linie, apoi
+# imaginea ţintă, fără reţea. Ieşire: „image<TAB>services.app.image" pe prima linie,
+# „run<TAB>ok" sau „run<TAB>motiv" (build / pull_policy) pe a doua, apoi
 # „volume<TAB>nume", „bind<TAB>cale" sau „unknown<TAB>motiv".
-COMPOSE_PLAN_PY='# wt-compose-plan (R-H1, RC-H1)
+COMPOSE_PLAN_PY='# wt-compose-plan (R-H1, RC-H1, RC2-H1, RC2-H2)
 import json, sys
 def out(*f):
     print("\t".join(f))
@@ -393,9 +401,25 @@ try:
     assert isinstance(app, dict)
 except (ValueError, KeyError, TypeError, AssertionError):
     print("image\t")
+    print("run\tno service app in the compose config")
     out("unknown", "no service app in the compose config")
 img = app.get("image")
 print("image\t" + ("" if bad(img) else img))
+pp = app.get("pull_policy")
+if "build" in app:
+    print("run\tservice app has a build section (the checked image could be rebuilt)")
+elif pp not in (None, "missing", "never"):
+    print("run\tservice app has pull_policy %s (only missing or never keep the checked image)" % str(pp)[:40])
+else:
+    print("run\tok")
+env = app.get("environment")
+if env is not None and not isinstance(env, dict):
+    out("unknown", "the environment of service app cannot be read")
+if "env_file" in app:
+    out("unknown", "service app has an env_file compose did not resolve")
+dd = (env or {}).get("WEBTERM_DATA_DIR")
+if dd is not None and dd != "/data":
+    out("unknown", "custom WEBTERM_DATA_DIR is not supported by the downgrade guard (service app sets it)")
 if app.get("volumes_from"):
     out("unknown", "service app uses volumes_from")
 def tgt(t):
@@ -451,17 +475,20 @@ if typ == "bind" and not bad(src) and src.startswith("/"):
     out("bind", src)
 out("unknown", "the /data mount is of type %s" % typ)
 '
-DATA_PLAN="" PLAN_ERR="" DATA_IMG="" GUARD_PLAN="" GUARD_ID="" GUARD_ERA=""
+DATA_PLAN="" PLAN_ERR="" DATA_IMG="" DATA_RUN="" GUARD_PLAN="" GUARD_ID="" GUARD_ERA=""
 data_plan() {   # data_plan COMPOSE_FILE IMAGE → 0 + DATA_PLAN ("volume<TAB>name" | "bind<TAB>/path"); 1 + PLAN_ERR
-  # DATA_IMG = services.app.image din ACELAŞI plan („" dacă nu se poate citi)
+  # DATA_IMG = services.app.image din ACELAŞI plan („" dacă nu se poate citi); DATA_RUN = „ok" sau
+  # motivul pentru care `up` ar putea re-construi / re-trage imaginea app („" dacă nu se poate citi)
   local cfg out verdict
-  DATA_PLAN="" PLAN_ERR="" DATA_IMG=""
+  DATA_PLAN="" PLAN_ERR="" DATA_IMG="" DATA_RUN=""
   cfg=$(docker compose -f "$1" config --format json 2>/dev/null) \
     || { PLAN_ERR="docker compose config --format json failed"; return 1; }
   out=$(printf '%s' "$cfg" | docker run --rm -i --network none --entrypoint python3 "$2" -I -c "$COMPOSE_PLAN_PY" 2>/dev/null) \
     || { PLAN_ERR="the compose config could not be read"; return 1; }
   case "$out" in
-    image$'\t'*$'\n'*) DATA_IMG=${out%%$'\n'*}; DATA_IMG=${DATA_IMG#image$'\t'}; verdict=${out#*$'\n'} ;;
+    image$'\t'*$'\n'run$'\t'*$'\n'*)
+      DATA_IMG=${out%%$'\n'*}; DATA_IMG=${DATA_IMG#image$'\t'}; out=${out#*$'\n'}
+      DATA_RUN=${out%%$'\n'*}; DATA_RUN=${DATA_RUN#run$'\t'}; verdict=${out#*$'\n'} ;;
     *) PLAN_ERR="the compose config could not be read"; return 1 ;;
   esac
   case "$verdict" in
@@ -493,7 +520,7 @@ volume_38_markers() {   # volume_38_markers TYPE SOURCE IMAGE → names on stdou
   printf '%s\n' "$ls" | grep -E '^(keys\.wtk.*|migrating\.wtm.*|master\.key.*|erasures\.wtj|\.restore|restore-pending\..+|.*\.wt[a-z0-9]*)$' || true
 }
 guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, GUARD_ID, GUARD_ERA); 1 refused
-  local era marks rc=0 typ src cids cid m id
+  local era marks rc=0 typ src cids cid m id ienv dd
   GUARD_PLAN="" GUARD_ID="" GUARD_ERA=""
   # RC-H1: eticheta, cititorul planului şi listarea volumului rulează pe ID-ul imaginii, nu pe un
   # tag pe care un pull îl poate re-indica între paşi; o imagine absentă nu e trasă pe tăcute aici
@@ -506,12 +533,22 @@ guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, 
   era=$(image_era "$id")
   GUARD_ERA=$era
   if [ "$era" = 38 ]; then GUARD_ID=$id; return 0; fi
+  # RC2-H2: ce cale de date vede gateway-ul imaginii verificate când compose nu o schimbă (ENV-ul
+  # imaginii); orice altceva decât exact /data (lipsă, goală, alt director) = refuz
+  ienv=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id" 2>/dev/null) || ienv="?"
+  dd=$(printf '%s\n' "$ienv" | sed -n 's/^WEBTERM_DATA_DIR=//p' | tail -n1)
+  if [ "$ienv" = "?" ] || [ "$dd" != /data ]; then
+    echo "✗ Refusing to start $1 (${era}): custom WEBTERM_DATA_DIR is not supported by the downgrade guard" >&2
+    echo "  (the image sets '${dd:-nothing}', only /data is checked). Nothing was changed." >&2
+    return 1
+  fi
   if ! data_plan "$2" "$id"; then
     echo "✗ Refusing to start $1: it is not a 3.8 image (${era}) and the /data mount compose would start" >&2
     echo "  cannot be determined or is not supported ($PLAN_ERR), so it cannot be checked for the 3.8" >&2
     echo "  encryption-at-rest migration." >&2
     echo "  Nothing was changed. Only a whole named volume or a plain bind mount at /data is" >&2
-    echo "  checked (no volume.subpath, no driver_opts device, default mount options). An image built" >&2
+    echo "  checked (no volume.subpath, no driver_opts device, default mount options, WEBTERM_DATA_DIR" >&2
+    echo "  unset or /data). An image built" >&2
     echo "  locally without a version label can be declared 3.8 explicitly for one run:" >&2
     echo "  WEBTERM_IMAGE_ERA=3.8 $0 …" >&2
     return 1
@@ -559,6 +596,18 @@ guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start (GUARD_PLAN, 
   echo "  (docs/INSTALL.md → Encryption at rest, \"Going back to 3.7\")." >&2
   return 1
 }
+up_checked() {   # up_checked IMAGE_ID LABEL COMPOSE_FILE [up args / services…] → `up` pe EXACT ID-ul verificat
+  # RC2-H1: WEBTERM_IMAGE=<ID> doar pentru acest apel (compose acceptă un ID ca `image:`), fără pull şi
+  # fără build: un tag mutabil re-indicat între verificare şi `up` nu mai schimbă ce porneşte.
+  # LABEL ţine WEBTERM_IMAGE_REF (ce afişează aplicaţia) pe referinţa umană, nu pe ID.
+  local id="$1" label="$2" f="$3"
+  shift 3
+  if ! [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "✗ Refusing to start: the checked image '${id:-?}' is not a sha256 image ID. Nothing was started." >&2
+    return 1
+  fi
+  WEBTERM_IMAGE="$id" WEBTERM_IMAGE_TAG="$label" docker compose -f "$f" up -d --pull never --no-build "$@"
+}
 guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the same plan and image still hold; 1 refused
   # R-H1: chiar înainte de `up`: aceeaşi verificare, iar planul trebuie să fie EXACT cel verificat
   local want="$3" want_id="$4" run_id=""
@@ -582,6 +631,13 @@ guard_recheck() {   # guard_recheck IMAGE COMPOSE_FILE PLAN IMAGE_ID → 0 the s
     echo "  checked ($1). Point WEBTERM_IMAGE / the compose file at the same image. Nothing was started." >&2
     return 1
   fi
+  # RC2-H1: `up` porneşte ID-ul verificat cu `--pull never --no-build`; un serviciu app care cere
+  # build sau alt pull_policy contrazice asta, deci refuz (şi pentru o imagine 3.8)
+  if [ "$DATA_RUN" != ok ]; then
+    echo "✗ Refusing to start $1: ${DATA_RUN:-the compose config could not be read}. Remove it from the" >&2
+    echo "  app service; only the checked image is started (no pull, no build). Nothing was started." >&2
+    return 1
+  fi
   return 0
 }
 # imaginea pe care compose o va porni: WEBTERM_IMAGE, altfel default-ul din compose
@@ -598,7 +654,9 @@ else
   echo "✗ cannot tell which image would start (WEBTERM_IMAGE is empty and compose lists none) — refusing." >&2
   exit 1
 fi
-$COMPOSE -f "$FILE" up -d --remove-orphans
+# RC2-H1: porneşte exact ID-ul verificat (fără pull/build); .env rămâne pe referinţa umană
+CHECKED_ID="$GUARD_ID" CHECKED_LABEL="${WEBTERM_IMAGE_TAG:-$TARGET_IMG}"
+up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$FILE" --remove-orphans || exit 1
 
 # --- health guard and automatic rollback ---
 # Prinde imaginile care nu pornesc (crash loop, config stricat). Un frontend
@@ -654,7 +712,8 @@ if { [ -n "$WITH_AUTHENTIK" ] || printf '%s' "${COMPOSE_PROFILES:-}" | grep -qw 
       done < <(printf '%s\n' "$OUT" | grep -E '^WEBTERM_OIDC_(ISSUER|CLIENT_ID|CLIENT_SECRET|PROVIDER_NAME)=')
       echo "→ SSO linked; reloading the app to pick up the OIDC settings…"
       load_env ./.env
-      $COMPOSE -f "$FILE" up -d app
+      # RC2-H1: tot imaginea verificată, nu tag-ul din .env re-rezolvat
+      up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$FILE" app
       echo "  Add users to the 'wt-access' group in Authentik to grant them access to this instance."
     else
       echo "✗ provisioning failed; WebTerm is up, SSO is off. Details:" >&2

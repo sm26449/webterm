@@ -865,16 +865,57 @@ def _unquote(kind, t) -> str:
     return t
 
 
+# RC2-M1: rezoluţiile unei clauze ON CONFLICT; lipsa ei = ABORT (comportamentul implicit al SQLite),
+# deci `UNIQUE` şi `UNIQUE ON CONFLICT ABORT` au aceeaşi amprentă, iar `… ON CONFLICT REPLACE` alta
+_CONFLICT = ("ROLLBACK", "ABORT", "FAIL", "IGNORE", "REPLACE")
+
+
+def _conflicts(seq) -> tuple:
+    """RC2-M1: the conflict clause of each NOT NULL / UNIQUE / PRIMARY KEY constraint in a column
+    definition or table constraint (tokens outside parenthesised groups) → sorted ((kind, resolution))."""
+    out, kind, depth, i = [], None, 0, 0
+    while i < len(seq):
+        k, t = seq[i]
+        if (k, t) == ("op", "("):
+            depth += 1
+        elif (k, t) == ("op", ")"):
+            depth -= 1
+        elif depth == 0 and k == "word":
+            nxt = seq[i + 1] if i + 1 < len(seq) else None
+            if t == "PRIMARY" and nxt == ("word", "KEY"):
+                kind = "PRIMARY KEY"
+                out.append([kind, "ABORT"])
+            elif t == "NOT" and nxt == ("word", "NULL"):
+                kind = "NOT NULL"
+                out.append([kind, "ABORT"])
+            elif t == "UNIQUE":
+                kind = "UNIQUE"
+                out.append([kind, "ABORT"])
+            elif t == "ON" and nxt == ("word", "CONFLICT") and i + 2 < len(seq):
+                res = seq[i + 2][1]
+                # o clauză fără constrângere înaintea ei sau cu o rezoluţie necunoscută rămâne vizibilă
+                if kind and out and res in _CONFLICT:
+                    out[-1][1] = res
+                else:
+                    out.append(["?", " ".join(t for _k, t in seq[i:i + 3])])
+                i += 3
+                continue
+        i += 1
+    return tuple(sorted(tuple(x) for x in out))
+
+
 def _table_ddl(sql):
     """RC-M2: what PRAGMA table_info does not say, read from the CREATE TABLE text (ALTER TABLE ADD
     COLUMN appends its column definition there, so migrated columns are included): per column
-    (case-folded name) its COLLATE and CHECK clauses; the table-level CHECK constraints; the
-    options after the column list (WITHOUT ROWID, STRICT). → (cols, checks, options)."""
+    (case-folded name) its COLLATE and CHECK clauses and (RC2-M1) the conflict clause of each of
+    its NOT NULL / UNIQUE / PRIMARY KEY constraints; the table-level CHECK constraints and
+    PRIMARY KEY / UNIQUE constraints (kind, case-folded columns, conflict resolution); the options
+    after the column list (WITHOUT ROWID, STRICT). → (cols, checks, keys, options)."""
     toks = _sql_tokens(sql)
     try:
         start = next(i for i, (k, t) in enumerate(toks) if k == "op" and t == "(")
     except StopIteration:
-        return {}, (), ""
+        return {}, (), (), ""
     parts, cur, depth, end = [], [], 0, len(toks)
     for j in range(start + 1, len(toks)):
         k, t = toks[j]
@@ -905,7 +946,7 @@ def _table_ddl(sql):
             j += 1
         return " ".join(t for _k, t in seq[i:j + 1]), j + 1
 
-    cols, checks = {}, []
+    cols, checks, keys = {}, [], []
     for part in parts:
         if not part:
             continue
@@ -913,6 +954,32 @@ def _table_ddl(sql):
         if head in ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"):
             if any(t == ("word", "CHECK") for t in part):
                 checks.append(" ".join(t for _k, t in part))
+            # RC2-M1: PRIMARY KEY / UNIQUE la nivel de tabelă: coloanele (primul nume din fiecare
+            # element al listei) + rezoluţia conflictului; numele constrângerii nu contează
+            body = part[2:] if head == "CONSTRAINT" else part
+            if body[:1] in ([("word", "PRIMARY")], [("word", "UNIQUE")]):
+                try:
+                    a = body.index(("op", "("))
+                except ValueError:
+                    a = -1
+                names = []
+                if a >= 0:
+                    _txt, b = group(body, a)
+                    item, d = [], 0
+                    for tk in body[a + 1:b - 1] + [("op", ",")]:
+                        if tk == ("op", "(") or tk == ("op", ")"):
+                            d += 1 if tk[1] == "(" else -1
+                        if tk == ("op", ",") and d == 0:
+                            names.append(_unquote(*item[0]).casefold() if item else "")
+                            item = []
+                            continue
+                        item.append(tk)
+                    rest = body[b:]
+                else:
+                    rest = body
+                kind = "PRIMARY KEY" if body[0][1] == "PRIMARY" else "UNIQUE"
+                conf = _conflicts(body[:1] + ([("word", "KEY")] if kind == "PRIMARY KEY" else []) + rest)
+                keys.append((kind, tuple(names), conf))
             continue
         name = _unquote(*part[0]).casefold()
         collate, cchecks, i = "", [], 1
@@ -930,15 +997,17 @@ def _table_ddl(sql):
                 _txt, i = group(part, i)        # tipul (VARCHAR(10)), DEFAULT (…), AS (…)
                 continue
             i += 1
-        cols[name] = (collate, tuple(sorted(cchecks)))
-    return cols, tuple(sorted(checks)), " ".join(t for _k, t in toks[end + 1:])
+        cols[name] = (collate, tuple(sorted(cchecks)), _conflicts(part[1:]))
+    return cols, tuple(sorted(checks)), tuple(sorted(keys)), " ".join(t for _k, t in toks[end + 1:])
 
 
 def _schema_of(con) -> dict:
     """R-M3 / RC-M2: what the admin DB-only commands rely on, per table — columns (order-free: a
     migrated database has the added columns last) with declared type, NOT NULL, primary-key
-    position, DEFAULT (as written, normalised by tokens), COLLATE and CHECK clauses; table-level
-    CHECK constraints and table options (WITHOUT ROWID, STRICT); every index from index_xinfo
+    position, DEFAULT (as written, normalised by tokens), COLLATE and CHECK clauses, the ON CONFLICT
+    resolution of each NOT NULL / UNIQUE / PRIMARY KEY (RC2-M1: absent = ABORT); table-level
+    CHECK constraints, PRIMARY KEY / UNIQUE constraints with their conflict resolution, and table
+    options (WITHOUT ROWID, STRICT); every index from index_xinfo
     (key AND auxiliary columns, sort order, collation; explicit ones also: name, uniqueness,
     partial flag and normalised DDL; implicit UNIQUE / PRIMARY KEY ones: origin, uniqueness);
     every foreign key (target table, columns, ON UPDATE / ON DELETE, MATCH); every trigger and
@@ -954,12 +1023,12 @@ def _schema_of(con) -> dict:
     tbl_sql = {r[1]: r[2] for r in master if r[0] == "table"}
     for t in tables:
         qt = _q(t)
-        ddl_cols, tchecks, topts = _table_ddl(tbl_sql.get(t))
+        ddl_cols, tchecks, tkeys, topts = _table_ddl(tbl_sql.get(t))
         cols = []
         for r in con.execute("PRAGMA table_info(%s)" % qt).fetchall():
-            collate, cchecks = ddl_cols.get(str(r[1]).casefold(), ("", ()))
+            collate, cchecks, conf = ddl_cols.get(str(r[1]).casefold(), ("", (), ()))
             cols.append((r[1], " ".join(str(r[2] or "").upper().split()), int(r[3]), int(r[5]),
-                         "" if r[4] is None else _norm_sql(r[4]), collate, cchecks))
+                         "" if r[4] is None else _norm_sql(r[4]), collate, cchecks, conf))
         idx = []
         for r in con.execute("PRAGMA index_list(%s)" % qt).fetchall():
             name, unique, origin, partial = r[1], int(r[2]), r[3], int(r[4])
@@ -972,7 +1041,7 @@ def _schema_of(con) -> dict:
                 idx.append((origin, "", unique, partial, xcols, ""))
         fks = tuple(sorted((r[2], r[1], r[3], r[4], r[5], r[6], r[7])
                            for r in con.execute("PRAGMA foreign_key_list(%s)" % qt).fetchall()))
-        out[t] = (tuple(sorted(cols)), tuple(sorted(idx)), fks, tchecks, topts)
+        out[t] = (tuple(sorted(cols)), tuple(sorted(idx)), fks, tchecks, tkeys, topts)
     out[" triggers"] = tuple(sorted((r[1], _norm_sql(r[2])) for r in master if r[0] == "trigger"))
     out[" views"] = tuple(sorted((r[1], _norm_sql(r[2])) for r in master if r[0] == "view"))
     return out

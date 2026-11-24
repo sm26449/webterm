@@ -988,7 +988,19 @@ tested in isolation; these are not implemented and each needs its own change and
    {{.Id}}`); the re-check right before `up` requires the same ID and that `services.app.image`
    from the same JSON plan resolves to it (upgrade.sh reads the plan with `WEBTERM_IMAGE` set to
    the target, as deploy.sh will); deploy.sh runs the re-check too. An image missing locally is
-   refused, not pulled by the check. The lock is per install directory: one kit per volume. An image without a version label is `unknown` (refused on a migrated volume)
+   refused, not pulled by the check. Third recheck RC2-H1: the start uses exactly the checked ID
+   (`up_checked`: `WEBTERM_IMAGE=<sha256 ID>` for that call only, `up -d --pull never --no-build`;
+   `.env` and `.prev-image` keep the human reference, the container's `WEBTERM_IMAGE_REF` the
+   label); an `app` service with `build:` or `pull_policy` other than `missing`/`never` is refused
+   for every image; rollback.sh confirms the container's image ID; upgrade.sh refuses an unpinned
+   (tag) pre-3.8 target, since that target's own deploy.sh starts the reference as given. RC2-H2:
+   for a pre-3.8 target the effective `WEBTERM_DATA_DIR` must be `/data` — the service
+   `environment` from the JSON plan (`.env` and `env_file` already resolved by compose; an
+   unresolved `env_file` or an unreadable environment is refused) and the checked image's
+   `Config.Env` (missing, empty or another path = refused). Third recheck RC2-M1: the fingerprint
+   also records the `ON CONFLICT` resolution of every NOT NULL / UNIQUE / PRIMARY KEY (column and
+   table constraints; an absent clause counts as ABORT, the SQLite default), and table-level
+   PRIMARY KEY / UNIQUE constraints with their columns. The lock is per install directory: one kit per volume. An image without a version label is `unknown` (refused on a migrated volume)
    unless the operator sets `WEBTERM_IMAGE_ERA=3.8` for that run; no file-existence heuristic.
    Recheck R-M1: `python3 -m app.hostops stage-restore` exits 0 only when the flag is published and
    its directory fsynced (`backup.StageProgress.committed`), 3 when it refused before the first

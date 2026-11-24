@@ -66,6 +66,7 @@ case "$1" in
     case "$*" in
       *RepoDigests*)  [ -n "${NO_DIGEST:-}" ] || echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST"; exit 0 ;;
       *Config.Image*) echo "ghcr.io/x/webterm@sha256:$WANT_DIGEST" ;;
+      *Config.Env*)   printf '%b\n' "${IMG_ENV-WEBTERM_DATA_DIR=/data}" ;;
       *"{{.Image}}"*|*"{{.Id}}"*) echo "sha256:imgid-$WANT_TAG" ;;
       *)              echo healthy ;;
     esac
@@ -442,10 +443,18 @@ def main():
               rnd.returncode != 0 and "refusing to deploy a mutable tag" in (rnd.stdout + rnd.stderr)
               and "deploy.sh" not in callsnd, callsnd)
         dnd2 = sandbox(tempfile.mkdtemp(dir=tmp))
-        rnd2, callsnd2 = run(dnd2, ["-y", "--allow-unpinned"], NO_DIGEST="1")
-        check("--allow-unpinned acceptă tag-ul, cu avertisment",
+        rnd2, callsnd2 = run(dnd2, ["-y", "--allow-unpinned"], NO_DIGEST="1", IMG_LABEL="v3.8.0")
+        check("--allow-unpinned acceptă tag-ul (ţintă 3.8: deploy.sh-ul ei porneşte ID-ul verificat), cu avertisment",
               "deploy.sh ghcr.io/x/webterm:v1.0.30 --tag v1.0.30" in callsnd2
               and "moving pointer" in (rnd2.stdout + rnd2.stderr), callsnd2)
+        # RC2-H1: o ţintă < 3.8 (sau fără versiune) porneşte prin deploy.sh-ul EI, fără up_checked →
+        # doar un digest garantează imaginea verificată
+        for lbl in ("v3.7.1", ""):
+            dnd3 = sandbox(tempfile.mkdtemp(dir=tmp))
+            rnd3, callsnd3 = run(dnd3, ["-y", "--allow-unpinned"], NO_DIGEST="1", IMG_LABEL=lbl)
+            check(f"RC2-H1: --allow-unpinned spre o ţintă {lbl or 'fără versiune'} → refuz, nimic instalat",
+                  rnd3.returncode != 0 and "unpinned: a target older than 3.8" in (rnd3.stdout + rnd3.stderr)
+                  and "deploy.sh" not in callsnd3 and "backup.sh" not in callsnd3, (rnd3.stdout + rnd3.stderr)[-400:])
 
         # ── versiune explicită ──
         d3 = sandbox(tempfile.mkdtemp(dir=tmp))

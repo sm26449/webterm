@@ -367,7 +367,13 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   bind propagation / SELinux options, `consistency`, a read-only `/data`); a bind mount is
   checked only with a local Docker daemon (unix socket). Everything runs on the checked image's ID,
   and right before starting the same plan is checked again and compose's `services.app.image`
-  must resolve to that same ID (a pull that re-points the tag in between = refusal). One lifecycle
+  must resolve to that same ID (a pull that re-points the tag in between = refusal). The start
+  itself uses that ID (`WEBTERM_IMAGE=<sha256 ID>` for the `up` call only, `--pull never
+  --no-build`), so a tag re-pointed after the last check changes nothing; an `app` service with
+  `build:` or a `pull_policy` other than missing/never is refused, and `upgrade.sh` installs a
+  pre-3.8 target only by digest. The gateway's data directory must be `/data`: a pre-3.8 target
+  whose effective `WEBTERM_DATA_DIR` (the service environment as compose resolves it, else the
+  image's own ENV) is anything else is refused. One lifecycle
   operation runs at a time (`.deploy.lock`, per install directory: one kit per volume). An
   image without a version label is of an unknown version unless the operator declares it 3.8.
 - A host-side restore reports one of three outcomes: committed (the flag published and flushed),
@@ -376,5 +382,5 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `verify_legacy_volume`, `restore_route`, `_extract_legacy_strict`, `StageProgress`; `hostops.py` `cmd_stage`, `_route`; `db.py` `connect_maintenance`, `_schema_of`, `_table_ddl`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `verify_legacy_volume`, `restore_route`, `_extract_legacy_strict`, `StageProgress`; `hostops.py` `cmd_stage`, `_route`; `db.py` `connect_maintenance`, `_schema_of`, `_table_ddl`, `_conflicts`; the host scripts deploy.sh, rollback.sh and upgrade.sh (guard_pre38, guard_recheck, up_checked: shell, not scanned by the anchor test); `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
 **Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`, `host_backup_script`, `deploy_script`, `upgrade_script`, `schema_history`.

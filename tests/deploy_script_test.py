@@ -41,6 +41,9 @@ DOCKER_SHIM = r'''#!/bin/sh
 echo "docker $*" >> "$CALLS"
 for a in "$@"; do printf '%s\0' "$a" >> "$ARGV_LOG"; done
 case "$1 $2" in "compose version") exit 0 ;; esac
+# ID-urile de imagine au forma reală (sha256:<64 hex>), derivate determinist din referinţă
+# (CALLS.ids ţine perechile ID → referinţă, ca eticheta de versiune să se citească şi pe ID)
+sid() { _h="sha256:$(printf '%s' "$1" | sha256sum | cut -c1-64)"; echo "$_h $1" >> "$CALLS.ids"; echo "$_h"; }
 # imaginea pe care compose ar porni-o: variabila din mediu bate .env (exact ca la compose real),
 # altfel linia din .env din directorul curent
 img="${WEBTERM_IMAGE:-$(grep -m1 '^WEBTERM_IMAGE=' .env 2>/dev/null | cut -d= -f2-)}"
@@ -57,10 +60,16 @@ case "$*" in
   *"compose -f"*" config"*) printf '%b' "${COMPOSE_CFG:-}"; exit 0 ;;
   *"ps -a -q app"*) [ -n "${PS_FAIL:-}" ] && exit 1; [ -n "${APP_PS-x}" ] && printf '%s\n' "${APP_PS-cid-app-1}"; exit 0 ;;
   *image.version*)
-    case "$*" in *1111111111*) echo "${NEW_LABEL-${IMG_LABEL:-}}" ;; *) echo "${IMG_LABEL:-}" ;; esac; exit 0 ;;
+    _r="${*##* }"; _m=$(grep -m1 "^$_r " "$CALLS.ids" 2>/dev/null | cut -d' ' -f2-)
+    case "$* ${_m}" in *1111111111*) echo "${NEW_LABEL-${IMG_LABEL:-}}" ;; *) echo "${IMG_LABEL:-}" ;; esac; exit 0 ;;
   *'"/data"'*) printf '%b\n' "${DATA_MOUNT:-volume\tproj_webterm-data}"; exit 0 ;;
   *"--entrypoint ls"*) [ -n "${LS_FAIL:-}" ] && exit 125; printf '%b' "${VOL_LS:-}"; exit 0 ;;
   *"ps -q app"*) echo "cid-app-1"; exit 0 ;;
+  # RC2-H1: ce imagine porneşte `up` (WEBTERM_IMAGE din mediul apelului) = ce raportează containerul
+  *"compose -f"*" up "*) echo "up-image=${WEBTERM_IMAGE:-} up-label=${WEBTERM_IMAGE_TAG:-}" >> "$CALLS"
+    printf '%s\n' "${WEBTERM_IMAGE:-$img}" > "$CALLS.started"; exit ${UP_FAILS:-0} ;;
+  # RC2-H2: ENV-ul imaginii verificate
+  *Config.Env*) printf '%b\n' "${IMG_ENV-PATH=/usr/bin\nWEBTERM_DATA_DIR=/data}"; exit 0 ;;
   *"compose -f"*"pull"*) exit ${PULL_FAILS:-0} ;;
   *"compose -f"*) exit 0 ;;
 esac
@@ -71,7 +80,9 @@ case "$1" in
   inspect)
     case "$*" in
       *Config.Image*) echo "$img" ;;
-      *"{{.Image}}"*) echo "id-foreign-uses" ;;
+      *"{{.Image}}"*)
+        case "$*" in *cid-app-1*) if [ -s "$CALLS.started" ]; then cat "$CALLS.started"; else sid foreign-uses; fi ;;
+                     *) sid foreign-uses ;; esac ;;
       *) echo "${HEALTH:-healthy}" ;;
     esac; exit 0 ;;
   image)
@@ -84,9 +95,9 @@ case "$1" in
         [ -n "${ID_MISSING:-}" ] && [ "$ref" = "$ID_MISSING" ] && exit 1
         # RC-H1: ID_FLIP = referinţa al cărei ID se schimbă după prima rezolvare (un pull între verificare şi `up`)
         if [ -n "${ID_FLIP:-}" ] && [ "$ref" = "$ID_FLIP" ]; then
-          if [ -e "$CALLS.idflip" ]; then echo "id-$ref-repointed"; else : > "$CALLS.idflip"; echo "id-$ref"; fi
+          if [ -e "$CALLS.idflip" ]; then sid "$ref-repointed"; else : > "$CALLS.idflip"; sid "$ref"; fi
           exit 0; fi
-        if [ -n "${IN_USE_REF:-}" ] && [ "$ref" = "$IN_USE_REF" ]; then echo "id-foreign-uses"; else echo "id-$ref"; fi
+        if [ -n "${IN_USE_REF:-}" ] && [ "$ref" = "$IN_USE_REF" ]; then sid foreign-uses; else sid "$ref"; fi
         exit 0 ;;
       *) exit ${IMAGE_MISSING:-0} ;;
     esac ;;
@@ -148,6 +159,7 @@ DEFAULT_JSON = cfg_json()
 def run(d, script, args=(), stdin=None, **extra):
     calls = d / "calls.log"
     calls.write_text("")
+    pathlib.Path(str(calls) + ".started").unlink(missing_ok=True)
     (d / "argv.log").write_bytes(b"")
     (d / "curl-stdin.log").write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("WEBTERM_", "CF_", "AUTHENTIK_", "PG_"))}
@@ -157,6 +169,12 @@ def run(d, script, args=(), stdin=None, **extra):
     r = subprocess.run(["bash", str(d / script), *args], cwd=str(d), env=env, capture_output=True,
                        text=True, timeout=120, input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL)
     return r, calls.read_text()
+
+
+def sid(ref):
+    """ID-ul pe care stub-ul `docker` îl dă referinţei (sha256 al textului)."""
+    import hashlib
+    return "sha256:" + hashlib.sha256(ref.encode()).hexdigest()
 
 
 def env_of(d):
@@ -197,7 +215,7 @@ def main():
               (d / ".prev-image-tag").read_text().strip() == "ghcr.io/x/webterm:v1.0.0")
         check("pull + up prin compose, apoi verdictul de sănătate",
               "docker compose -f docker-compose.prod.yml pull" in calls
-              and "docker compose -f docker-compose.prod.yml up -d --remove-orphans" in calls
+              and "docker compose -f docker-compose.prod.yml up -d --pull never --no-build --remove-orphans" in calls
               and calls.index("pull") < calls.index("up -d") < calls.index("docker inspect -f", calls.index("up -d")), calls)
         check("ce RULEAZĂ e raportat la final", NEW in out, out[-400:])
         # secretele: din .env → fişiere, .env golit
@@ -266,7 +284,7 @@ def main():
         check("digestul picat devine ţinta următorului rollback (swap)",
               (d4 / ".prev-image").read_text().strip() == NEW and (d4 / ".prev-image-tag").read_text().strip() == "ghcr.io/x/webterm:v9.9.9")
         check("rollback.sh porneşte app-ul FĂRĂ WEBTERM_IMAGE exportat (altfel compose re-rezolva la imaginea stricată)",
-              calls4.count("up -d app") == 1, calls4)
+              calls4.count("--no-build app") == 1 and f"up-image={sid(OLD)} " in calls4, calls4)
         # stub-ul răspunde unhealthy şi rollback-ului → trebuie să o spună, nu să anunţe verde
         check("rollback-ul raportează că nici imaginea veche n-a devenit healthy (nu minte)",
               r.returncode != 0 and "did not report healthy" in out4, out4[-300:])
@@ -388,7 +406,7 @@ def pre38_checks(tmp):
     check("…spune ce e de făcut (rămâi pe 3.8 sau restaurează backup-ul de dinainte de migrare)",
           "stay on 3.8" in out and "BEFORE the migration" in out, out[-500:])
     check("…volumul e listat read-only, fără reţea, cu imaginea ţintă",
-          f"--network none -v proj_webterm-data:/data:ro --entrypoint ls id-{NEW}" in calls, calls)
+          f"--network none -v proj_webterm-data:/data:ro --entrypoint ls {sid(NEW)}" in calls, calls)
     r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY)
     check("rollback.sh spre v3.7.1 pe un volum 3.7 (secret, lacăte) → merge", r.returncode == 0 and not same,
           (r.stdout + r.stderr)[-300:])
@@ -425,7 +443,7 @@ def pre38_checks(tmp):
     out = r.stdout + r.stderr
     check("deploy.sh: imaginea 3.8 nesănătoasă pe volum migrat → rollback-ul automat spre 3.7 e REFUZAT",
           r.returncode != 0 and "Rollback automat" in out and "migrated to 3.8" in out
-          and env_of(d).get("WEBTERM_IMAGE") == NEW and calls.count("up -d app") == 0, out[-700:])
+          and env_of(d).get("WEBTERM_IMAGE") == NEW and calls.count("--no-build app") == 0, out[-700:])
     # deploy.sh ţintit direct spre o imagine < 3.8
     d = sandbox(tempfile.mkdtemp(dir=tmp))
     r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.7.1", NEW_LABEL="v3.7.1", VOL_LS=MIGRATED)
@@ -529,7 +547,7 @@ def rh1_checks(tmp):
     r, calls = run(d, "deploy.sh", [NEW, "--tag", "v9.9.9"], HEALTH="unhealthy", IMG_LABEL="v3.8.0")
     out = r.stdout + r.stderr
     check("deploy.sh → exec rollback.sh moşteneşte lacătul (rollback-ul rulează)",
-          "Rollback:" in out and "another deploy" not in out and calls.count("up -d app") == 1, out[-400:])
+          "Rollback:" in out and "another deploy" not in out and calls.count("--no-build app") == 1, out[-400:])
     for script in ("deploy.sh", "rollback.sh", "upgrade.sh", "scripts/backup.sh", "scripts/restore.sh"):
         src = (ROOT / script).read_text()
         check(f"{script}: ia lacătul de lifecycle", "\nlifecycle_lock " in src and "flock -n 9" in src)
@@ -540,6 +558,7 @@ def rh1_checks(tmp):
         blocks.append(src[a:src.index("\nguard_recheck() {", a)])
     check("garda e identică în deploy.sh, rollback.sh, upgrade.sh", len(set(blocks)) == 1)
     rch1_checks(tmp)
+    rc2_checks(tmp)
 
 
 def rch1_checks(tmp):
@@ -635,6 +654,144 @@ def rch1_checks(tmp):
     r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.8.0", NEW_LABEL="v3.8.0")
     check("RC-H1: deploy.sh 3.8 normal → merge, imaginea pornită e legată de plan",
           r.returncode == 0 and "up -d" in calls and "wt-compose-plan" in calls, (r.stdout + r.stderr)[-400:])
+
+
+def rc2_checks(tmp):
+    """RC2-H1/H2 (al treilea recheck PR4): `up` porneşte EXACT ID-ul verificat (`--pull never
+    --no-build`, WEBTERM_IMAGE=<ID> doar pentru apel, .env pe referinţa umană); build / pull_policy
+    refuzate; WEBTERM_DATA_DIR efectiv ≠ /data refuzat pentru o ţintă < 3.8."""
+    print("── 12. RC2: start by the checked ID, no pull/build, effective WEBTERM_DATA_DIR")
+    TAG371 = "ghcr.io/x/webterm:v3.7.1"
+
+    def rb(prev=NEW, **extra):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(prev + "\n")
+        before = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        r, calls = run(d, "rollback.sh", **extra)
+        after = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        return d, r, calls, before == after, r.stdout + r.stderr
+
+    def app_cfg(**app):
+        js = json.loads(DEFAULT_JSON)
+        for k, v in app.items():
+            if v is None:
+                js["services"]["app"].pop(k, None)
+            else:
+                js["services"]["app"][k] = v
+        return json.dumps(js)
+
+    # deploy.sh: `up` cu ID-ul verificat, fără pull/build; .env rămâne pe referinţă
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW, "--tag", "v9.9.9"], IMG_LABEL="v3.8.0")
+    check("RC2-H1: deploy.sh: `up -d --pull never --no-build` cu WEBTERM_IMAGE=<ID-ul verificat>",
+          r.returncode == 0 and "up -d --pull never --no-build --remove-orphans" in calls
+          and f"up-image={sid(NEW)} up-label=ghcr.io/x/webterm:v9.9.9" in calls, calls[-600:])
+    check("RC2-H1: deploy.sh: .env păstrează referinţa umană (digestul), nu ID-ul",
+          env_of(d).get("WEBTERM_IMAGE") == NEW and env_of(d).get("WEBTERM_IMAGE_TAG") == "ghcr.io/x/webterm:v9.9.9",
+          env_of(d))
+    ups = [ln for ln in calls.splitlines() if " up " in ln and ln.startswith("docker compose")]
+    check("RC2-H1: deploy.sh: niciun `up` fără `--pull never --no-build`",
+          ups and all("--pull never --no-build" in ln for ln in ups), ups)
+
+    # rollback.sh spre un TAG mutabil (v3.7.1): porneşte ID-ul verificat al tag-ului
+    d, r, calls, same, out = rb(prev=TAG371, IMG_LABEL="v3.7.1", VOL_LS=LEGACY)
+    check("RC2-H1: rollback.sh spre un tag mutabil → `up … --pull never --no-build app` pe ID-ul verificat",
+          r.returncode == 0 and "up -d --pull never --no-build app" in calls
+          and f"up-image={sid(TAG371)} up-label={TAG371}" in calls, (out + calls)[-700:])
+    check("RC2-H1: rollback.sh: .env = tag-ul (referinţa umană), .prev-image = fostul curent",
+          env_of(d).get("WEBTERM_IMAGE") == TAG371 and (d / ".prev-image").read_text().strip() == OLD, env_of(d))
+    check("RC2-H1: rollback.sh: „✓ Rollback done” doar când containerul rulează ID-ul verificat",
+          "✓ Rollback done" in out, out[-300:])
+    # tag re-indicat între verificare şi `up` (ID_FLIP) → refuz în re-verificare, nimic pornit
+    d, r, calls, same, out = rb(prev=TAG371, IMG_LABEL="v3.7.1", VOL_LS=LEGACY, ID_FLIP=TAG371)
+    check("RC2-H1: tag-ul re-indicat după prima verificare → refuz, nimic pornit, .env revine",
+          r.returncode != 0 and same and "up -d" not in calls, out[-300:])
+    # containerul porneşte altceva decât ID-ul verificat → rollback-ul NU raportează succes
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d / ".prev-image").write_text(TAG371 + "\n")
+    (d / "bin" / "docker").write_text(DOCKER_SHIM.replace(
+        'printf \'%s\\n\' "${WEBTERM_IMAGE:-$img}" > "$CALLS.started"',
+        'printf \'%s\\n\' "sha256:$(printf %064d 7)" > "$CALLS.started"'))
+    r, calls = run(d, "rollback.sh", IMG_LABEL="v3.7.1", VOL_LS=LEGACY)
+    out = r.stdout + r.stderr
+    check("RC2-H1: containerul rulează alt ID decât cel verificat → „did NOT take effect”, exit ≠ 0",
+          r.returncode != 0 and "did NOT take effect" in out and "✓ Rollback done" not in out, out[-400:])
+
+    # build / pull_policy pe serviciul app → refuz (şi pentru o imagine 3.8)
+    for label, app, lbl, vl in (
+            ("build:", dict(build={"context": "."}), "v3.7.1", LEGACY),
+            ("build: (imagine 3.8)", dict(build={"context": "."}), "v3.8.0", MIGRATED),
+            ("pull_policy always", dict(pull_policy="always"), "v3.7.1", LEGACY),
+            ("pull_policy build", dict(pull_policy="build"), "v3.7.1", LEGACY),
+            ("pull_policy daily (imagine 3.8)", dict(pull_policy="daily"), "v3.8.0", MIGRATED)):
+        d, r, calls, same, out = rb(IMG_LABEL=lbl, VOL_LS=vl, COMPOSE_JSON=app_cfg(**app))
+        check(f"RC2-H1: app cu {label} → refuz, nimic pornit, .env/.prev-image neatinse",
+              r.returncode != 0 and same and "up -d" not in calls
+              and ("build" in out or "pull_policy" in out), out[-400:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.8.0", COMPOSE_JSON=app_cfg(build="."))
+    check("RC2-H1: deploy.sh cu build: pe app → refuz înainte de `up`",
+          r.returncode != 0 and "up -d" not in calls and "build section" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-300:])
+    for pp in ("missing", "never"):
+        d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=app_cfg(pull_policy=pp))
+        check(f"RC2-H1: pull_policy {pp} → merge", r.returncode == 0 and "--no-build app" in calls, out[-300:])
+
+    # up_checked: un ID care nu e sha256:<64 hex> nu ajunge la compose
+    src = (ROOT / "deploy.sh").read_text()
+    fn = src[src.index("up_checked() {"):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    for bad_id in ("", "ghcr.io/x/webterm:v3.7.1", "sha256:abc", "sha256:" + "A" * 64):
+        rr = subprocess.run(["bash", "-c", fn + '\ndocker() { echo CALLED; }\nup_checked "$1" L f app', "x", bad_id],
+                            capture_output=True, text=True)
+        check(f"RC2-H1: up_checked refuză ID-ul {bad_id[:20]!r} fără să cheme compose",
+              rr.returncode != 0 and "CALLED" not in rr.stdout, rr.stdout + rr.stderr)
+    for script in ("deploy.sh", "rollback.sh"):
+        body = (ROOT / script).read_text()
+        live = [ln for ln in body.splitlines()
+                if " up " in ln and "COMPOSE" in ln and not ln.lstrip().startswith(("#", "echo"))]
+        check(f"RC2-H1: {script}: niciun `$COMPOSE … up` direct (doar up_checked)", not live, live)
+
+    # RC2-H2: WEBTERM_DATA_DIR efectiv
+    for label, env, vl in (
+            ("/data/x", {"WEBTERM_DATA_DIR": "/data/x"}, LEGACY),
+            ("/data/x pe un volum migrat", {"WEBTERM_DATA_DIR": "/data/x"}, MIGRATED),
+            ("gol", {"WEBTERM_DATA_DIR": ""}, LEGACY),
+            ("/data/ (cu slash)", {"WEBTERM_DATA_DIR": "/data/"}, LEGACY),
+            ("/srv/other", {"WEBTERM_DATA_DIR": "/srv/other"}, LEGACY)):
+        d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=vl, COMPOSE_JSON=app_cfg(environment=env))
+        check(f"RC2-H2: compose setează WEBTERM_DATA_DIR={label} → refuz pentru < 3.8, nimic schimbat",
+              r.returncode != 0 and same and "custom WEBTERM_DATA_DIR" in out and "up -d" not in calls, out[-400:])
+    # două montări: /data neprotejat + al doilea dataset indicat de WEBTERM_DATA_DIR
+    two = json.loads(DEFAULT_JSON)
+    two["services"]["app"]["volumes"].append({"type": "volume", "source": "data-b", "target": "/data2", "volume": {}})
+    two["volumes"]["data-b"] = {"name": "proj_data-b"}
+    two["services"]["app"]["environment"] = {"WEBTERM_DATA_DIR": "/data2"}
+    d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=json.dumps(two))
+    check("RC2-H2: două montări, WEBTERM_DATA_DIR spre a doua → refuz (nu se verifică doar /data)",
+          r.returncode != 0 and same and "custom WEBTERM_DATA_DIR" in out and "up -d" not in calls, out[-400:])
+    d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY,
+                                COMPOSE_JSON=app_cfg(environment={"WEBTERM_DATA_DIR": "/data", "X": None}))
+    check("RC2-H2: WEBTERM_DATA_DIR=/data explicit → merge", r.returncode == 0, out[-300:])
+    d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY,
+                                COMPOSE_JSON=app_cfg(environment={"WEBTERM_DATA_DIR": None}))
+    check("RC2-H2: WEBTERM_DATA_DIR declarat fără valoare (nesetat) → ENV-ul imaginii (/data) → merge",
+          r.returncode == 0, out[-300:])
+    d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=app_cfg(env_file=["x.env"]))
+    check("RC2-H2: env_file nerezolvat în plan → refuz", r.returncode != 0 and same and "env_file" in out, out[-300:])
+    d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=app_cfg(environment=["A=1"]))
+    check("RC2-H2: environment ilizibil (listă) → refuz", r.returncode != 0 and same, out[-300:])
+    for label, ienv in (("/srv/webterm", "PATH=/usr/bin\\nWEBTERM_DATA_DIR=/srv/webterm"),
+                        ("lipsă (v1.x: cwd/data)", "PATH=/usr/bin"),
+                        ("gol", "WEBTERM_DATA_DIR=")):
+        d, r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, IMG_ENV=ienv)
+        check(f"RC2-H2: ENV-ul imaginii < 3.8 are WEBTERM_DATA_DIR {label} → refuz, volumul nici nu e listat",
+              r.returncode != 0 and same and "custom WEBTERM_DATA_DIR" in out
+              and "--entrypoint ls" not in calls and "up -d" not in calls, out[-400:])
+    d, r, calls, same, out = rb(IMG_LABEL="v3.8.0", VOL_LS=MIGRATED, IMG_ENV="PATH=/usr/bin\\nWEBTERM_DATA_DIR=/srv/x",
+                                COMPOSE_JSON=app_cfg(environment={"WEBTERM_DATA_DIR": "/data/x"}))
+    check("RC2-H2: imagine 3.8 cu WEBTERM_DATA_DIR propriu → merge (garda priveşte doar < 3.8)",
+          r.returncode == 0, out[-300:])
 
 
 CFG = "name: proj\\nservices:\\n  app:\\n    image: x\\nvolumes:\\n  webterm-data:\\n    name: custom_data\\n"

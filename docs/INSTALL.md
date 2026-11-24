@@ -718,7 +718,11 @@ non-default bind propagation or SELinux options, `consistency` and a read-only `
 mount is checked only when Docker runs on this host (a remote context or `DOCKER_HOST` is
 refused). The image is checked by its ID: if a pull re-points the tag between the check and the
 start, or compose would start another image than the one checked, they refuse and ask you to run
-them again. An
+them again; the start itself uses the checked image ID with `--pull never --no-build` (`.env`
+keeps the tag or digest), so an `app` service with `build:` or a `pull_policy` other than
+`missing`/`never` is refused, and `upgrade.sh` installs a pre-3.8 version only by digest. A
+custom `WEBTERM_DATA_DIR` (anything but `/data`, in the compose environment or the image) is not
+supported by the downgrade guard and is refused for a pre-3.8 image. An
 image without a version label counts as of an unknown version, which is refused on a migrated
 volume; a locally built 3.8 image can be declared for one run with `WEBTERM_IMAGE_ERA=3.8 ./deploy.sh
 …` (never put it in `.env`). The only way back is to restore the backup from step 2 — taken
