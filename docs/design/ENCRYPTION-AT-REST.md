@@ -2141,7 +2141,14 @@ done locally at once and shown as "not yet attested off-host" with a System heal
 upload succeeds; **Q3** a backup excludes a recording that fails its integrity check and raises an
 alarm naming it; **Q5** a live session whose recording writes fail keeps running, marked "recording
 degraded", with an alarm and an audit entry (availability over strict compliance, by choice); **Q4**
-the recommended default stands (Owners only, every read audited, released one recording at a time).
+the recommended default stands (Owners only, every read audited, released one recording at a time). Also
+confirmed on 2026-11-24: a restore without proof of erasure continuity (volume journal gone and any
+configured destination unreachable) **quarantines** the restored recordings until proven (Owner
+recovery mode excepted); a host live backup whose gateway control socket does not answer is
+**refused with an alarm** (never an uncoordinated copy, never an automatic stop of the app).
+Accepted as written: the erasure journal cap refuses new erasures until compaction exists; failed
+migrations block the global "fully migrated" flag; a role/permission change pauses open streams
+for a re-check.
 
 | # | Question | Recommended default |
 |---|---|---|
