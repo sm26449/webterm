@@ -49,9 +49,10 @@ case "$*" in
   "volume ls"*) [ -n "${VOL_LS_FAIL:-}" ] && exit 1; [ -n "${VOLUMES-x}" ] && printf '%s\n' "${VOLUMES-proj_webterm-data}"; exit 0 ;;
   # R-H1: planul compose (JSON) şi programul care îl citeşte (rulat aici cu python-ul gazdei)
   *"config --format json"*) [ -n "${CFG_FAIL:-}" ] && exit 1
+    # @IMG@ = interpolarea lui ${WEBTERM_IMAGE} pe care o face compose (services.app.image)
     if [ -n "${JSON_AFTER_SWAP:-}" ] && grep -qxF "WEBTERM_IMAGE=${SWAP_REF:-}" .env 2>/dev/null; then
-      printf '%s' "$JSON_AFTER_SWAP"; exit 0; fi
-    printf '%s' "${COMPOSE_JSON:-$DEFAULT_JSON}"; exit 0 ;;
+      printf '%s' "$JSON_AFTER_SWAP" | sed "s|@IMG@|$img|g"; exit 0; fi
+    printf '%s' "${COMPOSE_JSON:-$DEFAULT_JSON}" | sed "s|@IMG@|$img|g"; exit 0 ;;
   *wt-compose-plan*) eval "prog=\${$#}"; [ -n "${PLAN_RUN_FAIL:-}" ] && exit 125; exec python3 -I -c "$prog" ;;
   *"compose -f"*" config"*) printf '%b' "${COMPOSE_CFG:-}"; exit 0 ;;
   *"ps -a -q app"*) [ -n "${PS_FAIL:-}" ] && exit 1; [ -n "${APP_PS-x}" ] && printf '%s\n' "${APP_PS-cid-app-1}"; exit 0 ;;
@@ -65,6 +66,7 @@ case "$*" in
 esac
 case "$1" in
   login|logs|rmi) exit 0 ;;
+  context) echo "${CTX_HOST-unix:///var/run/docker.sock}"; exit 0 ;;
   ps) [ "$2" = "-aq" ] && printf 'c-foreign\n'; exit 0 ;;
   inspect)
     case "$*" in
@@ -79,6 +81,11 @@ case "$1" in
         # ID-uri de imagine: fiecare referinţă (ultimul argument) îşi are al ei; cea din
         # IN_USE_REF e „folosită" de un container străin (acelaşi ID ca `{{.Image}}` de mai sus)
         ref="${*##* }"
+        [ -n "${ID_MISSING:-}" ] && [ "$ref" = "$ID_MISSING" ] && exit 1
+        # RC-H1: ID_FLIP = referinţa al cărei ID se schimbă după prima rezolvare (un pull între verificare şi `up`)
+        if [ -n "${ID_FLIP:-}" ] && [ "$ref" = "$ID_FLIP" ]; then
+          if [ -e "$CALLS.idflip" ]; then echo "id-$ref-repointed"; else : > "$CALLS.idflip"; echo "id-$ref"; fi
+          exit 0; fi
         if [ -n "${IN_USE_REF:-}" ] && [ "$ref" = "$IN_USE_REF" ]; then echo "id-foreign-uses"; else echo "id-$ref"; fi
         exit 0 ;;
       *) exit ${IMAGE_MISSING:-0} ;;
@@ -131,7 +138,7 @@ def sandbox(tmp, env_txt=None):
 def cfg_json(volname="proj_webterm-data", mount=None, vols=None):
     """`docker compose config --format json` cum îl scrie compose v2 (doar ce citeşte planul)."""
     m = mount or {"type": "volume", "source": "webterm-data", "target": "/data", "volume": {}}
-    return json.dumps({"name": "proj", "services": {"app": {"image": "x", "volumes": [m]}},
+    return json.dumps({"name": "proj", "services": {"app": {"image": "@IMG@", "volumes": [m]}},
                        "volumes": vols if vols is not None else {"webterm-data": {"name": volname}}})
 
 
@@ -381,7 +388,7 @@ def pre38_checks(tmp):
     check("…spune ce e de făcut (rămâi pe 3.8 sau restaurează backup-ul de dinainte de migrare)",
           "stay on 3.8" in out and "BEFORE the migration" in out, out[-500:])
     check("…volumul e listat read-only, fără reţea, cu imaginea ţintă",
-          f"--network none -v proj_webterm-data:/data:ro --entrypoint ls {NEW}" in calls, calls)
+          f"--network none -v proj_webterm-data:/data:ro --entrypoint ls id-{NEW}" in calls, calls)
     r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY)
     check("rollback.sh spre v3.7.1 pe un volum 3.7 (secret, lacăte) → merge", r.returncode == 0 and not same,
           (r.stdout + r.stderr)[-300:])
@@ -532,6 +539,102 @@ def rh1_checks(tmp):
         a = src.index("# ── 3.8: graniţa migrării")
         blocks.append(src[a:src.index("\nguard_recheck() {", a)])
     check("garda e identică în deploy.sh, rollback.sh, upgrade.sh", len(set(blocks)) == 1)
+    rch1_checks(tmp)
+
+
+def rch1_checks(tmp):
+    """RC-H1 (al doilea recheck PR4): montări nemodelate refuzate explicit (subpath, driver_opts care
+    schimbă dispozitivul, opţiuni de mount), bind doar cu daemon local, imaginea legată ca ID de
+    services.app.image şi re-verificată chiar înainte de `up`."""
+    print("── 11. RC-H1: unmodelled mounts, remote daemon, image bound by ID")
+
+    def rb(**extra):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(NEW + "\n")
+        before = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        r, calls = run(d, "rollback.sh", **extra)
+        after = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        return r, calls, before == after, r.stdout + r.stderr
+
+    def vol(volume=None, vdef=None, **mopts):
+        m = {"type": "volume", "source": "webterm-data", "target": "/data", "volume": volume or {}}
+        m.update(mopts)
+        return cfg_json(mount=m, vols={"webterm-data": dict({"name": "proj_webterm-data"}, **(vdef or {}))})
+
+    for label, js, why in (
+            ("volume.subpath", vol({"subpath": "data"}), "volume.subpath"),
+            ("volume.subpath + nocopy", vol({"subpath": "data", "nocopy": True}), "volume.subpath"),
+            ("driver_opts device (bind la un director)", vol(vdef={"driver_opts": {"type": "none", "device": "/srv/q", "o": "bind"}}), "driver_opts"),
+            ("driver_opts o=bind fără device", vol(vdef={"driver_opts": {"o": "rbind"}}), "driver_opts"),
+            ("driver_opts nfs (device)", vol(vdef={"driver_opts": {"type": "nfs", "o": "addr=10.0.0.1", "device": ":/x"}}), "driver_opts"),
+            ("consistency pe /data", vol(consistency="cached"), "consistency"),
+            ("read_only pe /data", vol(read_only=True), "read-only"),
+            ("opţiune de volum necunoscută", vol({"labels": {"a": "b"}}), "not checked"),
+            ("cheie necunoscută în definiţia volumului", vol(vdef={"driver_opts": {}, "x-weird": 1}), "not checked")):
+        r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=js)
+        check(f"RC-H1: {label} → refuz explicit, nimic schimbat, volumul nici nu e listat",
+              r.returncode != 0 and same and why in out and "up -d" not in calls and "--entrypoint ls" not in calls,
+              out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=vol({"nocopy": True}))
+    check("RC-H1: volume.nocopy e modelat (aceeaşi rădăcină) → merge", r.returncode == 0, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=MIGRATED, COMPOSE_JSON=vol({"nocopy": True}))
+    check("RC-H1: volume.nocopy pe volum migrat → refuzul obişnuit", r.returncode != 0 and same and "migrated to 3.8" in out, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=vol(vdef={"driver_opts": {"type": "tmpfs"}}, ))
+    check("RC-H1: driver_opts fără device / bind → modelat, merge", r.returncode == 0, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.8.1", VOL_LS=MIGRATED, COMPOSE_JSON=vol({"subpath": "data"}))
+    check("RC-H1: imagine 3.8 cu subpath → merge (garda priveşte doar imaginile < 3.8)", r.returncode == 0, out[-400:])
+
+    # bind + context Docker remote
+    bd = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / "data"
+    bd.mkdir()
+    (bd / "webterm.db").write_text("x")
+    (bd / "secret").write_text("x")
+    bind = cfg_json(mount={"type": "bind", "source": str(bd), "target": "/data", "bind": {"create_host_path": True}})
+    bm = "bind\\t%s" % bd
+    for ctx in ("tcp://10.0.0.5:2376", "ssh://admin@far", "npipe:////./pipe/docker_engine", ""):
+        r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind, DATA_MOUNT=bm, CTX_HOST=ctx)
+        check(f"RC-H1: bind cu daemon remote ({ctx or 'context ilizibil'}) → refuz, nimic schimbat",
+              r.returncode != 0 and same and "remote" in out and "up -d" not in calls, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind, DATA_MOUNT=bm)
+    check("RC-H1: bind cu socket unix local → merge", r.returncode == 0, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, CTX_HOST="tcp://10.0.0.5:2376")
+    check("RC-H1: volum numit cu daemon remote → merge (listat prin daemon, nu pe gazdă)", r.returncode == 0, out[-400:])
+    for label, b in (("propagation rshared", {"propagation": "rshared"}), ("selinux z", {"selinux": "z"})):
+        js = cfg_json(mount={"type": "bind", "source": str(bd), "target": "/data", "bind": b})
+        r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=js, DATA_MOUNT=bm)
+        check(f"RC-H1: bind cu {label} → refuz", r.returncode != 0 and same and "non-default" in out, out[-400:])
+
+    # imaginea: ID-ul se schimbă între verificare şi `up` (pull care re-indică tag-ul)
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, ID_FLIP=NEW)
+    check("RC-H1: ID-ul imaginii se schimbă între verificare şi `up` → refuz, .env/.prev-image revin, niciun `up`",
+          r.returncode != 0 and same and "image changed since it was checked" in out and "up -d" not in calls, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.8.0", VOL_LS=MIGRATED, ID_FLIP=NEW)
+    check("RC-H1: …şi pentru o imagine 3.8 (re-indicată spre altceva)", r.returncode != 0 and same and "up -d" not in calls, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, ID_MISSING=NEW)
+    check("RC-H1: imaginea ţintă absentă local → refuz (nu e trasă pe tăcute de `docker run`)",
+          r.returncode != 0 and same and "not present locally" in out and "docker run" not in calls, out[-400:])
+    # compose ar porni ALTĂ imagine decât cea verificată (image fixat în compose)
+    other = json.loads(DEFAULT_JSON)
+    other["services"]["app"]["image"] = "ghcr.io/x/webterm:v3.7.1"
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.7.1", NEW_LABEL="v3.8.0", VOL_LS=MIGRATED,
+                   COMPOSE_JSON=json.dumps(other))
+    out = r.stdout + r.stderr
+    check("RC-H1: deploy.sh verifică NEW (3.8), dar compose ar porni altă imagine → refuz înainte de `up`",
+          r.returncode != 0 and "not the image that was" in out and "up -d" not in calls, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, JSON_AFTER_SWAP=json.dumps(other), SWAP_REF=NEW)
+    check("RC-H1: rollback.sh: services.app.image ≠ imaginea verificată la re-verificare → refuz, .env revine",
+          r.returncode != 0 and same and "up -d" not in calls, out[-400:])
+    noimg = json.loads(DEFAULT_JSON)
+    del noimg["services"]["app"]["image"]
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.8.0", NEW_LABEL="v3.8.0", COMPOSE_JSON=json.dumps(noimg))
+    check("RC-H1: planul fără services.app.image → refuz", r.returncode != 0 and "up -d" not in calls,
+          (r.stdout + r.stderr)[-400:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.8.0", NEW_LABEL="v3.8.0")
+    check("RC-H1: deploy.sh 3.8 normal → merge, imaginea pornită e legată de plan",
+          r.returncode == 0 and "up -d" in calls and "wt-compose-plan" in calls, (r.stdout + r.stderr)[-400:])
 
 
 CFG = "name: proj\\nservices:\\n  app:\\n    image: x\\nvolumes:\\n  webterm-data:\\n    name: custom_data\\n"

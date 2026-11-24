@@ -480,6 +480,24 @@ def test_backup(e):
     check("R-L1: două backup-uri cu acelaşi nume → al doilea refuză, primul neatins, niciun temporar",
           rc1 == 0 and rc2 != 0 and "already exists" in out2 and open(first, "rb").read() == b1
           and os.listdir(e.out) == [os.path.basename(first)], (out1[-300:], out2[-300:], os.listdir(e.out)))
+    # RC-L1: un director apare la numele final DUPĂ verificarea „există deja” (simulat la primul
+    # `sync` al temporarului) → `ln -T` refuză; nimic nu e publicat înăuntrul lui
+    ss = os.path.join(e.fake, "bin", "sync")
+    with open(ss, "w") as f:
+        f.write('#!/bin/sh\nfor a in "$@"; do case "$a" in *.wtbk.tmp)\n'
+                '  b=$(basename "$a"); s=${b#.webterm-}; s=${s%.*.wtbk.tmp}\n'
+                '  mkdir -p "$(dirname "$a")/webterm-$s.wtbk" ;; esac; done\nexec /usr/bin/sync "$@"\n')
+    os.chmod(ss, 0o755)
+    shutil.rmtree(e.out, ignore_errors=True)
+    rc, out = e.run("backup.sh", extra=dict(PE, WEBTERM_VOLUME="prot"))
+    os.unlink(ss)
+    inside = [n for n in os.listdir(e.out) if os.path.isdir(os.path.join(e.out, n))]
+    check("RC-L1: un director apărut la numele final → refuz, nimic publicat în el, niciun temporar",
+          rc != 0 and "could not publish" in out and len(inside) == 1 and inside[0].endswith(".wtbk")
+          and os.listdir(os.path.join(e.out, inside[0])) == [] and len(os.listdir(e.out)) == 1,
+          (out[-300:], os.listdir(e.out)))
+    shutil.rmtree(e.out, ignore_errors=True)
+    os.makedirs(e.out)
     gw = hold_lock(d)
     try:
         rc, out = backup_run(e, "prot", PE)
@@ -804,6 +822,105 @@ def test_hostops(e):
           and "docker" not in e.calls(), (out1[-300:], out2[-300:]))
 
 
+def test_rcm1(e):
+    """RC-M1: o singură conductă legacy — ruta după formatul INTERIOR şi politica ţintei, acelaşi
+    verdict la verify şi la stage (deci înainte de orice oprire), acelaşi extractor strict pe
+    ambele ţinte, aliasurile de nume refuzate."""
+    print("── RC-M1: WTBK1 with a 3.7 payload, one legacy pipeline, name aliases")
+    kf = e.key_file("m1.key")
+    src = legacy_volume(e, "m1src", email="m1@x")
+    rdf = lambda n: open(os.path.join(src, n), "rb").read()  # noqa: E731
+    base = [("webterm.db", rdf("webterm.db")), ("secret", rdf("secret")),
+            ("agent-signing.key", rdf("agent-signing.key")), ("agent-signing.pub", rdf("agent-signing.pub")),
+            ("transcripts/s1.out", b"x" * 10)]
+    tgz = open(craft(os.path.join(e.base, "m1.tar.gz"), base), "rb").read()
+    wtbk = backup.encrypt(tgz, PASS)
+    kenv = {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_BACKUP_PASSPHRASE": PASS}
+    lenv = {"WEBTERM_BACKUP_PASSPHRASE": PASS}
+    n = [0]
+
+    def fresh(kind):
+        n[0] += 1
+        name = "m1%s%d" % (kind, n[0])
+        if kind == "p":
+            return name, protected_volume(e, name, kf, email="tinta@x"), kenv
+        return name, legacy_volume(e, name, email="tinta@x"), lenv
+
+    def both(kind, blob, args):
+        """verify şi stage pe volume proaspete identice; → [(rc, out, volum neschimbat)] pentru fiecare."""
+        sha = hashlib.sha256(blob).hexdigest()
+        res = []
+        for cmd in ("verify", "stage-restore"):
+            name, d, env = fresh(kind)
+            before = data_tree(d)
+            rc, out = hostops_run(e, name, [cmd, "--sha256", sha, *args], blob, env)
+            # stage-ul ia întâi lacătul restore-ului (backups/.restore.lock, gol, ca .lock): nu e dată
+            after = {k: v for k, v in data_tree(d).items() if k not in ("backups", "backups/.restore.lock")}
+            res.append((rc, out, after == {k: v for k, v in before.items() if k not in ("backups", "backups/.restore.lock")}))
+        return res
+
+    for label, kind, blob, args, want in (
+            ("WTBK1(3.7) → protejat, fără --legacy-import", "p", wtbk, (), 3),
+            ("WTBK1(3.7) → protejat, cu --legacy-import", "p", wtbk, ("--legacy-import",), 0),
+            ("WTBK1(3.7) → legacy, fără opţiune", "l", wtbk, (), 0),
+            ("WTBK1(3.7) → legacy, cu --legacy-import", "l", wtbk, ("--legacy-import",), 3),
+            ("tar.gz 3.7 → protejat, fără --legacy-import", "p", tgz, (), 3),
+            ("tar.gz 3.7 → legacy, cu --legacy-import", "l", tgz, ("--legacy-import",), 3)):
+        (vrc, vout, vsame), (src_, sout, ssame) = both(kind, blob, args)
+        check(f"RC-M1: {label}: verify şi stage dau acelaşi verdict ({want})",
+              vrc == want and src_ == want and vsame and (ssame if want else True), (vrc, vout[-300:], src_, sout[-300:]))
+        if want == 3:
+            check(f"RC-M1: {label}: refuzul stage-ului lasă volumul identic", ssame, sout[-300:])
+        if want == 0 and kind == "p":
+            check(f"RC-M1: {label}: ruta e importul legacy la ambele",
+                  "archive: legacy-import" in vout and "staged: legacy-import" in sout, (vout, sout))
+        if want == 0 and kind == "l":
+            check(f"RC-M1: {label}: ruta e restore-ul legacy la ambele", "staged: legacy" in sout, sout)
+    # prin restore.sh: refuzul vine de la verify, deci înainte de oprirea app-ului
+    name, d, _env = fresh("p")
+    path = os.path.join(e.base, "m1.wtbk")
+    open(path, "wb").write(wtbk)
+    e.app(name, ["WEBTERM_MASTER_KEY_FILE=" + kf])
+    before = data_tree(d)
+    rc, out = restore(e, path, name, PE)
+    check("RC-M1: restore.sh WTBK1(3.7) pe volum protejat fără --legacy-import → refuz ÎNAINTE de oprire",
+          rc != 0 and "--legacy-import" in out and "stop " not in e.calls() and data_tree(d) == before, out[-400:])
+    rc, out = restore(e, path, name, PE, args=("--legacy-import",))
+    check("RC-M1: …cu --legacy-import → pus în staging (import legacy)", rc == 0 and "legacy-import" in out, out[-400:])
+    mode, email, _applied = boot_check(d, {"WEBTERM_MASTER_KEY_FILE": kf})
+    check("RC-M1: …boot-ul: protected, datele arhivei 3.7", mode == "protected" and email == "m1@x", (mode, email))
+
+    # aliasuri de nume: refuzate de extractorul strict la verify ŞI la stage, pe ambele ţinte
+    db = rdf("webterm.db")
+    for label, members in (
+            ("./webterm.db + webterm.db", [("./webterm.db", b"x" * 64)] + base),
+            ("./webterm.db singur", [("./webterm.db", db)] + base[1:]),
+            ("transcripts//s1.out", base[:4] + [("transcripts//s1.out", b"y")]),
+            ("transcripts/./s1.out", base[:4] + [("transcripts/./s1.out", b"y")]),
+            ("transcripts/../webterm.db", base + [("transcripts/../webterm.db", b"z")]),
+            ("/webterm.db absolut", base + [("/webterm.db", b"z")]),
+            ("coliziune de majuscule", base + [("transcripts/S1.out", b"y")]),
+            ("webterm.db dublat", base + [("webterm.db", b"z")])):
+        raw = open(craft(os.path.join(e.base, "alias.tar.gz"), members), "rb").read()
+        for kind, args in (("l", ()), ("p", ("--legacy-import",))):
+            for blob, wrap in ((raw, "tar.gz"), (backup.encrypt(raw, PASS), "WTBK1")):
+                (vrc, vout, vsame), (src_, sout, ssame) = both(kind, blob, args)
+                check(f"RC-M1: alias {label} ({wrap} → {'protejat' if kind == 'p' else 'legacy'}) → refuz la verify şi stage, volum identic",
+                      vrc == 3 and src_ == 3 and vsame and ssame, (vout[-200:], sout[-200:]))
+    # extractorul strict direct: aliasul de majuscule şi duplicatul
+    for label, members in (("majuscule", base + [("transcripts/S1.out", b"y")]),
+                           ("./ + simplu", [("./webterm.db", db)] + base)):
+        raw = open(craft(os.path.join(e.base, "alias2.tar.gz"), members), "rb").read()
+        td = tempfile.mkdtemp(prefix="wt-rcm1-")
+        try:
+            backup._extract_legacy_strict(raw, td)
+            check(f"RC-M1: _extract_legacy_strict refuză {label}", False, "acceptat")
+        except ValueError as ex:
+            check(f"RC-M1: _extract_legacy_strict refuză {label}", True, str(ex))
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     global FOREIGN_DB
     FOREIGN_DB = _foreign_db()
@@ -812,6 +929,7 @@ def main():
         test_backup(e)
         test_restore(e)
         test_hostops(e)
+        test_rcm1(e)
     finally:
         shutil.rmtree(e.base, ignore_errors=True)
         shutil.rmtree(_BOOT_DIR, ignore_errors=True)

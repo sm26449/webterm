@@ -27,7 +27,6 @@ extractor tar strict pentru WTS1 şi importul 3.7 (M1/M3); writer-ul aplică bug
 """
 import errno
 import fcntl
-import gzip
 import hashlib
 import hmac
 import io
@@ -321,66 +320,30 @@ def encrypt_stored(name: str, passphrase: str, keys=None, mk=None) -> bytes:
 # --------------------------------------------------------------- verify/restore
 # Plafon dur pe conţinutul DECOMPRIMAT al unui backup (un snapshot real e mic — DB + cheie).
 # Anti bombă de compresie: un tar.gz mic poate declara/expanda la zeci de GB şi umple discul
-# gateway-ului la _inspect (getnames walk) sau la extractall. GzipFile.read(n) decomprimă cel
-# mult n octeţi, deci nu materializează niciodată bomba.
+# gateway-ului la extragere; BoundedGunzip (snapshot.py) se opreşte la plafon, deci nu
+# materializează niciodată bomba.
 RESTORE_MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024      # 2 GB
 
 
-def _gunzip_bounded(raw: bytes) -> bytes:
-    """Decomprimă gzip cu plafon dur pe ieşire; peste RESTORE_MAX_UNCOMPRESSED → ValueError."""
+def _inspect(raw: bytes) -> dict:
+    """Validează un snapshot 3.7 decriptat (tar.gz); întoarce meta. RC-M1: prin ACEEAŞI conductă ca
+    staging-ul (_extract_legacy_strict: extractorul strict, fără duplicate / aliasuri / nume
+    necanonice, DB-ul EverShell, perechea de semnare, cheia dovedită pe DB-ul arhivei), doar că pe
+    disc ajunge numai webterm.db (într-un director privat, şters după). Lipsa cheii nu e refuz aici
+    (`has_secret` False; verify_restorable / staging-ul refuză). Orice arhivă invalidă → ValueError."""
+    td = tempfile.mkdtemp(prefix="wt-inspect-")
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as g:
-            out = g.read(RESTORE_MAX_UNCOMPRESSED + 1)
+        arc, secret, users_since = _extract_legacy_strict(raw, td, keep_files=False, require_secret=False)
+        has_secret = secret is not None
+        del secret
+        arc.mem.clear()
     except (OSError, EOFError) as e:
         raise ValueError("corrupt file, or not a WebTerm backup") from e
-    if len(out) > RESTORE_MAX_UNCOMPRESSED:
-        raise ValueError("backup too large when unpacked (possible compression bomb) — refused")
-    return out
-
-
-def _inspect(raw: bytes) -> dict:
-    """Validează un snapshot decriptat (tar.gz cu un DB integru); întoarce meta.
-    Orice conținut care nu e un tar.gz valid → ValueError (nu excepție de tarfile),
-    ca endpointul să-l mapeze curat pe 400 în loc de 500."""
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            flat = _gunzip_bounded(raw)               # plafon anti bombă de compresie
-            with tarfile.open(fileobj=io.BytesIO(flat), mode="r:") as tar:
-                names = tar.getnames()
-                if "webterm.db" not in names:
-                    raise ValueError("backup without webterm.db")
-                m = tar.getmember("webterm.db")
-                tar.extract(m, td, filter="data")     # nume fix, filtru anti-traversal
-                secret = _member_secret(tar) if "secret" in names else None
-        except (tarfile.TarError, OSError, EOFError) as e:
-            raise ValueError("corrupt file, or not a WebTerm backup") from e
-        dbp = os.path.join(td, "webterm.db")
-        r = sqlite3.connect(dbp).execute("PRAGMA integrity_check").fetchone()[0]
-        if r != "ok":
-            raise ValueError("the database in the backup is corrupt")
-        try:
-            created = sqlite3.connect(dbp).execute(
-                "SELECT MIN(created) FROM users").fetchone()[0]
-        except Exception:
-            created = None
-        if secret is not None:
-            # R-H2: cheia din arhivă trebuie să deschidă DB-ul DIN arhivă (aceeaşi regulă ca boot-ul)
-            prove_legacy_secret(td, secret)
-    return {"has_secret": "secret" in names,
-            "has_transcripts": any(n.startswith("transcripts") for n in names),
-            "users_since": created}
-
-
-def _member_secret(tar) -> bytes:
-    """The raw vault key of a 3.7 archive (memory only): a plain member of exactly 32 bytes."""
-    m = tar.getmember("secret")
-    if not m.isfile() or m.size != kr.KEY_LEN:
-        raise ValueError("the vault key in the backup is malformed — refused")
-    f = tar.extractfile(m)
-    raw = f.read(kr.KEY_LEN + 1) if f is not None else b""
-    if len(raw) != kr.KEY_LEN:
-        raise ValueError("the vault key in the backup is malformed — refused")
-    return raw
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return {"has_secret": has_secret,
+            "has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
+            "users_since": users_since}
 
 
 def prove_legacy_secret(db_dir: str, secret: bytes) -> str:
@@ -410,16 +373,41 @@ class StageProgress:
 
 def verify(blob: bytes, passphrase: str, keys=None, mk=None, prefer: str = "local") -> dict:
     raw = decrypt(blob, passphrase)
-    if raw[:4] == wts.MAGIC:
-        if not is_protected():
-            raise ValueError(_WTS_ON_LEGACY)
+    # RC-M1: aceeaşi rută ca stage_restore din ruta API (care nu oferă importul legacy): un 3.7 pe
+    # un volum protejat e refuzat aici la fel ca la restore. H2: un volum ambiguu nu verifică nimic.
+    if restore_route(raw, is_protected(), False) == "wts":
         return _verify_wts_bytes(raw, keys, mk, prefer)
-    volume_kind()                                  # H2: un volum ambiguu nu verifică nimic
     return _inspect(raw)
 
 
 _WTS_ON_LEGACY = ("this backup comes from an installation with encryption at rest; it can only be "
                   "restored on an installation whose key manifest (keys.wtk) is set up")
+_NEEDS_LEGACY_IMPORT = ("a pre-3.8 backup holds the raw vault key; on this installation it needs the "
+                        "explicit legacy import — refused")
+_IMPORT_ON_LEGACY = "the legacy import is for protected installations; this one is pre-3.8 — refused"
+_IMPORT_OF_WTS = "the legacy import is only for a pre-3.8 backup; this one is a 3.8 backup — refused"
+
+
+def restore_route(raw: bytes, protected: bool, legacy_import: bool) -> str:
+    """RC-M1: the ONE dispatch of a decrypted archive, by its INNER format and the target's policy
+    (never by the outer wrapper: a WTBK1 holding a 3.7 tar is a 3.7 archive). `hostops verify`,
+    `hostops stage-restore` and stage_restore call it, so verify and stage reach the same verdict,
+    before anything is stopped. → "wts" | "legacy-import" | "legacy-volume"; refusal → ValueError."""
+    if raw[:4] == wts.MAGIC:
+        if not protected:
+            raise ValueError(_WTS_ON_LEGACY)
+        if legacy_import:
+            raise ValueError(_IMPORT_OF_WTS)
+        return "wts"
+    if raw[:2] != b"\x1f\x8b":
+        raise ValueError("corrupt file, or not a WebTerm backup")
+    if protected:
+        if not legacy_import:
+            raise ValueError(_NEEDS_LEGACY_IMPORT)
+        return "legacy-import"
+    if legacy_import:
+        raise ValueError(_IMPORT_ON_LEGACY)
+    return "legacy-volume"
 
 
 def verify_restorable(blob: bytes, passphrase: str, keys=None, mk=None, prefer: str = "local") -> dict:
@@ -477,40 +465,60 @@ def stage_restore(blob: bytes, passphrase: str, keys=None, mk=None, legacy_impor
     progress = progress if progress is not None else StageProgress()
     raw = decrypt(blob, passphrase)
     _invalidate_kind()
-    if raw[:4] == wts.MAGIC:
-        if not is_protected():
-            raise ValueError(_WTS_ON_LEGACY)
+    route = restore_route(raw, is_protected(), legacy_import)     # RC-M1: aceeaşi rută ca verify
+    if route == "wts":
         return _stage_wts(io.BytesIO(raw), keys, mk, prefer, progress)
-    if is_protected():
-        if not legacy_import:
-            raise ValueError("a pre-3.8 backup holds the raw vault key; on this installation it "
-                             "needs the explicit legacy import — refused")
+    if route == "legacy-import":
         return _stage_legacy_import(raw, keys, progress)
     return _stage_legacy_volume(raw, progress)
 
 
-def _stage_legacy_volume(raw: bytes, progress) -> dict:
-    """A 3.7 backup onto a legacy volume. The 3.7 checks (_inspect, now with the key proof) on the
-    archive, then the set is extracted into a private directory, fsynced, and published: the old
-    flag removed durably first (a crash never leaves a flag over a half-swapped set), the old set
-    moved aside, the new one renamed into place, the flag written atomically (tmp, fsync, rename,
-    directory fsync) — the commit point."""
-    info = _inspect(raw)                          # abortează dacă e corupt/greșit (+ proba cheii)
-    # un backup WebTerm include MEREU cheia seifului (make_snapshot); lipsa ei = backup
-    # incomplet / de la alt instrument → restaurarea ar pune un DB nou peste cheia veche,
-    # lăsând toate credențialele SSH + tokenurile de agent nedecriptabile. Refuză din start.
+def verify_legacy_volume(raw: bytes) -> dict:
+    """RC-M1: a 3.7 archive for a legacy volume, checked exactly as _stage_legacy_volume checks it
+    (the strict extractor, the vault key required and proven on the archive's own database),
+    without staging anything."""
+    if volume_kind() != "legacy":
+        raise ValueError(_NEEDS_LEGACY_IMPORT)
+    info = _inspect(raw)
     if not info["has_secret"]:
         raise ValueError("backup without the vault key — a restore would leave the credentials "
                          "undecryptable; use a complete WebTerm backup")
+    return info
+
+
+def _stage_legacy_volume(raw: bytes, progress) -> dict:
+    """A 3.7 backup onto a legacy volume. RC-M1: the same strict extractor and proofs as verify
+    (_extract_legacy_strict) into a private directory; the vault key (memory only until here) is
+    written into the set, and the EXACT pair that is published (the set's webterm.db and the
+    `secret` read back from the set) is proven again right before publishing. Then the durable
+    publication: the old flag removed durably first (a crash never leaves a flag over a
+    half-swapped set), the old set moved aside, the new one renamed into place, the flag written
+    atomically (tmp, fsync, rename, directory fsync) — the commit point."""
     rd, flag = _restore_dir(), _restore_flag()
     with _restore_lock():
         td = _private_tmpdir()
         trash = None
         try:
-            flat = _gunzip_bounded(raw)           # plafon anti bombă de compresie (vezi _gunzip_bounded)
-            with tarfile.open(fileobj=io.BytesIO(flat), mode="r:") as tar:
-                tar.extractall(td, filter="data")  # filtru data = anti path-traversal/symlink
+            arc, secret, users_since = _extract_legacy_strict(raw, td)
+            _write_new(os.path.join(td, "secret"), secret)
+            del secret
+            arc.mem.clear()
+            info = {"has_secret": True, "users_since": users_since,
+                    "has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen)}
             files, dirs = _tree(td)
+            for rel in files:
+                if not _allowed(rel, False, "legacy"):
+                    raise ValueError("unexpected file in the restore staging — refused: %s" % rel[:80])
+            for rel in dirs:
+                if rel not in _TX_DIRS:
+                    raise ValueError("unexpected directory in the restore staging — refused")
+            # RC-M1: perechea publicată, exact cum stă în set (nu cum era în memorie)
+            pub = _read_small(os.path.join(td, "secret"), kr.KEY_LEN + 1)
+            if len(pub) != kr.KEY_LEN:
+                raise ValueError("the vault key in the restore staging is malformed — refused")
+            _check_db(os.path.join(td, "webterm.db"))
+            prove_legacy_secret(td, pub)
+            del pub
             for rel in files:
                 _fsync_path(files[rel])
             for rel in sorted(dirs, key=lambda r: -r.count("/")):
@@ -1146,6 +1154,7 @@ class _Archive:
         self.dirs: set = set()
         self.mem: dict = {}
         self._cur = None
+        self._folded: set = set()
 
     def entries(self):
         for e in self._tar:
@@ -1156,6 +1165,14 @@ class _Archive:
             name = _safe_name(e.name)
             if name in self.seen or name in self.dirs or name in self.mem:
                 raise wts.SnapshotError("duplicate-member", name)
+            # RC-M1: _safe_name refuză deja orice nume necanonic (`./`, `//`, `..`, `/` în faţă), deci
+            # două nume diferite nu pot ajunge la aceeaşi cale; rămâne aliasul doar de majuscule (pe un
+            # filesystem insensibil la majuscule ar fi acelaşi fişier). Numele legitime nu se ciocnesc
+            # (sid-uri hex mici, nume fixe), deci refuzul nu atinge arhivele reale.
+            folded = name.casefold()
+            if folded in self._folded:
+                raise wts.SnapshotError("duplicate-member", "case alias: %s" % name[:80])
+            self._folded.add(folded)
             if not _allowed(name, e.is_dir, self._profile):
                 raise wts.SnapshotError("unexpected-member", name)
             if e.is_dir:
@@ -2068,17 +2085,25 @@ def _missing_data_note(info: dict) -> dict:
     return info
 
 
-def _extract_legacy_strict(raw: bytes, td: str) -> tuple:
+def _extract_legacy_strict(raw: bytes, td: str, keep_files: bool = True, require_secret: bool = True) -> tuple:
     """R-H2: a pre-3.8 archive through the gateway's strict extractor (M3) into `td`, then every
     check a legacy import makes: webterm.db present and an EverShell database, the signing pair
     whole, a 32-byte `secret` (memory only, never written) that decrypts at least one encrypted
     value of exactly this database (prove_legacy_secret). The same function for `hostops verify`
-    and for the staging, so what was verified is what is staged. → (archive, secret, users_since)."""
+    and for the staging, so what was verified is what is staged. → (archive, secret, users_since).
+    RC-M1: also `_inspect` (every 3.7 verify, legacy volume included): `keep_files=False` reads and
+    hashes every member exactly the same way but writes only webterm.db (the proofs need it);
+    `require_secret=False` reports a missing key as `secret is None` instead of refusing."""
     gz = wts.BoundedGunzip(io.BytesIO(raw), RESTORE_MAX_UNCOMPRESSED)
     arc = _Archive(gz, "legacy", mem_only=("secret",), mem_also=_SIGNING)
     try:
         for name, is_dir, _size in arc.entries():
             path = os.path.join(td, name)
+            if not keep_files and name != "webterm.db":
+                if not is_dir:
+                    for _b in arc.data():
+                        pass
+                continue
             if is_dir:
                 os.makedirs(path, mode=0o700, exist_ok=True)
                 continue
@@ -2095,6 +2120,8 @@ def _extract_legacy_strict(raw: bytes, td: str) -> tuple:
         raise ValueError("backup without webterm.db")
     _check_signing_pair(arc.mem.get(_SIGNING[0]), arc.mem.get(_SIGNING[1]))
     secret = arc.mem.get("secret")
+    if secret is None and not require_secret:
+        return arc, None, _check_db(os.path.join(td, "webterm.db"))
     if secret is None or len(secret) != kr.KEY_LEN:
         raise ValueError("backup without the vault key — a restore would leave the credentials "
                          "undecryptable; use a complete WebTerm backup")
@@ -2144,6 +2171,14 @@ def _stage_legacy_import(raw: bytes, keys=None, progress=None) -> dict:
             staged = _manifest_for_host(new, hk)
             del secret, new
             arc.mem.clear()
+            # RC-M1: perechea EXACTĂ care se publică: FK_legacy citit din keys.wtk-ul staged (redeschis
+            # cu MK-ul gazdei) trebuie să deschidă webterm.db-ul din set, chiar înainte de publicare
+            fk = _open_ring(staged, hk.mk, "staged keys.wtk").fk_legacy
+            if fk is None:
+                raise ValueError("the staged keys.wtk lost the imported vault key — refused")
+            _check_db(os.path.join(td, "webterm.db"))
+            prove_legacy_secret(td, fk)
+            del fk
             _write_new(os.path.join(td, KEYS_NAME), staged)
             _stage_publish(td, staged, hk.mk, progress)
         except BaseException:

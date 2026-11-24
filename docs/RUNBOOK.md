@@ -56,10 +56,17 @@ image, or go back the documented way: restore the backup taken before the migrat
 volume (docs/INSTALL.md, *Going back to 3.7*). The volume checked is the one compose will mount at
 `/data`; if you renamed or remapped it, or `WEBTERM_VOLUME` names another one, the scripts refuse
 until the old container and the compose file agree (`docker compose -f docker-compose.prod.yml rm -sf app`, or restore the
-mapping). An image built locally without a version label is refused on a migrated volume unless
+mapping). A `volume.subpath`, `driver_opts` with `device` / `o: bind`, non-default bind options,
+`consistency` or a read-only `/data` are refused for a pre-3.8 image (the check only models a whole
+named volume or a plain bind), and so is a bind mount when Docker is remote (`DOCKER_HOST`, a
+remote context): run the scripts on the Docker host. If the image changes between the check and
+the start (a pull re-pointed the tag) or compose would start a different image, nothing starts:
+run it again. An image built locally without a version label is refused on a migrated volume unless
 you declare it for that run: `sudo WEBTERM_IMAGE_ERA=3.8 ./deploy.sh <image>`. Only one of
 `deploy.sh`, `rollback.sh`, `upgrade.sh`, `backup.sh`, `restore.sh` runs at a time (`.deploy.lock`);
-a second one says *another deploy … is running* — wait and run it again.
+a second one says *another deploy … is running* — wait and run it again. That lock lives in the
+install directory: run every lifecycle script from the one kit that manages the volume
+(`/opt/webterm`), never from a second copy, and don't `docker compose up` the app by hand meanwhile.
 
 **What the pin is.** `upgrade.sh` resolves the tag you asked for to the image's **digest**
 once, right after the pull, and from then on uses only that:

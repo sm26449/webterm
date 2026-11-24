@@ -30,6 +30,10 @@ def _seed_db(email="a@b.c"):
     config.ensure_dirs()
     con = sqlite3.connect(str(config.DB_PATH))
     con.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT, created REAL)")
+    # RC-M1: verificarea 3.7 trece prin extractorul strict, care cere schema minimă EverShell
+    for t in ("hosts", "sessions"):
+        con.execute("CREATE TABLE IF NOT EXISTS %s(id INTEGER PRIMARY KEY)" % t)
+    con.execute("CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT)")
     con.execute("DELETE FROM users")
     con.execute("INSERT INTO users(email, created) VALUES(?, 1000)", (email,))
     con.commit()

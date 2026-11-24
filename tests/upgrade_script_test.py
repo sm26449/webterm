@@ -43,14 +43,15 @@ case "$*" in
   # R-H1: planul compose (JSON) + cititorul lui (rulat cu python-ul gazdei), montarea containerului vechi
   *"config --format json"*)
     if grep -q REMAP docker-compose.prod.yml 2>/dev/null; then
-      printf '%s' '{"services":{"app":{"volumes":[{"type":"volume","source":"b","target":"/data"}]}},"volumes":{"b":{"name":"webterm_b"}}}'; exit 0; fi
-    printf '%s' '{"services":{"app":{"volumes":[{"type":"volume","source":"webterm-data","target":"/data"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0 ;;
+      printf '%s' '{"services":{"app":{"image":"x","volumes":[{"type":"volume","source":"b","target":"/data"}]}},"volumes":{"b":{"name":"webterm_b"}}}'; exit 0; fi
+    printf '%s' '{"services":{"app":{"image":"x","volumes":[{"type":"volume","source":"webterm-data","target":"/data"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0 ;;
   *wt-compose-plan*) eval "prog=\${$#}"; exec python3 -I -c "$prog" ;;
   *'"/data"'*) printf 'volume\twebterm_webterm-data\n'; exit 0 ;;
   *"--entrypoint ls"*) printf '%b' "${VOL_LS:-}"; exit 0 ;;
 esac
 case "$1" in
   login) exit 0 ;;
+  context) echo "unix:///var/run/docker.sock"; exit 0 ;;
   pull)  exit ${PULL_FAILS:-0} ;;
   ps)    case "$*" in *Names*) echo "webterm-app-1" ;; *) echo "ghcr.io/x/webterm:$WANT_TAG" ;; esac; exit 0 ;;
   # `docker inspect` e chemat de DOUĂ ori cu formate diferite: starea de sănătate şi imaginea
@@ -229,7 +230,7 @@ def pre38_checks(tmp):
     r, calls = run(d, ["-y"], IMG_LABEL="v3.7.1", VOL_LS="webterm.db\nsecret\n")
     out = r.stdout + r.stderr
     check("R-H1: trusa schimbă montarea /data → refuz înainte de deploy.sh",
-          r.returncode != 0 and "deploy.sh" not in calls and "data mount changed" in out, out[-500:])
+          r.returncode != 0 and "deploy.sh" not in calls and "data mount or the image changed" in out, out[-500:])
     d = sandbox(tempfile.mkdtemp(dir=tmp))
     import fcntl
     fd = os.open(str(d / ".deploy.lock"), os.O_RDWR | os.O_CREAT, 0o600)

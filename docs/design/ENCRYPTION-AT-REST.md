@@ -938,12 +938,25 @@ tested in isolation; these are not implemented and each needs its own change and
    (`db._schema_of`) holds, per table, the columns with declared type, NOT NULL and primary-key
    position (order-free), every index (explicit: name, uniqueness, partial flag, columns,
    normalized DDL; implicit UNIQUE / PK: origin, uniqueness, columns) and every foreign key, plus
-   all triggers and views with their normalized DDL; it is taken on a short private connection,
-   and the kept connection must see the same `schema_version` cookie. It proves the constraints
-   the admin statements rely on (a UNIQUE, a cascade) are there and that nothing extra reacts to
-   writes; it does not validate the rows, and a process that ignores `.maint.lock` is not
-   excluded. Checked against every historical `db.py` in git (48 versions): each one, upgraded
-   through the current SCHEMA + MIGRATIONS, yields the fresh fingerprint. Coordination uses a
+   all triggers and views with their normalized DDL. Second recheck RC-M2: also each column's
+   DEFAULT (as written), COLLATE and CHECK clauses and the table-level CHECKs and options (WITHOUT
+   ROWID, STRICT), read from the CREATE TABLE text (ALTER TABLE ADD COLUMN appends there), and
+   every index through `index_xinfo` (key and auxiliary columns, sort order, collation — two
+   implicit UNIQUEs that differ only in collation now differ); DDL is compared by tokens: string
+   literals and quoted names exactly, only spacing, comments and keyword case normalised. The
+   fingerprint is taken on the connection the command then uses, inside one read transaction
+   (BEGIN … COMMIT), so no other file can be swapped in between two opens; the transaction ends
+   before the command runs (`passwd` prompts with the connection open; a held lock or snapshot
+   would block or fail the gateway's writes), and the schema stays put for the rest of the command
+   because of `.maint.lock` (shared; the boot's schema step takes it exclusively). It proves the
+   constraints the admin statements rely on (a UNIQUE, a cascade) are there and that nothing extra
+   reacts to writes. Limits: it does not validate the rows, does not compare what a collation
+   sequence or a CHECK expression means beyond its text, ignores generated / hidden columns, and a
+   process that ignores `.maint.lock` is not excluded. Checked once against every historical
+   `db.py` in git (48 versions); `tests/schema_history_test.py` keeps three of them (v2.0.0,
+   v3.4.0, v3.7.1, from `tests/fixtures/db-schema/`, one with a different column order) as an
+   automated regression: each, upgraded through the current `db.connect()`, yields the fresh
+   fingerprint. Coordination uses a
    second lock file, `DATA_DIR/.maint.lock` (opened read-only, never written, never removed;
    recheck R-M2: `0600`, owned by the service user — a root `docker exec` that creates it chowns it
    to DATA_DIR's owner before using it and refuses if that fails; a file we own with any group /
@@ -964,7 +977,18 @@ tested in isolation; these are not implemented and each needs its own change and
    existing app container with another `/data` mount, any other mount kind, a second mount under
    `/data`, or an unreadable config are refused; the same plan is re-checked right before `up`
    (rollback.sh restores `.env` / `.prev-image` on a mismatch; upgrade.sh re-checks after syncing
-   the host kit). An image without a version label is `unknown` (refused on a migrated volume)
+   the host kit). Second recheck RC-H1: only a whole named volume or a plain bind is modelled, so
+   `volume.subpath`, a volume definition whose `driver_opts` set `device` or `o=bind`/`rbind` (if
+   the volume does not exist yet, compose would create it over a directory nobody listed), bind
+   propagation other than `rprivate`, an SELinux relabel option, `consistency`, a read-only
+   `/data` and any other unknown key of the mount or of the volume definition are refused (a 3.8
+   image is not affected); a bind plan is refused unless the current Docker context (DOCKER_HOST
+   included) is a local `unix://` socket, since the directory is listed on this host. The label,
+   the plan reader and the volume listing run on the image's ID (`docker image inspect
+   {{.Id}}`); the re-check right before `up` requires the same ID and that `services.app.image`
+   from the same JSON plan resolves to it (upgrade.sh reads the plan with `WEBTERM_IMAGE` set to
+   the target, as deploy.sh will); deploy.sh runs the re-check too. An image missing locally is
+   refused, not pulled by the check. The lock is per install directory: one kit per volume. An image without a version label is `unknown` (refused on a migrated volume)
    unless the operator sets `WEBTERM_IMAGE_ERA=3.8` for that run; no file-existence heuristic.
    Recheck R-M1: `python3 -m app.hostops stage-restore` exits 0 only when the flag is published and
    its directory fsynced (`backup.StageProgress.committed`), 3 when it refused before the first
@@ -978,8 +1002,21 @@ tested in isolation; these are not implemented and each needs its own change and
    `hostops verify`: the legacy import onto a protected volume through the strict extractor
    (`backup.verify_legacy_import` = the staging's own checks, in a private directory), a 3.7
    restore onto a pre-3.8 volume after the 3.7 checks. `restore.sh` has no separate scanner any
-   more. Recheck R-L1: `backup.sh` publishes a protected archive from a unique `mktemp` file,
-   `sync`ed, `ln`ed to its final name (refused if the name exists), then the directory `sync`ed.
+   more. Second recheck RC-M1: one legacy pipeline. `backup.restore_route` decides by the INNER
+   format (after the WTBK1 layer) and the target's policy — `wts` (protected only, never with
+   `--legacy-import`), `legacy-import` (protected + the flag), `legacy-volume` (pre-3.8 volume,
+   without the flag) — and is called by `hostops verify`, `hostops stage-restore` and
+   `stage_restore` alike, so a WTBK1 holding a 3.7 tar gets the same verdict in verify (before the
+   app is stopped) as in staging. Every 3.7 archive, on either target and in verify, the API
+   verify and `_inspect` alike, goes through `_extract_legacy_strict` (verify writes only the
+   database; the other members are read and hashed the same way); the strict reader refuses
+   non-canonical names (`./x`, `a//b`, `..`, a leading `/`), duplicates and names that differ
+   only in case. The staging proves the exact published pair again right before the first change:
+   on a legacy volume the staged `webterm.db` with the `secret` read back from the set, for the
+   import the staged `webterm.db` with `FK_legacy` read back from the staged keys.wtk. Recheck
+   R-L1: `backup.sh` publishes a protected archive from a unique `mktemp` file, `sync`ed, `ln -T`ed
+   to its exact final name (RC-L1: a directory that appeared there is refused, nothing is linked
+   inside it), then the directory `sync`ed.
 9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but the two lock files, twice);
    legacy + key (migrated, proven, old values decrypt, new values `FK:`, forward tokens still
    valid); foreign `secret` refused unchanged; no ciphertext eligible; WAL pending refused; mixed

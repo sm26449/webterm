@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sqlite3
 import time
 import urllib.parse
@@ -815,98 +816,209 @@ def _q(name) -> str:
     return '"%s"' % str(name).replace('"', '""')
 
 
-def _norm_sql(sql) -> str:
-    # textul DDL din sqlite_master, fără diferenţe de spaţii/majuscule/IF NOT EXISTS
-    t = " ".join(str(sql or "").split()).lower()
-    return t.replace(" if not exists ", " ")
+# RC-M2: tokenizatorul SQL al amprentei. Literalii ('…', x'…') şi identificatorii între ghilimele
+# rămân EXACT cum sunt; în afara lor se normalizează doar spaţiile (tokenii se reunesc cu un spaţiu),
+# comentariile (scoase) şi majusculele cuvintelor (cuvintele-cheie şi identificatorii simpli din
+# SQLite nu ţin cont de majuscule). Vechiul `" ".join(sql.split()).lower()` modifica şi literalii.
+_SQL_TOKEN = re.compile(r"""
+    (?P<ws>\s+)
+  | (?P<lc>--[^\n]*)
+  | (?P<bc>/\*.*?(?:\*/|\Z))
+  | (?P<blob>[xX]'[0-9A-Fa-f]*')
+  | (?P<str>'(?:''|[^'])*'?)
+  | (?P<qid>"(?:""|[^"])*"?|`(?:``|[^`])*`?|\[[^\]]*\]?)
+  | (?P<num>\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)
+  | (?P<word>[A-Za-z_][A-Za-z0-9_$]*)
+  | (?P<op>\|\||<<|>>|<=|>=|==|!=|<>|->>|->|.)
+""", re.S | re.X)
 
 
-def _schema_of(con) -> dict:
-    """R-M3: what the admin DB-only commands rely on, per table — columns with declared type,
-    NOT NULL and primary-key position (order-free: a migrated database has the added columns
-    last); every index (explicit: name, uniqueness, partial flag, column list and its normalized
-    DDL; implicit UNIQUE / PRIMARY KEY indexes: origin, uniqueness, columns); every foreign key
-    (target table, columns, ON UPDATE / ON DELETE, MATCH); plus every trigger and view with its
-    normalized DDL. It proves the database has the constraints this version's statements assume
-    (a revocation that relies on a UNIQUE or a cascade behaves as written) and nothing extra that
-    reacts to writes (a trigger). It does not prove the data is valid, nor that a process not
-    taking `.maint.lock` leaves the file alone."""
-    out = {}
-    tables = sorted(r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
-    idx_sql = {r[0]: r[1] for r in con.execute("SELECT name, sql FROM sqlite_master WHERE type='index'")}
-    for t in tables:
-        qt = _q(t)
-        cols = tuple(sorted((r[1], " ".join(str(r[2] or "").upper().split()), int(r[3]), int(r[5]))
-                            for r in con.execute("PRAGMA table_info(%s)" % qt)))
-        idx = []
-        for r in con.execute("PRAGMA index_list(%s)" % qt).fetchall():
-            name, unique, origin, partial = r[1], int(r[2]), r[3], int(r[4])
-            icols = tuple(x[2] for x in con.execute("PRAGMA index_info(%s)" % _q(name)))
-            if origin == "c":
-                idx.append(("c", name, unique, partial, icols, _norm_sql(idx_sql.get(name))))
-            else:
-                idx.append((origin, "", unique, partial, icols, ""))
-        fks = tuple(sorted((r[2], r[1], r[3], r[4], r[5], r[6], r[7])
-                           for r in con.execute("PRAGMA foreign_key_list(%s)" % qt)))
-        out[t] = (cols, tuple(sorted(idx)), fks)
-    out[" triggers"] = tuple(sorted((r[0], r[1], _norm_sql(r[2])) for r in con.execute(
-        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger'")))
-    out[" views"] = tuple(sorted((r[0], _norm_sql(r[1])) for r in con.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type='view'")))
+def _sql_tokens(sql) -> list:
+    """[(kind, text)] without whitespace and comments; words upper-cased, everything else verbatim."""
+    out = []
+    for m in _SQL_TOKEN.finditer(str(sql or "")):
+        kind = m.lastgroup
+        if kind in ("ws", "lc", "bc"):
+            continue
+        t = m.group()
+        out.append((kind, t.upper() if kind == "word" else t))
     return out
 
 
-def _live_schema(uri: str):
-    """The fingerprint of the file behind `uri` and its schema cookie, on a short private
-    connection (closed on every path)."""
-    con = sqlite3.connect(uri, uri=True, timeout=5)
+def _norm_sql(sql) -> str:
+    """DDL text compared by tokens: string literals and quoted names exact; spacing, comments and
+    keyword case normalised; `IF NOT EXISTS` after CREATE dropped (sqlite_master may keep it)."""
+    toks = [t for _k, t in _sql_tokens(sql)]
+    if toks[:1] == ["CREATE"]:
+        for i in range(1, min(len(toks), 6)):
+            if toks[i:i + 3] == ["IF", "NOT", "EXISTS"]:
+                del toks[i:i + 3]
+                break
+    return " ".join(toks)
+
+
+def _unquote(kind, t) -> str:
+    if kind == "qid":
+        q = t[0]
+        body = t[1:-1] if len(t) > 1 else ""
+        return body if q == "[" else body.replace(q + q, q)
+    return t
+
+
+def _table_ddl(sql):
+    """RC-M2: what PRAGMA table_info does not say, read from the CREATE TABLE text (ALTER TABLE ADD
+    COLUMN appends its column definition there, so migrated columns are included): per column
+    (case-folded name) its COLLATE and CHECK clauses; the table-level CHECK constraints; the
+    options after the column list (WITHOUT ROWID, STRICT). → (cols, checks, options)."""
+    toks = _sql_tokens(sql)
     try:
-        return _schema_of(con), con.execute("PRAGMA schema_version").fetchone()[0]
-    finally:
-        con.close()
+        start = next(i for i, (k, t) in enumerate(toks) if k == "op" and t == "(")
+    except StopIteration:
+        return {}, (), ""
+    parts, cur, depth, end = [], [], 0, len(toks)
+    for j in range(start + 1, len(toks)):
+        k, t = toks[j]
+        if k == "op" and t == "(":
+            depth += 1
+        elif k == "op" and t == ")":
+            if depth == 0:
+                end = j
+                break
+            depth -= 1
+        elif k == "op" and t == "," and depth == 0:
+            parts.append(cur)
+            cur = []
+            continue
+        cur.append((k, t))
+    parts.append(cur)
+
+    def group(seq, i):
+        # grupul parantezat care începe la seq[i] == "(" → (text normalizat, indicele de după el)
+        d, j = 0, i
+        while j < len(seq):
+            if seq[j] == ("op", "("):
+                d += 1
+            elif seq[j] == ("op", ")"):
+                d -= 1
+                if d == 0:
+                    break
+            j += 1
+        return " ".join(t for _k, t in seq[i:j + 1]), j + 1
+
+    cols, checks = {}, []
+    for part in parts:
+        if not part:
+            continue
+        head = part[0][1] if part[0][0] == "word" else ""
+        if head in ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"):
+            if any(t == ("word", "CHECK") for t in part):
+                checks.append(" ".join(t for _k, t in part))
+            continue
+        name = _unquote(*part[0]).casefold()
+        collate, cchecks, i = "", [], 1
+        while i < len(part):
+            k, t = part[i]
+            if (k, t) == ("word", "COLLATE") and i + 1 < len(part):
+                collate = _unquote(*part[i + 1]).upper()
+                i += 2
+                continue
+            if (k, t) == ("word", "CHECK") and i + 1 < len(part) and part[i + 1] == ("op", "("):
+                txt, i = group(part, i + 1)
+                cchecks.append(txt)
+                continue
+            if (k, t) == ("op", "("):
+                _txt, i = group(part, i)        # tipul (VARCHAR(10)), DEFAULT (…), AS (…)
+                continue
+            i += 1
+        cols[name] = (collate, tuple(sorted(cchecks)))
+    return cols, tuple(sorted(checks)), " ".join(t for _k, t in toks[end + 1:])
+
+
+def _schema_of(con) -> dict:
+    """R-M3 / RC-M2: what the admin DB-only commands rely on, per table — columns (order-free: a
+    migrated database has the added columns last) with declared type, NOT NULL, primary-key
+    position, DEFAULT (as written, normalised by tokens), COLLATE and CHECK clauses; table-level
+    CHECK constraints and table options (WITHOUT ROWID, STRICT); every index from index_xinfo
+    (key AND auxiliary columns, sort order, collation; explicit ones also: name, uniqueness,
+    partial flag and normalised DDL; implicit UNIQUE / PRIMARY KEY ones: origin, uniqueness);
+    every foreign key (target table, columns, ON UPDATE / ON DELETE, MATCH); every trigger and
+    view with its normalised DDL. It proves the database has the constraints this version's
+    statements assume (a revocation that relies on a UNIQUE or a cascade behaves as written) and
+    nothing extra that reacts to writes (a trigger). Limits (ENCRYPTION-AT-REST.md §12.9): it does
+    not prove the data is valid, does not compare the implementation of a collation sequence or a
+    CHECK's meaning beyond its text, and does not stop a process that ignores `.maint.lock`."""
+    out = {}
+    master = con.execute("SELECT type, name, sql FROM sqlite_master").fetchall()
+    tables = sorted(r[1] for r in master if r[0] == "table" and not str(r[1]).startswith("sqlite_"))
+    idx_sql = {r[1]: r[2] for r in master if r[0] == "index"}
+    tbl_sql = {r[1]: r[2] for r in master if r[0] == "table"}
+    for t in tables:
+        qt = _q(t)
+        ddl_cols, tchecks, topts = _table_ddl(tbl_sql.get(t))
+        cols = []
+        for r in con.execute("PRAGMA table_info(%s)" % qt).fetchall():
+            collate, cchecks = ddl_cols.get(str(r[1]).casefold(), ("", ()))
+            cols.append((r[1], " ".join(str(r[2] or "").upper().split()), int(r[3]), int(r[5]),
+                         "" if r[4] is None else _norm_sql(r[4]), collate, cchecks))
+        idx = []
+        for r in con.execute("PRAGMA index_list(%s)" % qt).fetchall():
+            name, unique, origin, partial = r[1], int(r[2]), r[3], int(r[4])
+            xcols = tuple((int(x[0]), x[2] if x[2] is not None else ("<rowid>" if x[1] == -1 else "<expr>"),
+                           int(x[3]), str(x[4] or "").upper(), int(x[5]))
+                          for x in con.execute("PRAGMA index_xinfo(%s)" % _q(name)).fetchall())
+            if origin == "c":
+                idx.append(("c", name, unique, partial, xcols, _norm_sql(idx_sql.get(name))))
+            else:
+                idx.append((origin, "", unique, partial, xcols, ""))
+        fks = tuple(sorted((r[2], r[1], r[3], r[4], r[5], r[6], r[7])
+                           for r in con.execute("PRAGMA foreign_key_list(%s)" % qt).fetchall()))
+        out[t] = (tuple(sorted(cols)), tuple(sorted(idx)), fks, tchecks, topts)
+    out[" triggers"] = tuple(sorted((r[1], _norm_sql(r[2])) for r in master if r[0] == "trigger"))
+    out[" views"] = tuple(sorted((r[1], _norm_sql(r[2])) for r in master if r[0] == "view"))
+    return out
 
 
 async def connect_maintenance() -> None:
     """M3: the connection of the admin DB-only commands (`python3 -m app.admin`). Unlike
     connect(): never creates the file (mode=rw: a missing database is a refusal), runs no
     SCHEMA / migration / seeding / clean-up, and switches no journal mode (the gateway's WAL
-    setting stays as the file has it). R-M3: the live schema fingerprint (_schema_of: columns
-    with types / NOT NULL / PK, indexes incl. UNIQUE, foreign keys, triggers, views) must equal
-    the code's exactly (expected_schema), and the connection that is kept must see the same
-    schema cookie the fingerprint was taken at; otherwise MaintenanceRefused and no connection
+    setting stays as the file has it). R-M3 / RC-M2: the schema fingerprint (_schema_of) is taken
+    on THIS connection — the one the command then uses, so no other file can be swapped in
+    between two opens — inside one read transaction (BEGIN … COMMIT: every pragma of the
+    fingerprint sees the same schema). The transaction ends before the command runs: `passwd`
+    prompts with the connection open, and a held lock or snapshot would block or fail the running
+    gateway's writes. For the rest of the command the schema stays put because the caller holds
+    `.maint.lock` (shared), which the gateway's schema / migration phase takes exclusively. It must
+    equal the code's exactly (expected_schema); otherwise MaintenanceRefused and no connection
     stays open — start the gateway once (it migrates), or use the matching image."""
     global _conn
     uri = "file:%s?mode=rw" % urllib.parse.quote(str(config.DB_PATH), safe="/")
-    try:
-        live, cookie = _live_schema(uri)
-    except Exception as e:
-        raise MaintenanceRefused("the database %s cannot be opened or read (%s): it is never created by "
-                                 "an admin command" % (config.DB_PATH, e)) from None
-    want = expected_schema()
-    if live != want:
-        diff = sorted(set(want) ^ set(live)) or sorted(t for t in want if want[t] != live.get(t))
-        raise MaintenanceRefused("the database schema differs from this version's (%s): start the "
-                                 "gateway of this version once (it migrates the schema), or run the "
-                                 "command from the image that matches the database"
-                                 % ", ".join(x.strip() for x in diff[:5]))
     try:
         conn = await aiosqlite.connect(uri, uri=True)
     except Exception as e:
         raise MaintenanceRefused("the database %s cannot be opened (%s): it is never created by an "
                                  "admin command" % (config.DB_PATH, e)) from None
     try:
+        try:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN")
+            # pe firul conexiunii aiosqlite: aceeaşi conexiune sqlite3, aceeaşi tranzacţie
+            live = await conn._execute(_schema_of, conn._conn)
+        except Exception as e:
+            raise MaintenanceRefused("the database %s cannot be opened or read (%s): it is never created "
+                                     "by an admin command" % (config.DB_PATH, e)) from None
+        want = expected_schema()
+        if live != want:
+            diff = sorted(set(want) ^ set(live)) or sorted(t for t in want if want[t] != live.get(t))
+            raise MaintenanceRefused("the database schema differs from this version's (%s): start the "
+                                     "gateway of this version once (it migrates the schema), or run the "
+                                     "command from the image that matches the database"
+                                     % ", ".join(x.strip() for x in diff[:5]))
+        await conn.commit()
         conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA busy_timeout=5000")
-        async with conn.execute("PRAGMA schema_version") as cur:
-            now_cookie = (await cur.fetchone())[0]
-    except Exception as e:
+    except BaseException:
         await conn.close()
-        raise MaintenanceRefused("the database %s cannot be read (%s)" % (config.DB_PATH, e)) from None
-    if now_cookie != cookie:
-        await conn.close()
-        raise MaintenanceRefused("the database schema changed while it was being checked — run the "
-                                 "command again")
+        raise
     _conn = conn
 
 

@@ -27,9 +27,11 @@ fsynced; 3 refused before any change — the data volume is exactly as it was (t
 restart the app); 4 outcome uncertain — something failed after the volume began to change (a
 failed fsync after a rename, an unexpected I/O error): the caller must NOT restart the app on its
 own; 1 anything else (treated like 4 by restore.sh). For verify / backup: 0 done, 3 refused.
-A legacy (pre-3.8) archive is checked by the same code that stages it: the strict extractor and
-the FK_legacy proof on the archive's own database for a legacy import (R-H2), the 3.7 checks plus
-that proof on a legacy volume. Messages never carry key material.
+A legacy (pre-3.8) archive is checked by the same code that stages it (RC-M1): one route decided
+by the INNER format (a WTBK1 holding a 3.7 tar is a 3.7 archive) and the target's policy
+(backup.restore_route), then the same strict extractor (no duplicate, non-canonical or case-alias
+names) and the key proof on the archive's own database for both a legacy import (R-H2) and a
+legacy volume; the staging proves the exact published pair again. Messages never carry key material.
 INV-14 (docs/design/INVARIANTS.md): the key decides before anything is written.
 """
 import argparse
@@ -232,31 +234,47 @@ def cmd_backup(args):
 # ── verify ───────────────────────────────────────────────────────────────────
 
 
-def _check(raw, kind, inv, hk, legacy_import):
-    """The gateway's restore check (backup.verify_restorable) against a private scratch data
-    directory that mirrors the target volume's kind (its keys.wtk, nothing else)."""
+def _route(raw, kind, inv, legacy_import):
+    """RC-M1: the archive's route, by its INNER format (a WTBK1 is decrypted first: one holding a
+    3.7 tar is a 3.7 archive) and the target volume's policy, through backup.restore_route — the
+    one decision stage_restore also makes, so verify (before the app is stopped) and stage reach
+    the same verdict. → (route, inner bytes, blob, passphrase); blob/passphrase are None for a
+    plain 3.7 tar.gz (stage-restore wraps it)."""
     if kind == "wtbk":
         blob, pw = raw, _passphrase()
+        try:
+            inner = backup.decrypt(raw, pw)
+        except ValueError as e:
+            raise Refused("the archive cannot be opened: %s" % _refusal(e)) from None
     else:
-        if inv.kind == "protected" and not legacy_import:
-            raise Refused("a pre-3.8 archive holds the raw vault key; on a protected volume it needs "
-                          "the explicit legacy import (--legacy-import) — refused")
-        if inv.kind == "legacy" and legacy_import:
-            raise Refused("--legacy-import is for protected volumes; this one is pre-3.8 — refused")
-        if inv.kind == "protected":
-            # R-H2: exact ce face staging-ul (extractorul strict + proba FK_legacy pe DB-ul arhivei)
-            try:
-                return backup.verify_legacy_import(raw, keys=hk)
-            except Exception as e:              # noqa: BLE001 — orice eroare a cititorului = refuz
-                raise Refused("the archive is refused: %s" % _refusal(e)) from None
-        blob, pw = _wrap_legacy(raw)
+        inner, blob, pw = raw, None, None
+    protected = inv.kind == "protected"
     try:
-        info = backup.verify_restorable(blob, pw, keys=hk)
+        route = backup.restore_route(inner, protected, legacy_import)
     except ValueError as e:
+        legacy_inner = inner[:2] == GZIP_MAGIC
+        if legacy_inner and protected and not legacy_import:
+            raise Refused("a pre-3.8 archive holds the raw vault key; on a protected volume it needs "
+                          "the explicit legacy import (--legacy-import) — refused") from None
+        if legacy_inner and not protected and legacy_import:
+            raise Refused("--legacy-import is for protected volumes; this one is pre-3.8 — refused") from None
         raise Refused("the archive is refused: %s" % _refusal(e)) from None
+    return route, inner, blob, pw
+
+
+def _check(raw, kind, inv, hk, legacy_import):
+    """The gateway's restore check against a private scratch data directory that mirrors the
+    target volume's kind (its keys.wtk, nothing else): per route, exactly the extraction and
+    proofs the staging makes (RC-M1)."""
+    route, inner, blob, pw = _route(raw, kind, inv, legacy_import)
+    try:
+        if route == "legacy-import":
+            return route, backup.verify_legacy_import(inner, keys=hk)
+        if route == "legacy-volume":
+            return route, backup.verify_legacy_volume(inner)
+        return route, backup.verify_restorable(blob, pw, keys=hk)
     except Exception as e:                      # noqa: BLE001 — orice eroare a cititorului = refuz
         raise Refused("the archive is refused: %s" % _refusal(e)) from None
-    return info
 
 
 def cmd_verify(args):
@@ -277,14 +295,13 @@ def cmd_verify(args):
             fd = os.open(os.path.join(scratch, keys.MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as f:
                 f.write(blob)
-        info = _check(raw, kind, inv, hk, args.legacy_import)
+        route, info = _check(raw, kind, inv, hk, args.legacy_import)
     finally:
         view.release()
         shutil.rmtree(scratch, ignore_errors=True)
     print("sha256: %s" % digest)
     print("volume: %s" % inv.kind)
-    print("archive: %s" % ("legacy-import" if kind == "legacy" and inv.kind == "protected"
-                           else info.get("format") or "legacy"))
+    print("archive: %s" % ("legacy-import" if route == "legacy-import" else info.get("format") or "legacy"))
     if hk is not None:
         print("master-key: %s (%s) opens this volume's keys.wtk" % (kr.key_id(hk.mk).hex(), resolved.source))
         print("volume-key: %d" % (resolved.source == "volume"))
@@ -322,20 +339,15 @@ def cmd_stage(args):
             # 3.7: un singur set fără jurnal; nu-l înlocuim pe jumătate peste unul deja flag-uit
             raise Refused("a restore is already staged on this volume: start the app once (it applies "
                           "it), then run this again")
-        if kind == "wtbk":
-            blob, pw = raw, _passphrase()
-            legacy_import = args.legacy_import
-        else:
-            if inv.kind == "protected" and not args.legacy_import:
-                raise Refused("a pre-3.8 archive holds the raw vault key; on a protected volume it needs "
-                              "the explicit legacy import (--legacy-import) — refused")
-            if inv.kind == "legacy" and args.legacy_import:
-                raise Refused("--legacy-import is for protected volumes; this one is pre-3.8 — refused")
+        # RC-M1: aceeaşi rută ca verify (format interior + politica ţintei), decisă înainte de orice
+        route, _inner, blob, pw = _route(raw, kind, inv, args.legacy_import)
+        del _inner
+        if blob is None:
             blob, pw = _wrap_legacy(raw)
-            legacy_import = inv.kind == "protected"
         progress = backup.StageProgress()
         try:
-            info = backup.stage_restore(blob, pw, keys=hk, legacy_import=legacy_import, progress=progress)
+            info = backup.stage_restore(blob, pw, keys=hk, legacy_import=route == "legacy-import",
+                                        progress=progress)
         except Exception as e:                  # noqa: BLE001
             # R-M1: rezultatul vine din ce a raportat staging-ul, nu dintr-o comparaţie de octeţi
             # a flagului: înainte de prima schimbare → refuz curat; după commit (flag publicat ŞI
@@ -354,8 +366,8 @@ def cmd_stage(args):
             os.close(maint)
         lock.release()
     print("sha256: %s" % digest)
-    print("staged: %s" % ("legacy-import" if kind == "legacy" and hk is not None else
-                          "protected" if hk is not None else "legacy"))
+    print("staged: %s" % ("legacy-import" if route == "legacy-import" else
+                          "protected" if route == "wts" else "legacy"))
     if info.get("live_transcripts_quarantined"):
         print("note: the archive comes from another installation; the live transcripts are quarantined")
     if info.get("live_signing_key_kept"):

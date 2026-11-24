@@ -344,10 +344,13 @@ case "$VOLKIND" in
       "REFUSING: the new archive did not pass the restore check — nothing was published."
     chmod 600 "$BK_TMP"
     # R-L1: publicare exclusivă şi durabilă — fsync pe fişier, link() spre numele final (refuzat
-    # dacă numele există: nimic nu se suprascrie), temporarul şters, apoi fsync pe director
+    # dacă numele există: nimic nu se suprascrie), temporarul şters, apoi fsync pe director.
+    # RC-L1: `-T` = destinaţia e EXACT numele final, niciodată „un director în care pun link-ul”: un
+    # director (sau un symlink spre unul) apărut acolo după verificarea de mai sus = refuz, nu o
+    # arhivă publicată înăuntrul lui cu succes raportat pentru altă cale
     sync -- "$BK_TMP" || bk_refuse "the archive could not be synced to disk" \
       "REFUSING: the new archive could not be flushed to disk (sync) — nothing was published."
-    ln -- "$BK_TMP" "$ARCHIVE" 2>/dev/null || bk_refuse "the archive could not be published" \
+    ln -T -- "$BK_TMP" "$ARCHIVE" 2>/dev/null || bk_refuse "the archive could not be published" \
       "REFUSING: could not publish $ARCHIVE (the name exists, or $OUT does not support hard links) —" \
       "          nothing was published."
     rm -f -- "$BK_TMP"

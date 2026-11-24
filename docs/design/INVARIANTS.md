@@ -331,8 +331,12 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   own `secret` must prove its own database before anything is touched; it is then applied under
   the old key and migrated in the same boot. The same proof, on the archive's own database, gates
   every restore of a pre-3.8 archive before anything is published: the explicit legacy import
-  onto a protected volume (the gateway's strict reader, identical in `verify` and in staging), and
-  a 3.7 restore onto a pre-3.8 volume.
+  onto a protected volume, and a 3.7 restore onto a pre-3.8 volume. Both go through one pipeline:
+  the route is decided by the archive's **inner** format (a `.wtbk` holding a 3.7 tar is a 3.7
+  archive) and the target's policy, the same way in `verify` and in staging (so the verdict comes
+  before the app is stopped); one strict reader refuses duplicate, non-canonical (`./`, `//`,
+  `..`, absolute) and case-only-colliding names; and the staging proves the exact pair it
+  publishes (the staged database with the staged key) again right before publishing.
 - Once a boot has started to change the volume (a 3.7 restore applied, a key file published), it
   keeps the data-directory lock until the process exits, on every error path, and reports the
   failure as `operation-incomplete`, never as a preflight refusal.
@@ -343,8 +347,10 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   the gateway holds that lock, as in 3.7: they never open, write or publish key material (Stefan's
   decision, 2026-11-24). They use a maintenance connection that never creates the database, runs
   no schema step and changes no journal mode (a schema whose fingerprint — columns with types,
-  NOT NULL and primary keys, indexes including UNIQUE ones, foreign keys, triggers, views — differs
-  from the code's is refused, and no connection stays open), and take `.maint.lock` shared (both
+  NOT NULL, primary keys, DEFAULT, COLLATE and CHECK clauses, table CHECKs and options, every index
+  with its key and auxiliary columns, sort order and collation, foreign keys, triggers, views —
+  differs from the code's is refused, and no connection stays open; the fingerprint is taken on
+  the connection the command then uses, inside one read transaction), and take `.maint.lock` shared (both
   lock files are `0600`, owned by the service user, so no other local user can hold them); the boot holds it exclusively through the preflight, a restore, a
   migration and the schema step, so an admin command is refused (not queued) during those. A new
   admin command that writes an encrypted value must open the keyring read-only or take the lock.
@@ -356,8 +362,13 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   the process does not hold is an error, never a retry with another key.
 - A pre-3.8 image is never started on a migrated volume: the host scripts check the `/data` mount
   compose will actually start (its effective volume name or bind directory), refuse a divergent
-  `WEBTERM_VOLUME`, a remapped mount, an unknown mount or an unreadable config, check the same
-  plan again right before starting, and run one lifecycle operation at a time (`.deploy.lock`). An
+  `WEBTERM_VOLUME`, a remapped mount, an unknown mount or an unreadable config, and any mount they
+  do not model (`volume.subpath`, a volume whose `driver_opts` change its device, non-default
+  bind propagation / SELinux options, `consistency`, a read-only `/data`); a bind mount is
+  checked only with a local Docker daemon (unix socket). Everything runs on the checked image's ID,
+  and right before starting the same plan is checked again and compose's `services.app.image`
+  must resolve to that same ID (a pull that re-points the tag in between = refusal). One lifecycle
+  operation runs at a time (`.deploy.lock`, per install directory: one kit per volume). An
   image without a version label is of an unknown version unless the operator declares it 3.8.
 - A host-side restore reports one of three outcomes: committed (the flag published and flushed),
   refused before any change, or uncertain; only the first two restart the app.
@@ -365,5 +376,5 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `StageProgress`; `hostops.py` `cmd_stage`; `db.py` `connect_maintenance`, `_schema_of`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
-**Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`, `host_backup_script`, `deploy_script`, `upgrade_script`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `verify_legacy_volume`, `restore_route`, `_extract_legacy_strict`, `StageProgress`; `hostops.py` `cmd_stage`, `_route`; `db.py` `connect_maintenance`, `_schema_of`, `_table_ddl`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`, `host_backup_script`, `deploy_script`, `upgrade_script`, `schema_history`.

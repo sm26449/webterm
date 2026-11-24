@@ -711,7 +711,14 @@ a pre-3.8 image on a migrated volume. The volume they check is the one compose w
 at `/data` (read from `docker compose config --format json`: a named volume with its project prefix,
 or a bind-mounted directory); they refuse when `WEBTERM_VOLUME` names another volume, when the
 existing app container mounts something else (a remapped volume), when the mount is of any other
-kind, or when the config cannot be read, and check the same plan again right before starting. An
+kind, or when the config cannot be read, and check the same plan again right before starting.
+Only a whole named volume or a plain bind mount at `/data` can be checked, so for a pre-3.8 image
+they also refuse `volume.subpath`, a volume whose `driver_opts` set `device` or `o: bind`,
+non-default bind propagation or SELinux options, `consistency` and a read-only `/data`; and a bind
+mount is checked only when Docker runs on this host (a remote context or `DOCKER_HOST` is
+refused). The image is checked by its ID: if a pull re-points the tag between the check and the
+start, or compose would start another image than the one checked, they refuse and ask you to run
+them again. An
 image without a version label counts as of an unknown version, which is refused on a migrated
 volume; a locally built 3.8 image can be declared for one run with `WEBTERM_IMAGE_ERA=3.8 ./deploy.sh
 …` (never put it in `.env`). The only way back is to restore the backup from step 2 — taken
@@ -784,9 +791,13 @@ host scripts hand the work to the gateway's own code, run in the app image
   whole run (`.deploy.lock` in the install directory, `flock`): a second one started meanwhile —
   a nightly backup during an upgrade, two deploys — is refused, not queued. A script started by
   another one (the backup inside `upgrade.sh`, the automatic rollback inside `deploy.sh`) shares
-  its lock.
+  its lock. The lock belongs to the install directory, not to the volume: manage each data volume
+  from **one kit only**, in its canonical directory (`/opt/webterm` for a standard install), and
+  never run a copy of the scripts from another directory, or `docker compose up` by hand, against
+  the same volume.
 - A host-script backup is published only once it is complete: written to a unique temporary file,
-  flushed, linked to its final name (never over an existing archive), and the directory flushed.
+  flushed, linked to exactly its final name (never over an existing archive, never into a
+  directory of that name), and the directory flushed.
 
 Pre-3.8 volumes are archived as before (`webterm-<date>.tar.gz[.enc]`), and their archives are
 staged through the same gateway code (with the key proof above, and the same atomic, flushed

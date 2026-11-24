@@ -1259,6 +1259,64 @@ def pr4_recheck_tests():
     check("R-M1: apply 3.7 al setului publicat", backup.apply_pending_restore() and db_email() == "legacy@rc")
 
 
+def pr4_second_recheck_tests():
+    """Al doilea recheck PR4 (e1dea74), RC-M1: o singură rută (formatul interior + politica ţintei)
+    pentru verify şi stage; perechea EXACTĂ publicată (DB-ul din set + cheia din set) re-dovedită
+    chiar înainte de publicare, pe volum legacy şi la importul legacy."""
+    import dataclasses
+    _n, _KL = volume("RC2L", protected=False, email="legacy@rc2")
+    good = backup.make_encrypted(PASS)
+    raw = backup.decrypt(good, PASS)
+    R = backup.restore_route
+    check("RC-M1: restore_route — tabelul complet (format interior × ţintă × opţiune)",
+          R(raw, False, False) == "legacy-volume" and R(raw, True, True) == "legacy-import"
+          and refused(lambda: R(raw, True, False)) and refused(lambda: R(raw, False, True))
+          and R(b"WTS1" + b"x" * 60, True, False) == "wts" and refused(lambda: R(b"WTS1" + b"x" * 60, False, False))
+          and refused(lambda: R(b"WTS1" + b"x" * 60, True, True)) and refused(lambda: R(b"nimic", False, False)))
+    # volum legacy: cheia scrisă în set diferă de cea verificată → re-proba perechii publicate refuză
+    orig_w = backup._write_new
+
+    def bad_write(path, data):
+        if os.path.basename(path) == "secret":
+            data = os.urandom(len(data))
+        return orig_w(path, data)
+    backup._write_new = bad_write
+    pr = backup.StageProgress()
+    try:
+        r = refused(lambda: backup.stage_restore(good, PASS, progress=pr))
+    finally:
+        backup._write_new = orig_w
+    check("RC-M1: legacy → volum legacy: cheia din SET nu deschide DB-ul din set → refuz înainte de publicare",
+          r and not pr.mutated and nothing_staged())
+    check("RC-M1: verify_legacy_volume = acelaşi verdict ca staging-ul (arhiva bună trece)",
+          backup.verify_legacy_volume(raw)["has_secret"] is True and nothing_staged())
+    pr = backup.StageProgress()
+    backup.stage_restore(good, PASS, progress=pr)
+    rd = config.DATA_DIR / "restore-pending"
+    check("RC-M1: staging legacy prin extractorul strict: setul are exact DB + cheie + perechea de semnare",
+          pr.committed and (rd / "secret").read_bytes() == _KL["secret"]
+          and {p.name for p in rd.iterdir()} <= {"webterm.db", "secret", "agent-signing.key", "agent-signing.pub", "transcripts"},
+          sorted(p.name for p in rd.iterdir()))
+    check("RC-M1: …şi boot-ul 3.7 îl aplică", backup.apply_pending_restore() and db_email() == "legacy@rc2")
+
+    # import legacy pe volum protejat: FK_legacy din keys.wtk-ul staged ≠ cheia dovedită → refuz
+    hk, _K = volume("RC2P")
+    orig_m = backup._manifest_for_host
+    backup._manifest_for_host = lambda src, h: orig_m(dataclasses.replace(src, fk_legacy=os.urandom(32)), h)
+    pr = backup.StageProgress()
+    try:
+        r = refused(lambda: backup.stage_restore(good, PASS, keys=hk, legacy_import=True, progress=pr))
+    finally:
+        backup._manifest_for_host = orig_m
+    check("RC-M1: import legacy: FK_legacy din keys.wtk-ul STAGED nu deschide DB-ul din set → refuz, nimic schimbat",
+          r and not pr.mutated and nothing_staged())
+    check("RC-M1: verify() pe volum protejat al unui WTBK1 cu tar 3.7 nu trece prin calea legacy-volume",
+          refused(lambda: backup.verify_legacy_volume(raw)))
+    pr = backup.StageProgress()
+    check("RC-M1: stage_restore WTBK1(3.7) pe volum protejat fără import explicit → refuz, nimic schimbat",
+          refused(lambda: backup.stage_restore(good, PASS, keys=hk, progress=pr)) and not pr.mutated and nothing_staged())
+
+
 def recheck_tests():
     rh1_tests()
     rh2_tests()
@@ -1519,6 +1577,7 @@ def main():
     review_tests()
     recheck_tests()
     pr4_recheck_tests()
+    pr4_second_recheck_tests()
 
     print(f"\n{ok}/{total} passed")
     shutil.rmtree(ROOT, ignore_errors=True)
