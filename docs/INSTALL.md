@@ -707,8 +707,14 @@ cleanly, then start with it.
 installation without any it creates a new `data/secret` and starts with a vault that cannot read
 the protected values. 3.8 then refuses the volume (`ambiguous`, *secret next to keys.wtk*) until
 that stray file is removed. That is why `deploy.sh`, `rollback.sh` and `upgrade.sh` refuse to start
-a pre-3.8 image on a migrated volume (an image without a version label counts as pre-3.8 unless it
-carries the 3.8 key code). The only way back is to restore the backup from step 2 — taken
+a pre-3.8 image on a migrated volume. The volume they check is the one compose will actually mount
+at `/data` (read from `docker compose config --format json`: a named volume with its project prefix,
+or a bind-mounted directory); they refuse when `WEBTERM_VOLUME` names another volume, when the
+existing app container mounts something else (a remapped volume), when the mount is of any other
+kind, or when the config cannot be read, and check the same plan again right before starting. An
+image without a version label counts as of an unknown version, which is refused on a migrated
+volume; a locally built 3.8 image can be declared for one run with `WEBTERM_IMAGE_ERA=3.8 ./deploy.sh
+…` (never put it in `.env`). The only way back is to restore the backup from step 2 — taken
 **before** the migration — into a new volume with a 3.7 image, or to stay on 3.8 and fix forward
 (`./deploy.sh <a 3.8.x version>`). Older
 backups (`*.wtsnap`, `pre-restore-*.wtsnap.keep`, and any off-host copy made before the migration)
@@ -763,9 +769,34 @@ host scripts hand the work to the gateway's own code, run in the app image
   migrate the volume first.
 - A master key given as a value (`WEBTERM_MASTER_KEY`) is never copied by the host scripts: they
   work with a key file only (or run inside the running app).
+- A pre-3.8 archive is checked only by the gateway's code, before the app is stopped: with
+  `--legacy-import` through the same strict reader that stages it, and on either kind of volume
+  its `secret` must decrypt at least one encrypted value of the archive's own database (an archive
+  with no encrypted value passes). A valid database packed with another installation's 32-byte
+  `secret` is refused.
+- The staging step ends in one of three ways: **committed** (the restore flag is published and
+  flushed to disk; the app is started and applies it), **refused before any change** (the app is
+  started on the old data), or **uncertain** — an I/O error after the volume began to change, such
+  as a failed flush after the flag was renamed. Then the app is **left stopped** and the script
+  prints the recovery steps: fix the disk problem, start the app (its boot applies a complete
+  staged set and ignores an incomplete one), and restore again if needed.
+- `deploy.sh`, `rollback.sh`, `upgrade.sh`, `backup.sh` and `restore.sh` take one lock for the
+  whole run (`.deploy.lock` in the install directory, `flock`): a second one started meanwhile —
+  a nightly backup during an upgrade, two deploys — is refused, not queued. A script started by
+  another one (the backup inside `upgrade.sh`, the automatic rollback inside `deploy.sh`) shares
+  its lock.
+- A host-script backup is published only once it is complete: written to a unique temporary file,
+  flushed, linked to its final name (never over an existing archive), and the directory flushed.
 
 Pre-3.8 volumes are archived as before (`webterm-<date>.tar.gz[.enc]`), and their archives are
-staged through the same gateway code.
+staged through the same gateway code (with the key proof above, and the same atomic, flushed
+publication of the staged set and its flag); otherwise a 3.7 → 3.7 restore keeps 3.7's behaviour.
+
+The data directory holds two empty lock files the gateway creates: `.lock` and `.maint.lock`,
+both `0600` and owned by the service user (a `.maint.lock` created by a root admin command is
+handed to the service user before it is used). Keep the data directory itself closed to other
+local users (`0750` or stricter): a user who could open a lock file could hold it and delay a
+boot or a restore.
 
 What is **not** in the volume, and therefore not in the archive: the archive's own
 passphrase (`/etc/default/webterm-backup`), `/opt/webterm/.env`, and the TLS certificates.

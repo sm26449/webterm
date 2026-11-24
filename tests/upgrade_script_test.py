@@ -40,7 +40,13 @@ case "$*" in
   *"ps -q app"*|*"ps -a -q app"*) [ -n "${NO_APP:-}" ] || echo "cid-app-1"; exit 0 ;;
   # garda 3.8 (H1): eticheta de versiune a imaginii, montarea /data, conţinutul volumului
   *image.version*) echo "${IMG_LABEL:-}"; exit 0 ;;
-  *'"/data"'*) echo "webterm_webterm-data"; exit 0 ;;
+  # R-H1: planul compose (JSON) + cititorul lui (rulat cu python-ul gazdei), montarea containerului vechi
+  *"config --format json"*)
+    if grep -q REMAP docker-compose.prod.yml 2>/dev/null; then
+      printf '%s' '{"services":{"app":{"volumes":[{"type":"volume","source":"b","target":"/data"}]}},"volumes":{"b":{"name":"webterm_b"}}}'; exit 0; fi
+    printf '%s' '{"services":{"app":{"volumes":[{"type":"volume","source":"webterm-data","target":"/data"}]}},"volumes":{"webterm-data":{"name":"webterm_webterm-data"}}}'; exit 0 ;;
+  *wt-compose-plan*) eval "prog=\${$#}"; exec python3 -I -c "$prog" ;;
+  *'"/data"'*) printf 'volume\twebterm_webterm-data\n'; exit 0 ;;
   *"--entrypoint ls"*) printf '%b' "${VOL_LS:-}"; exit 0 ;;
 esac
 case "$1" in
@@ -216,6 +222,25 @@ def pre38_checks(tmp):
     r, calls = run(d, ["-y"], IMG_LABEL="v3.8.0", VOL_LS="keys.wtk\n")
     check("ţintă v3.8.0 pe volum migrat → merge, fără să listeze volumul",
           r.returncode == 0 and "--entrypoint ls" not in calls, (r.stdout + r.stderr)[-400:])
+    # R-H1: trusa sincronizată aduce un compose care montează ALT volum → re-verificarea dinaintea
+    # deploy.sh-ului refuză (deploy.sh-ul unei ţinte < 3.8 nu are garda)
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d / "kit" / "docker-compose.prod.yml").write_text("services: {app: {}}   # REMAP\n")
+    r, calls = run(d, ["-y"], IMG_LABEL="v3.7.1", VOL_LS="webterm.db\nsecret\n")
+    out = r.stdout + r.stderr
+    check("R-H1: trusa schimbă montarea /data → refuz înainte de deploy.sh",
+          r.returncode != 0 and "deploy.sh" not in calls and "data mount changed" in out, out[-500:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    import fcntl
+    fd = os.open(str(d / ".deploy.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        r, calls = run(d, ["-y"], IMG_LABEL="v3.8.0")
+    finally:
+        os.close(fd)
+    check("R-H1: upgrade.sh cât alt lifecycle ţine .deploy.lock → refuz, niciun pull/deploy",
+          r.returncode != 0 and "another deploy" in (r.stdout + r.stderr) and "pull" not in calls
+          and "deploy.sh" not in calls, (r.stdout + r.stderr)[-300:])
 
 
 def main():

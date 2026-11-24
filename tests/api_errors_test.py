@@ -83,6 +83,8 @@ def unit_checks():
     bk = [("wrong passphrase, or the file is corrupt", "backup.badPassphrase"),
           ("backup too large when unpacked (possible compression bomb) — refused", "backup.tooLarge"),
           ("backup without the vault key — a restore would leave the credentials unreadable", "backup.noVaultKey"),
+          ("the vault key in the backup does not open its own database (legacy-key-unproven) — refused",
+           "backup.vaultKeyMismatch"),
           ("nu pare un backup WebTerm", "backup.badFile")]
     for msg, code in bk:
         check("_backup_value_error(%r) → %s" % (msg[:24], code), backup_api._backup_value_error(ValueError(msg)).code == code)

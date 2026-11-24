@@ -146,7 +146,7 @@ docker_down() { refuse_run "docker not reachable ($1)"; }
 log "── start (retention=$RETENTION, build cache=$BUILD_RETENTION, keep $KEEP WebTerm versions$([ "$DRY" = 1 ] && echo ', DRY RUN')) — disk / $(free_pct)% free"
 
 # ── the preserve set: image IDs that are never removed here (L2) ──────────────────────────────
-# the digest-pinned python image backup.sh / restore.sh / host-health.sh run (tests keep it in step)
+# the digest-pinned python image backup.sh / host-health.sh run (tests keep it in step)
 TOOL_IMAGE="python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
 VER_RE='^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,3}$'
 NL='

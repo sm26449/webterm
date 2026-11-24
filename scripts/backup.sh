@@ -50,6 +50,30 @@ _bk_status() {
 }
 trap _bk_status EXIT
 
+# R-H1 (recheck PR4): un singur ciclu de viaţă pe instalare — deploy, rollback, upgrade, backup şi
+# restore iau acelaşi lacăt (flock pe .deploy.lock din directorul instalării) pe toată rularea; o a
+# doua rulare simultană e refuzată, nu pusă la coadă. Copiii îl moştenesc (upgrade.sh → backup.sh /
+# deploy.sh, deploy.sh → exec rollback.sh): un fd 9 deja deschis pe ACELAŞI fişier e lacătul
+# părintelui (aceeaşi descriere de fişier, deci flock reuşeşte); altfel se deschide şi se ia acum.
+lifecycle_lock() {   # lifecycle_lock INSTALL_DIR → returns holding the lock; exits 1 when it is taken
+  local f="$1/.deploy.lock" have want
+  command -v flock >/dev/null 2>&1 || {
+    echo "✗ flock (util-linux) is missing — refusing to run without the lifecycle lock." >&2; exit 1; }
+  if [ -e "/proc/$$/fd/9" ] && [ -f "$f" ]; then
+    have=$(stat -L -c '%d:%i' "/proc/$$/fd/9" 2>/dev/null || true)
+    want=$(stat -c '%d:%i' "$f" 2>/dev/null || true)
+    if [ -n "$have" ] && [ "$have" = "$want" ] && flock -n 9; then return 0; fi
+  fi
+  ( umask 077; : >>"$f" ) 2>/dev/null || {
+    echo "✗ cannot create the lifecycle lock $f — refusing." >&2; exit 1; }
+  exec 9>>"$f"
+  flock -n 9 || {
+    echo "✗ another deploy / rollback / upgrade / backup / restore of this installation is running" >&2
+    echo "  (it holds $f) — refusing. Wait for it to finish, then run this again." >&2
+    exit 1; }
+}
+lifecycle_lock "$(cd "$BK_SELF_DIR/.." && pwd -P)"
+
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OUT="${WEBTERM_BACKUP_DIR:-/var/backups/webterm}"
 KEEP="${WEBTERM_BACKUP_KEEP:-14}"
@@ -294,8 +318,13 @@ case "$VOLKIND" in
          MODE=rw; VMODE=ro; LIVE=() ;;
     esac
     ARCHIVE="$OUT/webterm-$STAMP.wtbk"
-    BK_TMP="$OUT/.webterm-$STAMP.wtbk.tmp"
-    rm -f "$BK_TMP"
+    if [ -e "$ARCHIVE" ] || [ -L "$ARCHIVE" ]; then
+      bk_refuse "an archive with the same name exists" \
+        "REFUSING: $ARCHIVE already exists (two backups in the same second?) — nothing was published."
+    fi
+    # R-L1: temporar UNIC (mktemp, 0600) în acelaşi director: două rulări nu-şi şterg temporarele
+    BK_TMP=$(mktemp --suffix=.wtbk.tmp "$OUT/.webterm-$STAMP.XXXXXXXX") \
+      || bk_refuse "cannot create a temporary file in $OUT" "REFUSING: cannot create a temporary file in $OUT."
     rc=0
     HO_OUT=$( { (umask 077; hostops "$MODE" backup "${LIVE[@]}" >"$BK_TMP"); } 2>&1 ) || rc=$?
     if [ "$rc" != 0 ]; then
@@ -314,8 +343,18 @@ case "$VOLKIND" in
     [ "$rc" = 0 ] || bk_refuse "the new archive failed its restore check" "$(printf '%s' "$V_OUT" | tail -n3)" \
       "REFUSING: the new archive did not pass the restore check — nothing was published."
     chmod 600 "$BK_TMP"
-    mv -f "$BK_TMP" "$ARCHIVE"
+    # R-L1: publicare exclusivă şi durabilă — fsync pe fişier, link() spre numele final (refuzat
+    # dacă numele există: nimic nu se suprascrie), temporarul şters, apoi fsync pe director
+    sync -- "$BK_TMP" || bk_refuse "the archive could not be synced to disk" \
+      "REFUSING: the new archive could not be flushed to disk (sync) — nothing was published."
+    ln -- "$BK_TMP" "$ARCHIVE" 2>/dev/null || bk_refuse "the archive could not be published" \
+      "REFUSING: could not publish $ARCHIVE (the name exists, or $OUT does not support hard links) —" \
+      "          nothing was published."
+    rm -f -- "$BK_TMP"
     BK_TMP=""
+    sync -- "$OUT" || bk_refuse "the backup directory could not be synced" \
+      "ERROR: $ARCHIVE was written, but $OUT could not be flushed to disk (sync): it may not survive" \
+      "       a power loss. Check the disk, then run the backup again."
     BK_ENCRYPTED=true
     # Cheia master NU e în arhivă, cu bună ştiinţă: fără ea arhiva nu se poate restaura.
     echo "ENCRYPTED backup: $ARCHIVE (verified)"

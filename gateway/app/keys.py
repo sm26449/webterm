@@ -252,9 +252,17 @@ def acquire_maint_lock(dir_fd, exclusive, wait=0.0):
     """M3: flock on DATA_DIR/.maint.lock through `dir_fd`; returns the fd (close it to release).
     Exclusive: the boot's mutating phases. Shared: the admin DB-only commands, which run next to
     a live gateway without `.lock`. Non-blocking, retried for up to `wait` seconds, then
-    LockError("maintenance-busy"). The file is created 0644 and opened read-only (flock needs no
-    write access): `docker exec` runs the admin command as root while the gateway runs as the
-    service user, and both must be able to open it. Never written, never removed."""
+    LockError("maintenance-busy"). Opened read-only (flock needs no write access) and never
+    written or removed.
+
+    R-M2: the file is 0600 and owned by the service user (DATA_DIR's owner): `docker exec` runs
+    the admin command as root, which opens it anyway, and a root that creates it hands it to the
+    service user BEFORE using it (a failed chown refuses). Any other local user cannot open it, so
+    cannot hold it to stall a boot or a restore. Checked on the fd after open: a regular file,
+    owned by us, root or DATA_DIR's owner; a file we own (or root) with group/other bits — a 0644
+    one from an earlier build, or a restrictive umask that dropped the owner's read bit — is reset
+    to exactly 0600; a group/other-accessible file we cannot fix is refused. DATA_DIR itself should
+    not be traversable by other users (0750 or stricter, docs/INSTALL.md)."""
     dst = os.fstat(dir_fd)
     me = os.geteuid()
     # domeniul de încredere: ca la .lock, plus proprietarul DATA_DIR când rulăm ca root (docker
@@ -263,7 +271,7 @@ def acquire_maint_lock(dir_fd, exclusive, wait=0.0):
         raise LockError("data-dir-bad-mode" if dst.st_mode & 0o022 else "data-dir-bad-owner", "DATA_DIR")
     try:
         fd = os.open(MAINT_LOCK_NAME, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                     0o644, dir_fd=dir_fd)
+                     0o600, dir_fd=dir_fd)
     except OSError as e:
         raise LockError("lock-not-regular" if e.errno in (errno.ELOOP, errno.EISDIR) else
                         "lock-unavailable", MAINT_LOCK_NAME) from None
@@ -271,15 +279,28 @@ def acquire_maint_lock(dir_fd, exclusive, wait=0.0):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise LockError("lock-not-regular", MAINT_LOCK_NAME)
-        if st.st_uid not in (me, 0, dst.st_uid) or st.st_mode & 0o022:
+        if st.st_uid not in (me, 0, dst.st_uid):
             raise LockError("lock-bad-owner", MAINT_LOCK_NAME)
         if me == 0 and st.st_uid == 0 and dst.st_uid != 0:
-            # creat acum de root peste volumul userului serviciului: îl dăm proprietarului
-            # directorului, ca gateway-ul să-l poată deschide oricând (0644 oricum)
+            # R-M2: creat de root peste volumul userului serviciului: îl dăm proprietarului
+            # directorului ÎNAINTE de folosire (0600 nu l-ar mai lăsa pe gateway să-l deschidă);
+            # un chown eşuat = refuz, nu un lacăt pe care serviciul nu-l mai poate lua
             try:
                 os.fchown(fd, dst.st_uid, dst.st_gid)
             except OSError:
-                pass
+                raise LockError("lock-bad-owner", MAINT_LOCK_NAME) from None
+            st = os.fstat(fd)
+        if stat.S_IMODE(st.st_mode) != 0o600 and (me == 0 or st.st_uid == me):
+            # R-M2: exact 0600 — un fişier 0644 (build anterior) sau un umask care a scos citirea
+            # proprietarului; doar proprietarul sau root îl pot corecta
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                raise LockError("lock-bad-mode", MAINT_LOCK_NAME) from None
+            st = os.fstat(fd)
+        if st.st_mode & 0o077:
+            # grup/alţii îl pot deschide (şi ţine): refuz, nu-l folosim
+            raise LockError("lock-bad-mode", MAINT_LOCK_NAME)
         op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
         deadline = time.monotonic() + max(0.0, wait)
         while True:

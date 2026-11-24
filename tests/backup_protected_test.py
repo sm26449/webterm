@@ -5,6 +5,7 @@ Snapshotul nu conţine `secret` sau MK (căutăm cheile brute în container, în
 restore din altă instalare cu MK-ul operatorului, import explicit al unui backup pre-3.8 fără ca
 cheia brută să ajungă în staging, şi refuz ÎNAINTE de staging la cheie greşită / conţinut
 modificat / bombă / prea multe intrări. Partea legacy rămâne în backup_test.py, neschimbată."""
+import base64
 import io
 import json
 import os
@@ -16,6 +17,8 @@ import tempfile
 import time
 import zlib
 from pathlib import Path
+
+from cryptography.fernet import Fernet
 
 ROOT = tempfile.mkdtemp(prefix="wt-bkp-")
 os.environ["WEBTERM_DATA_DIR"] = os.path.join(ROOT, "boot")
@@ -58,8 +61,9 @@ def volume(name, protected=True, email="a@b.c", secret_leftover=False):
     use(d)
     con = sqlite3.connect(str(config.DB_PATH))
     con.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, created REAL)")
-    for t in ("hosts", "sessions", "app_settings"):        # R-M2: schema minimă a gateway-ului
-        con.execute("CREATE TABLE %s(id INTEGER PRIMARY KEY)" % t)
+    for t in ("hosts", "sessions"):                        # R-M2: schema minimă a gateway-ului
+        con.execute("CREATE TABLE %s(id INTEGER PRIMARY KEY, cred_encrypted TEXT)" % t)
+    con.execute("CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT)")
     con.execute("INSERT INTO users(email, created) VALUES(?, 1000)", (email,))
     con.commit()
     con.close()
@@ -72,6 +76,12 @@ def volume(name, protected=True, email="a@b.c", secret_leftover=False):
     keys = {"secret": os.urandom(32)}
     if not protected:
         (config.DATA_DIR / "secret").write_bytes(keys["secret"])
+        # R-H2: o valoare de seif reală, ca proba FK_legacy să aibă ce dovedi
+        tok = Fernet(base64.urlsafe_b64encode(keys["secret"])).encrypt(b"pw").decode()
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("INSERT INTO hosts(cred_encrypted) VALUES(?)", (tok,))
+        con.commit()
+        con.close()
         return None, keys
     if secret_leftover:
         # sub-starea secret_leftover a migrării: keys.wtk + secret + migrating.wtm (keys.classify)
@@ -1178,6 +1188,77 @@ def rl1_tests():
           and target.read_bytes() == before and not os.path.exists(str(target) + backup.TMP_SUFFIX))
 
 
+def _retar_secret(raw, secret):
+    """Acelaşi tar.gz 3.7, cu `secret` înlocuit (o cheie de 32 de octeţi din altă copie)."""
+    src = tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz")
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for m in src.getmembers():
+            if m.name == "secret":
+                m.size = len(secret)
+                dst.addfile(m, io.BytesIO(secret))
+            else:
+                dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+    return out.getvalue()
+
+
+def pr4_recheck_tests():
+    """Recheck PR4 (b3be939): R-H2 — FK_legacy dovedit pe DB-ul EXACT al arhivei înainte de orice
+    publicare (import pe volum protejat, verify, restore 3.7 pe volum legacy); R-M1 — staging-ul
+    spune explicit cât a ajuns (nimic schimbat / commit durabil / incert)."""
+    _n, _KL = volume("RCL", protected=False, email="legacy@rc")
+    good = backup.make_encrypted(PASS)
+    raw = backup.decrypt(good, PASS)
+    foreign = _retar_secret(raw, os.urandom(32))
+    blob_f = backup.encrypt(foreign, PASS)
+    hk, _K = volume("RCP")
+    check("R-H2: verify_legacy_import refuză un secret de 32 de octeţi străin DB-ului",
+          refused(lambda: backup.verify_legacy_import(foreign, keys=hk)) and nothing_staged())
+    pr = backup.StageProgress()
+    check("R-H2: importul legacy cu secret străin e refuzat înainte de staging (nimic schimbat)",
+          refused(lambda: backup.stage_restore(blob_f, PASS, keys=hk, legacy_import=True, progress=pr))
+          and nothing_staged() and not pr.mutated and not pr.committed)
+    info = backup.verify_legacy_import(raw, keys=hk)
+    check("R-H2: verify_legacy_import acceptă arhiva cu cheia ei", info.get("format") == "legacy-import"
+          and nothing_staged(), info)
+    pr = backup.StageProgress()
+    backup.stage_restore(good, PASS, keys=hk, legacy_import=True, progress=pr)
+    check("R-M1: import reuşit → mutated + committed", pr.mutated and pr.committed and flag_doc()["state"] == "staged")
+
+    use(os.path.join(ROOT, "RCL"))
+    check("R-H2: restore 3.7 pe volum legacy cu secret străin refuzat (verify + stage), nimic schimbat",
+          refused(lambda: backup.verify_restorable(blob_f, PASS))
+          and refused(lambda: backup.stage_restore(blob_f, PASS)) and nothing_staged())
+    # R-M1: fsync-ul directorului eşuează DUPĂ rename-ul flagului → incert, nu „commit”
+    orig, state = backup._fsync, {"armed": False}
+
+    def fsync(fd):
+        if state["armed"]:
+            raise OSError(5, "injected EIO")
+        return orig(fd)
+
+    def fault(name):
+        if name == "flag:renamed":
+            state["armed"] = True
+    backup._fsync, backup._fault = fsync, fault
+    pr = backup.StageProgress()
+    try:
+        r = refused(lambda: backup.stage_restore(good, PASS, progress=pr), OSError)
+    finally:
+        backup._fsync, backup._fault = orig, None
+    check("R-M1: fsync eşuat după rename-ul flagului (legacy) → eroare, mutated fără committed",
+          r and pr.mutated and not pr.committed)
+    pr = backup.StageProgress()
+    backup.stage_restore(good, PASS, progress=pr)
+    rd = config.DATA_DIR / "restore-pending"
+    check("R-M1: staging legacy durabil: set complet, flag 3.7, committed",
+          pr.committed and (rd / "webterm.db").is_file() and (rd / "secret").read_bytes() == _KL["secret"]
+          and (config.DATA_DIR / ".restore-flag").read_bytes()[:1] != b"{"
+          and not (config.DATA_DIR / ".restore-flag.tmp").exists()
+          and not list((config.DATA_DIR / "backups").glob(".restore-verify-*")))
+    check("R-M1: apply 3.7 al setului publicat", backup.apply_pending_restore() and db_email() == "legacy@rc")
+
+
 def recheck_tests():
     rh1_tests()
     rh2_tests()
@@ -1437,6 +1518,7 @@ def main():
 
     review_tests()
     recheck_tests()
+    pr4_recheck_tests()
 
     print(f"\n{ok}/{total} passed")
     shutil.rmtree(ROOT, ignore_errors=True)

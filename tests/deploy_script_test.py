@@ -11,6 +11,7 @@ apel (argv complet, NUL-separat) şi răspund ca un daemon pe care compose l-a p
 maşini care chiar au o instalare. Pasul de imagini (singurul care s-a schimbat, L3) e extras din script
 şi rulat izolat cu acelaşi stub `docker`; gărzile de dinaintea confirmării sunt în `upgrade_script_test`.
 """
+import json
 import os
 import pathlib
 import shutil
@@ -46,13 +47,18 @@ img="${WEBTERM_IMAGE:-$(grep -m1 '^WEBTERM_IMAGE=' .env 2>/dev/null | cut -d= -f
 case "$*" in
   # garda 3.8 (H1) şi detecţia instalării noi (M4)
   "volume ls"*) [ -n "${VOL_LS_FAIL:-}" ] && exit 1; [ -n "${VOLUMES-x}" ] && printf '%s\n' "${VOLUMES-proj_webterm-data}"; exit 0 ;;
+  # R-H1: planul compose (JSON) şi programul care îl citeşte (rulat aici cu python-ul gazdei)
+  *"config --format json"*) [ -n "${CFG_FAIL:-}" ] && exit 1
+    if [ -n "${JSON_AFTER_SWAP:-}" ] && grep -qxF "WEBTERM_IMAGE=${SWAP_REF:-}" .env 2>/dev/null; then
+      printf '%s' "$JSON_AFTER_SWAP"; exit 0; fi
+    printf '%s' "${COMPOSE_JSON:-$DEFAULT_JSON}"; exit 0 ;;
+  *wt-compose-plan*) eval "prog=\${$#}"; [ -n "${PLAN_RUN_FAIL:-}" ] && exit 125; exec python3 -I -c "$prog" ;;
   *"compose -f"*" config"*) printf '%b' "${COMPOSE_CFG:-}"; exit 0 ;;
-  *"ps -a -q app"*) [ -n "${APP_PS-x}" ] && printf '%s\n' "${APP_PS-cid-app-1}"; exit 0 ;;
+  *"ps -a -q app"*) [ -n "${PS_FAIL:-}" ] && exit 1; [ -n "${APP_PS-x}" ] && printf '%s\n' "${APP_PS-cid-app-1}"; exit 0 ;;
   *image.version*)
     case "$*" in *1111111111*) echo "${NEW_LABEL-${IMG_LABEL:-}}" ;; *) echo "${IMG_LABEL:-}" ;; esac; exit 0 ;;
-  *'"/data"'*) echo "${DATA_VOL:-proj_webterm-data}"; exit 0 ;;
+  *'"/data"'*) printf '%b\n' "${DATA_MOUNT:-volume\tproj_webterm-data}"; exit 0 ;;
   *"--entrypoint ls"*) [ -n "${LS_FAIL:-}" ] && exit 125; printf '%b' "${VOL_LS:-}"; exit 0 ;;
-  *keys.py*) exit ${KEYS_PY_RC:-0} ;;
   *"ps -q app"*) echo "cid-app-1"; exit 0 ;;
   *"compose -f"*"pull"*) exit ${PULL_FAILS:-0} ;;
   *"compose -f"*) exit 0 ;;
@@ -122,6 +128,16 @@ def sandbox(tmp, env_txt=None):
     return d
 
 
+def cfg_json(volname="proj_webterm-data", mount=None, vols=None):
+    """`docker compose config --format json` cum îl scrie compose v2 (doar ce citeşte planul)."""
+    m = mount or {"type": "volume", "source": "webterm-data", "target": "/data", "volume": {}}
+    return json.dumps({"name": "proj", "services": {"app": {"image": "x", "volumes": [m]}},
+                       "volumes": vols if vols is not None else {"webterm-data": {"name": volname}}})
+
+
+DEFAULT_JSON = cfg_json()
+
+
 def run(d, script, args=(), stdin=None, **extra):
     calls = d / "calls.log"
     calls.write_text("")
@@ -129,6 +145,7 @@ def run(d, script, args=(), stdin=None, **extra):
     (d / "curl-stdin.log").write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("WEBTERM_", "CF_", "AUTHENTIK_", "PG_"))}
     env.update(PATH=f"{d/'bin'}:{os.environ['PATH']}", CALLS=str(calls), ARGV_LOG=str(d / "argv.log"),
+               DEFAULT_JSON=DEFAULT_JSON,
                CURL_STDIN=str(d / "curl-stdin.log"), **extra)
     r = subprocess.run(["bash", str(d / script), *args], cwd=str(d), env=env, capture_output=True,
                        text=True, timeout=120, input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL)
@@ -174,7 +191,7 @@ def main():
         check("pull + up prin compose, apoi verdictul de sănătate",
               "docker compose -f docker-compose.prod.yml pull" in calls
               and "docker compose -f docker-compose.prod.yml up -d --remove-orphans" in calls
-              and calls.index("pull") < calls.index("up -d") < calls.index("docker inspect"), calls)
+              and calls.index("pull") < calls.index("up -d") < calls.index("docker inspect -f", calls.index("up -d")), calls)
         check("ce RULEAZĂ e raportat la final", NEW in out, out[-400:])
         # secretele: din .env → fişiere, .env golit
         check("secrets/ e creat 0700", (d / "secrets").is_dir() and mode(d / "secrets") == 0o700,
@@ -334,6 +351,7 @@ def main():
 
         pre38_checks(tmp)
         master_key_checks(tmp)
+        rh1_checks(tmp)
 
     print(f"\n{ok}/{total} passed")
     return ok == total
@@ -370,12 +388,18 @@ def pre38_checks(tmp):
     r, calls, same = rb(IMG_LABEL="v3.8.2", VOL_LS=MIGRATED)
     check("rollback.sh între versiuni 3.8 pe un volum migrat → merge, volumul nici nu e listat",
           r.returncode == 0 and "--entrypoint ls" not in calls, (r.stdout + r.stderr)[-300:])
-    r, calls, same = rb(IMG_LABEL="", KEYS_PY_RC="1", VOL_LS=MIGRATED)
-    check("imagine fără etichetă şi fără codul de chei 3.8 → tratată ca < 3.8 → refuz",
-          r.returncode != 0 and same and "older than 3.8" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-300:])
-    r, calls, same = rb(IMG_LABEL="", KEYS_PY_RC="125", VOL_LS=MIGRATED)
-    check("versiune necunoscută (Docker nu poate porni imaginea) pe volum migrat → refuz",
-          r.returncode != 0 and same and "unknown version" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="", VOL_LS=MIGRATED)
+    check("R-H1: imagine fără etichetă (chiar cu codul 3.8 în ea) = versiune necunoscută → refuz pe volum migrat",
+          r.returncode != 0 and same and "unknown version" in (r.stdout + r.stderr) and "keys.py" not in calls,
+          (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="", VOL_LS=MIGRATED, WEBTERM_IMAGE_ERA="3.8")
+    check("R-H1: imagine fără etichetă declarată explicit 3.8 (WEBTERM_IMAGE_ERA=3.8) → merge",
+          r.returncode == 0 and not same and "--entrypoint ls" not in calls, (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS=MIGRATED, WEBTERM_IMAGE_ERA="3.8")
+    check("R-H1: WEBTERM_IMAGE_ERA nu bate o etichetă 3.7", r.returncode != 0 and same, (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="", VOL_LS=LEGACY)
+    check("R-H1: imagine fără etichetă pe volum 3.7 → merge (nimic de protejat)", r.returncode == 0,
+          (r.stdout + r.stderr)[-300:])
     r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS_FAIL="1")
     check("`docker volume ls` eşuat → refuz (nu „volum curat”)", r.returncode != 0 and same, (r.stdout + r.stderr)[-300:])
     r, calls, same = rb(IMG_LABEL="v3.7.1", LS_FAIL="1")
@@ -403,6 +427,113 @@ def pre38_checks(tmp):
           (r.stdout + r.stderr)[-400:])
 
 
+def rh1_checks(tmp):
+    """R-H1 (recheck PR4): garda verifică montarea /data pe care o porneşte COMPOSE (planul din
+    `config --format json`), refuză un override divergent, un container vechi pe altă montare, o
+    montare necunoscută; lifecycle-ul e serializat (.deploy.lock)."""
+    print("── 10. R-H1: the effective /data mount, lifecycle lock")
+
+    def rb(**extra):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(NEW + "\n")
+        before = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        r, calls = run(d, "rollback.sh", **extra)
+        after = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        return r, calls, before == after, r.stdout + r.stderr
+
+    two = {"webterm-data": {"name": "proj_webterm-data"}, "data-b": {"name": "proj_data-b"}}
+    remap = cfg_json(mount={"type": "volume", "source": "data-b", "target": "/data"}, vols=two)
+    # remap în compose; containerul vechi încă pe A (legacy) → refuz, nu „A e curat”
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=remap, VOLUMES="proj_webterm-data\nproj_data-b")
+    check("remap A→B, containerul vechi pe A → refuz (nu se verifică A în locul lui B)",
+          r.returncode != 0 and same and "remapped" in out and "up -d" not in calls, out[-400:])
+    # remap, fără container vechi: se listează B (cel efectiv), care e migrat → refuz
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=MIGRATED, COMPOSE_JSON=remap, APP_PS="",
+                             VOLUMES="proj_webterm-data\nproj_data-b")
+    check("remap fără container vechi → volumul EFECTIV (proj_data-b) e cel listat → migrat → refuz",
+          r.returncode != 0 and same and "-v proj_data-b:/data:ro" in calls
+          and "-v proj_webterm-data:/data:ro" not in calls and "migrated to 3.8" in out, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=remap, APP_PS="",
+                             VOLUMES="proj_webterm-data\nproj_data-b")
+    check("remap fără container vechi, B legacy → merge", r.returncode == 0 and "-v proj_data-b:/data:ro" in calls, out[-400:])
+    # WEBTERM_VOLUME divergent de compose
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, WEBTERM_VOLUME="proj_alt")
+    check("WEBTERM_VOLUME ≠ volumul din compose → refuz", r.returncode != 0 and same and "WEBTERM_VOLUME" in out, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, WEBTERM_VOLUME="proj_webterm-data")
+    check("WEBTERM_VOLUME = volumul din compose → merge", r.returncode == 0, out[-400:])
+    # bind mount: directorul gazdei e listat direct
+    bd = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / "data"
+    bind = cfg_json(mount={"type": "bind", "source": str(bd), "target": "/data"})
+    bm = "bind\\t%s" % bd
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind, DATA_MOUNT=bm)
+    check("bind mount absent → nimic de protejat, merge", r.returncode == 0, out[-400:])
+    bd.mkdir()
+    (bd / "webterm.db").write_text("x")
+    (bd / "keys.wtk").write_text("x")
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind, DATA_MOUNT=bm)
+    check("bind mount cu keys.wtk → refuz (listat pe gazdă, nu prin volume ls)",
+          r.returncode != 0 and same and "keys.wtk" in out and "volume ls" not in calls, out[-400:])
+    (bd / "keys.wtk").unlink()
+    (bd / "secret").write_text("x")
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind, DATA_MOUNT=bm)
+    check("bind mount 3.7 → merge", r.returncode == 0, out[-400:])
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", COMPOSE_JSON=bind)
+    check("bind în compose, containerul vechi pe un volum → refuz", r.returncode != 0 and same, out[-400:])
+    # layout necunoscut / config neparsabil / Docker care eşuează
+    for label, extra in (
+            ("config neparsabil", dict(COMPOSE_JSON="not json")),
+            ("`config --format json` eşuat (compose v1)", dict(CFG_FAIL="1")),
+            ("imaginea nu poate rula cititorul planului", dict(PLAN_RUN_FAIL="1")),
+            ("volum anonim la /data", dict(COMPOSE_JSON=cfg_json(mount={"type": "volume", "source": "", "target": "/data"}))),
+            ("tmpfs la /data", dict(COMPOSE_JSON=cfg_json(mount={"type": "tmpfs", "target": "/data"}))),
+            ("niciun mount la /data", dict(COMPOSE_JSON=cfg_json(mount={"type": "volume", "source": "webterm-data", "target": "/srv"}))),
+            ("volumul nu are nume rezolvat", dict(COMPOSE_JSON=cfg_json(vols={"webterm-data": {}}))),
+            ("`docker compose ps` eşuat", dict(PS_FAIL="1"))):
+        r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, **extra)
+        check(f"{label} → refuz, nimic schimbat", r.returncode != 0 and same and "up -d" not in calls, out[-300:])
+    sub = json.loads(DEFAULT_JSON)
+    sub["services"]["app"]["volumes"].append({"type": "volume", "source": "webterm-data", "target": "/data/transcripts"})
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, COMPOSE_JSON=json.dumps(sub))
+    check("un al doilea mount sub /data → layout necunoscut → refuz", r.returncode != 0 and same, out[-300:])
+    # planul se schimbă între verificare şi `up` (după rescrierea .env) → refuz, .env revine
+    r, calls, same, out = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY, JSON_AFTER_SWAP=remap, SWAP_REF=NEW,
+                             VOLUMES="proj_webterm-data\nproj_data-b")
+    check("planul /data se schimbă înainte de `up` → refuz, .env şi .prev-image revin, niciun `up`",
+          r.returncode != 0 and same and "up -d" not in calls, out[-400:])
+
+    # lifecycle: o a doua rulare cât prima ţine lacătul
+    import fcntl
+    for script in ("rollback.sh", "deploy.sh"):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(NEW + "\n")
+        before = (d / ".env").read_text()
+        fd = os.open(str(d / ".deploy.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            r, calls = run(d, script, [NEW] if script == "deploy.sh" else [], IMG_LABEL="v3.8.0")
+        finally:
+            os.close(fd)
+        out = r.stdout + r.stderr
+        check(f"{script} cât alt deploy/rollback ţine .deploy.lock → refuz, nimic atins",
+              r.returncode != 0 and "another deploy" in out and (d / ".env").read_text() == before
+              and "up -d" not in calls and "pull" not in calls, out[-300:])
+    # moştenit: deploy.sh → exec rollback.sh (acelaşi lacăt), fără refuz
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW, "--tag", "v9.9.9"], HEALTH="unhealthy", IMG_LABEL="v3.8.0")
+    out = r.stdout + r.stderr
+    check("deploy.sh → exec rollback.sh moşteneşte lacătul (rollback-ul rulează)",
+          "Rollback:" in out and "another deploy" not in out and calls.count("up -d app") == 1, out[-400:])
+    for script in ("deploy.sh", "rollback.sh", "upgrade.sh", "scripts/backup.sh", "scripts/restore.sh"):
+        src = (ROOT / script).read_text()
+        check(f"{script}: ia lacătul de lifecycle", "\nlifecycle_lock " in src and "flock -n 9" in src)
+    blocks = []
+    for script in ("deploy.sh", "rollback.sh", "upgrade.sh"):
+        src = (ROOT / script).read_text()
+        a = src.index("# ── 3.8: graniţa migrării")
+        blocks.append(src[a:src.index("\nguard_recheck() {", a)])
+    check("garda e identică în deploy.sh, rollback.sh, upgrade.sh", len(set(blocks)) == 1)
+
+
 CFG = "name: proj\\nservices:\\n  app:\\n    image: x\\nvolumes:\\n  webterm-data:\\n    name: custom_data\\n"
 
 
@@ -414,6 +545,7 @@ def master_key_checks(tmp):
 
     def dep(**extra):
         d = sandbox(tempfile.mkdtemp(dir=tmp))
+        extra.setdefault("IMG_LABEL", "v3.8.0")      # garda R-H1 nu e subiectul aici
         r, calls = run(d, "deploy.sh", **extra)
         return r, (d / "secrets" / "master-key" / "master.key").exists(), env_of(d), calls
 

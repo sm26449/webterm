@@ -53,7 +53,13 @@ and waits for the healthcheck verdict. It is reversible: a second
 `upgrade.sh` to an older tag — refuse to start an image older than 3.8 and change nothing. A 3.7
 gateway would create a new vault key next to the protected one. Stay on 3.8 and deploy a good 3.8.x
 image, or go back the documented way: restore the backup taken before the migration into a new
-volume (docs/INSTALL.md, *Going back to 3.7*).
+volume (docs/INSTALL.md, *Going back to 3.7*). The volume checked is the one compose will mount at
+`/data`; if you renamed or remapped it, or `WEBTERM_VOLUME` names another one, the scripts refuse
+until the old container and the compose file agree (`docker compose -f docker-compose.prod.yml rm -sf app`, or restore the
+mapping). An image built locally without a version label is refused on a migrated volume unless
+you declare it for that run: `sudo WEBTERM_IMAGE_ERA=3.8 ./deploy.sh <image>`. Only one of
+`deploy.sh`, `rollback.sh`, `upgrade.sh`, `backup.sh`, `restore.sh` runs at a time (`.deploy.lock`);
+a second one says *another deploy … is running* — wait and run it again.
 
 **What the pin is.** `upgrade.sh` resolves the tag you asked for to the image's **digest**
 once, right after the pull, and from then on uses only that:
@@ -341,8 +347,12 @@ credentials** recovered and decryptable.
    Docker cannot tell, and **stages** the archive with the gateway's staging code under the data
    directory's lock (a lock held by anything else is refused before any change). Starting the app
    applies it, with the gateway's resumable journal and a safety copy of the previous state. The
-   app is restarted after a refusal or a committed stage, never after a stage that ended in an
-   unknown state (the script says so). `.enc`/`.wtbk` archives require the passphrase; a 3.7
+   app is restarted after a refusal or a committed stage, never after a stage whose outcome is
+   uncertain (exit 4: an I/O error after the volume began to change, such as a failed flush after
+   the flag was renamed). Then the app stays **stopped** and the script prints what to do: fix the
+   disk problem, `docker start <app>` (its boot applies a complete staged set and ignores an
+   incomplete one; `docker logs` names it), and restore again if the data is not the archive's.
+   A 3.7 archive whose `secret` does not decrypt its own database is refused before the app stops. `.enc`/`.wtbk` archives require the passphrase; a 3.7
    archive on a protected volume needs `--legacy-import`. `--verify <archive>` runs only the checks.
 3. **The golden rule**: on a pre-3.8 volume the vault key (`data/secret`) is in the archive.
    Without it, agent tokens and encrypted SSH credentials are UNRECOVERABLE — boot

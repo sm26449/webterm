@@ -37,8 +37,7 @@ _secret_key: bytes = b""            # subcheie HMAC (token-uri de forward), sepa
 # poartă numele cheii ei. Tokenurile Fernet sunt base64 url-safe (fără ':'), deci prefixul nu se
 # poate confunda cu un token. Fără prefix = FK_legacy (tot ce a scris 3.7 și tot ce scrie 3.8 în
 # starea legacy, ca o întoarcere la imaginea 3.7 să citească în continuare seiful).
-FK_PREFIX = "FK:"
-FK_LEGACY_PREFIX = "FKL:"
+from .legacyvault import FK_LEGACY_PREFIX, FK_PREFIX  # noqa: E402  (o singură sursă)
 
 
 def _forward_subkey(key: bytes) -> bytes:

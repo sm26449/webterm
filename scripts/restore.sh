@@ -18,8 +18,15 @@
 #   4. starts the app, whose boot applies the staged set under its lock with the resumable
 #      journal (and keeps a safety copy of the previous state). `.lock` and an in-volume
 #      `master.key` are never moved.
-# The app is restarted after a refusal (nothing changed) or a committed stage; never after a
-# stage that ended in an unknown state.
+# The app is restarted after a refusal (nothing changed, exit 3 of the staging) or a committed
+# stage (exit 0: the flag published and its directory fsynced); never after a stage that ended in
+# an uncertain state (exit 4, or anything else): then it stays stopped and recovery steps are
+# printed. Another deploy / rollback / upgrade / backup / restore of this installation running at
+# the same time is refused (.deploy.lock in the install directory).
+# A pre-3.8 archive is checked by the gateway's own code only (no separate scanner): on a
+# protected volume (--legacy-import) the strict extractor plus the proof that its `secret`
+# decrypts its own database; on a pre-3.8 volume the 3.7 checks plus the same proof. Both before
+# the app is stopped.
 #
 #   --legacy-import             a pre-3.8 archive (with data/secret) restored onto a PROTECTED
 #                               volume (keys.wtk): its vault key becomes this installation's
@@ -27,10 +34,7 @@
 #   WEBTERM_VOLUME              Docker volume name   (default webterm_webterm-data)
 #   WEBTERM_UID                 uid:gid the app runs as (default 10001:10001)
 #   WEBTERM_APP_CONTAINER       the app container (default: the one that mounts the volume at /data)
-#   WEBTERM_TOOL_IMAGE          image with python3 for the 3.7 archive scan (default python:3.12-alpine)
 #   WEBTERM_BACKUP_PASSPHRASE   required for an encrypted archive (.wtbk, or .enc from a 3.7 backup.sh)
-#   WEBTERM_RESTORE_MAX_BYTES   decompressed-size cap, anti compression-bomb (default 2 GiB)
-#   WEBTERM_RESTORE_MAX_MEMBERS max number of entries in a 3.7 archive       (default 20000)
 #
 #   --verify (3.6.8): a restore TEST that changes nothing — the same checks as steps 1–2; the
 #   result is recorded for Settings → System health ("restore verified").
@@ -46,22 +50,35 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# R-H1 (recheck PR4): un singur ciclu de viaţă pe instalare — deploy, rollback, upgrade, backup şi
+# restore iau acelaşi lacăt (flock pe .deploy.lock din directorul instalării) pe toată rularea; o a
+# doua rulare simultană e refuzată, nu pusă la coadă. Copiii îl moştenesc (upgrade.sh → backup.sh /
+# deploy.sh, deploy.sh → exec rollback.sh): un fd 9 deja deschis pe ACELAŞI fişier e lacătul
+# părintelui (aceeaşi descriere de fişier, deci flock reuşeşte); altfel se deschide şi se ia acum.
+lifecycle_lock() {   # lifecycle_lock INSTALL_DIR → returns holding the lock; exits 1 when it is taken
+  local f="$1/.deploy.lock" have want
+  command -v flock >/dev/null 2>&1 || {
+    echo "✗ flock (util-linux) is missing — refusing to run without the lifecycle lock." >&2; exit 1; }
+  if [ -e "/proc/$$/fd/9" ] && [ -f "$f" ]; then
+    have=$(stat -L -c '%d:%i' "/proc/$$/fd/9" 2>/dev/null || true)
+    want=$(stat -c '%d:%i' "$f" 2>/dev/null || true)
+    if [ -n "$have" ] && [ "$have" = "$want" ] && flock -n 9; then return 0; fi
+  fi
+  ( umask 077; : >>"$f" ) 2>/dev/null || {
+    echo "✗ cannot create the lifecycle lock $f — refusing." >&2; exit 1; }
+  exec 9>>"$f"
+  flock -n 9 || {
+    echo "✗ another deploy / rollback / upgrade / backup / restore of this installation is running" >&2
+    echo "  (it holds $f) — refusing. Wait for it to finish, then run this again." >&2
+    exit 1; }
+}
+lifecycle_lock "$(cd "$(dirname "$0")/.." && pwd -P)"
+
 ARCHIVE="${1:?usage: ./restore.sh [--verify] [--legacy-import] <archive.wtbk|.tar.gz|.enc>}"
 SRC_NAME="$ARCHIVE"
 [ -f "$ARCHIVE" ] || { echo "not found: $ARCHIVE"; exit 1; }
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OWNER="${WEBTERM_UID:-10001:10001}"
-# Plafon anti bombă de compresie (acelaşi spirit ca `_gunzip_bounded` din gateway/app/backup.py).
-RESTORE_MAX_BYTES="${WEBTERM_RESTORE_MAX_BYTES:-2147483648}"
-RESTORE_MAX_MEMBERS="${WEBTERM_RESTORE_MAX_MEMBERS:-20000}"
-# Imaginea-unealtă (doar scanarea unei arhive 3.7): pinuită pe digest, ca în backup.sh.
-# `WEBTERM_IMAGE` înseamnă imaginea GATEWAY-ULUI peste tot altundeva; aici e ignorată.
-IMAGE="${WEBTERM_TOOL_IMAGE:-python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df}"
-if [ -z "${WEBTERM_TOOL_IMAGE:-}" ] && [ -n "${WEBTERM_IMAGE:-}" ]; then
-  echo "note: WEBTERM_IMAGE is the gateway image and is IGNORED here;" \
-       "use WEBTERM_TOOL_IMAGE to change the python image ($IMAGE)." >&2
-fi
-
 # Un singur trap: temporarele şi — dacă l-am oprit noi ŞI ştim că volumul e într-o stare bună —
 # repornirea app-ului. RESTART_OK=0 cât timp staging-ul rulează: o ieşire în mijlocul lui (Ctrl-C,
 # crash) nu porneşte un gateway peste o stare pe care n-o cunoaştem (H2).
@@ -103,83 +120,13 @@ esac
 chmod 600 "$PINNED"
 SHA=$(sha256sum "$PINNED" | cut -d' ' -f1)
 if [ "$(head -c 5 "$PINNED")" = WTBK1 ]; then
-  AKIND=wtbk
   : "${WEBTERM_BACKUP_PASSPHRASE:?encrypted archive (.wtbk) — set WEBTERM_BACKUP_PASSPHRASE}"
 elif [ "$(od -An -tx1 -N2 "$PINNED" | tr -d ' \n')" = 1f8b ]; then
-  AKIND=legacy
+  :   # un tar.gz 3.7: îl verifică doar codul gateway-ului (pasul 2)
 else
   echo "REFUSING: '$SRC_NAME' is not a WebTerm backup (neither .wtbk nor a 3.7 tar.gz) — nothing was changed." >&2
   exit 1
 fi
-
-# ── scanarea structurală a unei arhive 3.7 (tar.gz), cu imaginea-unealtă, fără reţea ─────────
-# Plafoane (bombă de compresie, număr de membri), DB integru, `secret` prezent, niciun material
-# de chei 3.8. Decizia finală (extractorul strict, cheile) rămâne a gateway-ului, la pasul 2.
-PY_SCAN=$(cat <<'PY'
-import gzip, io, os, sqlite3, sys, tarfile, tempfile
-IN = os.environ.get("WT_IN", "/in")
-maxb, maxm = int(os.environ["MAXB"]), int(os.environ["MAXM"])
-KEY_MATERIAL = ("master.key", "master.key.tmp", "keys.wtk", "keys.wtk.tmp", "migrating.wtm",
-                "migrating.wtm.tmp", "erasures.wtj")
-
-
-def top(name):
-    return os.path.normpath(name).lstrip("/").split("/", 1)[0]
-
-
-flat, read = io.BytesIO(), 0
-try:
-    with gzip.open(os.path.join(IN, "archive"), "rb") as g:
-        while True:
-            chunk = g.read(1 << 20)
-            if not chunk:
-                break
-            read += len(chunk)
-            if read > maxb:
-                sys.exit("refusing: archive unpacks beyond %d bytes (possible compression bomb)" % maxb)
-            flat.write(chunk)
-except (OSError, EOFError) as e:
-    sys.exit("corrupt archive, or not a WebTerm backup: %s" % e)
-flat.seek(0)
-try:
-    t = tarfile.open(fileobj=flat, mode="r:")
-except tarfile.TarError as e:
-    sys.exit("corrupt archive, or not a WebTerm backup: %s" % e)
-with t:
-    members = t.getmembers()
-    if len(members) > maxm:
-        sys.exit("refusing: archive has %d entries (> %d)" % (len(members), maxm))
-    names = [m.name for m in members]
-    if len(set(names)) != len(names):
-        # un nume de două ori = scanarea şi extragerea pot vedea membri diferiţi
-        sys.exit("refusing: the archive lists the same name twice")
-    byname = {m.name: m for m in members}
-    tops = {top(m.name) for m in members}
-    if "webterm.db" not in byname or not byname["webterm.db"].isfile():
-        sys.exit("archive without webterm.db")
-    bad = sorted(tops.intersection(KEY_MATERIAL))
-    if bad:
-        sys.exit("refusing: the archive contains %s — a 3.7 archive never holds 3.8 key files (a "
-                 "protected volume's backup is a .wtbk)" % ", ".join(bad))
-    if "secret" not in byname:
-        sys.exit("archive without the vault key (secret) — refusing; it would restore "
-                 "undecryptable credentials")
-    td = tempfile.mkdtemp()
-    t.extract(byname["webterm.db"], td, filter="data")
-integ = sqlite3.connect(os.path.join(td, "webterm.db")).execute("PRAGMA integrity_check").fetchone()[0]
-if integ != "ok":
-    sys.exit("integrity FAILED: " + integ[:120])
-print("scan: ok")
-PY
-)
-
-scan_legacy() {   # → SCAN_OUT; 1 if refused
-  local rc=0
-  SCAN_OUT=$(docker run --rm -i --network none --entrypoint python3 \
-       -v "$PRIV":/in:ro -e MAXB="$RESTORE_MAX_BYTES" -e MAXM="$RESTORE_MAX_MEMBERS" \
-       "$IMAGE" -I - 2>&1 <<<"$PY_SCAN") || rc=$?
-  [ "$rc" = 0 ] && printf '%s\n' "$SCAN_OUT" | grep -q '^scan: ok$'
-}
 
 # ── containerul app-ului şi felul în care rulăm codul lui ───────────────────────
 # Containerul e cel care montează VOLUMUL la /data (nu un nume ghicit). Un `docker` care eşuează
@@ -278,16 +225,6 @@ refuse() {   # refuse MESSAGE…  — nothing was changed
 }
 LI=(); [ "$LEGACY_IMPORT" = 1 ] && LI=(--legacy-import)
 
-if [ "$AKIND" = legacy ]; then
-  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 \
-    || refuse "REFUSING: cannot get the helper image '$IMAGE' (no registry access?)." \
-              "         It scans 3.7 archives. Pre-pull it (docker pull $IMAGE) or set WEBTERM_TOOL_IMAGE."
-  if ! scan_legacy; then
-    refuse "$(printf '%s' "$SCAN_OUT" | tail -n1)" \
-           "REFUSING: '$SRC_NAME' is not a restorable WebTerm backup — nothing was changed."
-  fi
-fi
-
 # Volumul TREBUIE să existe: Docker ar crea tăcut unul gol, iar restore-ul ar „reuşi" într-un
 # volum pe care nu-l foloseşte nimic. Doar „confirmat absent" sau eroare: ambele = refuz.
 docker volume inspect "$VOLUME" >/dev/null 2>&1 || refuse \
@@ -346,6 +283,8 @@ app_run_args || { echo "REFUSING: $APP_ERR — nothing was changed." >&2; exit 1
 RESTART_OK=0
 rc=0
 SOUT=$(hostops rw stage-restore --sha256 "$SHA" "${LI[@]}" <"$PINNED" 2>&1) || rc=$?
+# R-M1: 0 = commit confirmat (flag publicat + director fsync-uit); 3 = refuzat înainte de orice
+# schimbare; 4 (sau orice altceva) = rezultat incert → app-ul rămâne oprit, cu paşii de recuperare
 case "$rc" in
   0) RESTART_OK=1 ;;
   3) RESTART_OK=1
@@ -353,7 +292,13 @@ case "$rc" in
      echo "REFUSING: nothing was staged; the data is as it was." >&2
      exit 1 ;;
   *) printf '%s\n' "$SOUT" >&2
-     echo "!! the staging step ended unexpectedly (exit $rc)." >&2
+     echo "!! the staging step did not confirm its outcome (exit $rc): the data volume may hold a" >&2
+     echo "   partly published restore. The app is left STOPPED. Recovery:" >&2
+     echo "   1. read the message above (a disk error? a full disk? fix that first);" >&2
+     echo "   2. start the app: docker start $APP_CID — its boot applies a restore only when the" >&2
+     echo "      staged set is complete and its flag is valid, otherwise it boots the previous data" >&2
+     echo "      (an incomplete set is refused and named in its log: docker logs $APP_CID);" >&2
+     echo "   3. then run this restore again if the data is not the archive's." >&2
      exit 1 ;;
 esac
 printf '%s\n' "$SOUT" | grep -v '^sha256: ' || true

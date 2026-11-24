@@ -293,6 +293,7 @@ const en: Lang = {
     'err.backup.busy': "Another backup verification or restore is in progress. Try again in a moment.",
     'err.backup.restoreInProgress': "A restore is still being applied. Restart the gateway so it finishes before you stage another one.",
     'err.backup.noVaultKey': "The backup has no vault key — a restore would leave the stored credentials unreadable.",
+    'err.backup.vaultKeyMismatch': "The backup's vault key does not decrypt its own database (a key from another installation?) — refused, nothing was changed.",
     'err.backup.emptyFile': "The file is empty.",
     'err.backup.failed': "The backup could not be created — see the gateway log.",
     'err.backup.restoreFailed': "The restore failed — see the gateway log.",

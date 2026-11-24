@@ -932,10 +932,23 @@ tested in isolation; these are not implemented and each needs its own change and
    Review M3: every admin command but `health` opens the database through
    `db.connect_maintenance()`: `mode=rw` (a missing database is refused, never created), no
    SCHEMA / migrations / role seeding / clean-up, no `journal_mode` or other persistent pragma;
-   the live tables and columns must equal the code's (`db.expected_schema()`, built in memory),
-   otherwise it refuses ("start the gateway of this version once"). Coordination uses a second
-   lock file, `DATA_DIR/.maint.lock` (created 0644 and opened read-only, so the service user
-   and a root `docker exec` can both flock it; never written, never removed): the boot holds it
+   the live schema fingerprint must equal the code's (`db.expected_schema()`, built in memory
+   from SCHEMA + MIGRATIONS + `POST_MIGRATION_DDL`), otherwise it refuses ("start the gateway of
+   this version once") and closes every connection it opened. Recheck R-M3: the fingerprint
+   (`db._schema_of`) holds, per table, the columns with declared type, NOT NULL and primary-key
+   position (order-free), every index (explicit: name, uniqueness, partial flag, columns,
+   normalized DDL; implicit UNIQUE / PK: origin, uniqueness, columns) and every foreign key, plus
+   all triggers and views with their normalized DDL; it is taken on a short private connection,
+   and the kept connection must see the same `schema_version` cookie. It proves the constraints
+   the admin statements rely on (a UNIQUE, a cascade) are there and that nothing extra reacts to
+   writes; it does not validate the rows, and a process that ignores `.maint.lock` is not
+   excluded. Checked against every historical `db.py` in git (48 versions): each one, upgraded
+   through the current SCHEMA + MIGRATIONS, yields the fresh fingerprint. Coordination uses a
+   second lock file, `DATA_DIR/.maint.lock` (opened read-only, never written, never removed;
+   recheck R-M2: `0600`, owned by the service user — a root `docker exec` that creates it chowns it
+   to DATA_DIR's owner before using it and refuses if that fails; a file we own with any group /
+   other bit, or without the owner's read bit, is reset to `0600`; group/other access we cannot
+   fix, or another non-root owner, is refused; DATA_DIR should be `0750` or stricter): the boot holds it
    **exclusively** from right after `.lock` through the preflight, a 3.7 or 3.8 restore apply,
    a migration and (from `main.lifespan`) `db.connect()`'s schema step, waiting up to 30 s for
    running admin commands (`maintenance-busy` after that); the admin commands take it
@@ -943,7 +956,30 @@ tested in isolation; these are not implemented and each needs its own change and
    With the gateway up the lock is free, so break-glass stays online; `.lock` is never taken by
    them. There is no rotation or restore CLI yet; the host
    `scripts/restore.sh` stops the app and refuses while any container uses the volume, and never
-   removes `.lock`.
+   removes `.lock`. Recheck R-H1: `deploy.sh`, `rollback.sh`, `upgrade.sh`, `backup.sh` and
+   `restore.sh` hold one host lock for their whole run (`flock` on `.deploy.lock` in the install
+   directory; a child run inherits it, a concurrent one is refused). The pre-3.8 start guard checks
+   the `/data` mount of the `app` service in `docker compose config --format json` (a named volume
+   with its effective name, or a bind directory read on the host): a divergent `WEBTERM_VOLUME`, an
+   existing app container with another `/data` mount, any other mount kind, a second mount under
+   `/data`, or an unreadable config are refused; the same plan is re-checked right before `up`
+   (rollback.sh restores `.env` / `.prev-image` on a mismatch; upgrade.sh re-checks after syncing
+   the host kit). An image without a version label is `unknown` (refused on a migrated volume)
+   unless the operator sets `WEBTERM_IMAGE_ERA=3.8` for that run; no file-existence heuristic.
+   Recheck R-M1: `python3 -m app.hostops stage-restore` exits 0 only when the flag is published and
+   its directory fsynced (`backup.StageProgress.committed`), 3 when it refused before the first
+   rename into DATA_DIR, 4 when anything failed after that; `restore.sh` restarts the app on 0 and
+   3 only and prints recovery steps otherwise. The 3.7 staging path on a pre-3.8 volume uses the same
+   discipline: the set extracted and fsynced in a private directory, the old flag removed durably,
+   the set renamed into place, the flag written tmp → fsync → rename → directory fsync. Recheck
+   R-H2: a pre-3.8 archive's `secret` must decrypt at least one value of the archive's own database
+   (`legacyvault.prove_legacy_key` through `backup.prove_legacy_secret`, the same inventory and
+   budget as the migration) before anything is published, in `backup.stage_restore` itself and in
+   `hostops verify`: the legacy import onto a protected volume through the strict extractor
+   (`backup.verify_legacy_import` = the staging's own checks, in a private directory), a 3.7
+   restore onto a pre-3.8 volume after the 3.7 checks. `restore.sh` has no separate scanner any
+   more. Recheck R-L1: `backup.sh` publishes a protected archive from a unique `mktemp` file,
+   `sync`ed, `ln`ed to its final name (refused if the name exists), then the directory `sync`ed.
 9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but the two lock files, twice);
    legacy + key (migrated, proven, old values decrypt, new values `FK:`, forward tokens still
    valid); foreign `secret` refused unchanged; no ciphertext eligible; WAL pending refused; mixed

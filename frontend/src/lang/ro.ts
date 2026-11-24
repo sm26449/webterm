@@ -291,6 +291,7 @@ const ro: Lang = {
     'err.backup.busy': "O altă verificare sau restaurare de backup e în curs. Încearcă din nou peste câteva momente.",
     'err.backup.restoreInProgress': "O restaurare este încă în curs de aplicare. Repornește gateway-ul ca să se termine înainte să pregătești alta.",
     'err.backup.noVaultKey': "Backupul nu conține cheia seifului — o restaurare ar lăsa credențialele salvate ilizibile.",
+    'err.backup.vaultKeyMismatch': "Cheia seifului din backup nu decriptează propria bază de date (o cheie de la altă instalare?) — refuzat, nimic nu s-a schimbat.",
     'err.backup.emptyFile': "Fișierul e gol.",
     'err.backup.failed': "Backupul nu a putut fi creat — vezi logul gateway-ului.",
     'err.backup.restoreFailed': "Restaurarea a eșuat — vezi logul gateway-ului.",

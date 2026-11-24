@@ -23,6 +23,7 @@ import os
 import sqlite3
 import stat
 import sys
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -35,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 from cryptography.fernet import Fernet, InvalidToken  # noqa: E402
 
-from app import admin, backup, bootkeys, config, core, keys, security, syshealth  # noqa: E402
+from app import admin, backup, bootkeys, config, legacyvault, core, keys, security, syshealth  # noqa: E402
 
 ok = 0
 total = 0
@@ -159,8 +160,8 @@ def test_legacy_no_key():
     check("arborele e identic octet cu octet în afară de .lock/.maint.lock", without_lock(after) == before,
           set(after.items()) ^ set(before.items()))
     check(".lock creat 0600, gol", ".lock" in after and after[".lock"][1] == 0o600 and after[".lock"][2] == 0)
-    check(".maint.lock creat 0644, gol (deschis read-only şi de root, M3)", ".maint.lock" in after
-          and after[".maint.lock"][1] == 0o644 and after[".maint.lock"][2] == 0, after.get(".maint.lock"))
+    check(".maint.lock creat 0600, gol (R-M2: niciun alt user nu-l poate deschide şi ţine)", ".maint.lock" in after
+          and after[".maint.lock"][1] == 0o600 and after[".maint.lock"][2] == 0, after.get(".maint.lock"))
     v = fernet(secret).encrypt(b"x").decode()
     check("seiful = data/secret (o valoare 3.7 se decriptează)", security.decrypt_secret(v) == "x")
     new = security.encrypt_secret("nou")
@@ -629,12 +630,12 @@ def test_h4_inventory():
     d, secret = legacy_volume("h4-cap")
     _fill(d, [fernet(secret).encrypt(b"t").decode() for _ in range(6)])
     kf, _ = key_file("h4-cap")
-    saved = bootkeys._MAX_VAULT_VALUES
-    bootkeys._MAX_VAULT_VALUES = 5
+    saved = legacyvault._MAX_VAULT_VALUES
+    legacyvault._MAX_VAULT_VALUES = 5
     try:
         e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
     finally:
-        bootkeys._MAX_VAULT_VALUES = saved
+        legacyvault._MAX_VAULT_VALUES = saved
     check("inventar peste plafon → legacy-db-inventory-too-large", e is not None
           and e.reason == "legacy-db-inventory-too-large", e)
 
@@ -839,6 +840,51 @@ def test_m3_admin_maintenance():
     bootkeys.release()
 
 
+def test_rm3_schema_fingerprint():
+    """R-M3 (recheck PR4): conexiunea de mentenanţă compară amprenta schemei (coloane cu tip /
+    NOT NULL / PK, indexuri inclusiv UNIQUE, chei străine, triggere, view-uri), nu doar numele,
+    şi nu lasă conexiunea deschisă la nepotrivire."""
+    print("── R-M3: maintenance schema fingerprint")
+    from app import db
+    base = Path(tempfile.mkdtemp(prefix="wt-rm3-"))
+    use(base)
+    run(db.connect())
+    run(db.close())
+    good = (base / "webterm.db").read_bytes()
+
+    def attempt(mutate):
+        (base / "webterm.db").write_bytes(good)
+        for side in ("-wal", "-shm"):
+            if (base / ("webterm.db" + side)).exists():
+                (base / ("webterm.db" + side)).unlink()
+        if mutate:
+            con = sqlite3.connect(str(base / "webterm.db"))
+            con.executescript(mutate)
+            con.commit()
+            con.close()
+        try:
+            run(db.connect_maintenance())
+            ok_ = True
+        except db.MaintenanceRefused:
+            ok_ = False
+        opened = db._conn is not None
+        run(db.close())
+        return ok_, opened
+
+    check("R-M3: DB-ul creat de boot = amprenta codului → acceptat", attempt("") == (True, True))
+    for label, sql in (
+            ("un trigger în plus", "CREATE TRIGGER t_x AFTER DELETE ON users BEGIN SELECT 1; END;"),
+            ("indexul parţial lipsă", "DROP INDEX idx_sessions_share;"),
+            ("un index UNIQUE în plus", "CREATE UNIQUE INDEX ux_x ON users(created);"),
+            ("o coloană cu alt tip", "ALTER TABLE users RENAME TO users_old; "
+             "CREATE TABLE users AS SELECT * FROM users_old; DROP TABLE users_old;"),
+            ("un view în plus", "CREATE VIEW v_x AS SELECT 1;")):
+        got = attempt(sql)
+        check("R-M3: %s (aceleaşi tabele) → refuz, nicio conexiune rămasă deschisă" % label,
+              got == (False, False), got)
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def _boot_waits(d, kf):
     dfd = os.open(str(d), os.O_RDONLY | os.O_DIRECTORY)
     held = keys.acquire_maint_lock(dfd, False, 0)
@@ -851,6 +897,88 @@ def _boot_waits(d, kf):
         return x.reason == "maintenance-busy" and _lock_free(d)
     finally:
         os.close(held)
+
+
+def _as_uid(uid, fn, umask=0o077):
+    """Rulează fn() într-un proces copil cu uid/gid `uid` şi umask-ul dat → (ok, motiv LockError)."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        code = "ok"
+        try:
+            os.setgroups([])
+            os.setresgid(uid, uid, uid)
+            os.setresuid(uid, uid, uid)
+            os.umask(umask)
+            fn()
+        except keys.LockError as e:
+            code = e.reason
+        except BaseException as e:            # noqa: BLE001
+            code = "error:" + type(e).__name__
+        os.write(w, code.encode())
+        os._exit(0)
+    os.close(w)
+    out = os.read(r, 200).decode()
+    os.close(r)
+    os.waitpid(pid, 0)
+    return out
+
+
+def test_rm2_maint_lock_perms():
+    """R-M2 (recheck PR4): .maint.lock e 0600 al userului serviciului; root care îl creează i-l
+    dă înainte de folosire; un umask restrictiv nu-l strică; alt uid nu-l poate deschide/ţine."""
+    print("── R-M2: .maint.lock owner + mode")
+    if os.geteuid() != 0:
+        print("  SKIP: needs root (chown / setuid)")
+        return
+    svc, other = 10001, 10002
+    d = tempfile.mkdtemp(prefix="wt-rm2-")
+    os.chown(d, svc, svc)
+    os.chmod(d, 0o750)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    old = os.umask(0o277)                      # umask restrictiv: fără bitul de citire al proprietarului
+    try:
+        fd = keys.acquire_maint_lock(dfd, exclusive=True)
+        os.close(fd)
+    finally:
+        os.umask(old)
+    st = os.lstat(os.path.join(d, keys.MAINT_LOCK_NAME))
+    check("R-M2: creat de root → al userului serviciului, exact 0600, înainte de folosire",
+          (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) == (svc, svc, 0o600), (st.st_uid, oct(st.st_mode)))
+
+    def take():
+        f = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        os.close(keys.acquire_maint_lock(f, exclusive=False))
+    check("R-M2: boot-ul ca uid-ul serviciului (umask 077) îl ia", _as_uid(svc, take) == "ok")
+
+    def hold_ro():
+        os.close(os.open(os.path.join(d, keys.MAINT_LOCK_NAME), os.O_RDONLY))
+    os.chmod(d, 0o755)                         # chiar cu DATA_DIR traversabil
+    check("R-M2: alt uid nu-l poate deschide read-only (deci nici ţine)", _as_uid(other, hold_ro) == "error:PermissionError")
+    os.chmod(d, 0o750)
+    lp = os.path.join(d, keys.MAINT_LOCK_NAME)
+    os.chmod(lp, 0o644)
+    check("R-M2: un 0644 rămas (build anterior) e readus la 0600 de proprietar", _as_uid(svc, take) == "ok"
+          and stat.S_IMODE(os.lstat(lp).st_mode) == 0o600)
+    os.chown(lp, 0, 0)
+    os.chmod(lp, 0o644)
+    check("R-M2: 0644 al lui root, deschis de serviciu (nu-l poate corecta) → refuz lock-bad-mode",
+          _as_uid(svc, take) == "lock-bad-mode")
+    os.chown(lp, other, other)
+    os.chmod(lp, 0o600)
+    fd2 = None
+    try:
+        fd2 = keys.acquire_maint_lock(dfd, exclusive=False)
+        got = "ok"
+    except keys.LockError as e:
+        got = e.reason
+    finally:
+        if fd2 is not None:
+            os.close(fd2)
+    check("R-M2: deţinut de alt uid (nici root, nici serviciul) → refuz lock-bad-owner", got == "lock-bad-owner", got)
+    os.close(dfd)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def main_():
@@ -868,6 +996,8 @@ def main_():
     test_m1_layouts()
     test_m2_lock_after_mutation()
     test_m3_admin_maintenance()
+    test_rm2_maint_lock_perms()
+    test_rm3_schema_fingerprint()
     print(f"\n{ok}/{total} passed")
     raise SystemExit(0 if ok == total else 1)
 

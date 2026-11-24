@@ -48,6 +48,9 @@ def _backup_value_error(e: Exception) -> ApiError:
         code = "backup.badPassphrase"
     elif "too large" in low or "bomb" in low:
         code = "backup.tooLarge"
+    elif "does not open its own database" in low:
+        # R-H2: cheia 3.7 din arhivă nu decriptează nicio valoare a DB-ului din aceeaşi arhivă
+        code = "backup.vaultKeyMismatch"
     elif "vault key" in low:
         code = "backup.noVaultKey"
     else:

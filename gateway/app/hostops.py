@@ -22,8 +22,14 @@ The archive on stdin must hash to `--sha256` (the digest the script took of its 
 copy): what was checked is what is staged. Legacy archives (a 3.7 tar.gz, already decrypted by
 the script) go through the same public `backup` entry points.
 
-Exit codes: 0 done; 3 refused or not committed — the data volume is exactly as it was (the
-caller may restart the app); 1 anything else. Messages never carry key material.
+Exit codes (R-M1, stage-restore): 0 committed — the new flag is published and its directory
+fsynced; 3 refused before any change — the data volume is exactly as it was (the caller may
+restart the app); 4 outcome uncertain — something failed after the volume began to change (a
+failed fsync after a rename, an unexpected I/O error): the caller must NOT restart the app on its
+own; 1 anything else (treated like 4 by restore.sh). For verify / backup: 0 done, 3 refused.
+A legacy (pre-3.8) archive is checked by the same code that stages it: the strict extractor and
+the FK_legacy proof on the archive's own database for a legacy import (R-H2), the 3.7 checks plus
+that proof on a legacy volume. Messages never carry key material.
 INV-14 (docs/design/INVARIANTS.md): the key decides before anything is written.
 """
 import argparse
@@ -40,7 +46,7 @@ from . import backup, config
 from . import keyring as kr
 from . import keys
 
-EXIT_OK, EXIT_ERR, EXIT_REFUSED = 0, 1, 3
+EXIT_OK, EXIT_ERR, EXIT_REFUSED, EXIT_UNCERTAIN = 0, 1, 3, 4
 # antetul stratului cu parolă (backup.encrypt); un tar.gz începe cu magicul gzip
 WTBK_MAGIC = b"WTBK1"
 GZIP_MAGIC = b"\x1f\x8b"
@@ -52,6 +58,10 @@ MAINT_WAIT = 15.0
 
 class Refused(Exception):
     """Nothing in the data volume was changed (exit 3)."""
+
+
+class Uncertain(Exception):
+    """The volume began to change and the staging did not reach its commit (exit 4)."""
 
 
 class _DirView:
@@ -233,6 +243,12 @@ def _check(raw, kind, inv, hk, legacy_import):
                           "the explicit legacy import (--legacy-import) — refused")
         if inv.kind == "legacy" and legacy_import:
             raise Refused("--legacy-import is for protected volumes; this one is pre-3.8 — refused")
+        if inv.kind == "protected":
+            # R-H2: exact ce face staging-ul (extractorul strict + proba FK_legacy pe DB-ul arhivei)
+            try:
+                return backup.verify_legacy_import(raw, keys=hk)
+            except Exception as e:              # noqa: BLE001 — orice eroare a cititorului = refuz
+                raise Refused("the archive is refused: %s" % _refusal(e)) from None
         blob, pw = _wrap_legacy(raw)
     try:
         info = backup.verify_restorable(blob, pw, keys=hk)
@@ -281,20 +297,6 @@ def cmd_verify(args):
 # ── stage-restore ────────────────────────────────────────────────────────────
 
 
-def _flag_bytes(dir_fd):
-    try:
-        fd = os.open(".restore-flag", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
-    except FileNotFoundError:
-        return None
-    except OSError as e:
-        return ("unreadable", e.errno)
-    try:
-        with os.fdopen(os.dup(fd), "rb") as f:
-            return f.read(64 * 1024)
-    finally:
-        os.close(fd)
-
-
 def cmd_stage(args):
     raw, digest = _read_stdin(args.sha256)
     kind = _archive_kind(raw)
@@ -331,16 +333,22 @@ def cmd_stage(args):
                 raise Refused("--legacy-import is for protected volumes; this one is pre-3.8 — refused")
             blob, pw = _wrap_legacy(raw)
             legacy_import = inv.kind == "protected"
-        before = _flag_bytes(lock.dir_fd)
+        progress = backup.StageProgress()
         try:
-            info = backup.stage_restore(blob, pw, keys=hk, legacy_import=legacy_import)
+            info = backup.stage_restore(blob, pw, keys=hk, legacy_import=legacy_import, progress=progress)
         except Exception as e:                  # noqa: BLE001
-            # flagul e ultimul pas durabil al staging-ului (ambele formate): neschimbat = nimic
-            # pus în staging, setul anterior (dacă era) a rămas întreg
-            if _flag_bytes(lock.dir_fd) == before:
+            # R-M1: rezultatul vine din ce a raportat staging-ul, nu dintr-o comparaţie de octeţi
+            # a flagului: înainte de prima schimbare → refuz curat; după commit (flag publicat ŞI
+            # director fsync-uit) → doar curăţenia a eşuat; între ele → incert, fără restart
+            if not progress.mutated:
                 raise Refused("nothing was staged: %s" % _refusal(e)) from None
-            _say("warning: the restore was staged, then a clean-up step failed: %s" % _refusal(e))
+            if not progress.committed:
+                raise Uncertain("the staging failed after the data volume began to change: %s"
+                                % _refusal(e)) from None
+            _say("warning: the restore was staged (committed), then a clean-up step failed: %s" % _refusal(e))
             info = {}
+        if not progress.committed:
+            raise Uncertain("the staging returned without a committed flag")
     finally:
         if maint is not None:
             os.close(maint)
@@ -372,6 +380,9 @@ def main(argv=None):
     except Refused as e:
         _say("REFUSING: %s" % e)
         return EXIT_REFUSED
+    except Uncertain as e:
+        _say("UNCERTAIN: %s" % e)
+        return EXIT_UNCERTAIN
     except keys.BootRefused as e:
         _say("REFUSING: %s" % _refusal(e))
         return EXIT_REFUSED

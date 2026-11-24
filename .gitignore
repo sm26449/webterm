@@ -10,6 +10,8 @@ node_modules
 .env.*
 !.env*.example
 backups/
+# host lifecycle lock (deploy/rollback/upgrade/backup/restore, R-H1)
+.deploy.lock
 
 # agent update signing key — must never be committed
 *.pem

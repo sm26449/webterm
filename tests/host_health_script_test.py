@@ -523,7 +523,8 @@ def main():
               and st["data"].get("disk_free_pct") == 0, (st, out[-300:]))
         os.remove(dfp)
         tool_refs = {}
-        for f in ("backup.sh", "restore.sh", "host-health.sh", "docker-cleanup.sh"):
+        # restore.sh nu mai are imagine-unealtă (R-H2: arhivele 3.7 le verifică doar codul gateway-ului)
+        for f in ("backup.sh", "host-health.sh", "docker-cleanup.sh"):
             m = re.search(r"python:3\.12-alpine@sha256:[0-9a-f]{64}", open(os.path.join(ROOT, "scripts", f)).read())
             tool_refs[f] = m.group(0) if m else None
         check("the tool image digest docker-cleanup preserves is the one backup/restore/host-health run",

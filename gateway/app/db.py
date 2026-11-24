@@ -751,9 +751,8 @@ async def connect() -> None:
     # coloana vine dintr-o migrație, deci indexul se creează DUPĂ. Fără el, fiecare cerere
     # (inclusiv cu token invalid) scanează toată tabela sessions (~120z istoric) — amplificare
     # ieftină pt. un atacator care lovește tokenuri aleatoare. Parțial → mic (doar sesiuni share-uite).
-    await _conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sessions_share ON sessions(share_token) "
-        "WHERE share_token IS NOT NULL")
+    for stmt in POST_MIGRATION_DDL:
+        await _conn.execute(stmt)
     await _conn.execute("PRAGMA journal_mode=WAL")
     # synchronous=NORMAL: sub WAL, durabil la crash de proces (doar un crash de OS/kernel
     # în fereastra dintre commit și checkpoint poate pierde ultima tranzacție — acceptabil
@@ -784,9 +783,18 @@ class MaintenanceRefused(RuntimeError):
     """The maintenance connection (admin DB-only commands) cannot open this database as is."""
 
 
+# DDL pe care connect() îl rulează DUPĂ migraţii (coloana vine dintr-o migraţie); face parte din
+# schema aşteptată (R-M3), deci o singură listă pentru boot şi pentru amprentă.
+POST_MIGRATION_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_sessions_share ON sessions(share_token) "
+    "WHERE share_token IS NOT NULL",
+)
+
+
 def expected_schema() -> dict:
-    """{table: (columns…)} the code's SCHEMA + MIGRATIONS produce, built in memory (no file
-    touched). The maintenance connection compares the live database against it (M3)."""
+    """The schema fingerprint (_schema_of) the code's SCHEMA + MIGRATIONS + POST_MIGRATION_DDL
+    produce, built in memory (no file touched). The maintenance connection compares the live
+    database against it (M3, R-M3)."""
     con = sqlite3.connect(":memory:")
     try:
         con.executescript(SCHEMA)
@@ -796,28 +804,92 @@ def expected_schema() -> dict:
             except sqlite3.Error as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+        for stmt in POST_MIGRATION_DDL:
+            con.execute(stmt)
         return _schema_of(con)
     finally:
         con.close()
 
 
+def _q(name) -> str:
+    return '"%s"' % str(name).replace('"', '""')
+
+
+def _norm_sql(sql) -> str:
+    # textul DDL din sqlite_master, fără diferenţe de spaţii/majuscule/IF NOT EXISTS
+    t = " ".join(str(sql or "").split()).lower()
+    return t.replace(" if not exists ", " ")
+
+
 def _schema_of(con) -> dict:
+    """R-M3: what the admin DB-only commands rely on, per table — columns with declared type,
+    NOT NULL and primary-key position (order-free: a migrated database has the added columns
+    last); every index (explicit: name, uniqueness, partial flag, column list and its normalized
+    DDL; implicit UNIQUE / PRIMARY KEY indexes: origin, uniqueness, columns); every foreign key
+    (target table, columns, ON UPDATE / ON DELETE, MATCH); plus every trigger and view with its
+    normalized DDL. It proves the database has the constraints this version's statements assume
+    (a revocation that relies on a UNIQUE or a cascade behaves as written) and nothing extra that
+    reacts to writes (a trigger). It does not prove the data is valid, nor that a process not
+    taking `.maint.lock` leaves the file alone."""
     out = {}
-    for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
-        qt = '"%s"' % t.replace('"', '""')
-        out[t] = tuple(sorted(r[1] for r in con.execute("PRAGMA table_info(%s)" % qt)))
+    tables = sorted(r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
+    idx_sql = {r[0]: r[1] for r in con.execute("SELECT name, sql FROM sqlite_master WHERE type='index'")}
+    for t in tables:
+        qt = _q(t)
+        cols = tuple(sorted((r[1], " ".join(str(r[2] or "").upper().split()), int(r[3]), int(r[5]))
+                            for r in con.execute("PRAGMA table_info(%s)" % qt)))
+        idx = []
+        for r in con.execute("PRAGMA index_list(%s)" % qt).fetchall():
+            name, unique, origin, partial = r[1], int(r[2]), r[3], int(r[4])
+            icols = tuple(x[2] for x in con.execute("PRAGMA index_info(%s)" % _q(name)))
+            if origin == "c":
+                idx.append(("c", name, unique, partial, icols, _norm_sql(idx_sql.get(name))))
+            else:
+                idx.append((origin, "", unique, partial, icols, ""))
+        fks = tuple(sorted((r[2], r[1], r[3], r[4], r[5], r[6], r[7])
+                           for r in con.execute("PRAGMA foreign_key_list(%s)" % qt)))
+        out[t] = (cols, tuple(sorted(idx)), fks)
+    out[" triggers"] = tuple(sorted((r[0], r[1], _norm_sql(r[2])) for r in con.execute(
+        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger'")))
+    out[" views"] = tuple(sorted((r[0], _norm_sql(r[1])) for r in con.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='view'")))
     return out
+
+
+def _live_schema(uri: str):
+    """The fingerprint of the file behind `uri` and its schema cookie, on a short private
+    connection (closed on every path)."""
+    con = sqlite3.connect(uri, uri=True, timeout=5)
+    try:
+        return _schema_of(con), con.execute("PRAGMA schema_version").fetchone()[0]
+    finally:
+        con.close()
 
 
 async def connect_maintenance() -> None:
     """M3: the connection of the admin DB-only commands (`python3 -m app.admin`). Unlike
     connect(): never creates the file (mode=rw: a missing database is a refusal), runs no
     SCHEMA / migration / seeding / clean-up, and switches no journal mode (the gateway's WAL
-    setting stays as the file has it). The live schema must equal the code's exactly
-    (expected_schema); otherwise MaintenanceRefused — start the gateway once (it migrates), or
-    use the matching image."""
+    setting stays as the file has it). R-M3: the live schema fingerprint (_schema_of: columns
+    with types / NOT NULL / PK, indexes incl. UNIQUE, foreign keys, triggers, views) must equal
+    the code's exactly (expected_schema), and the connection that is kept must see the same
+    schema cookie the fingerprint was taken at; otherwise MaintenanceRefused and no connection
+    stays open — start the gateway once (it migrates), or use the matching image."""
     global _conn
     uri = "file:%s?mode=rw" % urllib.parse.quote(str(config.DB_PATH), safe="/")
+    try:
+        live, cookie = _live_schema(uri)
+    except Exception as e:
+        raise MaintenanceRefused("the database %s cannot be opened or read (%s): it is never created by "
+                                 "an admin command" % (config.DB_PATH, e)) from None
+    want = expected_schema()
+    if live != want:
+        diff = sorted(set(want) ^ set(live)) or sorted(t for t in want if want[t] != live.get(t))
+        raise MaintenanceRefused("the database schema differs from this version's (%s): start the "
+                                 "gateway of this version once (it migrates the schema), or run the "
+                                 "command from the image that matches the database"
+                                 % ", ".join(x.strip() for x in diff[:5]))
     try:
         conn = await aiosqlite.connect(uri, uri=True)
     except Exception as e:
@@ -826,25 +898,15 @@ async def connect_maintenance() -> None:
     try:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA busy_timeout=5000")
-        live = {}
-        async with conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                                "AND name NOT LIKE 'sqlite_%'") as cur:
-            tables = [r[0] for r in await cur.fetchall()]
-        for t in tables:
-            qt = '"%s"' % t.replace('"', '""')
-            async with conn.execute("PRAGMA table_info(%s)" % qt) as cur:
-                live[t] = tuple(sorted(r[1] for r in await cur.fetchall()))
+        async with conn.execute("PRAGMA schema_version") as cur:
+            now_cookie = (await cur.fetchone())[0]
     except Exception as e:
         await conn.close()
         raise MaintenanceRefused("the database %s cannot be read (%s)" % (config.DB_PATH, e)) from None
-    want = expected_schema()
-    if live != want:
+    if now_cookie != cookie:
         await conn.close()
-        diff = sorted(set(want) ^ set(live)) or sorted(t for t in want if want[t] != live.get(t))
-        raise MaintenanceRefused("the database schema differs from this version's (%s): start the "
-                                 "gateway of this version once (it migrates the schema), or run the "
-                                 "command from the image that matches the database"
-                                 % ", ".join(diff[:5]))
+        raise MaintenanceRefused("the database schema changed while it was being checked — run the "
+                                 "command again")
     _conn = conn
 
 

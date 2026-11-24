@@ -329,7 +329,10 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   first), any `FK:` value next to a 3.7 `secret` (a mixed set), a value that looks encrypted but
   is not a token, an inventory over the hard cap. A staged 3.7 restore must be complete and its
   own `secret` must prove its own database before anything is touched; it is then applied under
-  the old key and migrated in the same boot.
+  the old key and migrated in the same boot. The same proof, on the archive's own database, gates
+  every restore of a pre-3.8 archive before anything is published: the explicit legacy import
+  onto a protected volume (the gateway's strict reader, identical in `verify` and in staging), and
+  a 3.7 restore onto a pre-3.8 volume.
 - Once a boot has started to change the volume (a 3.7 restore applied, a key file published), it
   keeps the data-directory lock until the process exits, on every error path, and reports the
   failure as `operation-incomplete`, never as a preflight refusal.
@@ -339,8 +342,10 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   database rows (`passwd`, `disable-2fa`, `logout-all`, `promote`, `sso-only`, `enable`) run while
   the gateway holds that lock, as in 3.7: they never open, write or publish key material (Stefan's
   decision, 2026-11-24). They use a maintenance connection that never creates the database, runs
-  no schema step and changes no journal mode (a schema other than the code's is refused), and take
-  `.maint.lock` shared; the boot holds it exclusively through the preflight, a restore, a
+  no schema step and changes no journal mode (a schema whose fingerprint — columns with types,
+  NOT NULL and primary keys, indexes including UNIQUE ones, foreign keys, triggers, views — differs
+  from the code's is refused, and no connection stays open), and take `.maint.lock` shared (both
+  lock files are `0600`, owned by the service user, so no other local user can hold them); the boot holds it exclusively through the preflight, a restore, a
   migration and the schema step, so an admin command is refused (not queued) during those. A new
   admin command that writes an encrypted value must open the keyring read-only or take the lock.
 - Every backup and snapshot of a protected volume is a `WTS1` container that needs the key held
@@ -349,9 +354,16 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
 - Stored secrets name their key: values written on a protected volume carry the `FK:` prefix and
   decrypt only with `FK`; unprefixed values decrypt only with `FK_legacy`. A value that names a key
   the process does not hold is an error, never a retry with another key.
+- A pre-3.8 image is never started on a migrated volume: the host scripts check the `/data` mount
+  compose will actually start (its effective volume name or bind directory), refuse a divergent
+  `WEBTERM_VOLUME`, a remapped mount, an unknown mount or an unreadable config, check the same
+  plan again right before starting, and run one lifecycle operation at a time (`.deploy.lock`). An
+  image without a version label is of an unknown version unless the operator declares it 3.8.
+- A host-side restore reports one of three outcomes: committed (the flag published and flushed),
+  refused before any change, or uncertain; only the first two restart the app.
 - Limits (stated, not hidden): until SQLCipher ships, the database file and its WAL are outside
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`, `legacy_inventory`, `check_legacy_staging`; `db.py` `connect_maintenance`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
-**Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `StageProgress`; `hostops.py` `cmd_stage`; `db.py` `connect_maintenance`, `_schema_of`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`, `host_backup_script`, `deploy_script`, `upgrade_script`.

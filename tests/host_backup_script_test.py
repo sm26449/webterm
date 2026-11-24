@@ -49,6 +49,7 @@ from app import backup, bootkeys, config, hostops, keys  # noqa: E402
 ok = 0
 total = 0
 PASS = "parola-arhivei-host"
+FOREIGN_DB = b""
 
 
 def check(name, cond, detail=""):
@@ -197,6 +198,12 @@ if image == "sha256:fakeapp":
     env["PYTHONPATH"] = GW
     if rest[:2] == ["-m", "app.hostops"] and rest[2:3] == ["stage-restore"] and rd("stage_crash"):
         sys.exit(137)
+    if rest[:2] == ["-m", "app.hostops"] and rest[2:3] == ["stage-restore"] and rd("stage_fsync_fail"):
+        # R-M1: fsync-ul directorului eşuează DUPĂ rename-ul flagului (EIO injectat în codul real)
+        rest = ["-c", "import sys\nfrom app import backup, hostops\nst = {'on': False}\no = backup._fsync\n"
+                "def fs(fd):\n    if st['on']:\n        raise OSError(5, 'injected EIO')\n    return o(fd)\n"
+                "def fault(n):\n    if n == 'flag:renamed':\n        st['on'] = True\n"
+                "backup._fsync = fs\nbackup._fault = fault\nsys.exit(hostops.main())"] + rest[2:]
 os.execve(sys.executable, [sys.executable] + rest, env)
 '''
 
@@ -253,7 +260,7 @@ class Env:
         if mounts is None:
             mounts = "bind||%s|%s\n" % (self.keys, self.keys)   # cheia: aceeaşi cale „în container"
         self.put("app_mounts", mounts)
-        for n in ("others", "ps_fail", "stage_crash"):
+        for n in ("others", "ps_fail", "stage_crash", "stage_fsync_fail"):
             self.put(n, None)
 
     def state(self, name):
@@ -287,11 +294,28 @@ class Env:
 def make_db(path, email="a@b.c"):
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, created REAL)")
-    for t in ("hosts", "sessions", "app_settings"):
-        con.execute("CREATE TABLE %s(id INTEGER PRIMARY KEY)" % t)
+    for t in ("hosts", "sessions"):
+        con.execute("CREATE TABLE %s(id INTEGER PRIMARY KEY, cred_encrypted TEXT)" % t)
+    con.execute("CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT)")
     con.execute("INSERT INTO users(email, created) VALUES(?, 1000)", (email,))
     con.commit()
     con.close()
+
+
+def _foreign_db():
+    """Un DB valid cu o valoare de seif criptată sub o cheie pe care arhiva NU o poartă (R-H2)."""
+    from cryptography.fernet import Fernet
+    d = tempfile.mkdtemp(prefix="wt-hostbk-fdb-")
+    p = os.path.join(d, "webterm.db")
+    make_db(p, email="strain@x")
+    con = sqlite3.connect(p)
+    tok = Fernet(base64.urlsafe_b64encode(os.urandom(32))).encrypt(b"pw").decode()
+    con.execute("INSERT INTO hosts(cred_encrypted) VALUES(?)", (tok,))
+    con.commit()
+    con.close()
+    raw = open(p, "rb").read()
+    shutil.rmtree(d, ignore_errors=True)
+    return raw
 
 
 def signing_pair():
@@ -440,6 +464,22 @@ def test_backup(e):
           rc == 0 and arc.endswith(".wtbk") and "run --rm -i --network none" in calls
           and ("%s:%s:ro" % (e.keys, e.keys)) in calls and "--env-file" not in calls
           and "exec " not in calls, out + calls)
+    # R-L1: acelaşi nume (aceeaşi secundă) → a doua rulare refuză, prima arhivă rămâne neatinsă
+    ds = os.path.join(e.fake, "bin", "date")
+    with open(ds, "w") as f:
+        f.write('#!/bin/sh\n[ -n "$FAKE_STAMP" ] && [ "$1" = "+%Y%m%d-%H%M%S" ] && { echo "$FAKE_STAMP"; exit 0; }\n'
+                'exec /usr/bin/date "$@"\n')
+    os.chmod(ds, 0o755)
+    shutil.rmtree(e.out, ignore_errors=True)
+    x = dict(PE, WEBTERM_VOLUME="prot", FAKE_STAMP="20260101-000000")
+    rc1, out1 = e.run("backup.sh", extra=x)
+    first = newest(e) if rc1 == 0 else ""
+    b1 = open(first, "rb").read() if first else b""
+    rc2, out2 = e.run("backup.sh", extra=x)
+    os.unlink(ds)
+    check("R-L1: două backup-uri cu acelaşi nume → al doilea refuză, primul neatins, niciun temporar",
+          rc1 == 0 and rc2 != 0 and "already exists" in out2 and open(first, "rb").read() == b1
+          and os.listdir(e.out) == [os.path.basename(first)], (out1[-300:], out2[-300:], os.listdir(e.out)))
     gw = hold_lock(d)
     try:
         rc, out = backup_run(e, "prot", PE)
@@ -579,6 +619,19 @@ def test_restore(e):
     e.put("stage_crash", None)
     e.put("app_running", "true")
 
+    # R-M1: fsync-ul directorului eşuează după publicarea flagului → exit 4, app-ul rămâne oprit
+    e.put("stage_fsync_fail", "1")
+    rc, out = restore(e, arc, "rtgt", PE)
+    calls = e.calls()
+    check("R-M1: fsync eşuat după rename-ul flagului → exit 4 (incert), app-ul NU e repornit, paşi de recuperare",
+          rc != 0 and "exit 4" in out and "UNCERTAIN" in out and "stop cid-app" in calls
+          and "start cid-app" not in calls and "left STOPPED" in out, out[-600:] + calls)
+    e.put("stage_fsync_fail", None)
+    mode, email, applied = boot_check(tgt, {"WEBTERM_MASTER_KEY_FILE": kf})
+    check("R-M1: …următorul boot recuperează: aplică setul publicat (protected, datele sursei)",
+          mode == "protected" and email == "sursa@x" and applied, (mode, email, applied))
+    e.put("app_running", "true")
+
     rc, out = restore(e, arc, "rtgt", PE)
     calls = e.calls()
     check("protejat + cheia bună → verificat, oprit, pus în staging, pornit",
@@ -595,18 +648,21 @@ def test_restore(e):
     check("…boot-ul gateway-ului aplică setul: protected, datele sursei",
           mode == "protected" and email == "sursa@x" and applied, (mode, email, applied))
 
-    # arhive făcute de mână: refuzate la citire, înainte de oprire
+    # arhive făcute de mână: refuzate la citire de extractorul STRICT al gateway-ului (R-H2: niciun
+    # alt parser), înainte de oprire — şi fără --legacy-import, şi cu el
     db = open(os.path.join(e.vol("rsrc"), "webterm.db"), "rb").read()
     before = data_tree(tgt)
-    for label, members, needle in (
-            ("secret + keys.wtk", [("webterm.db", db), ("keys.wtk", b"k"), ("secret", b"s" * 32)], "keys.wtk"),
-            ("cu master.key", [("webterm.db", db), ("secret", b"s" * 32), ("master.key", b"k")], "master.key"),
-            ("legacy fără secret", [("webterm.db", db)], "without the vault key"),
-            ("nume dublat", [("webterm.db", db), ("secret", b"s" * 32), ("webterm.db", b"x")], "twice")):
+    for label, members in (
+            ("secret + keys.wtk", [("webterm.db", db), ("keys.wtk", b"k"), ("secret", b"s" * 32)]),
+            ("cu master.key", [("webterm.db", db), ("secret", b"s" * 32), ("master.key", b"k")]),
+            ("legacy fără secret", [("webterm.db", db)]),
+            ("nume dublat", [("webterm.db", db), ("secret", b"s" * 32), ("webterm.db", b"x")]),
+            ("secret străin DB-ului (32 de octeţi)", [("webterm.db", FOREIGN_DB), ("secret", os.urandom(32))])):
         p = craft(os.path.join(e.base, "craft.tar.gz"), members)
-        rc, out = restore(e, p, "rtgt", PE)
-        check("arhivă %s → refuz, nimic oprit, volum identic" % label,
-              rc != 0 and needle in out and "stop " not in e.calls() and data_tree(tgt) == before, out)
+        for args in ((), ("--legacy-import",)):
+            rc, out = restore(e, p, "rtgt", PE, args=args)
+            check("arhivă %s%s → refuz, nimic oprit, volum identic" % (label, " (--legacy-import)" if args else ""),
+                  rc != 0 and "REFUSING" in out and "stop " not in e.calls() and data_tree(tgt) == before, out[-400:])
 
     # legacy, ca în 3.7
     legacy_volume(e, "lsrc", email="vechi@x")
@@ -731,9 +787,26 @@ def test_hostops(e):
     rc, out = hostops_run(e, "hsrc", ["stage-restore", "--sha256", sha], blob, kenv)
     check("stage-restore → exit 0, set în staging", rc == 0 and "staged: protected" in out, out)
     check("hostops.WTBK_MAGIC e antetul real al backup.encrypt", backup.encrypt(b"x", "p")[:5] == hostops.WTBK_MAGIC)
+    check("R-M1: codurile de ieşire sunt distincte (0 commit, 3 refuz, 4 incert)",
+          (hostops.EXIT_OK, hostops.EXIT_REFUSED, hostops.EXIT_UNCERTAIN) == (0, 3, 4))
+    # R-H1: backup.sh şi restore.sh iau lacătul de lifecycle al instalării (cel al deploy.sh)
+    import fcntl
+    fd = os.open(os.path.join(e.base, ".deploy.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        e.app("hsrc", ["WEBTERM_MASTER_KEY_FILE=" + kf])
+        rc1, out1 = backup_run(e, "hsrc")
+        rc2, out2 = restore(e, os.path.join(e.base, "nu-exista.wtbk"), "hsrc", PE)
+    finally:
+        os.close(fd)
+    check("R-H1: backup.sh / restore.sh cât un deploy ţine .deploy.lock → refuz, niciun docker",
+          rc1 != 0 and "another deploy" in out1 and rc2 != 0 and "another deploy" in out2
+          and "docker" not in e.calls(), (out1[-300:], out2[-300:]))
 
 
 def main():
+    global FOREIGN_DB
+    FOREIGN_DB = _foreign_db()
     e = Env()
     try:
         test_backup(e)
