@@ -546,6 +546,70 @@ class Reader:
         return bytes(out)
 
 
+class RecordCursor:
+    """Verified forward parse of the committed DATA records of a generation from a known record
+    boundary (§12.11.2 range rule): either seq 0 (just after the header) or an entry of an
+    authenticated index. Each record is checked for type, exact seq succession and tag before
+    its plaintext is returned; the logical offset of a returned byte is the start offset plus the
+    lengths of verified records only. `fp` must be positioned at `file_offset`.
+
+    The header is not read here: the caller has verified it (and its hdr_mac) when it opened the
+    generation. `seal()` reads the record after the watermark and checks it is the SEAL matching
+    what was parsed (only meaningful from seq 0, where every DATA tag was seen)."""
+
+    def __init__(self, fp, rk, *, kind, gen_id, hdr_mac, data_count, seq=0, logical_offset=0,
+                 file_offset=PREFIX_LEN):
+        _need_int("data_count", data_count, 0, MAX_DATA_RECORDS + 1)
+        _need_int("seq", seq, 0, data_count + 1)
+        _need_int("logical_offset", logical_offset, 0, MAX_PLAIN_BYTES + 1)
+        if not seq <= logical_offset <= seq * MAX_DATA_LEN:
+            raise StateError("bad-argument", "logical offset")
+        # Aceeaşi relaţie ca la index: o poziţie de start inventată nu ajunge la decriptare.
+        if file_offset != PREFIX_LEN + logical_offset + REC_OVERHEAD * seq:
+            raise StateError("bad-argument", "file offset")
+        self._fp = fp
+        self._aes = AESGCM(generation_keys(rk, kind, gen_id).rec)
+        self._hdr_mac = _need("hdr_mac", hdr_mac, MAC_LEN)
+        self.data_count = data_count
+        self.seq = seq
+        self.logical_offset = logical_offset
+        self.file_offset = file_offset
+        self._from_zero = seq == 0
+        self._tags = hashlib.sha256()
+
+    def next(self):
+        """The next DATA record, or None at the watermark (nothing after it is read)."""
+        if self.seq >= self.data_count:
+            return None
+        rtype, pt, tag, n = _read_record(self._fp, self._aes, self._hdr_mac, self.seq)
+        if rtype != TYPE_DATA:
+            raise CorruptError("bad-type", f"SEAL at seq {self.seq} below the watermark")
+        rec = Record(self.seq, self.logical_offset, self.file_offset, pt)
+        self._tags.update(tag)
+        self.seq += 1
+        self.logical_offset += len(pt)
+        self.file_offset += n
+        return rec
+
+    def seal(self):
+        """After the watermark: the SEAL must follow and match; returns SealInfo."""
+        if not self._from_zero or self.seq != self.data_count:
+            raise StateError("bad-argument", "seal check needs a full parse from seq 0")
+        first = self._fp.read(1)
+        if not first:
+            raise CorruptError("missing-seal")
+        rtype, pt, _tag, n = _read_record(self._fp, self._aes, self._hdr_mac, self.seq, first)
+        if rtype != TYPE_SEAL:
+            raise CorruptError("count-mismatch", "DATA after the watermark where SEAL expected")
+        s_count, s_plain, s_hash = _SEAL.unpack(pt)
+        digest = self._tags.digest()
+        if (s_count != self.data_count or s_plain != self.logical_offset
+                or not hmac.compare_digest(s_hash, digest)):
+            raise CorruptError("bad-seal")
+        self.file_offset += n
+        return SealInfo(s_count, s_plain, self.file_offset, digest, self._hdr_mac)
+
+
 def verify_full(fp, rk, *, kind, sid, gen_id, data_count=None, plain_len=None, phys_len=None,
                 hdr_mac=None):
     """Whole-generation integrity: header, every record in succession, exactly one SEAL that

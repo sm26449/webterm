@@ -559,6 +559,40 @@ check("default index budget is 65 536 entries", tx.DEFAULT_MAX_INDEX_ENTRIES == 
 check("max_entries above the record limit refused", raises(lambda: tx.verify_index(idx, RK, kind=1, gen_id=GEN, data_count=3,
                                                                                    max_entries=tx.MAX_DATA_RECORDS + 1), tx.StateError))
 
+print("== RecordCursor (verified forward parse from a record boundary, PR5) ==")
+VB = bytes.fromhex(V_PREFIX + V_REC0 + V_REC1 + V_SEAL)
+HM = VB[64:96]
+
+
+def cur(**kw):
+    a = dict(kind=1, gen_id=GEN, hdr_mac=HM, data_count=2)
+    a.update(kw)
+    fp = io.BytesIO(VB)
+    fp.seek(a.get("file_offset", tx.PREFIX_LEN))
+    return tx.RecordCursor(fp, RK, **a)
+
+
+c = cur()
+r0, r1, end = c.next(), c.next(), c.next()
+check("from seq 0: both DATA records with offsets, None at the watermark",
+      (r0.data, r0.logical_offset, r1.data, r1.logical_offset, r1.file_offset, end) == (P0, 0, P1, 7, 128, None))
+check("seal() after a full parse matches the SEAL", c.seal().phys_len == len(VB))
+c = cur(seq=1, logical_offset=7, file_offset=128)
+check("from an index entry (seq 1)", c.next().data == P1 and c.next() is None)
+check("seal() refused when the parse did not start at seq 0", raises(lambda: c.seal(), tx.StateError))
+check("inconsistent start position refused before decrypting", raises(lambda: cur(seq=1, logical_offset=7, file_offset=129), tx.StateError))
+check("watermark 1 stops before seq 1 (bytes past it never read)", (lambda c: (c.next(), c.next())[1] is None)(cur(data_count=1)))
+check("watermark above the DATA records → SEAL below the watermark refused",
+      raises(lambda: [cur(data_count=3).next() for _ in range(3)] and (lambda c: [c.next() for _ in range(3)])(cur(data_count=3)), tx.CorruptError, "bad-type"))
+t = bytearray(VB)
+t[110] ^= 1
+check("tampered record → bad-tag", raises(lambda: tx.RecordCursor(io.BytesIO(bytes(t[96:])), RK, kind=1, gen_id=GEN, hdr_mac=HM, data_count=2).next(),
+                                         tx.CorruptError, "bad-tag"))
+check("wrong hdr_mac (AAD) → bad-tag", raises(lambda: cur(hdr_mac=bytes(32)).next(), tx.CorruptError, "bad-tag"))
+c = cur(data_count=1)
+c.next()
+check("seal() at a watermark below the real count → DATA where SEAL expected", raises(lambda: c.seal(), tx.CorruptError))
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 sys.exit(1 if failed else 0)

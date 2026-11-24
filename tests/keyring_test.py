@@ -309,6 +309,21 @@ live = td.Generation(bytes(range(0x30, 0x40)), td.STATE_LIVE, 1, 7, tx.phys_len(
 rec = td.Generation(bytes(range(0x50, 0x60)), td.STATE_RECOVERED, 0, 0, 96, HDR_MAC)
 ok3 = td.Descriptor(INST, SID, 1, 4, kr.envelope_hash(env_rk), (rec, gen, live))
 check("recovered + sealed + live (last) round trip", td.decode_descriptor(td.encode_descriptor(ok3, KWK), KWK, **dec) == ok3)
+conv = td.Descriptor(INST, SID, 1, 5, kr.envelope_hash(env_rk), (gen,), td.FLAG_CONVERTED)
+cb = td.encode_descriptor(conv, KWK)
+check("flags: converted bit round trips and sits at bytes 6..7", td.decode_descriptor(cb, KWK, **dec) == conv and cb[6:8] == b"\x01\x00")
+check("flags 0 keeps the v1 vector byte-identical (reserved u16 = 0 → flags = 0)", db[6:8] == b"\x00\x00")
+check("unknown flag bit refused on encode", raises(lambda: td.encode_descriptor(td.Descriptor(INST, SID, 1, 5, bytes(32), (), 2), KWK), td.DescriptorError, "bad-flags"))
+check("bool flags refused on encode", raises(lambda: td.encode_descriptor(td.Descriptor(INST, SID, 1, 5, bytes(32), (), True), KWK), td.DescriptorError, "bad-flags"))
+for bit in (1, 7, 15):
+    raw_f = bytearray(cb[:-32])
+    raw_f[6:8] = struct.pack("<H", 1 | (1 << bit))
+    authentic = bytes(raw_f) + hmac.new(kr.desc_key(KWK), bytes(raw_f), hashlib.sha256).digest()
+    check(f"authentic descriptor with unknown flag bit {bit} → bad-flags",
+          raises(lambda: td.decode_descriptor(authentic, KWK, **dec), td.DescriptorError, "bad-flags"))
+t_f = bytearray(cb)
+t_f[6] ^= 1
+check("converted bit cleared without the key → bad-mac", raises(lambda: td.decode_descriptor(bytes(t_f), KWK, **dec), td.DescriptorError, "bad-mac"))
 check("empty generation list accepted", td.decode_descriptor(td.encode_descriptor(td.Descriptor(INST, SID, 1, 0, kr.envelope_hash(env_rk)), KWK), KWK, **dec).generations == ())
 
 

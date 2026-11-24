@@ -472,6 +472,61 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     fail_count INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
+-- 3.8 înregistrări criptate (ENCRYPTION-AT-REST.md §12.11.0). Create mereu, folosite doar de
+-- txstore.py când WEBTERM_TX_RECORDINGS=1 (dezactivat implicit; în PR5 doar pe volume de test).
+-- Fără FK spre sessions: o înregistrare trăieşte mai mult decât rândul sesiunii.
+-- session_keys: plicul RK (tip 6, sub KWK). Ştergerea rândului = distrugerea cheii.
+CREATE TABLE IF NOT EXISTS session_keys (
+    sid TEXT PRIMARY KEY,
+    envelope BLOB NOT NULL,
+    created REAL NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'session'      -- session | migrated | orphan
+);
+-- tx_descriptors: lista autentificată de generaţii (WTD1) per (sid, kind). `version` trebuie să fie
+-- cea din blob; restul coloanelor sunt indicii neautentificate (UI, retenţie, recuperare).
+-- list_epoch = `out_gen` de azi (crescut doar de cap / migrarea unei sesiuni vii).
+CREATE TABLE IF NOT EXISTS tx_descriptors (
+    sid TEXT NOT NULL,
+    kind TEXT NOT NULL,                         -- out | cast
+    blob BLOB NOT NULL,
+    version INTEGER NOT NULL,
+    list_epoch INTEGER NOT NULL DEFAULT 0,
+    committed_at REAL,
+    archived_at REAL,
+    status TEXT NOT NULL DEFAULT 'ok',          -- ok | quarantined | recovery | damaged | absent
+    PRIMARY KEY (sid, kind)
+);
+-- tx_files: registrul fiecărui gen_id rezervat vreodată. Doar un rând `created` (un O_EXCL făcut de
+-- noi, cu inode-ul notat) dă dreptul de unlink, şi doar pentru acel inode.
+CREATE TABLE IF NOT EXISTS tx_files (
+    gen_id TEXT PRIMARY KEY,
+    sid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,                        -- reserved | created | collision | published | retired | gone
+    dev INTEGER,
+    ino INTEGER,
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tx_files_sid ON tx_files(sid);
+-- tx_migration: inventarul durabil al înregistrărilor în clar (§12.11.5), luat o singură dată.
+CREATE TABLE IF NOT EXISTS tx_migration (
+    sid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    dir TEXT NOT NULL,                          -- transcripts | arhiva
+    name TEXT NOT NULL,
+    dev INTEGER,
+    ino INTEGER,
+    size INTEGER,
+    mtime_ns INTEGER,
+    sha256 TEXT,
+    state TEXT NOT NULL,                        -- pending | converted | unlinked | missing | failed | orphan
+    error TEXT,
+    PRIMARY KEY (sid, kind)
+);
+CREATE TABLE IF NOT EXISTS tx_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # additive migrations for DBs created by an older version

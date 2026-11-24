@@ -3,7 +3,7 @@
 Pure types and functions; nothing here reads or writes the database (publication is §12.8
 contract 1). Canonical binary encoding, integers little-endian:
 
-    "WTD1" | ver u8 = 1 | kind u8 | reserved u16 = 0 | installation_id 16 B | sid 16 B
+    "WTD1" | ver u8 = 1 | kind u8 | flags u16 | installation_id 16 B | sid 16 B
     | version u64 | rk_hash 32 B (SHA-256 of the session's wrapped-RK envelope)
     | n_gen u16 | n_gen × generation | mac 32 B = HMAC-SHA-256(K_desc, all bytes before)
 
@@ -13,7 +13,8 @@ contract 1). Canonical binary encoding, integers little-endian:
 K_desc = HKDF(KWK, "wt/v1/desc") (keyring.desc_key). The list keeps the recording order (oldest
 first). Rules checked on encode and decode (fail closed): gen_ids unique, at most one `live`
 generation and only as the last one, data_count / plain_len within the §12.1 limits and
-consistent with each other, phys_len exact for the state: the committed prefix for live and
+consistent with each other, flags only from KNOWN_FLAGS (bit 0 = converted: migrated from
+plaintext, §12.11.0; any other bit → refused), phys_len exact for the state: the committed prefix for live and
 recovered, the whole file including the 73-byte SEAL for sealed (txformat.phys_len).
 
 `decode_descriptor` always needs the session's wrapped-RK envelope (from `session_keys`): its
@@ -37,6 +38,10 @@ STATE_LIVE = 1
 STATE_SEALED = 2
 STATE_RECOVERED = 3
 STATES = frozenset({STATE_LIVE, STATE_SEALED, STATE_RECOVERED})
+# §12.11.0: fostul `reserved u16` devine `flags u16`; ver rămâne 1 (niciun WTD1 nu există încă în
+# afara testelor). Un bit necunoscut = refuz: un cititor vechi nu are voie să ignore un sens nou.
+FLAG_CONVERTED = 0x0001
+KNOWN_FLAGS = FLAG_CONVERTED
 
 _HEAD = struct.Struct("<4sBBH16s16sQ32sH")
 _GEN = struct.Struct("<16sBQQQ32s")
@@ -67,6 +72,7 @@ class Descriptor:
     version: int
     rk_hash: bytes
     generations: tuple = ()
+    flags: int = 0
 
 
 def _b(v, n):
@@ -89,6 +95,8 @@ def _check(d):
         raise DescriptorError("bad-version")
     if not _b(d.rk_hash, 32):
         raise DescriptorError("bad-rk-hash")
+    if not _is_int(d.flags) or not 0 <= d.flags < 1 << 16 or d.flags & ~KNOWN_FLAGS:
+        raise DescriptorError("bad-flags")
     gens = tuple(d.generations)
     if len(gens) > MAX_GENERATIONS:
         raise DescriptorError("too-many-generations")
@@ -122,7 +130,7 @@ def _mac(kwk, body):
 
 def encode_descriptor(d, kwk):
     _check(d)
-    out = bytearray(_HEAD.pack(MAGIC, VERSION, d.kind, 0, d.installation_id, d.sid, d.version,
+    out = bytearray(_HEAD.pack(MAGIC, VERSION, d.kind, d.flags, d.installation_id, d.sid, d.version,
                                d.rk_hash, len(d.generations)))
     for g in d.generations:
         out += _GEN.pack(g.gen_id, g.state, g.data_count, g.plain_len, g.phys_len, g.hdr_mac)
@@ -153,9 +161,11 @@ def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope):
     # (altă sesiune, celălalt kind, altă instalaţie) e respins mai jos, nu doar la MAC.
     if not hmac.compare_digest(mac, _mac(kwk, body)):
         raise DescriptorError("bad-mac")
-    magic, ver, k, res, inst, s, version, rk_hash, n = _HEAD.unpack_from(body, 0)
-    if magic != MAGIC or ver != VERSION or res != 0:
+    magic, ver, k, flags, inst, s, version, rk_hash, n = _HEAD.unpack_from(body, 0)
+    if magic != MAGIC or ver != VERSION:
         raise DescriptorError("bad-header")
+    if flags & ~KNOWN_FLAGS:
+        raise DescriptorError("bad-flags")
     if inst != installation_id:
         raise DescriptorError("wrong-installation")
     if s != sid:
@@ -169,6 +179,6 @@ def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope):
     if len(body) != _HEAD.size + n * _GEN.size:
         raise DescriptorError("bad-size")
     gens = tuple(Generation(*_GEN.unpack_from(body, _HEAD.size + i * _GEN.size)) for i in range(n))
-    d = Descriptor(inst, s, k, version, rk_hash, gens)
+    d = Descriptor(inst, s, k, version, rk_hash, gens, flags)
     _check(d)
     return d

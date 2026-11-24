@@ -2347,6 +2347,20 @@ Owner decisions (§12.11.8) unchanged; M5 tightened their wording in §12.11.4, 
 | Recheck (ee2068b) R-M1 live backup socket protocol | §12.11.3 "Control socket protocol": creation on a checked dir fd, peer check, versioned framing with allowlisted ops (`snapshot.start` / `read` / `release`), full verification before any byte is offered, timeouts, hold limits, concurrency cap, release on disconnect, consumer temp-then-rename |
 | Recheck (ee2068b) R-H4, R-M2, R-M4, R-M5, M6 | not addressed here: R-H4 (WTJ1 freshness authority) and R-M5 (durable unlink identity) are PR6 gates; R-M2 (output frontier for other destinations, WTS v2 cardinality) and R-M4 (WTJ1 crash/epoch reconciliation) stay open before activation; M6 residual unchanged |
 
+
+#### 12.11.10 Implementation notes (PR5a, txstore)
+
+Recorded from the PR5a implementation, to be reviewed with it: `tx_descriptors.list_epoch` is an
+unauthenticated column (drives resume/OSC 133 offset consistency only); WTD1's former reserved u16
+is `flags` (`FLAG_CONVERTED = 1`, unknown bits refused, `ver` stays 1; flags 0 keeps the v1 bytes);
+`txformat.RecordCursor` is the public checked parse-from-entry API used by readers and `verify`; an
+RK-binding failure (`rk-mismatch`, `bad-rk-envelope`) is reported as `keyError`, and recovery skips
+all ledger clean-up for a sid whose descriptor cannot be authenticated; a gap is written as 3.7's
+`GAP_MARKER` bytes at the committed position, its size kept in memory and raised through the alarm
+hook (audit), not inside the recording; `verify`'s resumable cursor is per generation; retire uses
+`fstatat` + `unlinkat` on the directory fd (the `renameat2` scheme stays for PR6 migration).
+Still to do for the appendix: a WTD1 vector with `flags = converted`.
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
