@@ -515,11 +515,11 @@ reviewed before the PR that turns writers, migration, backup or erasure on:
 ### 12.9 Boot and key-manifest publication (PR2)
 
 Normative. Closes contract 6 and the key-manifest part of contract 1 (§12.8). Implemented in
-`gateway/app/keys.py`, tested in `tests/keys_test.py`; **not called by the real boot yet**
-(`config.load_secret`, `security.init_crypto` and `main.lifespan` are unchanged in PR2). The
-wiring PR places `keys.boot()` before anything that mutates `DATA_DIR` (the clean-up in
-`config.ensure_dirs()`, the staged-restore apply), before the vault and before `db.connect`; see
-the *Wiring checklist* at the end of this section, which must be closed before the wiring PR.
+`gateway/app/keys.py`, tested in `tests/keys_test.py`. **Wired into the real boot in PR4**
+through `gateway/app/bootkeys.py` (`prepare()`, first step of `main.lifespan`), before anything
+that mutates `DATA_DIR` (the clean-up in `config.ensure_dirs()`, the staged-restore apply), before
+the vault and before `db.connect`; tested end to end in `tests/boot_keys_test.py`. See the
+*Wiring checklist* and its *Status (PR4)* at the end of this section.
 
 **Order.** Lock → inventory → key source → open or create the keyring → (later PRs) restore apply,
 schema, writers. Every step before "open" only reads; a refusal at any of them leaves the data
@@ -851,14 +851,87 @@ tested in isolation; these are not implemented and each needs its own change and
    its meaning in the code; if a rotation or the migration changes the key it uses, existing
    forward tokens are invalidated explicitly (and the UI says so), never silently.
 
+**Status (PR4, wiring).** Each item, where it is closed:
+
+1. *Preflight before every mutation:* `bootkeys.prepare()` creates only `DATA_DIR` itself, then
+   `keys.boot()` (lock, inventory, key source, key check) runs before `config.ensure_dirs()`,
+   `core.cleanup_cap_temps()`, the staged-restore apply, the vault and `db.connect`. The
+   `BootResult` (lock + `DATA_DIR` fd) is kept in `bootkeys._boot` for the life of the process,
+   also when a later boot step fails; only process exit releases it. A refusal logs one line
+   (`boot refused: <reason> (<name>) [kind=…] — <hint>`, never key material) and the lifespan
+   raises, so uvicorn exits non-zero. Test: `boot_keys` "main.lifespan" (wrong key + staging +
+   cap temporaries → refused, nothing cleaned up, tree unchanged).
+2. *3.7 staged restore:* on a `legacy-3.7` volume with a valid source, the `before_migrate` hook
+   of `keys.boot()` applies the 3.7 staging first (the 3.7 code, under the process lock, with the
+   3.7 key it carries), then proves FK_legacy on the **restored** database, then migrates in the
+   same boot. A staging next to `migrating.wtm` is refused (`staged-restore-during-migration`; the
+   protocol never produces it). Without a source: exactly 3.7 (apply, then `data/secret`).
+3. *FK_legacy proven:* `bootkeys.prove_legacy_key` opens `webterm.db` read-only and immutable
+   (through the pinned `DATA_DIR` fd; no `-wal`/`-shm` is created), collects every `*_encrypted`
+   column and every `app_settings` value that is a Fernet token or a JSON object holding one
+   (SMTP, cloud, the agents' CA key), and requires at least one to decrypt with `secret`.
+   **Eligibility rule:** a database with no encrypted value at all (or no database) is eligible,
+   because nothing exists that a wrong key could make unreadable; a non-empty `-wal` with no
+   ciphertext in the checkpointed file is refused (`legacy-db-wal-pending`: the probe cannot see
+   the WAL). A value already carrying the `FK:` prefix next to a 3.7 `secret` is refused (mixed
+   set). Refusals are `invalid-key` (nothing written) unless a 3.7 restore was applied first
+   (`operation-incomplete`).
+4. *Key selection:* `security.encrypt_secret` writes `FK:` + Fernet(FK) on a protected / reduced
+   volume and the unprefixed 3.7 form in the legacy state (so a 3.7 image still reads what a 3.8
+   legacy boot wrote); `decrypt_secret` routes by prefix only (`FK:` → FK, `FKL:` or none →
+   FK_legacy) and raises `InvalidToken` for a key the process does not hold. The forward-token
+   HMAC keeps its derivation from FK_legacy while it exists (no invalidation at migration); a
+   fresh protected install derives it from FK. **Later (not in PR4):** a verified, resumable
+   re-encryption job moving every FK_legacy value to FK, after which FK_legacy is retired and the
+   forward-token key moves to FK with an explicit invalidation of live forward tokens.
+5. *Legacy raw-key copies:* System health `crypto.legacy_copies` counts `backups/*.wtsnap` and
+   `*.wtsnap.keep` (by name, never opened; `backup.raw_key_copies`) on a protected or reduced
+   volume. Retention: unchanged (`.wtsnap` expire after 7 days, `.keep` never automatically).
+6. *Backup/restore:* after the key check, `bootkeys.prepare()` registers the keyring provider and
+   `backup.set_boot_protected(True)` (the inventory was taken under the lock), runs
+   `apply_pending_restore(keys=…)` under the process lock (the `backups/.restore.lock` flock stays
+   as the in-process guard for verify/stage), and after an apply re-opens `keys.wtk`
+   (`keys.open_protected`) before the vault and `db.connect`.
+7. *Resume and mixed-artefact gate:* unchanged and green (`keys` 229/229); the new branches
+   (`before_migrate`, the re-open after apply) never publish a keyring: the first reads only, the
+   second opens.
+8. *Process exclusion:* the gateway holds the lock for its life; `admin.py` takes the same lock for
+   every command that writes (`WRITERS`: passwd, disable-2fa, logout-all, promote, sso-only,
+   enable, vacuum) and refuses with the stop / run / start commands while the gateway runs. The
+   read-only commands (list, roles, health) do not lock. There is no rotation or restore CLI yet.
+9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but `.lock`, twice);
+   legacy + key (migrated, proven, old values decrypt, new values `FK:`, forward tokens still
+   valid); foreign `secret` refused unchanged; no ciphertext eligible; WAL pending refused; mixed
+   `FK:` refused; protected + wrong / missing key refused unchanged across two boots; 3.8 staging +
+   wrong key refused before any swap, right key applies and re-opens; 3.7 staging + key → restore
+   then migrate; second process and admin writers refused; empty volume refused without a key,
+   `reduced` with `WEBTERM_KEY_IN_VOLUME=1`.
+
+Deployment: `install.sh` / `setup.sh` create `secrets/master-key/master.key` (0400, uid 10001, in a
+0700 directory of the same owner) only on a new install with no existing data volume; compose
+mounts the directory read-only at `/run/webterm-key` and `WEBTERM_MASTER_KEY_FILE` points at the
+file. A directory mount, not a `secrets:` entry, because compose refuses a missing secret file and
+an upgraded install has none. `upgrade.sh` never creates a key; the opt-in is in
+`docs/INSTALL.md` → *Encryption at rest*. The CI and local gate containers set
+`WEBTERM_KEY_IN_VOLUME=1` explicitly (ephemeral volumes).
+
+Verified on a real upgrade (3.7.1 image → 3.8 image, scratch volume, read-only rootfs, dropped
+capabilities as in compose): no key → legacy, only `.lock` added by the key code; key file 0400 uid
+10001 in a 0700 directory bind-mounted at `/run/webterm-key` → migrated; mode 0444, wrong key, no
+key on the migrated volume → refused. **Image rollback residual:** a 3.7 image started on a migrated
+volume with no stored host credentials does not refuse (its guard only looks at `hosts`): it creates
+a new `data/secret`. 3.8 then refuses the volume as `ambiguous` (`secret` + `keys.wtk` without
+`migrating.wtm`) until the operator removes that file; documented in INSTALL.md. 3.7 code cannot be
+changed, so this stays an operator rule ("never start 3.7 on a migrated volume").
+
 ### 12.10 Snapshot container `WTS1` (PR3)
 
 Normative. Closes §12.8 contract 4 and replaces the sketch of §12.6 where they differ.
 Implemented in `gateway/app/snapshot.py` (pure codec: file objects in, file objects out, one
 chunk in memory) and `gateway/app/backup.py` (what goes inside, where it is stored, restore);
-tested in `tests/snapshot_test.py` and `tests/backup_protected_test.py`. Like PR2, it is **not
-reachable from production** until the boot is wired: a volume becomes *protected* only when
-`keys.wtk` exists, and until then every backup path runs the 3.7 code unchanged.
+tested in `tests/snapshot_test.py` and `tests/backup_protected_test.py`. Reachable from
+production since PR4 (the boot is wired): a volume becomes *protected* only when `keys.wtk`
+exists, and until then every backup path runs the 3.7 code unchanged.
 
 **Which path.** `backup.volume_kind()` (and `is_protected()` on top of it), read without the
 process lock: *protected* = `DATA_DIR/keys.wtk` is a regular file **and** `keys.classify` says

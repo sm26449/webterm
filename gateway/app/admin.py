@@ -38,7 +38,7 @@ import getpass
 import sys
 import time
 
-from . import config, db, owners, security
+from . import config, db, keys, owners, security
 
 
 async def _find(email: str):
@@ -386,6 +386,33 @@ async def cmd_vacuum(_args) -> None:
     print("✓ %.1f MB → %.1f MB" % (before / 1024 ** 2, after / 1024 ** 2))
 
 
+# INV-14 (docs/design/INVARIANTS.md), ENCRYPTION-AT-REST.md §12.9 item 8: comenzile care SCRIU iau acelaşi
+# lock de proces ca gateway-ul (DATA_DIR/.lock), ţinut cât rulează comanda. Cu gateway-ul pornit
+# sunt refuzate: un al doilea scriitor pe acelaşi volum e exact ce protocolul de chei exclude.
+# Cele care doar citesc (list, roles, health) rulează oricând.
+WRITERS = frozenset(("passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable", "vacuum"))
+
+
+def _writer_lock(cmd: str):
+    if cmd not in WRITERS:
+        return None
+    try:
+        return keys.acquire_lock(str(config.DATA_DIR))
+    except keys.BootRefused as e:
+        if e.reason == "locked":
+            print("the gateway is running and holds the data directory: stop it first, then run\n"
+                  "  docker compose -f docker-compose.prod.yml stop app\n"
+                  "  docker compose -f docker-compose.prod.yml run --rm --no-deps app "
+                  "python3 -m app.admin %s …\n"
+                  "  docker compose -f docker-compose.prod.yml start app" % cmd, file=sys.stderr)
+        else:
+            # ex. data-dir-bad-owner: rulat ca root peste un volum al userului webterm
+            print("cannot lock the data directory (%s: %s); run the command as the service user "
+                  "(docker compose run goes through the entrypoint, which does that)"
+                  % (e.reason, e.subject), file=sys.stderr)
+        raise SystemExit(3) from None
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(
         prog="python3 -m app.admin",
@@ -420,6 +447,7 @@ async def main() -> None:
 
     if args.cmd == "health":
         raise SystemExit(cmd_health(args))
+    lock = _writer_lock(args.cmd)
     await db.connect()
     try:
         await {"list": cmd_list, "passwd": cmd_passwd,
@@ -429,6 +457,8 @@ async def main() -> None:
                "vacuum": cmd_vacuum}[args.cmd](args)
     finally:
         await db.close()
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

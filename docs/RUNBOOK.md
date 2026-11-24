@@ -125,17 +125,28 @@ There is **no password-reset email for login** — by design: a self-hosted tool
 administrator is you. Recovery means server access, which you have, and there is a command for it:
 
 ```sh
+cd /opt/webterm
+# read-only, any time:
 docker exec -it webterm-app-1 python3 -m app.admin list
-docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
-docker exec -it webterm-app-1 python3 -m app.admin disable-2fa you@example.com
-docker exec -it webterm-app-1 python3 -m app.admin logout-all you@example.com
 docker exec -it webterm-app-1 python3 -m app.admin roles you@example.com
-docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+
+# commands that change something: stop the gateway, run them, start it again (3.8+)
+docker compose -f docker-compose.prod.yml stop app
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin passwd you@example.com
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin disable-2fa you@example.com
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin logout-all you@example.com
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin promote you@example.com
+docker compose -f docker-compose.prod.yml start app
 ```
 
+Since 3.8 the commands that write (`passwd`, `disable-2fa`, `logout-all`, `promote`, `enable`,
+`sso-only`, `vacuum`) take the same lock on the data directory as the gateway (encryption at rest:
+one writer per volume). With the gateway running they refuse and print the three commands above;
+`docker compose run` goes through the image's entrypoint, so the command runs as the service user.
+
 `promote` (3.6) makes the account **Owner over all hosts** — the way back when no Owner is left
-(for example after a partial restore). `roles` shows an account's bindings. The running gateway
-picks the change up within about a minute; the promotion is recorded in the audit log.
+(for example after a partial restore). `roles` shows an account's bindings. The gateway reads the
+change when it starts again; the promotion is recorded in the audit log.
 
 Prefer it over the raw SQL below. It hashes with the application's own argon2 parameters, and it
 also **deletes the open web sessions and share links** — the hand-written `UPDATE` did not, so

@@ -59,7 +59,7 @@ cleanup
 say "── starting an ephemeral WebTerm ($IMAGE) ──"
 docker network create "$NET" >/dev/null
 docker run -d --name "$APP" --network "$NET" --hostname web-01 \
-  -e WEBTERM_SETUP_TOKEN="$TOKEN" \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN="$TOKEN" \
   -e WEBTERM_PUBLIC_URL="http://$APP:8000" \
   -e WEBTERM_AGENT_INSECURE=1 \
   "$IMAGE" >/dev/null

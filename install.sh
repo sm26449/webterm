@@ -267,6 +267,7 @@ done
 
 # ── 3) .env ───────────────────────────────────────────────────────────────
 say "[3/7] Configurare (.env)…"
+FRESH_ENV=0; [ -f .env ] || FRESH_ENV=1      # 3.8: cheia principală se creează doar la o instalare nouă
 if [ -f .env ]; then
   say "  .env exists — keeping your values; filling in only what is missing."
   load_env ./.env
@@ -389,6 +390,37 @@ for _pair in WEBTERM_OIDC_CLIENT_SECRET:webterm_oidc_client_secret WEBTERM_SMTP_
   secret_write "$_name" "$_cur"; set_env "$_var" ""
   say "  moved $_var from .env to secrets/$_name"
 done
+
+# 3.8 — cheia principală (criptarea la repaus, docs/INSTALL.md → Encryption at rest). DOAR la o
+# instalare nouă (.env inexistent ŞI niciun volum de date al acestui proiect): o instalare existentă
+# rămâne legacy până când operatorul alege, iar upgrade.sh nu creează niciodată o cheie. Fişierul
+# stă în afara volumului, montat la /run/webterm-key (docker-compose.prod.yml): dir 0700 + fişier
+# 0400, ale userului aplicaţiei (10001) — cititorul de chei refuză un fişier lizibil de grup/alţii.
+# 3.8: are acest proiect deja un volum de date? „none” doar când compose ştie numele proiectului
+# ŞI volumul lipseşte; orice îndoială = „unknown” (atunci nu se creează nicio cheie automat).
+data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unknown
+  local proj
+  proj=$(docker compose -f "$1" config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
+  [ -n "$proj" ] || { echo unknown; return 0; }
+  if docker volume inspect "${proj}_webterm-data" >/dev/null 2>&1; then echo exists; else echo none; fi
+}
+MK_DIR="$SECRETS_DIR/master-key"
+if [ -f "$MK_DIR/master.key" ]; then
+  # deja creată (o rulare anterioară); .env se completează doar la o instalare nouă — pe una
+  # existentă, activarea rămâne pasul explicit al operatorului
+  if [ "$FRESH_ENV" = 1 ]; then set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key; fi
+elif [ "$FRESH_ENV" = 1 ] && [ "$(data_volume_state docker-compose.prod.yml)" = none ]; then
+  install -d -m 0700 -o 10001 -g 10001 "$MK_DIR"
+  head -c 32 /dev/urandom | base64 | install -m 0400 -o 10001 -g 10001 /dev/stdin "$MK_DIR/master.key"
+  set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key
+  say "  master key created: $MK_DIR/master.key — copy it OFF this machine (without it, backups"
+  say "  of this installation cannot be restored)."
+else
+  # docker compose creează altfel un director gol (root) la montare; îl facem noi, cu drepturile bune
+  install -d -m 0700 -o 10001 -g 10001 "$MK_DIR"
+  say "  existing installation: encryption at rest stays off until you enable it"
+  say "  (docs/INSTALL.md → Encryption at rest)."
+fi
 
 # --with-authentik: rulează Authentik (SSO) în acelaşi stack (profilul compose `authentik`),
 # generând secretele unic la ACEASTĂ instalare — niciodată copiate. Se provisionează după pornire.

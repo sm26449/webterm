@@ -111,6 +111,28 @@ WEBTERM_AGENT_INSECURE=$INSECURE
 WEBTERM_SETUP_TOKEN=
 EOF
   say "Wrote .env for https://$HOST_ONLY$PORT_PART"
+
+  # 3.8 — cheia principală (criptarea la repaus, docs/INSTALL.md → Encryption at rest). DOAR la o
+  # instalare nouă: .env tocmai scris ŞI niciun volum de date existent (un volum 3.7 rămâne legacy
+  # până când operatorul alege). Fişierul stă în afara volumului: dir 0700 + fişier 0400, ale
+  # userului aplicaţiei (10001) — cititorul de chei refuză un fişier lizibil de grup/alţii.
+  _proj=$($COMPOSE config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
+  # docker-compose v1 nu tipăreşte `name:`; numele lui implicit = directorul, fără punctuaţie
+  [ -n "$_proj" ] || _proj=$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')
+  if [ -n "$_proj" ] && [ ! -f secrets/master-key/master.key ] \
+     && ! docker volume inspect "${_proj}_webterm-data" >/dev/null 2>&1; then
+    _sudo=""; [ "$(id -u)" = 0 ] || _sudo="sudo"
+    if $_sudo install -d -m 0700 secrets && $_sudo install -d -m 0700 -o 10001 -g 10001 secrets/master-key \
+       && head -c 32 /dev/urandom | base64 | $_sudo install -m 0400 -o 10001 -g 10001 /dev/stdin secrets/master-key/master.key; then
+      echo "WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key" >> .env
+      warn "Master key created: secrets/master-key/master.key. COPY IT OFF THIS MACHINE now:"
+      warn "without it, this installation's backups cannot be restored."
+    else
+      echo "WEBTERM_KEY_IN_VOLUME=1" >> .env
+      warn "Could not create secrets/master-key/ (needs root for chown 10001): the master key is kept"
+      warn "in the data volume instead (reduced protection; see docs/INSTALL.md → Encryption at rest)."
+    fi
+  fi
 fi
 
 # 3) Build and start

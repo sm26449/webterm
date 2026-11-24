@@ -192,6 +192,31 @@ if [ -z "$(secret_read webterm_setup_token)" ]; then
   echo "→ Setup token generated and written to secrets/webterm_setup_token."
 fi
 
+# 3.8: are acest proiect deja un volum de date? „none” doar când compose ştie numele proiectului
+# ŞI volumul lipseşte; orice îndoială = „unknown” (atunci nu se creează nicio cheie automat).
+data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unknown
+  local proj
+  proj=$(docker compose -f "$1" config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
+  [ -n "$proj" ] || { echo unknown; return 0; }
+  if docker volume inspect "${proj}_webterm-data" >/dev/null 2>&1; then echo exists; else echo none; fi
+}
+
+# --- master key (3.8, encryption at rest; docs/INSTALL.md → Encryption at rest) ---------------
+# ONLY for a brand-new installation: no data volume yet, no key file, nothing configured. An
+# existing installation (upgrade.sh runs this script too) always has its volume, so it never gets
+# a key here: it stays legacy until the operator opts in. Dir 0700 + file 0400, owned by 10001
+# (the app's user; the key reader refuses a file readable by group/others).
+MK_DIR="$SECRETS_DIR/master-key"
+if [ ! -f "$MK_DIR/master.key" ] && [ -z "${WEBTERM_MASTER_KEY_FILE:-}" ] && [ -z "${WEBTERM_KEY_IN_VOLUME:-}" ] \
+   && [ "$(data_volume_state docker-compose.prod.yml)" = none ]; then
+  install -d -m 0700 -o 10001 -g 10001 "$MK_DIR"
+  head -c 32 /dev/urandom | base64 | install -m 0400 -o 10001 -g 10001 /dev/stdin "$MK_DIR/master.key"
+  set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key
+  export WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key
+  echo "→ master key created: secrets/master-key/master.key — copy it OFF this machine (without it,"
+  echo "  this installation's backups cannot be restored)."
+fi
+
 # --- optional bundled Authentik (SSO) ---
 # --with-authentik (sau COMPOSE_PROFILES=authentik deja în .env) porneşte Authentik în acelaşi
 # stack. Generăm secretele lipsă unic la ACEST deploy — niciodată copiate între instalări.

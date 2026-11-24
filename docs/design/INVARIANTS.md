@@ -26,6 +26,7 @@ The rules are ordered from "a mistake leaks a secret or grants access" to "a mis
 | [INV-11](#inv-11) | Every forwarded request is authenticated |
 | [INV-12](#inv-12) | An agent host that has connected with its client certificate never goes back to the token alone |
 | [INV-13](#inv-13) | Idle sessions are only announced, never closed automatically (3.7.1) |
+| [INV-14](#inv-14) | A protected volume never opens without its own key, and never falls back to the old one (3.8) |
 
 ---
 
@@ -295,3 +296,35 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 
 **Enforced in**: `idlesess.py` `AUTOCLOSE_AVAILABLE`, `sanitize`, `sweep`, `_notify`, `notice_json`, `last_activity`; `core.py` `[hub]` `_idle_activity`; `api.py` `save_idle_sessions`; `alert_history.py` `record_required`.
 **Tests**: `session_idle`.
+
+<a id="inv-14"></a>
+## INV-14: a protected volume never opens without its own key, and never falls back to the old one (3.8)
+
+**Rule** (phase 1 of [ENCRYPTION-AT-REST.md](ENCRYPTION-AT-REST.md) §8; recordings are not
+encrypted yet, so this covers the keys, backups, snapshots and the boot).
+- Once a data volume has a key manifest (`keys.wtk`), every boot needs exactly the master key it
+  was protected with. A missing, wrong or divergent key, an invalid envelope or a tampered manifest
+  stops the boot **before** any clean-up, staged-restore apply, schema change or writer, and the
+  data directory is left as it was (only `.lock` may be created). Nothing ever falls back to
+  `data/secret`, to the in-volume key or to another source.
+- A 3.7 volume with **no** key source configured boots exactly as before (legacy state, nothing
+  written but `.lock`): upgrading the image changes nothing until the operator provides a key. A
+  configured key migrates it once; the old 32-byte key becomes `FK_legacy` only after it has been
+  proven to decrypt the database's encrypted values (a volume with no encrypted value is eligible;
+  a foreign key file is refused). A staged 3.7 restore is applied first, under the old key, then
+  migrated in the same boot.
+- A new, empty volume needs an external key, or `WEBTERM_KEY_IN_VOLUME=1` (reduced protection,
+  shown as such). One process at a time: the gateway and every admin command that writes hold the
+  same lock on the data directory.
+- Every backup and snapshot of a protected volume is a `WTS1` container that needs the key held
+  apart from the data; it never contains the master key or the old key in clear. Older 3.7 backups
+  that do hold the old key are listed in System health until they are deleted.
+- Stored secrets name their key: values written on a protected volume carry the `FK:` prefix and
+  decrypt only with `FK`; unprefixed values decrypt only with `FK_legacy`. A value that names a key
+  the process does not hold is an error, never a retry with another key.
+- Limits (stated, not hidden): until SQLCipher ships, the database file and its WAL are outside
+  this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
+  HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
+
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `WRITERS`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`.

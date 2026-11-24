@@ -67,6 +67,7 @@ async def main():
     home = os.path.join(tmp, "home")
     os.makedirs(home)
     env = dict(os.environ, WEBTERM_SETUP_TOKEN="test-setup", WEBTERM_DATA_DIR=os.path.join(tmp, "data"),
+               WEBTERM_KEY_IN_VOLUME="1",  # 3.8: un volum nou cere o cheie (aici în volum, explicit)
                WEBTERM_PUBLIC_URL=BASE, PYTHONPATH=str(ROOT / "gateway"))
     gw = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(PORT),

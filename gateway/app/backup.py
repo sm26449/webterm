@@ -2308,6 +2308,24 @@ def _open_stored_wts(name: str):
     return path
 
 
+def raw_key_copies() -> int:
+    """3.8 wiring item 5: how many stored files hold the raw 3.7 vault key (`*.wtsnap`, the 3.7
+    scheduled snapshots, and `*.wtsnap.keep`, the 3.7 pre-restore copies). Regular files only,
+    counted by name, never opened. System health shows the count on a protected volume."""
+    n = 0
+    d = config.DATA_DIR / "backups"
+    if not d.is_dir():
+        return 0
+    for pat in ("*.wtsnap", "*.wtsnap.keep"):
+        for f in d.glob(pat):
+            try:
+                if stat.S_ISREG(f.lstat().st_mode):
+                    n += 1
+            except OSError:
+                pass
+    return n
+
+
 def list_keep_copies() -> list:
     """L1: the pre-restore safety copies (`*.keep`, never pruned). Read-only inventory, so they
     stay visible for retention; a `.wtsnap.keep` holds the 3.7 raw vault key."""

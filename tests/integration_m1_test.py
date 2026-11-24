@@ -103,6 +103,7 @@ async def main():
 
     env = dict(os.environ,
                WEBTERM_DATA_DIR=data_dir,
+               WEBTERM_KEY_IN_VOLUME="1",  # 3.8: un volum nou cere o cheie (aici în volum, explicit)
                WEBTERM_PUBLIC_URL=BASE,
                WEBTERM_SETUP_TOKEN="test-setup",
                PYTHONPATH=str(ROOT / "gateway"))

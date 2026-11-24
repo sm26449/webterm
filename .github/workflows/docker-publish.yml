@@ -278,7 +278,7 @@ jobs:
       - name: Boot smoke test (the UI starts with no JS errors)
         run: |
           docker run -d --name smoke -p 8000:8000 \
-            -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
             -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8000 \
             -e WEBTERM_AGENT_INSECURE=1 \
             webterm-smoke:ci
@@ -311,7 +311,7 @@ jobs:
       - name: SSO login UI (frontend contract when OIDC is on)
         run: |
           docker run -d --name sso -p 8002:8000 \
-            -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token \
             -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8002 \
             -e WEBTERM_AGENT_INSECURE=1 \
             -e WEBTERM_OIDC_ISSUER=http://dummy-idp.invalid/application/o/webterm/ \
@@ -355,11 +355,11 @@ jobs:
             python:3.12-alpine sh -c "pip install --quiet pyftpdlib==2.2.0 pyopenssl && python /srv/ftps.py"
           # app pentru BACKUP: pe reţeaua fixture-urilor, publicat pe host
           docker run -d --name bkapp --network wtbk-net -p 8003:8000 \
-            -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8003 \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8003 \
             -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
           # app pentru RESTORE: `--restart` ca să revină după os._exit al restore-ului
           docker run -d --name rsapp --restart unless-stopped -p 8004:8000 \
-            -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8004 \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8004 \
             -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
           for c in bkapp rsapp; do
             st=starting
@@ -380,7 +380,7 @@ jobs:
       - name: Feature UI (group tokens + host tags) (Playwright)
         run: |
           docker run -d --name featapp -p 8005:8000 \
-            -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8005 \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8005 \
             -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
           st=starting
           for i in $(seq 1 45); do st=$(docker inspect -f '{{.State.Health.Status}}' featapp 2>/dev/null); [ "$st" = healthy ] && break; sleep 2; done
@@ -397,7 +397,7 @@ jobs:
       - name: Jump-host UI (nesting, form, host hub) (Playwright)
         run: |
           docker run -d --name jumpapp -p 8006:8000 \
-            -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8006 \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL=http://127.0.0.1:8006 \
             -e WEBTERM_UPDATE_CHECK=0 webterm-smoke:ci
           st=starting
           for i in $(seq 1 45); do st=$(docker inspect -f '{{.State.Health.Status}}' jumpapp 2>/dev/null); [ "$st" = healthy ] && break; sleep 2; done
@@ -537,7 +537,7 @@ jobs:
       - name: Port forwarding (handshake + proxy + WebSocket + securitate)
         run: |
           docker run -d --name smoke-fwd -p 8001:8000 \
-            -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://wt.test \
+            -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL=http://wt.test \
             -e WEBTERM_AGENT_INSECURE=1 webterm-smoke:ci
           st=starting
           for i in $(seq 1 45); do

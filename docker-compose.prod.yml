@@ -186,6 +186,12 @@ services:
     pids_limit: 512
     environment:
       WEBTERM_PUBLIC_URL: https://${WEBTERM_DOMAIN}
+      # 3.8 encryption at rest (docs/INSTALL.md → Encryption at rest). install.sh sets
+      # WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key on a NEW install (the key file lives in
+      # secrets/master-key/, mounted below). Empty on an upgraded install = nothing changes until
+      # you opt in. WEBTERM_KEY_IN_VOLUME=1 keeps the key inside the data volume (reduced).
+      WEBTERM_MASTER_KEY_FILE: ${WEBTERM_MASTER_KEY_FILE:-}
+      WEBTERM_KEY_IN_VOLUME: ${WEBTERM_KEY_IN_VOLUME:-}
       # the per-browser-WS backlog cap before a forced resync
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
       # Secretele: valoarea din .env (fallback, gol = nesetat) SAU fişierul montat de `secrets:`.
@@ -296,6 +302,11 @@ services:
     volumes:
       - webterm-data:/data
       - edge-lists:/edge
+      # the master key, kept OUT of the data volume. A directory, not a `secrets:` entry: compose
+      # refuses a missing secret file, and an install that has not opted in has none. Host side:
+      # dir 0700 + file 0400, both owned by 10001 (the app's user; the key reader refuses a file
+      # readable by group/others). An empty directory here means "no key configured".
+      - ./secrets/master-key:/run/webterm-key:ro
     networks: [webterm]
     labels:
       - traefik.enable=true

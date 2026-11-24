@@ -632,6 +632,89 @@ make deploy    # production (image)     make pull      # pull the latest image
 #                                        (backup needs WEBTERM_BACKUP_PASSPHRASE)
 ```
 
+## Encryption at rest
+
+Since 3.8 the data volume can be **protected by a master key kept outside it**. The vault key that
+encrypts the stored credentials (agent tokens, SSH passwords and keys, TOTP secrets, SMTP and cloud
+credentials, the agents' CA key) is then itself wrapped by that master key in `keys.wtk`, and every
+backup or snapshot the gateway writes is an encrypted `WTS1` container that cannot be opened
+without it. A copy of the volume alone no longer gives the credentials away.
+
+Phase 1 limits, stated plainly: the SQLite database file and its WAL are not encrypted yet
+(metadata such as host names, users and the audit log stay readable in the volume), and session
+recordings are not encrypted yet. The rule this follows is
+[INV-14](design/INVARIANTS.md#inv-14); the design is in
+[design/ENCRYPTION-AT-REST.md](design/ENCRYPTION-AT-REST.md).
+
+Three states, shown in **Settings → System health → Encryption at rest**:
+
+| State | When | What it means |
+|---|---|---|
+| protected | a key file outside the volume (`WEBTERM_MASTER_KEY_FILE`) | the intended setup |
+| reduced | `WEBTERM_KEY_IN_VOLUME=1` | the key is in the volume next to the data: a copy of the volume includes it (test setups) |
+| legacy | an installation from before 3.8 with no key configured | exactly as 3.7: the vault key is `data/secret` in the volume |
+
+**New installations.** `install.sh` (and `setup.sh` on the Caddy path) create the key file
+`secrets/master-key/master.key` (32 random bytes, base64; directory 0700 and file 0400, both owned
+by uid 10001, the app's user) and set `WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key`; the
+compose file mounts `secrets/master-key/` read-only at `/run/webterm-key`. **Copy the key off the
+machine right away** (a password manager is fine): without it, this installation and every backup
+it makes cannot be opened. A new, empty volume does not start without a key at all; the log says
+`boot refused: no-source`.
+
+**Upgraded installations do not change** until you opt in: with no key configured, a 3.7 volume
+boots exactly as before (`upgrade.sh` never creates a key). To turn protection on:
+
+1. Upgrade to 3.8 first and check it is healthy. No 3.7 process may run against the volume.
+2. Download a backup (Settings → Backup). It is in the old format and holds the old vault key.
+3. Create the key file and keep a copy off the machine:
+   ```sh
+   cd /opt/webterm
+   sudo install -d -m 0700 -o 10001 -g 10001 secrets/master-key
+   head -c 32 /dev/urandom | base64 | sudo install -m 0400 -o 10001 -g 10001 /dev/stdin secrets/master-key/master.key
+   sudo cat secrets/master-key/master.key     # → your password manager / recovery kit
+   ```
+   The file must be owned by 10001 and not readable by group or others: the gateway refuses a key
+   file with a looser mode (`bad-mode`) or another owner (`bad-owner`). Docker keeps the host
+   owner and mode on the bind mount.
+4. Add `WEBTERM_MASTER_KEY_FILE=/run/webterm-key/master.key` to `.env` and recreate the app:
+   `sudo docker compose -f docker-compose.prod.yml up -d app`.
+5. Verify: the log shows `encryption at rest: protected (key source file) — migrated from 3.7 on
+   this boot`; System health shows *Encryption at rest is on*; `docker exec webterm-app-1 ls /data`
+   lists `keys.wtk` and no longer `secret`. Every stored credential still works (the old key became
+   `FK_legacy` inside `keys.wtk`; new values are written under a new key).
+
+The migration first proves that the old key decrypts the database's encrypted values; a key file
+that belongs to another installation is refused before anything is written. A restore staged
+before the restart is applied first, then migrated. If the database's WAL was not checkpointed
+(an unclean stop), it refuses with `legacy-db-wal-pending`: start once without the key, stop
+cleanly, then start with it.
+
+After the migration there is **no way back to 3.7 on the same volume**: do not start a 3.7 image
+on it. A 3.7 image finds no `data/secret`; it refuses when hosts with stored credentials exist, but
+on an installation without any it creates a new `data/secret` and starts with a vault that cannot
+read the protected values. 3.8 then refuses the volume (`ambiguous`, *secret next to keys.wtk*)
+until that stray file is removed. Rolling back means restoring the backup from step 2. Older
+backups (`*.wtsnap`, `pre-restore-*.wtsnap.keep`, and any off-host copy made before the migration)
+still contain the old vault key in clear; System health counts them. Scheduled `.wtsnap` files
+expire after 7 days; delete the `.keep` files once you no longer need them.
+
+**When the gateway refuses to start**, the log has one line `boot refused: <reason> (<name>)`, with
+no key material:
+
+| Reason | Meaning |
+|---|---|
+| `wrong-key` | the key file is not the one this volume was protected with |
+| `missing`, `no-source` | no key file where it is configured, or none at all on a protected volume |
+| `bad-mode`, `bad-owner`, `symlink`, `key-in-data-dir` | the key file's permissions or location (see step 3) |
+| `legacy-key-unproven` | `data/secret` does not decrypt this database (a mixed or foreign volume) |
+| `locked` | another process holds the data directory (a second gateway, or an admin command) |
+| `ambiguous` | the volume mixes old and new key files (for example a 3.7 image was started on a migrated volume and created a new `data/secret`) |
+
+The gateway never falls back to another key. Admin commands that write now need the gateway
+stopped ([RUNBOOK §5](RUNBOOK.md#5-locked-out-of-your-own-account)). Rotating the master key is
+not exposed as a command yet.
+
 ## Backup
 
 Everything that matters is in the `webterm-data` volume (`/data`): `webterm.db`,

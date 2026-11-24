@@ -84,8 +84,12 @@ def _b_upgrade(p, d):
 
 def _b_db_vacuum(p, d):
     _no_params(p)
-    return [["cd", d], ["sudo", "-k", "docker", "compose", "-f", "docker-compose.prod.yml", "exec",
-                        "-u", "webterm", "app", "python3", "-m", "app.admin", "vacuum"]]
+    # 3.8: comenzile admin care scriu iau lock-ul procesului (ENCRYPTION-AT-REST.md §12.9 item 8),
+    # deci rulează cu gateway-ul OPRIT, într-un container efemer, apoi gateway-ul porneşte iar
+    dc = ["docker", "compose", "-f", "docker-compose.prod.yml"]
+    return [["cd", d], ["sudo", "-k", *dc, "stop", "app"],
+            ["sudo", *dc, "run", "--rm", "--no-deps", "app", "python3", "-m", "app.admin", "vacuum"],
+            ["sudo", *dc, "start", "app"]]
 
 
 def _b_cf_token_edit(p, d):

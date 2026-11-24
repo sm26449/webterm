@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from argon2 import PasswordHasher
 from argon2.exceptions import Argon2Error, InvalidHashError, VerifyMismatchError
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .errors import ApiError
@@ -29,19 +29,60 @@ from . import bgtasks, config, db, email_alerts, totp
 log = logging.getLogger("webterm")
 
 # ── Vault (secrete criptate la repaus: token agent, parole/chei SSH) ──────────
-_fernet: Optional[Fernet] = None
+_fernet: Optional[Fernet] = None       # FK_legacy (= data/secret din 3.7): valorile fără prefix
+_fernet_fk: Optional[Fernet] = None    # FK (3.8, volum protejat): valorile cu prefixul FK_PREFIX
 _secret_key: bytes = b""            # subcheie HMAC (token-uri de forward), separată de cheia seifului
+
+# 3.8 (ENCRYPTION-AT-REST.md §12.2, wiring item 4): fiecare valoare scrisă pe un volum protejat
+# poartă numele cheii ei. Tokenurile Fernet sunt base64 url-safe (fără ':'), deci prefixul nu se
+# poate confunda cu un token. Fără prefix = FK_legacy (tot ce a scris 3.7 și tot ce scrie 3.8 în
+# starea legacy, ca o întoarcere la imaginea 3.7 să citească în continuare seiful).
+FK_PREFIX = "FK:"
+FK_LEGACY_PREFIX = "FKL:"
+
+
+def _forward_subkey(key: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"webterm/forward-token").derive(key)
 
 
 def init_crypto(secret: bytes) -> None:
-    global _fernet, _secret_key
+    """Legacy state (3.7 volume, no master key): the vault key is data/secret, unchanged."""
+    global _fernet, _fernet_fk, _secret_key
     # L1: separare de scop. Cheia seifului rămâne pe secretul BRUT (schimbarea ei ar face
     # nedecriptabile toate secretele deja stocate). Cheia HMAC de forward e o subcheie derivată
     # cu HKDF, ca aceleași 32 de octeți să nu servească simultan drept cheie Fernet și cheie HMAC.
     # (Doar cookie-urile de forward existente se invalidează — au TTL scurt și se rotesc oricum.)
     _fernet = Fernet(base64.urlsafe_b64encode(secret))
-    _secret_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                       info=b"webterm/forward-token").derive(secret)
+    _fernet_fk = None
+    _secret_key = _forward_subkey(secret)
+
+
+def init_crypto_keyring(fk_legacy: Optional[bytes], fk: bytes) -> None:
+    """Protected / reduced state (keys.wtk opened). New values are written under FK with the
+    FK_PREFIX; unprefixed values decrypt only with FK_legacy (absent on a volume that was never
+    3.7). The choice follows the prefix, never a retry on failure.
+
+    INV-14 (docs/design/INVARIANTS.md): the key is chosen by the value's prefix and the boot
+    state; a value that names a key this process does not hold is an error, never a fallback.
+
+    The forward-token HMAC keeps its 3.7 derivation from FK_legacy while FK_legacy exists, so
+    the migration does not invalidate live forward tokens; a fresh protected install derives it
+    from FK. Moving it to FK belongs to the later re-encryption job (§12.2), which must then
+    invalidate the forward tokens explicitly."""
+    global _fernet, _fernet_fk, _secret_key
+    if not isinstance(fk, (bytes, bytearray)) or len(fk) != 32:
+        raise ValueError("FK missing from the keyring")
+    _fernet = Fernet(base64.urlsafe_b64encode(fk_legacy)) if fk_legacy else None
+    _fernet_fk = Fernet(base64.urlsafe_b64encode(bytes(fk)))
+    _secret_key = _forward_subkey(bytes(fk_legacy) if fk_legacy else bytes(fk))
+
+
+def vault_mode() -> str:
+    """"protected" once init_crypto_keyring ran, "legacy" after init_crypto, "" before."""
+    if _fernet_fk is not None:
+        return "protected"
+    return "legacy" if _fernet is not None else ""
 
 
 # ── Token-uri de forward (auth pe subdomeniile de port-forward) ───────────────
@@ -122,11 +163,26 @@ def verify_forward_token(token: Optional[str], slug: str) -> bool:
 
 
 def encrypt_secret(plaintext: str) -> str:
-    """Criptează un secret pentru stocare (Fernet = AES-CBC + HMAC autentificat)."""
+    """Criptează un secret pentru stocare (Fernet = AES-CBC + HMAC autentificat). Volum protejat:
+    sub FK, cu prefixul FK_PREFIX; legacy: sub data/secret, fără prefix (exact ca 3.7)."""
+    if _fernet_fk is not None:
+        return FK_PREFIX + _fernet_fk.encrypt(plaintext.encode()).decode()
+    if _fernet is None:
+        raise RuntimeError("the vault key is not loaded")
     return _fernet.encrypt(plaintext.encode()).decode()
 
 
 def decrypt_secret(blob: str) -> str:
+    """Decriptează după PREFIX (§12.2): `FK:` → FK, `FKL:` sau fără prefix → FK_legacy. O valoare
+    care numește o cheie pe care procesul n-o are ridică InvalidToken (niciun fallback)."""
+    if blob.startswith(FK_PREFIX):
+        if _fernet_fk is None:
+            raise InvalidToken
+        return _fernet_fk.decrypt(blob[len(FK_PREFIX):].encode()).decode()
+    if blob.startswith(FK_LEGACY_PREFIX):
+        blob = blob[len(FK_LEGACY_PREFIX):]
+    if _fernet is None:
+        raise InvalidToken
     return _fernet.decrypt(blob.encode()).decode()
 
 # F-04: hashing-ul de parole are executor PROPRIU. Pe pool-ul implicit al asyncio

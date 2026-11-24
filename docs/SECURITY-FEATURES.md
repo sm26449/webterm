@@ -56,7 +56,8 @@ exactly as much as access to the mailbox.
 **And a way back in, from the server.** `docker exec -it webterm-app-1 python3 -m app.admin`
 recovers access over SSH: `list`, `passwd`, `disable-2fa`, `logout-all`, and the break-glass
 `promote` (make an account Owner over all hosts), `enable` (re-enable an account the IdP disabled
-through SCIM), `sso-only`, `roles`, `health` and `vacuum`. Every gate above is another way to lock
+through SCIM), `sso-only`, `roles`, `health` and `vacuum` (since 3.8 the commands that write
+run with the gateway stopped, through `docker compose run`: one writer per data volume). Every gate above is another way to lock
 yourself out; the product can be strict in the browser because this exists, and shell on the
 server is a far higher bar than a mailbox. See RUNBOOK §5 and [ROLES.md → break-glass](ROLES.md#break-glass-promote-from-the-server).
 

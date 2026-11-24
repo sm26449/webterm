@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import agentca, alert_history, config, conntypes, db, edgeguard, edgemtls, fwddomain, healthcmd, hoststatus, owners
+from . import agentca, alert_history, backup, bootkeys, config, conntypes, db, edgeguard, edgemtls, fwddomain, healthcmd, hoststatus, owners
 
 log = logging.getLogger("webterm")
 
@@ -65,7 +65,8 @@ MAX_HOSTS_IN_RESULT = 50
 DOCS = {"authentik_upgrade": "docs/AUTHENTIK-UPGRADE.md", "heartbeat": "docs/INSTALL.md#dead-man-switch",
         "host_health": "docs/INSTALL.md#system-health",
         "host_requirements": "docs/INSTALL.md#supported-hosts",
-        "break_glass": "docs/ROLES.md#break-glass-promote-from-the-server"}
+        "break_glass": "docs/ROLES.md#break-glass-promote-from-the-server",
+        "encryption": "docs/INSTALL.md#encryption-at-rest"}
 # FL-12 (audit 2026-10-17): a helper that has never reported is "not installed yet" for the
 # first minutes after the gateway starts (install.sh / upgrade.sh is still running) and a
 # warning after that — an upgrade from < 3.6.9 in one jump leaves the host kit uninstalled
@@ -229,6 +230,12 @@ MESSAGES = {
     "forward_dns_missing": "No DNS record answers for *.{domain}",
     "forward_dns_ok": "Forward DNS for *.{domain} answers",
     "check_failed": "This check could not run: {error}",
+    "crypto_legacy": "Encryption at rest is off: the vault key is stored in the data volume",
+    "crypto_reduced": "Reduced protection: the master key is stored in the data volume",
+    "crypto_env": "The master key comes from WEBTERM_MASTER_KEY, visible in the container's metadata",
+    "crypto_protected": "Encryption at rest is on (master key: {source})",
+    "crypto_raw_copies": "{count} backup file(s) still contain the old vault key in clear",
+    "crypto_raw_copies_ok": "No stored backup contains the old vault key",
 }
 WHY = {
     "host.helper": "Host timers (backup, certificate check, Docker cleanup) and the Cloudflare token are only visible to EverShell through this helper.",
@@ -266,6 +273,8 @@ WHY = {
     "update.available": "New releases carry security fixes.",
     "clock.gateway": "A wrong clock breaks TOTP codes, SSO tokens and certificate checks.",
     "forward.dns": "Port-forward links open on *.<domain>; without a wildcard DNS record they do not resolve.",
+    "crypto.protection": "Backups and snapshots of a protected volume cannot be read without the master key held apart from the data.",
+    "crypto.legacy_copies": "A backup made before the migration holds the old vault key in clear: whoever has the file can read the credentials it protected.",
 }
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
@@ -297,7 +306,7 @@ RECS = {
     "sso_groups": "Bind the EverShell application to a group in the IdP, or set WEBTERM_OIDC_ALLOWED_GROUPS. If the IdP already gates it, mute this.",
     "revoke_orphan_enroll": "Settings → Access & automation → Bulk enrollment marks them “creator gone”: revoke the ones nobody needs any more (machines already enrolled keep working). If one is still in use, mute this.",
     "janitor_logs": "Look at the gateway log for “janitor”; the next run retries.",
-    "compact_db": "Compacting locks the database for a moment: run it in a quiet minute.",
+    "compact_db": "Compacting stops the gateway for a moment (it needs the data directory to itself): run it in a quiet minute. If it fails, start the gateway again with docker compose … start app.",
     "enable_backup": "Turn on the scheduled backup in Settings → Backup, or install the host backup timer.",
     "add_offhost": "Add an off-host destination (Settings → Backup → off-host copy) or WEBTERM_BACKUP_RSYNC/REMOTE for the host timer.",
     "verify_backup": "Verify a backup in Settings → Backup (it decrypts it and checks the database, nothing is restored).",
@@ -308,6 +317,10 @@ RECS = {
     "upgrade": "Upgrade on the gateway host (it backs up first and rolls back on failure).",
     "fix_clock": "Enable time sync (NTP) on the gateway host.",
     "forward_dns": "Create a wildcard DNS record *.<domain> pointing at this server (Settings → Network & certificates → Port forwarding).",
+    "enable_master_key": "Create a master key file outside the data volume, point WEBTERM_MASTER_KEY_FILE at it and restart: the volume migrates once (docs/INSTALL.md, Encryption at rest). Keep a copy of the key off this machine.",
+    "key_in_volume": "WEBTERM_KEY_IN_VOLUME=1 keeps the key next to the data it protects: any copy of the volume includes it. New installations should use an external key file.",
+    "key_file": "Put the key in a file (mode 0400, owned by the service user) and use WEBTERM_MASTER_KEY_FILE instead of WEBTERM_MASTER_KEY.",
+    "raw_copies": "Settings → Backup lists them (.wtsnap and pre-restore .keep files). Scheduled .wtsnap files expire after 7 days; delete the .keep files once you no longer need them, and treat every off-host copy made before the migration as holding the old key.",
 }
 
 
@@ -1001,6 +1014,33 @@ async def c_backup_inapp() -> Optional[Result]:
     return Result("ok", "backup_inapp_ok")
 
 
+async def c_crypto_protection() -> Optional[Result]:
+    """3.8: the protection state of the data volume, as the boot established it (bootkeys)."""
+    st = bootkeys.STATE
+    mode = st.get("mode")
+    if not mode:
+        return None
+    if mode == "legacy":
+        return Result("info", "crypto_legacy", rec="enable_master_key", doc="encryption")
+    if mode == "reduced":
+        return Result("warning", "crypto_reduced", rec="key_in_volume", doc="encryption")
+    if st.get("source") == "env":
+        return Result("warning", "crypto_env", rec="key_file", doc="encryption")
+    return Result("ok", "crypto_protected", {"source": st.get("source") or "?"})
+
+
+async def c_crypto_legacy_copies() -> Optional[Result]:
+    """3.8 wiring item 5: on a migrated volume, 3.7 snapshots (`*.wtsnap`) and pre-restore copies
+    (`*.wtsnap.keep`) still hold the raw 3.7 vault key. Counted, never opened."""
+    if bootkeys.STATE.get("mode") in ("", "legacy"):
+        return None          # legacy: data/secret is in the volume anyway; nothing extra to say
+    n = await asyncio.to_thread(backup.raw_key_copies)
+    if n:
+        return Result("warning", "crypto_raw_copies", {"count": n}, rec="raw_copies",
+                      action="settings:backup", doc="encryption")
+    return Result("ok", "crypto_raw_copies_ok")
+
+
 _CERT_SEV = {"ok": "ok", "expiring": "warning", "expiring_soon": "critical", "expired": "critical",
              "default": "critical", "mismatch": "critical", "error": "warning"}
 
@@ -1134,6 +1174,9 @@ CHECKS: list = [
     Check("backup.offhost", "config", c_backup_offhost),
     Check("backup.restore", "config", c_backup_restore, alert="none"),
     Check("backup.inapp", "config", c_backup_inapp, alert="none"),             # backup_failed alerts
+    # 3.8: encryption at rest (state set at boot; the copies change only with backups / deletes)
+    Check("crypto.protection", "config", c_crypto_protection, alert="none"),
+    Check("crypto.legacy_copies", "config", c_crypto_legacy_copies),
     Check("certs.main", "fast", _cert_check("main"), alert="none", critical=True),  # certmon alerts
     Check("certs.forward", "fast", _cert_check("forward"), alert="none", critical=True),
     Check("certs.authentik", "fast", _cert_check("authentik"), alert="none", critical=True),

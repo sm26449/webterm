@@ -25,3 +25,6 @@ AGENTS.md
 .aider*
 docs/AUDIT-*.md
 docs/audit-*/
+
+# 3.8: the master key (setup.sh / install.sh) — never committed
+secrets/

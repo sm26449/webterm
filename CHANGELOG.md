@@ -9,6 +9,38 @@ back.
 
 ## [Unreleased]
 
+### Added
+- **Encryption at rest for the data volume (phase 1).** Until now the key that encrypts every stored
+  credential (agent tokens, SSH passwords and keys, TOTP secrets, SMTP and cloud credentials, the
+  agents' CA key) sat in the same volume as the data it protected, as `data/secret`: anyone with a
+  copy of the volume or of a backup had everything. A volume can now be protected by a **master key
+  kept outside it**: the vault key is wrapped in `keys.wtk`, and every backup or snapshot the gateway
+  writes is an encrypted container that cannot be opened without that key. New installations get a
+  key file from `install.sh` / `setup.sh` (`secrets/master-key/master.key`, mounted read-only);
+  **copy it off the machine**, because without it the installation and its backups cannot be
+  opened. Upgraded installations change nothing until the operator opts in: a 3.7 volume with no key
+  configured boots exactly as before. Turning it on is one key file and one line in `.env`; the next
+  start migrates the volume once, after proving the old key really decrypts the database, and
+  applies a staged restore first if there is one (docs/INSTALL.md, *Encryption at rest*). Not covered
+  yet: the database file itself and session recordings (stated in System health and the docs).
+- **System health shows the protection state** (*Encryption at rest*: protected / reduced / legacy,
+  and a warning when the key comes from an environment variable) and **counts the older backups
+  that still hold the old vault key in clear**, so they can be deleted once no longer needed.
+
+### Changed
+- **A gateway refuses to start rather than run with the wrong key.** A protected volume needs exactly
+  its own master key: a missing, wrong or badly-permissioned key file stops the boot before anything
+  in the data directory is touched (no clean-up, no restore, no schema change), with one log line
+  naming the reason and never the key. There is no fallback to the old key. A new, empty volume does
+  not start without a key at all (or `WEBTERM_KEY_IN_VOLUME=1` for test setups, shown as reduced
+  protection).
+- **Admin commands that write now run with the gateway stopped.** `python3 -m app.admin passwd`,
+  `disable-2fa`, `logout-all`, `promote`, `enable`, `sso-only` and `vacuum` take the same lock on the
+  data directory as the gateway (one writer per volume, which the key protocol relies on); while the
+  gateway runs they refuse and print the stop / `docker compose run` / start commands. `list`,
+  `roles` and `health` still work any time. The System health "compact the database" command was
+  updated accordingly.
+
 ## [3.7.1] — 2026-11-22 · agent (61)
 
 ### Added

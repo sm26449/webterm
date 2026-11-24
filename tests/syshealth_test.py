@@ -163,7 +163,9 @@ def test_commands():
         ("unit_journal", "webterm-backup.service"):
             "sudo -k journalctl -u webterm-backup.service -n 50 --no-pager",
         ("upgrade", "v3.6.9"): "sudo -k /opt/webterm/upgrade.sh v3.6.9",
-        ("db_vacuum", None): "cd /opt/webterm && sudo -k docker compose -f docker-compose.prod.yml exec -u webterm app python3 -m app.admin vacuum",
+        ("db_vacuum", None): "cd /opt/webterm && sudo -k docker compose -f docker-compose.prod.yml stop app"
+                             " && sudo docker compose -f docker-compose.prod.yml run --rm --no-deps app"
+                             " python3 -m app.admin vacuum && sudo docker compose -f docker-compose.prod.yml start app",
         ("cf_token_edit", None): "sudo -k -e /opt/webterm/secrets/cf_dns_api_token",
         ("ntp_status", None): "timedatectl status",
         ("cert_renew", "*.wt.example.com"): "sudo -k /opt/webterm/scripts/cert-renew.sh --domain '*.wt.example.com'",
@@ -1262,10 +1264,10 @@ async def test_cadence():
     print("── PF-02: the config tier runs at startup/hourly/manual, not every fast tick")
     syshealth.reset_for_tests()
     cfg = {c.id for c in syshealth.CHECKS if c.tier == "config"}
-    check("config tier = the admin-config checks (roles/backup/sso-ungated/enrol)",
+    check("config tier = the admin-config checks (roles/backup/sso-ungated/enrol/crypto)",
           {"roles.permanent_owner", "roles.break_glass", "config.sso_ungated",
            "tokens.enroll_orphans", "backup.coverage", "backup.offhost", "backup.restore",
-           "backup.inapp"} == cfg, cfg)
+           "backup.inapp", "crypto.protection", "crypto.legacy_copies"} == cfg, cfg)
     # spy on which checks each run actually EXECUTES (not _rows, which _load() hydrates from DB)
     ran: list = []
     orig = syshealth._run_one

@@ -229,12 +229,15 @@ docker build -q -t "$IMG" "$REPO" >/dev/null 2>&1 && ok "docker build" || { no "
 fi
 
 # ── containerul de smoke ────────────────────────────────────────────────────
+# 3.8 (criptarea la repaus): un volum NOU porneşte doar cu o cheie principală. Containerele de test
+# au volume efemere, deci primesc explicit WEBTERM_KEY_IN_VOLUME=1 (cheia în volum, „protecţie
+# redusă”); producţia foloseşte un fişier extern (docs/INSTALL.md → Encryption at rest).
 boot() {
   local name=$1 port=$2 url=$3
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker network create "$NET" >/dev/null 2>&1 || true
   docker run -d --name "$name" --network "$NET" -p "$port:8000" \
-    -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="$url" \
+    -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="$url" \
     -e WEBTERM_AGENT_INSECURE=1 "$IMG" >/dev/null
   local st=starting
   for _ in $(seq 1 45); do
@@ -394,7 +397,7 @@ say "SSO login UI"
 docker rm -f $C3 >/dev/null 2>&1 || true
 docker network create $NET >/dev/null 2>&1 || true
 docker run -d --name $C3 --network $NET -p "$P3:8000" \
-  -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="$BASE3" -e WEBTERM_AGENT_INSECURE=1 \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="$BASE3" -e WEBTERM_AGENT_INSECURE=1 \
   -e WEBTERM_OIDC_ISSUER=http://dummy-idp.invalid/application/o/webterm/ \
   -e WEBTERM_OIDC_CLIENT_ID=dummy -e WEBTERM_OIDC_CLIENT_SECRET=dummy \
   -e WEBTERM_OIDC_PROVIDER_NAME=TestSSO "$IMG" >/dev/null
@@ -439,12 +442,12 @@ docker run -d --name $FT --network $NET --network-alias ftps-eval \
 # app pentru BACKUP: pe reţeaua fixture-urilor, publicat pe host
 docker rm -f $C4 >/dev/null 2>&1 || true
 docker run -d --name $C4 --network $NET -p "$P4:8000" \
-  -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P4" \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=ci-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P4" \
   -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
 # app pentru RESTORE: `--restart` ca să revină după os._exit al restore-ului
 docker rm -f $C5 >/dev/null 2>&1 || true
 docker run -d --name $C5 --restart unless-stopped -p "$P5:8000" \
-  -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P5" \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=e2e-restore-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P5" \
   -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
 
 _bkok=1
@@ -479,7 +482,7 @@ if want features; then
 say "Feature UI (group tokens + host tags)"
 docker rm -f $C6 >/dev/null 2>&1 || true
 docker run -d --name $C6 -p "$P6:8000" \
-  -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P6" \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=e2e-features-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P6" \
   -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
 _st=starting
 for _ in $(seq 1 45); do _st=$(docker inspect -f '{{.State.Health.Status}}' $C6 2>/dev/null); [ "$_st" = healthy ] && break; sleep 2; done
@@ -502,7 +505,7 @@ if want jump; then
 say "Jump-host UI (nesting + form + host hub)"
 docker rm -f "$C7" >/dev/null 2>&1 || true
 docker run -d --name "$C7" -p "$P7:8000" \
-  -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P7" \
+  -e WEBTERM_KEY_IN_VOLUME=1 -e WEBTERM_SETUP_TOKEN=jump-e2e-token -e WEBTERM_PUBLIC_URL="http://127.0.0.1:$P7" \
   -e WEBTERM_UPDATE_CHECK=0 "$IMG" >/dev/null
 _st=starting
 for _ in $(seq 1 45); do _st=$(docker inspect -f '{{.State.Health.Status}}' "$C7" 2>/dev/null); [ "$_st" = healthy ] && break; sleep 2; done

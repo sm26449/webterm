@@ -54,6 +54,11 @@ services:
       # ONLY in the production file; `tests/compose_env_test.py` now guards both mechanically.
       # the app's public domain (used by the browser, by agents and by WebAuthn)
       WEBTERM_PUBLIC_URL: ${WEBTERM_PUBLIC_URL:-https://term.example.com}
+      # 3.8 encryption at rest (docs/INSTALL.md → Encryption at rest): setup.sh creates
+      # ./secrets/master-key/master.key on a new install and sets this to the mounted path; a new
+      # volume does not start without a key (or WEBTERM_KEY_IN_VOLUME=1, reduced protection)
+      WEBTERM_MASTER_KEY_FILE: ${WEBTERM_MASTER_KEY_FILE:-}
+      WEBTERM_KEY_IN_VOLUME: ${WEBTERM_KEY_IN_VOLUME:-}
       # set to 1 only if the gateway has a self-signed certificate
       WEBTERM_AGENT_INSECURE: ${WEBTERM_AGENT_INSECURE:-}
       # the per-browser-WS backlog cap before a forced resync
@@ -124,6 +129,9 @@ services:
       WEBTERM_HEARTBEAT_MINUTES: ${WEBTERM_HEARTBEAT_MINUTES:-}
     volumes:
       - webterm-data:/data
+      # the master key, outside the data volume (dir 0700 + file 0400, owned by 10001); an empty
+      # directory = no key configured
+      - ./secrets/master-key:/run/webterm-key:ro
     networks: [webterm]
 
   caddy:

@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup, backup_api, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
+from . import (api, audit, authz, backup_api, bootkeys, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
                hosts_api, idlesess, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth,
                webauthn_api)
@@ -222,38 +222,26 @@ async def _scheduled_backup() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 3.8 (ENCRYPTION-AT-REST.md §12.9 Wiring checklist): cheile ÎNAINTEA oricărei scrieri în
+    # DATA_DIR. bootkeys.prepare() ia lock-ul procesului, inventariază volumul, verifică sursa
+    # cheii şi abia apoi aplică un restore din staging (sub lock), migrează un volum 3.7 când i
+    # s-a dat o cheie şi încarcă seiful. Un volum 3.7 fără cheie configurată porneşte EXACT ca
+    # înainte (starea legacy, nimic scris în afară de `.lock`).
+    # INV-14 (docs/design/INVARIANTS.md): o cheie lipsă/greşită/divergentă opreşte boot-ul aici,
+    # înainte de clean-up, restore, schemă şi orice scriitor.
+    try:
+        bootkeys.prepare()
+    except Exception as e:
+        # O linie clară (cod + nume, niciodată material de cheie), apoi ieşire cu cod ≠ 0: uvicorn
+        # opreşte procesul când lifespan-ul eşuează. Un restore PORNIT dar neterminat rămâne în
+        # staging/jurnal şi se reia la repornire; nu servim niciodată o stare pe jumătate.
+        log.critical(bootkeys.describe_refusal(e))
+        raise RuntimeError("boot refused (see the line above)") from None
     config.ensure_dirs()
     # temporarele unui plafon de transcript întrerupt (crash/oprire în timpul copierii off-loop):
     # originalele sunt intacte, temporarele sunt doar spaţiu ocupat
     core.cleanup_cap_temps()
-    # Un restore pus în staging din UI se aplică ACUM, înainte de a citi cheia/DB-ul:
-    # swap DB + data/secret. Vezi backup.apply_pending_restore.
-    try:
-        if backup.apply_pending_restore():
-            log.warning("restore applied at boot from the uploaded backup")
-    except Exception:
-        # Un restore PORNIT dar ne-terminat nu trebuie să lase aplicația să pornească cu o
-        # stare pe jumătate aplicată (DB nou + cheie veche = seif nedecriptabil). Staging-ul
-        # + flagul rămân intacte (apply_pending_restore e reîncercabil) → repornirea reia și
-        # converge. Eșuăm zgomotos în loc să servim un seif rupt.
-        log.exception("applying the restore at boot failed — refusing to start with "
-                      "partial state; the next restart resumes from staging")
-        raise
-    security.init_crypto(config.load_secret())
     await db.connect()
-    # Guard: if we just minted a fresh vault key but the DB already holds
-    # encrypted secrets, that key can never decrypt them — fail loud instead of
-    # silently serving a broken vault (agent tokens + SSH creds unrecoverable).
-    if config.secret_was_generated:
-        enc = await db.fetchone(
-            "SELECT 1 FROM hosts WHERE token_encrypted IS NOT NULL"
-            " OR credential_encrypted IS NOT NULL LIMIT 1")
-        if enc:
-            raise RuntimeError(
-                "data/secret is missing but the database contains encrypted "
-                "secrets (agent tokens / SSH credentials). A new key was just "
-                "generated and CANNOT decrypt them. Restore the original "
-                "data/secret from backup before starting. Refusing to boot.")
     # Instalare NOUĂ → cheie proprie din prima secundă. Sursa publică a agentului are încorporată
     # cheia MENTAINERULUI; fără o cheie de deployment, fiecare instalare din lume ar împărţi
     # aceeaşi ancoră de încredere pentru update-uri, iar o scurgere a acelei chei ar însemna cod

@@ -1,9 +1,10 @@
 """Key sources, boot contract, process lock and atomic key-manifest publication (3.8,
 docs/design/ENCRYPTION-AT-REST.md §12.9, normative).
 
-Not wired into the real boot yet: `config.load_secret`, `security.init_crypto` and
-`main.lifespan` do not call this module in PR2 (see the wiring checklist in §12.9). Only
-os / fcntl / stat / hashlib and `keyring.py`; no config, no DB, no logging of anything secret.
+Called by the real boot through `bootkeys.prepare()` (PR4, §12.9 Wiring checklist): the
+gateway-specific steps (3.7 staged restore, the FK_legacy proof on the database) are passed in
+as the `before_migrate` hook, so this module keeps to os / fcntl / stat / hashlib and
+`keyring.py`; no config, no DB, no logging of anything secret.
 
 Entry points (all of them under a `ProcessLock`, whose directory fd is the only way they reach
 `DATA_DIR`):
@@ -1127,14 +1128,49 @@ class BootResult:
     state: ProtectionState
     keyring: kr.Keyring = field(default=None, repr=False)
     legacy_key: bytes = field(default=None, repr=False)  # only in the legacy state
+    # PR4: the MK the keyring was opened with (protected / reduced only). The process keeps it in
+    # memory for its whole life: backup/restore re-open keys.wtk with it on every use (§12.10).
+    master_key: bytes = field(default=None, repr=False)
+    resolved: ResolvedKey = field(default=None, repr=False)
 
 
+def read_legacy_secret(lock):
+    """data/secret (regular, exactly 32 bytes) through the lock's directory fd. The legacy state
+    re-reads it after a 3.7 staged restore replaced it."""
+    return _read_secret(lock)
+
+
+def _held_mk(lock, resolved, ring):
+    """MK-ul cu care s-a deschis keyring-ul. Pentru `volume` la bootstrap/migrare cheia tocmai a
+    fost generată în master.key: o recitim prin fd-ul DATA_DIR și cerem ca id-ul ei să fie exact
+    cel din manifestul deschis (altfel nu știm ce cheie ține procesul → refuz)."""
+    mk = resolved.mk if resolved is not None else None
+    with _phase(KIND_COMMIT_UNKNOWN, VOLUME_KEY):
+        if mk is None and resolved is not None and resolved.source == "volume":
+            mk = read_key_file(VOLUME_KEY, lock.dir_fd, VOLUME_KEY)
+        if mk is None or not hmac.compare_digest(kr.key_id(mk), ring.mk_id):
+            raise BootRefused("held-key-mismatch", MANIFEST)
+    return mk
+
+
+def _held(lock, resolved, ring):
+    mk = _held_mk(lock, resolved, ring)
+    return {"master_key": mk, "resolved": _resolved_with(resolved, mk)}
+
+
+# INV-14 (docs/design/INVARIANTS.md): lock → inventar → sursă → cheie verificată, înaintea oricărei
+# scrieri; un volum protejat nu cade niciodată pe `secret` sau pe altă sursă.
 def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1, migrate=True,
-         _crash_at=None):
+         _crash_at=None, before_migrate=None):
     """§12.9 order: lock → inventory → key source → open / bootstrap / migrate. On a preflight
     refusal (kind invalid-key) nothing but `.lock` may have been created; the lock is released on
     every refusal. A raw OSError that escapes preflight (fstat, listing, flock…) becomes
-    BootRefused("io-error", kind="preflight-io"); publication errors are already typed."""
+    BootRefused("io-error", kind="preflight-io"); publication errors are already typed.
+
+    `before_migrate(lock, inv)` (PR4) runs on a `legacy` volume with a valid source, under the
+    lock, before anything of the migration is written: the gateway applies a 3.7 staged restore
+    there and proves FK_legacy on the database (§12.9 checklist items 2–3). It refuses by raising
+    BootRefused; afterwards the volume must still classify `legacy`."""
     try:
         lock = acquire_lock(data_dir)
     except OSError as e:
@@ -1146,7 +1182,7 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
         resolved = resolve_master_key(env, lock, inv, default_key_file)
         if inv.kind == "empty":
             ring, state = bootstrap(lock, resolved, profile, _crash_at)
-            return BootResult(lock, state, ring)
+            return BootResult(lock, state, ring, **_held(lock, resolved, ring))
         if inv.kind == "legacy":
             if resolved is None or not migrate:
                 if inv.migrating:
@@ -1155,10 +1191,15 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
                 return BootResult(lock, ProtectionState("legacy", None, inv.staged_restore, False,
                                                         ("legacy-key-in-volume",)),
                                   legacy_key=_read_secret(lock))
+            if before_migrate is not None:
+                before_migrate(lock, inv)
+                after = classify(lock)
+                if after.kind != "legacy":
+                    raise BootRefused("not-legacy", after.reason or after.kind, KIND_INCOMPLETE)
             ring, state = migrate_legacy(lock, resolved, profile, _crash_at)
-            return BootResult(lock, state, ring)
+            return BootResult(lock, state, ring, **_held(lock, resolved, ring))
         ring, state = open_protected(lock, inv, resolved, profile, _crash_at)
-        return BootResult(lock, state, ring)
+        return BootResult(lock, state, ring, **_held(lock, resolved, ring))
     except OSError as e:
         lock.release()
         # Low 5: orice OSError brut ajuns aici e din preflight (publicările îl tipizează în

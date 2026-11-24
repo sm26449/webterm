@@ -474,10 +474,13 @@ docker exec -it webterm-app-1 python3 -m app.admin health
 # give one account a local password (prompts; never on the command line).
 # This makes it a break-glass account: SCIM stops managing it and its SSO-group roles are
 # removed (an account with a local password gets no roles from groups) — so promote it next.
-docker exec -it webterm-app-1 python3 -m app.admin passwd you@example.com
+# (3.8+: commands that write need the gateway stopped, see RUNBOOK §5)
+cd /opt/webterm && docker compose -f docker-compose.prod.yml stop app
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin passwd you@example.com
 
-# make that account Owner over all hosts (permanent, audited)
-docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com
+# make that account Owner over all hosts (permanent, audited), then start the gateway again
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin promote you@example.com
+docker compose -f docker-compose.prod.yml start app
 ```
 
 Then sign in with the password form (2FA still applies if the account has TOTP; `app.admin

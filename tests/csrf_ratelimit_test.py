@@ -19,6 +19,7 @@ import threading
 import time
 
 os.environ["WEBTERM_DATA_DIR"] = tempfile.mkdtemp()
+os.environ["WEBTERM_KEY_IN_VOLUME"] = "1"   # 3.8: lifespan-ul real cere o cheie pe un volum nou
 os.environ.setdefault("WEBTERM_PUBLIC_URL", "https://term.example.com")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 

@@ -496,11 +496,15 @@ exists, with the command below printed, never run.
 If no Owner is left (for example after a partial restore), make an account Owner from the server:
 
 ```sh
-docker exec -it webterm-app-1 python3 -m app.admin promote you@example.com   # Owner over all hosts
-docker exec -it webterm-app-1 python3 -m app.admin enable  you@example.com   # undo a SCIM disable
-docker exec -it webterm-app-1 python3 -m app.admin sso-only you@example.com  # drop local pw/passkeys/2FA (SSO-only)
-docker exec -it webterm-app-1 python3 -m app.admin roles    you@example.com
+cd /opt/webterm
+docker exec -it webterm-app-1 python3 -m app.admin roles    you@example.com   # read-only, any time
 docker exec -it webterm-app-1 python3 -m app.admin list
+# commands that write need the gateway stopped (3.8+, see RUNBOOK §5):
+docker compose -f docker-compose.prod.yml stop app
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin promote you@example.com   # Owner over all hosts
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin enable  you@example.com   # undo a SCIM disable
+docker compose -f docker-compose.prod.yml run --rm --no-deps app python3 -m app.admin sso-only you@example.com  # drop local pw/passkeys/2FA (SSO-only)
+docker compose -f docker-compose.prod.yml start app
 ```
 
 `enable` undoes a SCIM deactivation when no Owner can sign in to do it from the UI; `sso-only`

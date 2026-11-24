@@ -35,6 +35,7 @@ def ok(name, cond, detail=""):
 async def main():
     tmp = tempfile.mkdtemp(prefix="sec-")
     env = dict(os.environ, WEBTERM_SETUP_TOKEN="test-setup", WEBTERM_DATA_DIR=os.path.join(tmp, "data"),
+               WEBTERM_KEY_IN_VOLUME="1",  # 3.8: un volum nou cere o cheie (aici în volum, explicit)
                WEBTERM_PUBLIC_URL=BASE, PYTHONPATH=f"{ROOT}/gateway")
     # interpretorul curent (nu o cale .venv hardcodată) → rulează din orice clonă
     gw = subprocess.Popen(

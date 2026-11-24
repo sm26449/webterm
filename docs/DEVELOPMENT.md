@@ -16,6 +16,12 @@ PYTHONPATH=gateway .venv/bin/uvicorn app.main:app --reload &
 cd frontend && npm run dev
 ```
 
+Since 3.8 a **new** data directory does not start without a master key (encryption at rest,
+`docs/INSTALL.md` → *Encryption at rest*). For a throwaway dev `data/`, export
+`WEBTERM_KEY_IN_VOLUME=1` (the key is kept in the volume; System health says "reduced"). An existing
+`data/` from 3.7 keeps booting as before (legacy) without it. Tests that start a real gateway set
+the variable themselves, and so do the gate containers (`scripts/ci-local.sh`, CI).
+
 No Node on the machine? The Playwright image used by the gates has it:
 
 ```sh
@@ -140,6 +146,7 @@ gateway/app/
   certmon.py               TLS certificate monitoring + renew
   updatecheck.py           "is there a newer version?"
   admin.py                 recovery from the server: python3 -m app.admin …
+  keys.py · keyring.py · bootkeys.py · snapshot.py   encryption at rest: key manifest, boot wiring, WTS1
 frontend/src/
   App.tsx                  shell: tabs, split views, hash routing, toasts, global shortcuts
   components/              one file per surface. SessionView = a terminal pane (the largest);
