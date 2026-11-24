@@ -1,9 +1,12 @@
 """Encrypted recordings: publication (Recorder) and readers (ENCRYPTION-AT-REST.md §12.11).
 
 PR5a: implemented and tested in isolation, **not wired** into core.py. A `Store` refuses to exist
-unless `WEBTERM_TX_RECORDINGS=1` *and* the volume is a test-fixture volume
-(`tx_state.test_volume = 1`, written only by `create_test_volume`, which itself needs
-`WEBTERM_TEST_GATE`). Enabling on a real volume needs PR6 (migration, erasure journal, quarantine).
+unless `WEBTERM_TX_RECORDINGS=1`, `WEBTERM_TEST_GATE=1` (both checked before anything is opened)
+*and* the volume is a test-fixture volume: an existing DB (opened `mode=rw`, never created) under
+the system temp dir whose `tx_state.test_volume` marker binds that file's identity (written only
+by `create_test_volume`, which refuses a DB with `users` / `hosts` rows). This guards against
+accidents, not against an operator who can write the DB. Enabling on a real volume needs PR6
+(migration, erasure journal, quarantine).
 
 Layout (§12.11.0): `transcripts/<sid>.<k>.<gen>.wtx` (k = out | cast, gen = 32 lowercase hex) and
 the cache `transcripts/<sid>.<k>.<gen>.idx`, created through a directory fd, never renamed or
@@ -32,10 +35,12 @@ import hashlib
 import hmac
 import json
 import os
+import pathlib
 import re
 import secrets
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -59,18 +64,53 @@ def enabled(env=None):
 
 
 def test_gate(env=None):
+    """True only for exactly `WEBTERM_TEST_GATE=1` ("0", "false", " 1" … = off)."""
     env = os.environ if env is None else env
-    return bool(env.get(ENV_TEST_GATE, ""))
+    return env.get(ENV_TEST_GATE, "") == "1"
+
+
+def _volume_binding(db_path):
+    """(realpath, marker) of a test volume: the DB must already exist under the system temp dir
+    (where the test harness creates its data dirs), and the marker binds the file's identity
+    (dev, ino, path), so a copied or restored DB does not carry a valid marker. This is a guard
+    against accidents, not access control against an operator who can write the DB."""
+    real = os.path.realpath(str(db_path))
+    root = os.path.realpath(tempfile.gettempdir())
+    parent = os.path.dirname(real)
+    if parent == root or os.path.commonpath([real, root]) != root:
+        raise TxStoreError("disabled", "a test volume lives in a harness temp dir only")
+    try:
+        st = os.stat(real)
+    except OSError:
+        raise TxStoreError("disabled", "test volume DB missing") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise TxStoreError("disabled", "test volume DB is not a regular file")
+    return real, f"1:{st.st_dev}:{st.st_ino}:{real}"
+
+
+def _connect_rw(path):
+    # mode=rw: niciodată nu creează fişierul (un DB lipsă nu devine un volum gol).
+    return sqlite3.connect(pathlib.Path(path).as_uri() + "?mode=rw", uri=True, isolation_level=None,
+                           check_same_thread=False, timeout=5)
 
 
 def create_test_volume(db_path, env=None):
-    """The test-fixture helper: marks a volume `tx_state.test_volume = 1`. Nothing else sets it;
-    refused outside a test gate."""
+    """The test-fixture helper: marks a volume `tx_state.test_volume` with its identity binding.
+    Nothing else sets it. Refused outside a test gate, for a DB outside a harness temp dir, and for
+    a DB that has any `users` or `hosts` row (a real installation)."""
     if not test_gate(env):
-        raise TxStoreError("disabled", "test volumes exist only under WEBTERM_TEST_GATE")
-    con = sqlite3.connect(str(db_path), isolation_level=None, timeout=5)
+        raise TxStoreError("disabled", "test volumes exist only under WEBTERM_TEST_GATE=1")
+    real, marker = _volume_binding(db_path)
+    con = _connect_rw(real)
     try:
-        con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('test_volume', '1')")
+        for table in ("users", "hosts"):
+            try:
+                has = con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+            except sqlite3.OperationalError:
+                has = False                       # tabel absent: nu e o instalare reală
+            if has:
+                raise TxStoreError("disabled", f"{table} has rows: not a fresh test volume")
+        con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('test_volume', ?)", (marker,))
     finally:
         con.close()
 
@@ -104,6 +144,10 @@ LEDGER_KEEP_SECS = 90 * 86400
 IDX_MAX_FILE = txformat.IDX_FIXED + txformat.DEFAULT_MAX_INDEX_ENTRIES * txformat.IDX_ENTRY_LEN \
     + txformat.MAC_LEN
 SHUTDOWN_SECS = 5.0
+OWNER_RECOVERY_ROUTE = "owner-recovery"
+# Cel mai rău caz fizic per octet în clar: un DATA de 1 octet = antet + tag + 1.
+PHYS_PER_PLAIN = txformat.REC_HDR_LEN + txformat.TAG_LEN + 1
+REPRESENTATIONS = ("raw", "redacted")
 
 _NAME_RE = re.compile(r"^([0-9a-f]{32})\.(out|cast)\.([0-9a-f]{32})\.(wtx|idx)$")
 _TMP_IDX_RE = re.compile(r"^([0-9a-f]{32})\.(out|cast)\.([0-9a-f]{32})\.t[0-9a-f]{16}\.idx$")
@@ -203,7 +247,8 @@ def cap_streams(read_out, read_cast, out_end, cast_end, keep, fallback_ts, out_s
     """Exactly 3.7's `_cap_build` content (core.py), over random-access readers of the logical
     `.out`/`.cast` streams (`read_x(offset, n) -> bytes`): `.out` = GAP_MARKER + the last `keep`
     bytes; `.cast` = header line (≤ CAP_HEADER_MAX) + gap event + whole lines of the last `keep`
-    bytes, the gap timestamped with the first kept event."""
+    bytes, the gap timestamped with the first kept event. A reader of None = that kind is absent
+    (a one-kind recording is capped on its own stream)."""
     def copy(read, sink, start, end):
         pos = start
         while pos < end:
@@ -215,8 +260,11 @@ def cap_streams(read_out, read_cast, out_end, cast_end, keep, fallback_ts, out_s
             sink(buf)
             pos += len(buf)
 
-    out_sink(GAP_MARKER)
-    copy(read_out, out_sink, max(0, out_end - keep), out_end)
+    if read_out is not None:
+        out_sink(GAP_MARKER)
+        copy(read_out, out_sink, max(0, out_end - keep), out_end)
+    if read_cast is None:
+        return
     head = read_cast(0, min(CAP_HEADER_MAX, cast_end))
     nl = head.find(b"\n")
     if nl < 0:
@@ -266,36 +314,61 @@ class _File:
 
 
 class _PRead:
-    """File-like over an fd with its own position (pread): snapshots share nothing."""
+    """File-like over an fd with its own position (pread): snapshots share nothing. `limit` is the
+    physical end the parse may reach (the generation's committed `phys_len`): a record claiming a
+    length past it gets a short read (corrupt) without any byte past the limit being read.
+    `budget` (optional) is charged for every physical byte BEFORE the pread."""
 
-    def __init__(self, fd, pos):
+    def __init__(self, fd, pos, limit=None, budget=None, hook=None):
         self.fd = fd
         self.pos = pos
+        self.limit = limit
+        self.budget = budget
+        self.hook = hook
 
     def read(self, n):
+        if self.limit is not None:
+            n = max(0, min(n, self.limit - self.pos))
+        if n == 0:
+            return b""
+        if self.budget is not None:
+            self.budget.spend_phys(n)
+        if self.hook is not None:
+            self.hook()
         b = os.pread(self.fd, n, self.pos)
         self.pos += len(b)
         return b
 
 
 class Budget:
-    """Bytes a request may parse: `total` across every generation, `pre_first` before the first
-    returned byte (None = the default for the path: 1 MiB with an index, max+keep without)."""
+    """Bytes a request may parse: `total` plaintext across every generation, `pre_first` before the
+    first returned byte (None = the default for the path: 1 MiB with an index, max+keep without),
+    and `phys` physical bytes read (default: the worst case of `total`, 1-byte records), charged
+    before each read."""
 
-    def __init__(self, total, pre_first=None):
+    def __init__(self, total, pre_first=None, phys=None):
         self.total = total
         self.pre_first = pre_first
+        self.phys = total * PHYS_PER_PLAIN + txformat.PREFIX_LEN if phys is None else phys
         self.used = 0
+        self.phys_used = 0
 
     def spend(self, n):
         self.used += n
         if self.used > self.total:
             raise TxStoreError("limitExceeded", "request budget")
 
+    def spend_phys(self, n):
+        if self.phys_used + n > self.phys:
+            raise TxStoreError("limitExceeded", "physical read budget")
+        self.phys_used += n
+
 
 @dataclass(frozen=True)
 class Access:
-    """Built by the route's own authorization step; counters captured *before* the decision."""
+    """Issued only by `Store.access` from the route's own authorization step; counters captured
+    *before* the decision. `issuer` ties it to the Store (an Access built by hand is refused);
+    `owner_recovery` is honoured only with `route == OWNER_RECOVERY_ROUTE`."""
     sid: str
     principal: str
     route: str
@@ -303,6 +376,13 @@ class Access:
     access_epoch: int
     not_after: float = None
     owner_recovery: bool = False
+    issuer: object = field(default=None, compare=False, repr=False)
+
+
+def _same_grant(a, b):
+    """A re-authorization may refresh counters and the deadline, never the grant's subject."""
+    return (a.sid, a.principal, a.route, a.owner_recovery) == (b.sid, b.principal, b.route,
+                                                               b.owner_recovery)
 
 
 @dataclass
@@ -345,22 +425,38 @@ class Store:
                  max_bytes=None, keep_bytes=None, gen_limits=None, op_gen_cap=OP_GEN_CAP,
                  pending_cap=PENDING_CAP, total_cap=REC_BUFFER_TOTAL, clock=time.time):
         env = os.environ if env is None else env
+        # Starea minimă pentru close() înainte de orice deschidere (un refuz nu lasă resurse).
+        self._w = self._r = None
+        self.dir_fd = None
+        self._snapshots = set()
+        self._io_lock = threading.Lock()
+        self._io_busy = 0
+        self._closing = False
+        self._released = False
         if not enabled(env):
             raise TxStoreError("disabled", f"{ENV_FLAG} is not 1")
-        self._db_path = str(db_path or config.DB_PATH)
-        self._w = self._connect()
-        self._r = self._connect()
-        self._rlock = threading.Lock()
         # PR5: activ doar pe un volum de test, şi doar sub o poartă de test (§12.11 PR5/PR6).
-        row = self._r.execute("SELECT value FROM tx_state WHERE key='test_volume'").fetchone()
-        if row is None or row[0] != "1":
-            self.close()
-            raise TxStoreError("disabled", "encrypted recordings need PR6 on a real volume")
+        # Poarta se verifică înaintea oricărei deschideri; DB-ul se deschide mode=rw (nu-l creează).
         if not test_gate(env):
-            self.close()
             raise TxStoreError("disabled", "test volume outside a test gate")
-        self.dir_fd = os.open(str(transcripts_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-                              | os.O_CLOEXEC)
+        self._db_path, marker = _volume_binding(db_path or config.DB_PATH)
+        try:
+            self._r = self._connect()
+            row = self._r.execute("SELECT value FROM tx_state WHERE key='test_volume'").fetchone()
+            if row is None or not hmac.compare_digest(str(row[0]), marker):
+                raise TxStoreError("disabled", "encrypted recordings need PR6 on a real volume")
+            self._w = self._connect()
+            self.dir_fd = os.open(str(transcripts_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                  | os.O_CLOEXEC)
+        except BaseException:
+            self.close()
+            raise
+        self._rlock = threading.Lock()
+        self._fd_lock = threading.Lock()
+        self._issuer = object()
+        self._slots = 0
+        self._starting = set()
+        self._shutting = False
         self.kwk = kwk
         self.inst = installation_id
         self.max_bytes = config.TRANSCRIPT_MAX_BYTES if max_bytes is None else max_bytes
@@ -382,7 +478,6 @@ class Store:
         self._rk_cache = collections.OrderedDict()
         self._pins = collections.Counter()
         self._deferred = {}               # gen hex → (name, dev, ino)
-        self._snapshots = set()
         self._gen_fds = 0
         self._sem = None
         self._caches = []
@@ -397,19 +492,41 @@ class Store:
     # ── plumbing ──
 
     def _connect(self):
-        con = sqlite3.connect(self._db_path, isolation_level=None, check_same_thread=False, timeout=5)
+        con = _connect_rw(self._db_path)
         con.execute("PRAGMA busy_timeout=5000")
         return con
 
     def close(self):
-        for s in list(getattr(self, "_snapshots", ())):
+        """Logical close: every snapshot closed (their fds go when their last reader returns), no
+        new I/O admitted; the connections and the directory fd are released when the last
+        in-flight thread call has returned (never under a worker that still uses them)."""
+        for s in list(self._snapshots):
             s.close()
-        for con in (getattr(self, "_w", None), getattr(self, "_r", None)):
+        with self._io_lock:
+            self._closing = True
+            now = self._io_busy == 0
+        if now:
+            self._release()
+
+    def _release(self):
+        with self._io_lock:
+            if self._released:
+                return
+            self._released = True
+        for con in (self._w, self._r):
             if con is not None:
-                con.close()
-        if getattr(self, "dir_fd", None) is not None:
+                with contextlib.suppress(Exception):
+                    con.close()
+        if self.dir_fd is not None:
             os.close(self.dir_fd)
             self.dir_fd = None
+
+    def _io_done(self):
+        with self._io_lock:
+            self._io_busy -= 1
+            last = self._closing and self._io_busy == 0
+        if last:
+            self._release()
 
     def _fault(self, point):
         if self.fault is not None:
@@ -428,14 +545,32 @@ class Store:
     async def io(self, fn, *args, **kw):
         """Blocking I/O off the loop. A cancel does not abandon the thread: we wait until the
         call has really returned before propagating it, so fds and leases are never released
-        while a thread is still inside write/fsync (§12.11.1 Supervision)."""
+        while a thread is still inside write/fsync (§12.11.1 Supervision). A second (third…)
+        cancel while waiting does not cut that wait short."""
         loop = asyncio.get_running_loop()
-        fut = loop.run_in_executor(None, lambda: fn(*args, **kw))
+
+        def run():
+            try:
+                return fn(*args, **kw)
+            finally:
+                self._io_done()
+        with self._io_lock:
+            if self._closing:
+                raise TxStoreError("closed", "store closed")
+            self._io_busy += 1
+        try:
+            fut = loop.run_in_executor(None, run)
+        except BaseException:
+            self._io_done()
+            raise
         try:
             return await asyncio.shield(fut)
         except asyncio.CancelledError:
-            with contextlib.suppress(BaseException):
-                await asyncio.wait([fut])
+            while not fut.done():
+                try:
+                    await asyncio.wait([fut])
+                except asyncio.CancelledError:
+                    continue
             raise
 
     def _run_txn(self, fn):
@@ -582,6 +717,10 @@ class Store:
             "SELECT state, dev, ino FROM tx_files WHERE gen_id=?", (hexid,)).fetchone())
         if row is None or row[0] != "retired":
             return "not-retired"
+        if self._pins[hexid]:
+            # Un pin luat cât am citit registrul: amânat, niciodată şters sub un cititor.
+            self._deferred[hexid] = (sid, kind)
+            return "deferred"
         res = await self.io(self._unlink_if_ours_sync, gen_name(sid, kind, hexid), row[1], row[2])
         await self.io(self._drop_idx_sync, sid, kind, hexid)
         if res == "mismatch":
@@ -635,6 +774,16 @@ class Store:
                 await self.txn(lambda c: c.execute(
                     "UPDATE tx_files SET state='created', dev=?, ino=? WHERE gen_id=? "
                     "AND state='reserved'", (st.st_dev, st.st_ino, hexid)))
+            except Exception:
+                # Eşec în proces (nu moartea lui): fişierul e al nostru (fd-ul O_EXCL, inode-ul lui),
+                # deci se şterge acum; rândul `reserved` rămâne pentru recuperare dacă DB-ul nu merge.
+                with contextlib.suppress(Exception):
+                    st2 = os.fstat(fd)
+                    await self.io(self._unlink_if_ours_sync, name, st2.st_dev, st2.st_ino)
+                    await self.txn(lambda c: c.execute(
+                        "DELETE FROM tx_files WHERE gen_id=? AND state='reserved'", (hexid,)))
+                os.close(fd)
+                raise
             except BaseException:
                 os.close(fd)
                 raise
@@ -787,16 +936,25 @@ class Store:
     # ── recorders and supervision ──
 
     async def start_recorder(self, sid, *, track_agent=True):
+        """One writer per sid: the start is reserved synchronously (before any await), so two
+        concurrent starts cannot both pass the check and the second never runs recovery over the
+        first's fresh generations."""
+        if self._shutting:
+            raise TxStoreError("disabled", "store shutting down")
         old = self.recorders.get(sid)
-        if old is not None and old.state == "running":
+        if sid in self._starting or (old is not None and old.state == "running"):
             raise TxStoreError("busy", "recorder already running")
-        rec = Recorder(self, sid, track_agent=track_agent)
-        await rec._start()
-        self.recorders[sid] = rec
-        t = asyncio.get_running_loop().create_task(self._supervise(rec))
-        self._supervised.add(t)
-        t.add_done_callback(self._supervised.discard)
-        return rec
+        self._starting.add(sid)
+        try:
+            rec = Recorder(self, sid, track_agent=track_agent)
+            await rec._start()
+            self.recorders[sid] = rec
+            t = asyncio.get_running_loop().create_task(self._supervise(rec))
+            self._supervised.add(t)
+            t.add_done_callback(self._supervised.discard)
+            return rec
+        finally:
+            self._starting.discard(sid)
 
     async def _supervise(self, rec):
         await asyncio.wait([rec._task])
@@ -812,7 +970,7 @@ class Store:
         self.alarm("transcript.recorderLost", rec.sid)
         if self.recorders.get(rec.sid) is rec:
             del self.recorders[rec.sid]
-        if not self.readopt_enabled:
+        if not self.readopt_enabled or self._shutting:
             return
         try:
             new = await self.start_recorder(rec.sid, track_agent=rec.track_agent)
@@ -823,11 +981,30 @@ class Store:
             self.on_readopt(rec.sid, new)
 
     async def shutdown(self):
+        """Close every recorder (bounded), then stop the remaining workers and WAIT for them (their
+        blocking calls included) before their fds are closed. A worker still stuck after the
+        bound is abandoned with its fds left open (never reused under it) and an alarm."""
+        self._shutting = True
         for rec in list(self.recorders.values()):
-            with contextlib.suppress(Exception):
+            if rec.state != "running":
+                continue
+            try:
                 await asyncio.wait_for(rec.close(), SHUTDOWN_SECS)
+            except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
+                self.alarm("transcript.shutdown", f"{rec.sid}: close failed: {e!r}")
         for t in list(self._supervised):
             t.cancel()
+        tasks = {rec: rec._task for rec in self.recorders.values()
+                 if rec._task is not None and not rec._task.done()}
+        for t in tasks.values():
+            t.cancel()
+        if tasks:
+            await asyncio.wait(list(tasks.values()), timeout=SHUTDOWN_SECS)
+        for rec, t in tasks.items():
+            if t.done():
+                rec._close_fds()
+            else:
+                self.alarm("transcript.shutdown", f"{rec.sid}: worker still blocked; fds abandoned")
 
     # ── revocation counters and fences (§12.11.2) ──
 
@@ -870,12 +1047,19 @@ class Store:
         self.drop_key(sid)
 
     def access(self, sid, principal, route, *, not_after=None, owner_recovery=False):
-        """Capture the counters BEFORE the route's authorization decision."""
+        """Capture the counters BEFORE the route's authorization decision. Owner recovery is a
+        property of the recovery route itself (§12.11.4), never a flag another route can set."""
+        if owner_recovery and route != OWNER_RECOVERY_ROUTE:
+            raise TxStoreError("bad-access", "owner recovery only from the recovery route")
         return Access(sid, principal, route, self.sid_epoch[sid], self.access_epoch, not_after,
-                      owner_recovery)
+                      owner_recovery, self._issuer)
 
     def check(self, access):
         """The synchronous check (linearisation point at open; check points (a)–(c))."""
+        if not isinstance(access, Access) or access.issuer is not self._issuer:
+            raise TxStoreError("bad-access", "access not issued by this store")
+        if access.owner_recovery and access.route != OWNER_RECOVERY_ROUTE:
+            raise TxStoreError("bad-access", "owner recovery only from the recovery route")
         sid = access.sid
         if sid in self.tombstoned or self.sid_epoch[sid] != access.sid_epoch or sid in self._fences:
             raise Revoked("revoked", sid)
@@ -886,9 +1070,33 @@ class Store:
 
     # ── readers ──
 
-    def _admit(self, nfds):
-        if len(self._snapshots) >= MAX_SNAPSHOTS or self._gen_fds + nfds > MAX_GEN_FDS:
-            raise TxStoreError("busy", "snapshot budget")
+    def _reserve(self, nfds, *, force=False):
+        """Atomic admission: one snapshot slot and `nfds` generation fds are reserved BEFORE any fd
+        is opened (released when the snapshot's fds are really closed). `force` (compaction, an
+        internal job) counts without refusing."""
+        with self._fd_lock:
+            if not force and (self._slots >= MAX_SNAPSHOTS or self._gen_fds + nfds > MAX_GEN_FDS):
+                raise TxStoreError("busy", "snapshot budget")
+            self._slots += 1
+            self._gen_fds += nfds
+
+    def _unreserve(self, nfds):
+        with self._fd_lock:
+            self._slots -= 1
+            self._gen_fds -= nfds
+
+    async def _make_snapshot(self, cls, *args, nfds, force=False):
+        """Reserve, construct on the loop, open the fds on a thread; any failure or cancel closes
+        it (io() returns only after the thread did, so nothing built is ever abandoned)."""
+        self._reserve(nfds, force=force)
+        snap = cls(self, *args, reserved=nfds)
+        try:
+            await self.io(snap._open_fds)
+        except BaseException:
+            snap.close()
+            raise
+        self._snapshots.add(snap)
+        return snap
 
     @contextlib.asynccontextmanager
     async def worker_slot(self):
@@ -907,9 +1115,12 @@ class Store:
         """Snapshot of the committed (sid, kind); see the module docstring. A failed check at the
         linearisation point closes every fd and retries once from `reauthorize()` (the route's
         own authorization, which returns a fresh Access); a second failure is refused."""
+        first = access
         for attempt in (0, 1):
             if access.sid != sid:
                 raise TxStoreError("bad-access", "access built for another sid")
+            if not _same_grant(first, access):
+                raise Revoked("bad-access", "re-authorization changed the grant")
             snap = await self._open_once(sid, kind, access)
             try:
                 self.check(access)               # linearisation point: după ce fd-urile sunt deschise
@@ -920,15 +1131,19 @@ class Store:
                     raise Revoked("revoked", "access changed while opening") from None
                 await self.wait_fences(sid)
                 access = await reauthorize()
+            except BaseException:
+                snap.close()
+                raise
         raise Revoked("revoked")                  # pragma: no cover
 
     async def _open_once(self, sid, kind, access):
         if kind not in KINDS:
             raise TxStoreError("notFound", "kind")
         _sid_bytes(sid)
+        if not isinstance(access, Access) or access.issuer is not self._issuer:
+            raise TxStoreError("bad-access", "access not issued by this store")
         if sid in self.tombstoned:
             raise TxStoreError("notFound", "erased")
-        self._admit(0)
 
         def load(c):
             return (c.execute("SELECT blob, version, status, list_epoch FROM tx_descriptors "
@@ -943,16 +1158,21 @@ class Store:
         status = drow[2]
         if status in ("damaged", "absent"):
             raise TxStoreError("damaged", f"{sid}.{kind}: {status}")
-        if status in ("quarantined", "recovery") and not access.owner_recovery:
+        # `quarantined` nu-şi codifică motivul (continuitate / epoch keyring / restore): refuzat
+        # pentru oricine. Owner recovery deschide DOAR `recovery` (carantina de continuitate pe
+        # care ruta de recuperare a ridicat-o explicit, §12.11.4).
+        if status == "quarantined" or (status == "recovery" and not access.owner_recovery):
             raise TxStoreError("quarantined", f"{sid}.{kind}")
+        if status not in ("ok", "recovery"):
+            raise TxStoreError("damaged", f"{sid}.{kind}: unknown status")
         if krow is None:
             self.alarm("transcript.keyError", f"{sid}: descriptor without RK")
             raise TxStoreError("keyError", "no RK")
         env = bytes(krow[0])
         d = self.decode(drow, sid, kind, env)
         rk = self.rk_for(sid, env)
-        self._admit(len(d.generations))
-        return await self.io(Snapshot._build, self, sid, kind, d, rk, drow[3], access)
+        return await self._make_snapshot(Snapshot, sid, kind, d, rk, drow[3], access,
+                                         nfds=len(d.generations))
 
     async def _open_plain(self, sid, kind, access, krow, mrow, fmt):
         """3.7 plaintext only while inventoried `pending` and identical; otherwise a downgrade."""
@@ -967,31 +1187,26 @@ class Store:
         if state != "pending" or krow is not None or (fmt is not None and fmt[0] == "wtx1"):
             self.alarm("transcript.downgrade", f"{sid}.{kind}: plaintext for a converted recording")
             raise TxStoreError("downgrade", "recording is not plaintext any more")
-        if dirn not in ("transcripts", "arhiva") or "/" in name or name in ("", ".", ".."):
+        # Numele inventarului trebuie să fie exact al acestui (sid, kind): un rând care arată spre
+        # alt fişier (alt sid, alt kind) nu devine o cale de citire.
+        if dirn not in ("transcripts", "arhiva") or name != legacy:
+            self.alarm("transcript.downgrade", f"{sid}.{kind}: inventory row names another file")
             raise TxStoreError("downgrade", "bad inventory row")
-        path_fd = self.dir_fd if dirn == "transcripts" else None
-        try:
-            if path_fd is None:
-                sub = os.open("arhiva", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                              dir_fd=self.dir_fd)
-                try:
-                    fd = os.open(name, _RDONLY, dir_fd=sub)
-                finally:
-                    os.close(sub)
-            else:
-                fd = os.open(name, _RDONLY, dir_fd=path_fd)
-        except OSError:
-            raise TxStoreError("notFound", "plaintext missing") from None
-        st = os.fstat(fd)
-        if (not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-                != (dev, ino, size, mtime_ns)):
-            os.close(fd)
-            self.alarm("transcript.downgrade", f"{sid}.{kind}: plaintext changed since inventory")
-            raise TxStoreError("downgrade", "plaintext differs from its inventory row")
-        snap = PlainSnapshot(self, sid, kind, fd, size, access)
-        self._snapshots.add(snap)
-        self._gen_fds += 1
-        return snap
+        return await self._make_snapshot(PlainSnapshot, sid, kind, dirn, name,
+                                         (dev, ino, size, mtime_ns), access, nfds=1)
+
+    def _plain_still_pending(self, sid, kind, ident):
+        """Re-read, after the fd is fixed, that the recording is still plaintext-pending for
+        exactly this inode (a conversion committed meanwhile wins: downgrade refused)."""
+        def load(c):
+            return (c.execute("SELECT 1 FROM tx_descriptors WHERE sid=? AND kind=?", (sid, kind)).fetchone(),
+                    c.execute("SELECT 1 FROM session_keys WHERE sid=?", (sid,)).fetchone(),
+                    c.execute("SELECT dev, ino, size, mtime_ns, state FROM tx_migration "
+                              "WHERE sid=? AND kind=?", (sid, kind)).fetchone(),
+                    c.execute("SELECT value FROM tx_state WHERE key='recordings_format'").fetchone())
+        drow, krow, mrow, fmt = self._run_read(load)
+        return (drow is None and krow is None and (fmt is None or fmt[0] != "wtx1")
+                and mrow is not None and mrow[4] == "pending" and tuple(mrow[:4]) == tuple(ident))
 
     async def tail(self, sid, kind, limit, *, access, end=None, reauthorize=None):
         """(bytes, end, list_epoch) of the last `limit` committed bytes, or up to `end`."""
@@ -1087,6 +1302,7 @@ class Store:
             cursor = None                         # descriptorul s-a schimbat: o luăm de la capăt
         start = (cursor or {}).get("at", (0, 0))
         spent = 0
+        rep["limitExceeded"] = []
         for ki, k in enumerate(KIND_NAMES):
             d = descs.get(k)
             if d is None:
@@ -1094,17 +1310,23 @@ class Store:
             for gi, g in enumerate(d.generations):
                 if (ki, gi) < tuple(start):
                     continue
-                if spent and spent + g.plain_len > budget:
+                # Bugetul e tare şi pe octeţi fizici: o generaţie mai mare decât o trecere întreagă
+                # NU se verifică pe calea asta (raportată limitExceeded, raportul nu e complet);
+                # una care nu mai încape în trecerea curentă → cursor.
+                if g.phys_len > budget:
+                    rep["limitExceeded"].append(f"{k}.{g.gen_id.hex()}")
+                    continue
+                if spent + g.phys_len > budget:
                     rep["cursor"] = {"versions": versions, "at": (ki, gi)}
-                    return rep
-                spent += g.plain_len
+                    return _verify_done(rep)
+                spent += g.phys_len
                 prob, info = self._verify_gen(sid, k, g, rk)
                 if prob:
                     rep["ok"] = False
                     rep["problems"].append(f"{k}.{g.gen_id.hex()}: {prob}")
                 if info:
                     rep["info"].append(f"{k}.{g.gen_id.hex()}: {info}")
-        return rep
+        return _verify_done(rep)
 
     def _verify_gen(self, sid, kind, g, rk):
         try:
@@ -1117,7 +1339,8 @@ class Store:
                 return "not a regular single-link file", None
             if st.st_size < g.phys_len:
                 return "shorter than phys_len", None
-            fp = _PRead(fd, 0)
+            # Parsarea nu citeşte niciun octet peste prefixul comis (phys_len).
+            fp = _PRead(fd, 0, limit=g.phys_len)
             try:
                 txformat.verify_header(fp.read(txformat.PREFIX_LEN), txformat.generation_keys(
                     rk, KINDS[kind], g.gen_id), kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id)
@@ -1133,7 +1356,7 @@ class Store:
                     info = cur.seal()
                     if info.phys_len != g.phys_len:
                         return "phys-len-mismatch", None
-                    if fp.read(1):
+                    if os.pread(fd, 1, g.phys_len):
                         return "trailing-bytes", None
                     return None, None
                 if st.st_size > g.phys_len:
@@ -1147,15 +1370,87 @@ class Store:
             os.close(fd)
 
 
+def _verify_done(rep):
+    if rep["limitExceeded"]:
+        # Neverificat ≠ verificat: raportul nu poate spune „ok" (fail closed).
+        rep["ok"] = False
+        rep["problems"].append("limitExceeded: " + ", ".join(rep["limitExceeded"]))
+    return rep
+
+
 # ── Snapshot ─────────────────────────────────────────────────────────────────
 
 
-class Snapshot:
+class _FdOwner:
+    """fd lifetime shared by both snapshot kinds: a worker uses the fds only inside `_using()`
+    (a refcount under a lock); `close()` is logical (cancel + no new user) and the fds are
+    physically closed by whoever leaves last, so an fd number is never released while a thread
+    may still pread it (and so never reused under it)."""
+
+    def _init_owner(self, store, reserved):
+        self.store = store
+        self._reserved = reserved
+        self._lk = threading.Lock()
+        self._users = 0
+        self._released = False
+        self.closed = False
+        self.cancel = threading.Event()
+        self.last_used = time.monotonic()
+
+    def _enter(self):
+        with self._lk:
+            if self.closed:
+                raise TxStoreError("closed", "snapshot closed")
+            self._users += 1
+
+    def _leave(self):
+        with self._lk:
+            self._users -= 1
+            last = self.closed and self._users == 0 and not self._released
+            if last:
+                self._released = True
+        if last:
+            self._release_fds()
+
+    @contextlib.contextmanager
+    def _using(self):
+        self._enter()
+        try:
+            yield
+        finally:
+            self._leave()
+
+    def close(self):
+        with self._lk:
+            if self.closed:
+                return
+            self.closed = True
+            self.cancel.set()
+            now = self._users == 0 and not self._released
+            if now:
+                self._released = True
+        self.store._snapshots.discard(self)
+        if now:
+            self._release_fds()
+
+    def _release_fds(self):
+        try:
+            for fd in self._fds():
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        finally:
+            self.store._unreserve(self._reserved)
+
+    def _hook(self):
+        self.store._fault("pread")
+
+
+class Snapshot(_FdOwner):
     """Fds, descriptor and counters of one (sid, kind) fixed at open. Unlinked inodes stay
     readable through the fds, so a concurrent cap / merge / purge cannot change what it reads."""
 
-    def __init__(self, store, sid, kind, desc, rk, list_epoch, access):
-        self.store = store
+    def __init__(self, store, sid, kind, desc, rk, list_epoch, access, *, reserved=0):
+        self._init_owner(store, reserved)
         self.sid = sid
         self.kind = kind
         self.desc = desc
@@ -1164,52 +1459,36 @@ class Snapshot:
         self.access = access
         self.gens = []                            # (Generation, fd, logical start)
         self.length = 0
-        self.closed = False
-        self.last_used = time.monotonic()
-        self.cancel = threading.Event()
 
     @property
     def version(self):
         return self.desc.version
 
-    @classmethod
-    def _build(cls, store, sid, kind, desc, rk, list_epoch, access):
-        snap = cls(store, sid, kind, desc, rk, list_epoch, access)
-        try:
-            for g in desc.generations:
-                try:
-                    fd = os.open(gen_name(sid, kind, g.gen_id.hex()), _RDONLY, dir_fd=store.dir_fd)
-                except OSError:
-                    raise TxStoreError("damaged", f"generation {g.gen_id.hex()} missing") from None
-                snap.gens.append((g, fd, snap.length))
-                store._gen_fds += 1
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size < g.phys_len:
-                    raise TxStoreError("damaged", f"generation {g.gen_id.hex()} not usable")
-                keys_ = txformat.generation_keys(rk, KINDS[kind], g.gen_id)
-                try:
-                    h = txformat.verify_header(os.pread(fd, txformat.PREFIX_LEN, 0), keys_,
-                                               kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id)
-                except txformat.CorruptError as e:
-                    raise TxStoreError("corrupt", e.reason) from None
-                if not hmac.compare_digest(h.hdr_mac, g.hdr_mac):
-                    raise TxStoreError("corrupt", "hdr-mac-mismatch")
-                snap.length += g.plain_len
-        except BaseException:
-            snap.close()
-            raise
-        store._snapshots.add(snap)
-        return snap
+    def _fds(self):
+        return [fd for _g, fd, _s in self.gens]
 
-    def close(self):
-        if self.closed:
-            return
-        self.closed = True
-        self.cancel.set()
-        for _g, fd, _s in self.gens:
-            os.close(fd)
-            self.store._gen_fds -= 1
-        self.store._snapshots.discard(self)
+    def _open_fds(self):
+        """On a thread, before the snapshot is shared: open and check every generation."""
+        store, sid, kind, rk = self.store, self.sid, self.kind, self.rk
+        store._fault("open-fds")
+        for g in self.desc.generations:
+            try:
+                fd = os.open(gen_name(sid, kind, g.gen_id.hex()), _RDONLY, dir_fd=store.dir_fd)
+            except OSError:
+                raise TxStoreError("damaged", f"generation {g.gen_id.hex()} missing") from None
+            self.gens.append((g, fd, self.length))
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size < g.phys_len:
+                raise TxStoreError("damaged", f"generation {g.gen_id.hex()} not usable")
+            keys_ = txformat.generation_keys(rk, KINDS[kind], g.gen_id)
+            try:
+                h = txformat.verify_header(os.pread(fd, txformat.PREFIX_LEN, 0), keys_,
+                                           kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id)
+            except txformat.CorruptError as e:
+                raise TxStoreError("corrupt", e.reason) from None
+            if not hmac.compare_digest(h.hdr_mac, g.hdr_mac):
+                raise TxStoreError("corrupt", "hdr-mac-mismatch")
+            self.length += g.plain_len
 
     def etag(self):
         h = hashlib.sha256(_sid_bytes(self.sid) + self.kind.encode() + self.version.to_bytes(8, "little")
@@ -1259,7 +1538,9 @@ class Snapshot:
         else:
             pre = self.store.max_bytes + self.store.keep_bytes if pre is None else pre
             seq, log, foff = 0, 0, txformat.PREFIX_LEN
-        cur = txformat.RecordCursor(_PRead(fd, foff), self.rk, kind=KINDS[self.kind],
+        # Plafon fizic la I/O: niciun pread peste phys_len, fiecare octet fizic plătit din buget.
+        fp = _PRead(fd, foff, limit=g.phys_len, budget=budget, hook=self._hook)
+        cur = txformat.RecordCursor(fp, self.rk, kind=KINDS[self.kind],
                                     gen_id=g.gen_id, hdr_mac=g.hdr_mac, data_count=g.data_count,
                                     seq=seq, logical_offset=log, file_offset=foff)
         return cur, pre, start is None
@@ -1334,8 +1615,14 @@ class Snapshot:
                 self.store.alarm("transcript.corrupt", f"{self.sid}.{self.kind}.{g.gen_id.hex()}: {e}")
                 raise TxStoreError("corrupt", e.reason) from None
 
-    def read_sync(self, start, end, budget):
-        return b"".join(self._chunks(start, end, budget, STREAM_CHUNK))
+    def _read_sync(self, start, end, budget):
+        """Internal (compaction, `read`): no access check here; the fds only inside the guard."""
+        with self._using():
+            return b"".join(self._chunks(start, end, budget, STREAM_CHUNK))
+
+    def _next_guarded(self, gen, done):
+        with self._using():
+            return next(gen, done)
 
     async def _checkpoint(self, reauthorize):
         try:
@@ -1346,6 +1633,8 @@ class Snapshot:
             for _ in (0, 1):
                 await self.store.wait_fences(self.sid)
                 new = await reauthorize()        # NotAuthorized etc. → propagă, fluxul se opreşte
+                if not _same_grant(self.access, new):
+                    raise Revoked("bad-access", "re-authorization changed the grant")
                 try:
                     self.store.check(new)
                     self.access = new
@@ -1362,7 +1651,7 @@ class Snapshot:
                                   + self.store.keep_bytes)
         await self._checkpoint(reauthorize)
         async with self.store.worker_slot():
-            data = await self.store.io(self.read_sync, start, end, budget)
+            data = await self.store.io(self._read_sync, start, end, budget)
         self.last_used = time.monotonic()
         await self._checkpoint(reauthorize)       # (c) înainte de predarea către transport
         return data
@@ -1380,7 +1669,7 @@ class Snapshot:
             while True:
                 await self._checkpoint(reauthorize)
                 async with self.store.worker_slot():
-                    piece = await self.store.io(next, gen, done)
+                    piece = await self.store.io(self._next_guarded, gen, done)
                 if piece is done:
                     return
                 self.last_used = time.monotonic()
@@ -1390,39 +1679,72 @@ class Snapshot:
             gen.close()
 
 
-class PlainSnapshot:
-    """3.7 plaintext (inventoried `pending`, identity-checked), same API, one fd."""
+class PlainSnapshot(_FdOwner):
+    """3.7 plaintext (inventoried `pending`, identity-checked), same API, one fd. Plaintext has no
+    authentication, so the fd's identity (regular, one link, dev, ino, size, mtime) is checked
+    against the inventory row before EVERY read, inside the guard."""
 
-    def __init__(self, store, sid, kind, fd, size, access):
-        self.store = store
+    def __init__(self, store, sid, kind, dirn, name, ident, access, *, reserved=0):
+        self._init_owner(store, reserved)
         self.sid = sid
         self.kind = kind
-        self.fd = fd
-        self.length = size
+        self.dirn = dirn
+        self.name = name
+        self.ident = tuple(ident)
+        self.fd = None
+        self.length = ident[2]
         self.access = access
         self.list_epoch = 0
-        self.closed = False
-        self.last_used = time.monotonic()
-        self.cancel = threading.Event()
 
-    def close(self):
-        if not self.closed:
-            self.closed = True
-            os.close(self.fd)
-            self.store._gen_fds -= 1
-            self.store._snapshots.discard(self)
+    def _fds(self):
+        return [] if self.fd is None else [self.fd]
+
+    def _open_fds(self):
+        store = self.store
+        store._fault("open-fds")
+        try:
+            if self.dirn == "arhiva":
+                sub = os.open("arhiva", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=store.dir_fd)
+                try:
+                    self.fd = os.open(self.name, _RDONLY, dir_fd=sub)
+                finally:
+                    os.close(sub)
+            else:
+                self.fd = os.open(self.name, _RDONLY, dir_fd=store.dir_fd)
+        except OSError:
+            raise TxStoreError("notFound", "plaintext missing") from None
+        self._check_identity()
+        # Starea conversiei revalidată DUPĂ fixarea fd-ului: o conversie comisă între timp câştigă.
+        if not store._plain_still_pending(self.sid, self.kind, self.ident):
+            store.alarm("transcript.downgrade", f"{self.sid}.{self.kind}: converted while opening")
+            raise TxStoreError("downgrade", "recording is not plaintext any more")
+
+    def _check_identity(self):
+        st = os.fstat(self.fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != self.ident):
+            self.store.alarm("transcript.downgrade", f"{self.sid}.{self.kind}: plaintext changed since inventory")
+            raise TxStoreError("downgrade", "plaintext differs from its inventory row")
 
     def _chunks(self, start, end, budget, chunk):
         pos, end = max(0, start), min(end, self.length)
         while pos < end:
-            b = os.pread(self.fd, min(chunk, end - pos), pos)
+            if self.cancel.is_set():
+                raise TxStoreError("aborted")
+            n = min(chunk, end - pos)
+            budget.spend_phys(n)
+            self._hook()
+            self._check_identity()
+            b = os.pread(self.fd, n, pos)
             if not b:
                 return
             budget.spend(len(b))
             yield b
             pos += len(b)
 
-    read_sync = Snapshot.read_sync
+    _read_sync = Snapshot._read_sync
+    _next_guarded = Snapshot._next_guarded
     _checkpoint = Snapshot._checkpoint
     read = Snapshot.read
     iter = Snapshot.iter
@@ -1467,6 +1789,9 @@ async def iter_lines(chunks, max_line=CAP_HEADER_MAX):
             i = buf.find(b"\n")
             if i < 0:
                 break
+            # Lungimea se verifică ÎNAINTE de yield: o linie prea lungă dar completă nu trece.
+            if i + 1 > max_line:
+                raise TxStoreError("limitExceeded", "line longer than the redaction buffer")
             yield bytes(buf[:i + 1])
             del buf[:i + 1]
         if len(buf) > max_line:
@@ -1477,7 +1802,9 @@ async def iter_lines(chunks, max_line=CAP_HEADER_MAX):
 
 class ResponseCache:
     """Small LRU of computed responses keyed by (sid, kind, version, list digest, policy version,
-    revocation_epoch[sid], access_epoch); dropped on any bump, checked before serve and put."""
+    representation, route, revocation_epoch[sid], access_epoch); dropped on any bump, checked
+    before serve and put, and only for an Access of the same sid and route as the key (raw and
+    redacted responses never share an entry)."""
 
     def __init__(self, store, size=1):
         self.store = store
@@ -1485,15 +1812,23 @@ class ResponseCache:
         self._d = collections.OrderedDict()
         store._caches.append(self)
 
-    def key(self, snap, policy_version):
+    def key(self, snap, policy_version, *, representation):
+        if representation not in REPRESENTATIONS:
+            raise TxStoreError("bad-argument", "representation")
         return (snap.sid, snap.kind, snap.version, _list_digest(snap.desc), policy_version,
-                self.store.sid_epoch[snap.sid], self.store.access_epoch)
+                representation, snap.access.route, self.store.sid_epoch[snap.sid],
+                self.store.access_epoch)
 
     def _current(self, key):
-        return key[5] == self.store.sid_epoch[key[0]] and key[6] == self.store.access_epoch
+        return key[7] == self.store.sid_epoch[key[0]] and key[8] == self.store.access_epoch
+
+    def _bound(self, key, access):
+        self.store.check(access)
+        if access.sid != key[0] or access.route != key[6]:
+            raise TxStoreError("bad-access", "cache key of another sid or route")
 
     def get(self, key, access):
-        self.store.check(access)                  # (a) înainte de a servi din cache
+        self._bound(key, access)                  # (a) înainte de a servi din cache
         v = self._d.get(key)
         if v is None or not self._current(key):
             self._d.pop(key, None)
@@ -1502,7 +1837,7 @@ class ResponseCache:
         return v
 
     def put(self, key, value, access):
-        self.store.check(access)                  # (a) înainte de a pune în cache
+        self._bound(key, access)                  # (a) înainte de a pune în cache
         if not self._current(key):
             return False
         self._d[key] = value
@@ -1534,7 +1869,18 @@ class _Plan:
 
 
 class Recorder:
-    """One per recorded sid: a worker task with a FIFO job queue (§12.11.1)."""
+    """One per recorded sid: a worker task with a FIFO job queue (§12.11.1).
+
+    Ingress contract (the hub, PR5b): `feed_out` / `feed_cast` return whether the bytes were
+    accepted; refused bytes are never recorded later. `ingress()` says why: "open"; "overflow"
+    (call `resume()`: C is where the agent replays from, and what the ring no longer has becomes
+    ONE `gap(size)` at C); "closing" (`close()` was called: nothing fed after it is recorded,
+    counted in `rejected`); or the recorder state. An epoch change is a cut at the call: bytes fed
+    BEFORE `change_epoch(e)` belong to the old epoch and are published under its position; bytes
+    fed AFTER it count from offset 0 of `e` and are published only after the switch committed. A
+    failed switch re-adopts the sid from the DB (the committed position decides where the hub
+    re-attaches). `gap()` writes synthetic marker bytes and never advances the agent offset (the
+    skipped source bytes are upstream's to account for)."""
 
     def __init__(self, store, sid, *, track_agent=True):
         self.store = store
@@ -1557,9 +1903,17 @@ class Recorder:
         self.inflight = 0
         self.overflow = False
         self.dropped = 0
+        self.rejected = 0
         self.degraded = False
-        self.gap_pending = None
+        self.closing = False
+        self.gap_pending = []                     # (pos, size) ale markerelor încă în buffer
+        self._gaps_unpub = []                     # scrise în writer, încă nepublicate
         self.gaps = []
+        # Poziţia agentului căreia îi corespund octeţii din writere (ultima captură scrisă); se
+        # publică DOAR împreună cu ei (H1: prefixele şi offsetul se mişcă împreună).
+        self._written_agent = (None, 0)
+        # Tăietura de epoch în aşteptare: {"old": (epoch, offset), "bufs": {kind: bytearray}, "new": e}
+        self._switch = None
         self.cap_not_before = 0.0
         self.capping = False
         self._queue = asyncio.Queue()
@@ -1574,8 +1928,21 @@ class Recorder:
             self.env, self.rk = await st.ensure_rk(self.sid)
             await self._reload()
             st.tokens[self.sid] = self.token
-            for k in KIND_NAMES:
-                self.cur[k] = await self._open_gen(k)
+            try:
+                for k in KIND_NAMES:
+                    self.cur[k] = await self._open_gen(k)
+            except Exception:
+                # Pornire parţială (ex. ENOSPC la a doua generaţie): niciun fd rămas deschis,
+                # nicio generaţie creată neretrasă, tokenul nu rămâne al unui writer mort.
+                for k in KIND_NAMES:
+                    g, self.cur[k] = self.cur[k], None
+                    if g is not None:
+                        self._drop_gen_fd(g)
+                        with contextlib.suppress(Exception):
+                            await self._retire_unpublished(g)
+                if st.tokens.get(self.sid) == self.token:
+                    del st.tokens[self.sid]
+                raise
         self.state = "running"
         self._task = asyncio.get_running_loop().create_task(self._worker())
 
@@ -1604,6 +1971,7 @@ class Recorder:
                 raise TxStoreError("notFound", "no session row for the agent position")
             self.agent_committed = (ag[0], ag[1] or 0)
         self.agent_epoch, self.agent_offset = self.agent_committed
+        self._written_agent = self.agent_committed
         self.out_pos = self.committed_len("out")
 
     def committed_len(self, kind):
@@ -1613,17 +1981,37 @@ class Recorder:
     async def _open_gen(self, kind):
         st = self.store
         gid, fd, dev, ino, name = await st.reserve_and_create(self.sid, kind)
+        g = _Gen(kind, gid, name, fd, None, dev, ino)
         try:
-            w = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind], sid=self.sidb,
-                            gen_id=gid, created_ms=int(st.clock() * 1000),
-                            max_records=st.gen_limits[0], max_plain=st.gen_limits[1])
-        except BaseException:
-            os.close(fd)
+            g.writer = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind],
+                                   sid=self.sidb, gen_id=gid, created_ms=int(st.clock() * 1000),
+                                   max_records=st.gen_limits[0], max_plain=st.gen_limits[1])
+            st._fault("header")
+        except Exception:
+            # Generaţia e a noastră (O_EXCL + inode în registru): retrasă acum, nu lăsată la boot.
+            self._drop_gen_fd(g)
+            with contextlib.suppress(Exception):
+                await self._retire_unpublished(g)
             raise
-        st._fault("header")
-        g = _Gen(kind, gid, name, fd, w, dev, ino)
+        except BaseException:
+            self._drop_gen_fd(g)                  # moartea procesului: registrul decide la boot
+            raise
         st.live_index[(self.sid, kind, gid.hex())] = g.index
         return g
+
+    async def _reopen(self, kind):
+        try:
+            self.cur[kind] = await self._open_gen(kind)
+        except (TxStoreError, OSError, sqlite3.Error, txformat.TxFormatError, Uncertain) as e:
+            # Un recorder „running" fără generaţie curentă nu există: readoptare explicită.
+            raise _NeedReadopt(f"cannot open a generation: {e}") from None
+
+    def _drop_gen_fd(self, g):
+        if g.fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(g.fd)
+            g.fd = None
+        self.store.live_index.pop((self.sid, g.kind, g.gen_id.hex()), None)
 
     def _close_fds(self):
         for k in KIND_NAMES:
@@ -1634,18 +2022,39 @@ class Recorder:
                     g.fd = None
             self.cur[k] = None
             self.done[k] = []
-        self.store.buffered_total -= sum(len(b) for b in self.pending.values())
-        for b in self.pending.values():
-            b.clear()
+        self._drop_buffers()
 
     # ── loop side (synchronous, no file I/O) ──
 
+    def _all_buffers(self):
+        return [self.pending] + ([self._switch["bufs"]] if self._switch is not None else [])
+
+    def _drop_buffers(self):
+        """Clears every pending buffer (ingress + an epoch cut's); returns the `.out` bytes."""
+        bufs = self._all_buffers()
+        lost = sum(len(b["out"]) for b in bufs)
+        self.store.buffered_total -= sum(len(x) for b in bufs for x in b.values())
+        for b in bufs:
+            for x in b.values():
+                x.clear()
+        return lost
+
     def _buffered(self):
-        return sum(len(b) for b in self.pending.values()) + self.inflight
+        return sum(len(x) for b in self._all_buffers() for x in b.values()) + self.inflight
+
+    def ingress(self):
+        if self.state != "running":
+            return self.state
+        if self.closing:
+            return "closing"
+        return "overflow" if self.overflow else "open"
 
     def _feed(self, kind, data):
         if self.state != "running":
             self.dropped += len(data)
+            return False
+        if self.closing:
+            self.rejected += len(data)
             return False
         if self.overflow:
             if kind == "out":
@@ -1660,21 +2069,21 @@ class Recorder:
         return True
 
     def feed_out(self, data, agent_bytes=None):
-        """`.out` bytes from `_process_output`; advances the agent offset in memory."""
-        if self._feed("out", data):
+        """`.out` bytes from `_process_output`; advances the agent offset in memory. Returns
+        whether they were accepted (see the class docstring for a refusal)."""
+        ok = self._feed("out", data)
+        if ok:
             self.agent_offset += len(data) if agent_bytes is None else agent_bytes
             self.out_pos += len(data)
+        return ok
 
     def feed_cast(self, data):
-        self._feed("cast", data)
+        return self._feed("cast", data)
 
     def _enter_overflow(self, incoming):
-        # Doar bufferul în aşteptare se aruncă, niciodată lotul în zbor; agent_offset NU se derulează
+        # Doar bufferele în aşteptare se aruncă, niciodată lotul în zbor; agent_offset NU se derulează
         # cât timp un job e în zbor (§12.11.1 Backpressure).
-        lost = len(self.pending["out"])
-        self.store.buffered_total -= sum(len(b) for b in self.pending.values())
-        for b in self.pending.values():
-            b.clear()
+        lost = self._drop_buffers()
         self.overflow = True
         self.dropped += lost + incoming
         if not self.degraded:
@@ -1682,23 +2091,28 @@ class Recorder:
             self.store.alarm("transcript.degraded", f"{self.sid}: recording buffer overflow")
 
     async def resume(self):
-        """After an overflow or a write fault: queued behind the in-flight job, re-reads the
-        committed position C from the DB and resumes there. Returns C = (agent_epoch,
-        agent_offset, out_pos, dropped). The hub re-attaches at C's agent offset; what the ring
-        no longer has becomes ONE `gap(size)` at C."""
+        """After an overflow or a write fault: queued behind the in-flight job, publishes (or
+        abandons) what the writers hold, re-reads the committed position C from the DB, drops
+        every pending buffer (superseded by the replay) and resumes there. Returns C =
+        (agent_epoch, agent_offset, out_pos, dropped). Refused while an epoch change is pending."""
+        if self._switch is not None:
+            raise TxStoreError("busy", "epoch change in progress: resume after it")
         return await self._submit("resync")
 
     def gap(self, size, cast_ts=0.0):
-        """One GAP_MARKER at the current committed position, carrying the lost length (recorded
-        in `gaps`, audited by the caller); the same position as a `.cast` gap event."""
-        if self.overflow or self.state != "running":
+        """One GAP_MARKER at the current position, carrying the lost length (recorded in `gaps`
+        once published, audited by the caller); the same position as a `.cast` gap event."""
+        if self.overflow or self.state != "running" or self.closing or self._switch is not None:
             raise TxStoreError("busy", "resume first")
-        pos = self.out_pos
+        self._add_gap(self.out_pos, size, cast_ts)
+
+    def _add_gap(self, pos, size, cast_ts):
+        ev = gap_event(cast_ts)
         self.pending["out"] += GAP_MARKER
-        self.pending["cast"] += gap_event(cast_ts)
-        self.store.buffered_total += len(GAP_MARKER) + len(gap_event(cast_ts))
+        self.pending["cast"] += ev
+        self.store.buffered_total += len(GAP_MARKER) + len(ev)
         self.out_pos += len(GAP_MARKER)
-        self.gap_pending = (pos, size)
+        self.gap_pending.append((pos, size))
 
     # ── jobs ──
 
@@ -1706,6 +2120,8 @@ class Recorder:
         if self.state != "running":
             raise RecorderLost("lost", f"recorder {self.state}")
         fut = asyncio.get_running_loop().create_future()
+        # Rezultatul e citit şi când apelantul a renunţat (wait_for, shutdown): fără avertismente.
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         self._queue.put_nowait((op, args, fut))
         # Anularea apelantului nu anulează un job început.
         return asyncio.shield(fut)
@@ -1713,11 +2129,27 @@ class Recorder:
     def checkpoint(self):
         return self._submit("checkpoint")
 
-    def close(self):
-        return self._submit("finalize")
+    def close(self, cast_ts=0.0):
+        """Close: ingress stops NOW (later bytes are refused, counted in `rejected`); the finalize
+        job drains everything accepted before, seals and publishes. An overflow still open then is
+        recorded as one GAP_MARKER at the end (`cast_ts` for its `.cast` event), its size in
+        `gaps` and the result's `lost`, and alarmed."""
+        fut = self._submit("finalize", cast_ts)
+        self.closing = True
+        return fut
 
     def change_epoch(self, new_epoch):
-        return self._submit("epoch", new_epoch)
+        """The cut is taken HERE, synchronously (see the class docstring)."""
+        if self.closing:
+            raise TxStoreError("busy", "recorder closing")
+        if self._switch is not None:
+            raise TxStoreError("busy", "epoch change in progress")
+        fut = self._submit("epoch", new_epoch)
+        self._switch = {"old": (self.agent_epoch, self.agent_offset), "bufs": self.pending,
+                        "new": new_epoch}
+        self.pending = {k: bytearray() for k in KIND_NAMES}
+        self.agent_epoch, self.agent_offset = new_epoch, 0
+        return fut
 
     async def cap_now(self, truncate=True):
         """Cap (3.7 content) or merge (truncate=False) of everything committed before now."""
@@ -1790,6 +2222,8 @@ class Recorder:
             raise Refused("stale-writer", "a newer writer owns this sid")
 
     async def _job_resync(self):
+        self._check_token()
+        await self._flush_dirty()
         sid = self.sid
 
         def load(c):
@@ -1798,42 +2232,64 @@ class Recorder:
         (ag,) = await self.store.fresh_read(load)
         if self.track_agent and ag is not None:
             self.agent_committed = (ag[0], ag[1] or 0)
-        self.agent_epoch, self.agent_offset = self.agent_committed
+        lost_old = 0
+        if self._switch is not None:
+            # resume() cerut înaintea unei schimbări de epoch încă în coadă: segmentul vechiului
+            # epoch nu se mai poate relua de la agent → pierdut, numărat exact.
+            lost_old = len(self._switch["bufs"]["out"])
+        self._drop_buffers()                      # reluarea de la C le înlocuieşte
+        self._written_agent = self.agent_committed
+        if self._switch is not None:
+            self._switch["old"] = self.agent_committed
+            self.agent_epoch, self.agent_offset = self._switch["new"], 0
+        else:
+            self.agent_epoch, self.agent_offset = self.agent_committed
         self.out_pos = self.committed_len("out")
-        dropped, self.dropped = self.dropped, 0
+        dropped, self.dropped = self.dropped + lost_old, 0
         self.overflow = False
         return (self.agent_epoch, self.agent_offset, self.out_pos, dropped)
 
+    def _capture(self):
+        """The batch and its agent position, taken in ONE tick. With an epoch cut pending, only
+        the old epoch's segment is captured (the new epoch's bytes wait for the switch)."""
+        if self._switch is not None:
+            src, agent_end = self._switch["bufs"], self._switch["old"]
+            self._switch["bufs"] = {k: bytearray() for k in KIND_NAMES}
+        else:
+            src, agent_end = self.pending, (self.agent_epoch, self.agent_offset)
+            self.pending = {k: bytearray() for k in KIND_NAMES}
+        return {k: bytes(src[k]) for k in KIND_NAMES}, agent_end
+
     async def _job_checkpoint(self):
+        """Capture → append → fsync → publish. The publication unit is everything the writers hold
+        beyond the committed prefix (both kinds, a batch whose publication failed earlier
+        included), with the agent position of the last appended capture: both prefixes and the
+        offset move together or not at all, and nothing is ever appended twice."""
         self._check_token()
-        if self.overflow:
-            return None
-        # Captura: schimbăm bufferele şi luăm poziţia agentului ÎN ACELAŞI tick.
-        batch = {k: bytes(self.pending[k]) for k in KIND_NAMES}
-        for k in KIND_NAMES:
-            self.pending[k] = bytearray()
-        size = sum(len(b) for b in batch.values())
-        self.inflight += size
-        agent_end = (self.agent_epoch, self.agent_offset)
-        gap = self.gap_pending
-        self.gap_pending = None
-        try:
-            self.store._fault("captured")
+        if not self.overflow:
+            batch, agent_end = self._capture()
+            size = sum(len(b) for b in batch.values())
+            gaps, self.gap_pending = self.gap_pending, []
+            self.inflight += size
             try:
-                touched = await self._append(batch)
-                await self._fsync(touched)
-            except (OSError, txformat.TxFormatError) as e:
-                await self._writer_failed(e)
-                raise TxStoreError("writeFailed", str(e)) from None
-            if not any(touched.values()) and not any(self.to_recover.values()):
-                return self._snapshot_state()
-            plan = self._plan(touched, agent_end)
-            await self._publish(plan)
-        finally:
-            self.inflight -= size
-            self.store.buffered_total -= size
-        if gap is not None:
-            self.gaps.append(gap)
+                self.store._fault("captured")
+                try:
+                    touched = await self._append(batch)
+                    await self._fsync(touched)
+                except (OSError, txformat.TxFormatError) as e:
+                    await self._writer_failed(e)
+                    raise TxStoreError("writeFailed", str(e)) from None
+                self._written_agent = agent_end
+                self._gaps_unpub += gaps
+            finally:
+                self.inflight -= size
+                self.store.buffered_total -= size
+        if not self._dirty():
+            return self._snapshot_state()
+        await self._publish(self._plan(self._written_agent))
+        if self._gaps_unpub:
+            self.gaps += self._gaps_unpub
+            self._gaps_unpub = []
             self.degraded = False
         elif not self.overflow and self.degraded and not self.dropped:
             self.degraded = False
@@ -1844,6 +2300,48 @@ class Recorder:
     def _snapshot_state(self):
         return {"out_len": self.committed_len("out"), "cast_len": self.committed_len("cast"),
                 "agent": self.agent_committed, "list_epoch": self.list_epoch}
+
+    @staticmethod
+    def _entry(g):
+        w = g.writer
+        return txdesc.Generation(g.gen_id, txdesc.STATE_SEALED if w.sealed else txdesc.STATE_LIVE,
+                                 w.data_count, w.plain_len, w.phys_len, w.hdr_mac)
+
+    def _writers(self, k):
+        return [g for g in self.done[k] + [self.cur[k]]
+                if g is not None and not g.broken and g.writer is not None and g.writer.data_count]
+
+    def _dirty(self):
+        """True when the writers hold anything the committed descriptors do not list (either
+        kind), a generation must become `recovered`, or the written agent position is not the
+        committed one."""
+        if any(self.to_recover.values()):
+            return True
+        for k in KIND_NAMES:
+            d = self.committed[k]
+            have = {e.gen_id: e for e in d.generations} if d else {}
+            for g in self._writers(k):
+                if have.get(g.gen_id) != self._entry(g):
+                    return True
+        return self.track_agent and tuple(self._written_agent) != tuple(self.agent_committed)
+
+    async def _flush_dirty(self):
+        """Publish what the writers hold with the agent position those bytes belong to, or — if
+        that publication fails — abandon those generations (published live → recovered at its
+        committed counts, unpublished → retired): the offset never covers bytes that are not
+        published, and nothing written is published later under another position."""
+        if not self._dirty():
+            return
+        try:
+            await self._publish(self._plan(self._written_agent))
+        except _NeedReadopt:
+            raise
+        except Refused as e:
+            if self.state == "replaced":
+                raise
+            await self._abandon_writers(f"publication refused: {e}")
+        except (TxStoreError, sqlite3.Error, OSError) as e:
+            await self._abandon_writers(f"publication failed: {e}")
 
     async def _append(self, batch):
         touched = {k: [] for k in KIND_NAMES}
@@ -1859,7 +2357,8 @@ class Recorder:
                     # Limita tare ar fi depăşită: SEAL + generaţie nouă ÎN ACELAŞI job.
                     await self.store.io(g.writer.seal)
                     self.done[k].append(g)
-                    self.cur[k] = await self._open_gen(k)
+                    self.cur[k] = None
+                    await self._reopen(k)
         return touched
 
     def _append_run(self, g, data, pos):
@@ -1890,11 +2389,11 @@ class Recorder:
                 os.fsync(self.store.dir_fd)
         await self.store.io(run)
 
-    async def _writer_failed(self, err):
-        """fsync error / ambiguous write: abandon the generations of this batch (a published one
-        becomes `recovered` at its committed counts in the next publication), open new ones,
-        discard pending, and ask for a resume from the committed position."""
-        self.store.alarm("transcript.writeFailed", f"{self.sid}: {err}")
+    async def _abandon_writers(self, why):
+        """Abandon every generation of the writers: a published one becomes `recovered` at its
+        committed counts in the next publication, an unpublished one is retired; new ones are
+        opened, and the written position falls back to the committed one."""
+        self.store.alarm("transcript.writeFailed", f"{self.sid}: {why}")
         for k in KIND_NAMES:
             for g in self.done[k] + [self.cur[k]]:
                 if g is None:
@@ -1902,17 +2401,22 @@ class Recorder:
                 g.broken = True
                 if g.published:
                     self.to_recover[k].add(g.gen_id)
-                with contextlib.suppress(OSError):
-                    os.close(g.fd)
-                g.fd = None
-                self.store.live_index.pop((self.sid, k, g.gen_id.hex()), None)
+                self._drop_gen_fd(g)
                 if not g.published:
-                    await self._retire_unpublished(g)
+                    with contextlib.suppress(TxStoreError, OSError, sqlite3.Error, Uncertain):
+                        await self._retire_unpublished(g)
             self.done[k] = []
             self.cur[k] = None
-        self._enter_overflow(0)
+        self._written_agent = self.agent_committed
+        self._gaps_unpub = []
         for k in KIND_NAMES:
-            self.cur[k] = await self._open_gen(k)
+            await self._reopen(k)
+
+    async def _writer_failed(self, err):
+        """fsync error / ambiguous write: abandon the generations, discard pending, and ask for a
+        resume from the committed position."""
+        await self._abandon_writers(err)
+        self._enter_overflow(0)
 
     async def _retire_unpublished(self, g):
         st = self.store
@@ -1921,7 +2425,7 @@ class Recorder:
                                          "AND state='created'", (hexid,)))
         await st.retire(self.sid, g.kind, hexid)
 
-    def _plan(self, touched, agent_end, *, epoch_change=False):
+    def _plan(self, agent_end, *, epoch_change=False):
         new, start, listed = {}, {}, []
         for k in KIND_NAMES:
             old = self.committed[k]
@@ -1930,13 +2434,8 @@ class Recorder:
                 if e.gen_id in self.to_recover[k] and e.state == txdesc.STATE_LIVE:
                     gens[i] = txdesc.Generation(e.gen_id, txdesc.STATE_RECOVERED, e.data_count,
                                                 e.plain_len, e.phys_len, e.hdr_mac)
-            for g in self.done[k] + touched[k]:
-                w = g.writer
-                if w.data_count == 0 or g.broken:
-                    continue
-                state = txdesc.STATE_SEALED if w.sealed else txdesc.STATE_LIVE
-                ent = txdesc.Generation(g.gen_id, state, w.data_count, w.plain_len, w.phys_len,
-                                        w.hdr_mac)
+            for g in self._writers(k):
+                ent = self._entry(g)
                 idx = next((i for i, e in enumerate(gens) if e.gen_id == g.gen_id), None)
                 if idx is None:
                     gens.append(ent)
@@ -1980,7 +2479,7 @@ class Recorder:
                 r = c.execute("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", (sid,)).fetchone()
                 if r is None:
                     raise Refused("no-session", sid)
-                if (r[0], r[1] or 0) != plan.agent_prev:
+                if (r[0], r[1] or 0) != tuple(plan.agent_prev):
                     raise Refused("cas", "agent position moved")
                 if not plan.epoch_change and (plan.agent[0] != r[0] or plan.agent[1] < (r[1] or 0)):
                     raise Refused("agent-regress", f"{plan.agent} < {(r[0], r[1])}")
@@ -2034,16 +2533,39 @@ class Recorder:
         self._apply(plan)
 
     async def _resolve(self, plan):
+        """Uncertain COMMIT: everything the transaction writes is re-read in ONE read transaction
+        on a fresh connection — the descriptors, the agent position and the ledger rows. Committed
+        only if all of it is the plan's result; not committed only if all of it is still the
+        start; anything else (something moved independently) is unknown → re-adoption."""
         sid = self.sid
+        listed = list(plan.listed)
+        retired = [h for _k, h in plan.retired]
+        track = self.track_agent and plan.agent is not None
 
         def load(c):
-            return {k: c.execute("SELECT blob, version FROM tx_descriptors WHERE sid=? AND kind=?",
-                                 (sid, k)).fetchone() for k in plan.new}
-        rows = await self.store.fresh_read(load)
-        if all(r is not None and r[1] == plan.new[k][0].version and bytes(r[0]) == plan.new[k][1]
-               for k, r in rows.items()):
+            descs = {k: c.execute("SELECT blob, version FROM tx_descriptors WHERE sid=? AND kind=?",
+                                  (sid, k)).fetchone() for k in plan.start}
+            ag = c.execute("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?",
+                           (sid,)).fetchone() if track else None
+            led = {}
+            for h in listed + retired:
+                r = c.execute("SELECT state FROM tx_files WHERE gen_id=?", (h,)).fetchone()
+                led[h] = r[0] if r else None
+            return descs, ag, led
+        descs, ag, led = await self.store.fresh_read(load)
+        agent_now = (ag[0], ag[1] or 0) if ag is not None else None
+
+        def at(r, version, blob):
+            return (r[1] if r else 0) == version and (bytes(r[0]) if r else None) == blob
+        if (all(at(descs[k], plan.new[k][0].version, plan.new[k][1]) for k in plan.new)
+                and (not track or agent_now == tuple(plan.agent))
+                and all(led[h] == "published" for h in listed)
+                and all(led[h] in ("retired", "gone") for h in retired)):
             return "committed"
-        if all((r[1] if r else 0) == plan.start[k][0] for k, r in rows.items()):
+        if (all(at(descs[k], *plan.start[k]) for k in plan.start)
+                and (not track or agent_now == tuple(plan.agent_prev))
+                and all(led[h] == "created" for h in listed)
+                and all(led[h] == "published" for h in retired)):
             return "not-committed"
         return "unknown"
 
@@ -2054,10 +2576,7 @@ class Recorder:
             for g in self.done[k]:
                 if g.gen_id in listed:
                     g.published = True
-                    with contextlib.suppress(OSError):
-                        os.close(g.fd)
-                    g.fd = None
-                    self.store.live_index.pop((self.sid, k, g.gen_id.hex()), None)
+                    self._drop_gen_fd(g)
             self.done[k] = [g for g in self.done[k] if g.fd is not None]
             c = self.cur[k]
             if c is not None and c.gen_id in listed:
@@ -2066,23 +2585,31 @@ class Recorder:
         if plan.op == "cap":
             self.list_epoch += 1
         if self.track_agent and plan.agent is not None:
-            self.agent_committed = plan.agent
+            self.agent_committed = tuple(plan.agent)
 
-    async def _maybe_roll(self, force=False):
+    async def _maybe_roll(self, force=False, reopen=True):
+        """SEAL the current generations that are full (or all, `force`), open the next ones
+        BEFORE publishing (a failed publication leaves the sealed ones dirty and a usable current
+        one), publish with the written position. A seal / fsync fault is a write fault."""
         rolling = [k for k in KIND_NAMES if self.cur[k] is not None and self.cur[k].writer.data_count
                    and (force or self.cur[k].writer.should_roll())]
         if not rolling:
             return False
-        for k in rolling:
-            await self.store.io(self.cur[k].writer.seal)
-        await self._fsync({k: [self.cur[k]] if k in rolling else [] for k in KIND_NAMES})
+        try:
+            for k in rolling:
+                self.store._fault("seal")
+                await self.store.io(self.cur[k].writer.seal)
+            await self._fsync({k: [self.cur[k]] if k in rolling else [] for k in KIND_NAMES})
+        except (OSError, txformat.TxFormatError) as e:
+            await self._writer_failed(e)
+            raise TxStoreError("writeFailed", str(e)) from None
         for k in rolling:
             self.done[k].append(self.cur[k])
             self.cur[k] = None
-        plan = self._plan({k: [] for k in KIND_NAMES}, self.agent_committed)
-        await self._publish(plan)
-        for k in rolling:
-            self.cur[k] = await self._open_gen(k)
+        if reopen:
+            for k in rolling:
+                await self._reopen(k)
+        await self._publish(self._plan(self._written_agent))
         return True
 
     def _maybe_trigger_cap(self):
@@ -2116,8 +2643,9 @@ class Recorder:
                 for k in KIND_NAMES:
                     if prefix[k]:
                         d = txdesc.Descriptor(st.inst, self.sidb, KINDS[k], 0, b"\0" * 32, prefix[k])
-                        snaps[k] = await st.io(Snapshot._build, st, self.sid, k, d, self.rk,
-                                               self.list_epoch, None)
+                        snaps[k] = await st._make_snapshot(Snapshot, self.sid, k, d, self.rk,
+                                                           self.list_epoch, None,
+                                                           nfds=len(prefix[k]), force=True)
                 for k in KIND_NAMES:
                     if k in snaps:
                         async with st.lease(self.sid):
@@ -2136,27 +2664,38 @@ class Recorder:
         # T foloseşte limitele §12.1 complete (concatenarea unui merge poate depăşi limitele de test).
         st = self.store
         gid, fd, dev, ino, name = await st.reserve_and_create(self.sid, kind)
-        w = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind], sid=self.sidb,
-                        gen_id=gid, created_ms=int(st.clock() * 1000))
-        return _Gen(kind, gid, name, fd, w, dev, ino)
+        g = _Gen(kind, gid, name, fd, None, dev, ino)
+        try:
+            g.writer = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind],
+                                   sid=self.sidb, gen_id=gid, created_ms=int(st.clock() * 1000))
+        except Exception:
+            self._drop_gen_fd(g)
+            with contextlib.suppress(Exception):
+                await self._retire_unpublished(g)
+            raise
+        return g
 
     def _fill_compacted(self, snaps, built, truncate):
         big = Budget(1 << 62, pre_first=1 << 62)
 
         def reader(k):
-            return lambda off, n: snaps[k].read_sync(off, off + n, big)
+            if k not in snaps:
+                return None
+            return lambda off, n: snaps[k]._read_sync(off, off + n, big)
 
         def sink(k):
             return lambda b: built[k].writer.write(b) if b else None
         if truncate:
-            if "out" not in snaps or "cast" not in snaps:
-                raise TxStoreError("capOneKind", "cap needs both kinds")
-            cap_streams(reader("out"), reader("cast"), snaps["out"].length, snaps["cast"].length,
-                        self.store.keep_bytes, self.store.clock(), sink("out"), sink("cast"))
+            # O pereche istorică cu un singur kind se plafonează pe kind-ul ei (regula 3.7 per flux).
+            cap_streams(reader("out"), reader("cast"), snaps["out"].length if "out" in snaps else 0,
+                        snaps["cast"].length if "cast" in snaps else 0, self.store.keep_bytes,
+                        self.store.clock(), sink("out") if "out" in built else None,
+                        sink("cast") if "cast" in built else None)
         else:
             for k, s in snaps.items():
-                for piece in s._chunks(0, s.length, big, CAP_CHUNK):
-                    built[k].writer.write(piece)
+                with s._using():
+                    for piece in s._chunks(0, s.length, big, CAP_CHUNK):
+                        built[k].writer.write(piece)
 
     def _finish_compacted(self, built):
         for k, g in built.items():
@@ -2170,9 +2709,9 @@ class Recorder:
             try:
                 if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (g.dev, g.ino):
                     raise TxStoreError("corrupt", "compacted generation replaced under us")
-                txformat.verify_full(_PRead(fd, 0), self.rk, kind=KINDS[k], sid=self.sidb,
-                                     gen_id=g.gen_id, data_count=w.data_count, plain_len=w.plain_len,
-                                     phys_len=w.phys_len, hdr_mac=w.hdr_mac)
+                txformat.verify_full(_PRead(fd, 0, limit=w.phys_len), self.rk, kind=KINDS[k],
+                                     sid=self.sidb, gen_id=g.gen_id, data_count=w.data_count,
+                                     plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac)
             finally:
                 os.close(fd)
 
@@ -2225,42 +2764,67 @@ class Recorder:
         return True
 
     async def _job_epoch(self, new_epoch):
-        """Writer change for an agent epoch change: flush, seal, publish the new epoch at offset 0
-        with fresh generations (nothing is replayed from the old ring)."""
+        """The switch for the cut taken in `change_epoch`: publish the old epoch's segment under
+        its position, seal, then publish (new_epoch, 0) through the same CAS'd transaction (with
+        uncertain-COMMIT resolution) even when no descriptor exists yet. Only then do the new
+        epoch's bytes become capturable. A failure re-adopts from the DB."""
         self._check_token()
-        await self._job_checkpoint()
-        await self._maybe_roll(force=True)
-        plan = self._plan({k: [] for k in KIND_NAMES}, (new_epoch, 0), epoch_change=True)
-        if plan.new:
-            await self._publish(plan)
-        elif self.track_agent:
-            sid = self.sid
-            await self.store.txn(lambda c: c.execute(
-                "UPDATE sessions SET agent_epoch=?, agent_offset=0 WHERE id=?", (new_epoch, sid)))
-            self.agent_committed = (new_epoch, 0)
-        self.agent_epoch, self.agent_offset = new_epoch, 0
+        sw = self._switch
+        if sw is None or sw["new"] != new_epoch:
+            raise _NeedReadopt("epoch job without its cut")
+        try:
+            await self._job_checkpoint()
+            await self._maybe_roll(force=True)
+            plan = self._plan((new_epoch, 0), epoch_change=True)
+            if plan.new or self.track_agent:
+                await self._publish(plan)
+        except _NeedReadopt:
+            raise
+        except Refused as e:
+            if self.state == "replaced":
+                raise
+            raise _NeedReadopt(f"epoch change refused: {e}") from None
+        except (TxStoreError, OSError, sqlite3.Error, txformat.TxFormatError) as e:
+            # Tăietura nu rămâne pe jumătate: octeţii noului epoch aşteaptă un comutator comis.
+            raise _NeedReadopt(f"epoch change failed: {e}") from None
+        self._switch = None
+        self._written_agent = self.agent_committed
         return self.agent_committed
 
-    async def _job_finalize(self):
-        """Close: final checkpoint, SEAL both kinds, publish; retire never-published generations."""
+    async def _job_finalize(self, cast_ts=0.0):
+        """Close: drain (final checkpoint of everything accepted before close), an explicit gap
+        for an overflow still open, SEAL both kinds, publish; retire never-published generations.
+        A failure leaves the recorder retryable (close() again)."""
         if self.store.tokens.get(self.sid) != self.token:
             self.state = "replaced"
             return None
+        self.closing = True
         await self._job_checkpoint()
-        await self._maybe_roll(force=True)
+        lost = None
+        if self.overflow:
+            # Lipsa se reprezintă exact: un marker la capătul prefixului comis, mărimea în `gaps`;
+            # offsetul agentului NU avansează peste ce s-a înregistrat.
+            lost, self.dropped = self.dropped, 0
+            self.overflow = False
+            self.agent_epoch, self.agent_offset = self.agent_committed
+            self.out_pos = self.committed_len("out")
+            self._add_gap(self.out_pos, lost, cast_ts)
+            self.store.alarm("transcript.gap", f"{self.sid}: {lost} bytes lost before close")
+            await self._job_checkpoint()
+        await self._maybe_roll(force=True, reopen=False)
         for k in KIND_NAMES:
             g = self.cur[k]
             if g is not None and not g.published:
-                with contextlib.suppress(OSError):
-                    os.close(g.fd)
-                g.fd = None
-                self.store.live_index.pop((self.sid, k, g.gen_id.hex()), None)
+                self._drop_gen_fd(g)
                 await self._retire_unpublished(g)
             self.cur[k] = None
         self.state = "closed"
         if self.store.tokens.get(self.sid) == self.token:
             del self.store.tokens[self.sid]
-        return self._snapshot_state()
+        res = self._snapshot_state()
+        res["lost"] = lost
+        res["rejected"] = self.rejected
+        return res
 
 
 class _NeedReadopt(TxStoreError):

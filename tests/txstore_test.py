@@ -10,6 +10,7 @@ integrity check of the .out/.cast pair; backpressure, worker loss and write faul
 Temp dirs + the real db module; no network, no Docker.
 """
 import asyncio
+import contextlib
 import os
 import sqlite3
 import sys
@@ -80,7 +81,8 @@ def store(**kw):
 
 
 async def access(st, sid, **kw):
-    return st.access(sid, "u1", "test", **kw)
+    route = ts.OWNER_RECOVERY_ROUTE if kw.get("owner_recovery") else "test"
+    return st.access(sid, "u1", route, **kw)
 
 
 async def read_all(st, sid, kind="out", **kw):
@@ -215,7 +217,7 @@ async def g_ordering():
     rec.feed_out(b"one")
     rec.feed_cast(b"h\n")
     await rec.checkpoint()
-    plan_old = rec._plan({k: [rec.cur[k]] for k in ts.KIND_NAMES}, (rec.agent_epoch, rec.agent_offset))
+    plan_old = rec._plan((rec.agent_epoch, rec.agent_offset))
     order = []
     slow = {"n": 0}
 
@@ -246,7 +248,7 @@ async def g_ordering():
     async with st.lease(sid):
         ok = await araises(rec._publish(plan_old), ts.Refused, "regress")
     check("smaller prefix at the current version refused (monotonic check)", ok)
-    plan_new = rec._plan({k: [rec.cur[k]] for k in ts.KIND_NAMES}, ("e1", 3))
+    plan_new = rec._plan(("e1", 3))
     async with st.lease(sid):
         ok = await araises(rec._publish(plan_new), ts.Refused, "agent-regress")
     check("older agent offset refused", ok)
@@ -407,9 +409,9 @@ async def g_crash():
     async def e_sealed(st, sid, rep, ctx):
         d = await desc(st, sid)
         lg = await ledger(sid)
-        check("seal published → nothing to do; never-published generations retired at close",
+        check("seal published → nothing to do; close opens no throw-away generations",
               [g.state for g in d.generations] == [td.STATE_SEALED] and not rep.changed()
-              and sorted(lg.values()) == ["gone", "gone", "published", "published"], (d, lg, rep))
+              and sorted(lg.values()) == ["published", "published"], (d, lg, rep))
         v = await st.verify(sid)
         check("verify: sealed pair ok, no info", v["ok"] and not v["problems"], v)
     await crash_case("sealed", s_sealed, e_sealed)
@@ -880,16 +882,16 @@ async def g_stream_revocation():
     check("one retry from the authorization step succeeds", snap.length == len(blob))
     # Cache: cheia conţine versiunea, digestul listei, politica şi contoarele.
     cache = ts.ResponseCache(st, size=1)
-    k1 = cache.key(snap, policy_version=1)
+    k1 = cache.key(snap, policy_version=1, representation="redacted")
     check("cache put + get", cache.put(k1, b"R", snap.access) and cache.get(k1, snap.access) == b"R")
-    check("cache key differs by redaction policy version", cache.key(snap, 2) != k1)
+    check("cache key differs by redaction policy version", cache.key(snap, 2, representation="redacted") != k1)
     st.bump(sid)
     a3 = await access(st, sid)
     check("bump drops the cache; an old key is never served", cache.get(k1, a3) is None)
     k_stale = k1
     check("a just-computed response under a stale key is not cached", cache.put(k_stale, b"R", a3) is False)
     check("serving with a revoked access raises before the cache is read",
-          _raises(lambda: cache.get(cache.key(snap, 1), snap.access), ts.Revoked))
+          _raises(lambda: cache.get(cache.key(snap, 1, representation="redacted"), snap.access), ts.Revoked))
     snap.close()
     e1 = (await st.open(sid, "cast", access=a3))
     tag1 = e1.etag()
@@ -904,14 +906,23 @@ async def g_stream_revocation():
     check("Range: suffix", ts.parse_range("bytes=-10", 100) == (206, 90, 100))
     check("Range: start ≥ length → 416", ts.parse_range("bytes=100-", 100)[0] == 416)
     check("Range: several ranges → 200 full", ts.parse_range("bytes=0-1,5-6", 100) == (200, 0, 100))
-    # Owner recovery ridică DOAR carantina.
-    await db.execute("UPDATE tx_descriptors SET status='quarantined' WHERE sid=? AND kind='cast'", sid)
+    # Owner recovery deschide DOAR `recovery` (carantina de continuitate ridicată de ruta ei);
+    # `quarantined` nu-şi codifică motivul (ex. epoch keyring) → refuzat pentru oricine (M2).
+    await db.execute("UPDATE tx_descriptors SET status='recovery' WHERE sid=? AND kind='cast'", sid)
     ok = await araises(st.open(sid, "cast", access=await access(st, sid)), ts.TxStoreError, "quarantined")
     s = await st.open(sid, "cast", access=await access(st, sid, owner_recovery=True))
     s.close()
+    await db.execute("UPDATE tx_descriptors SET status='quarantined' WHERE sid=? AND kind='cast'", sid)
+    ok3 = await araises(st.open(sid, "cast", access=await access(st, sid, owner_recovery=True)), ts.TxStoreError, "quarantined")
     await db.execute("UPDATE tx_descriptors SET status='damaged' WHERE sid=? AND kind='cast'", sid)
     ok2 = await araises(st.open(sid, "cast", access=await access(st, sid, owner_recovery=True)), ts.TxStoreError, "damaged")
-    check("quarantined: refused, Owner recovery may open; damaged: refused even for Owner recovery", ok and ok2)
+    check("recovery: refused, Owner recovery may open; quarantined (reason unknown) and damaged: refused even for Owner recovery",
+          ok and ok2 and ok3)
+    check("owner_recovery cannot be set by another route",
+          _raises(lambda: st.access(sid, "u1", "download", owner_recovery=True), ts.TxStoreError))
+    forged = ts.Access(sid, "u1", ts.OWNER_RECOVERY_ROUTE, st.sid_epoch[sid], st.access_epoch, None, True)
+    check("an Access not issued by the store is refused", await araises(st.open(sid, "cast", access=forged), ts.TxStoreError, "bad-access"))
+    await db.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=? AND kind='cast'", sid)
     st.close()
 
 
@@ -1084,6 +1095,600 @@ async def g_misc():
     st.close()
 
 
+# ── review fixes (audit 2026-11-24, PR5a): every scenario of the review, as a regression ─────
+
+
+class Hold:
+    """A fault hook that parks the worker thread at `point` (the n-th time) until released."""
+
+    def __init__(self, point, nth=1, exc=None):
+        self.point, self.nth, self.exc = point, nth, exc
+        self.seen = 0
+        self.entered = threading.Event()
+        self.go = threading.Event()
+
+    def __call__(self, p):
+        if p != self.point:
+            return
+        self.seen += 1
+        if self.seen == self.nth:
+            self.entered.set()
+            self.go.wait(5)
+            if self.exc is not None:
+                raise self.exc(p)
+
+    async def wait_entered(self):
+        for _ in range(250):
+            if self.entered.is_set():
+                return True
+            await asyncio.sleep(0.02)
+        return False
+
+
+def crash_recorder(st, rec):
+    """Process death: the in-memory recorder is abandoned without any further publication."""
+    rec._close_fds()
+    if rec._task:
+        rec._task.cancel()
+    st.close()
+
+
+async def g_review_h1():
+    print("== review H1: a failed publication stays the retry unit (both kinds + offset together) ==")
+    st = store()
+    st.readopt_enabled = False
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    c1, c2 = cast_line(0.1, "A"), cast_line(0.2, "B")
+    rec.feed_out(b"A")
+    rec.feed_cast(b"h\n" + c1)
+    await rec.checkpoint()
+    # .out + .cast scrise, publicarea pică; următorul lot atinge DOAR .out.
+    rec.feed_out(b"B")
+    rec.feed_cast(c2)
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
+    ok = await araises(rec.checkpoint(), sqlite3.OperationalError)
+    st.fault = None
+    rec.feed_out(b"C")
+    await rec.checkpoint()
+    ag = await row("SELECT agent_offset FROM sessions WHERE id=?", sid)
+    check("failed publication with .cast written, next batch .out only: .cast published WITH the offset",
+          ok and ag[0] == 3 and await read_all(st, sid, "cast") == b"h\n" + c1 + c2
+          and await read_all(st, sid) == b"ABC", (ag, await read_all(st, sid, "cast")))
+    # Eşec, apoi un checkpoint fără date noi: tot ce e scris se publică (nu întoarce watermark-ul vechi).
+    rec.feed_out(b"D")
+    rec.feed_cast(cast_line(0.3, "D"))
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
+    await araises(rec.checkpoint(), sqlite3.OperationalError)
+    st.fault = None
+    S = await rec.checkpoint()
+    check("failed publication, then an EMPTY checkpoint: the written batch is published",
+          S["out_len"] == 4 and S["agent"] == ("e1", 4) and (await desc(st, sid, "cast")).generations[-1].plain_len
+          == len(b"h\n" + c1 + c2 + cast_line(0.3, "D")), S)
+    # Restart după o publicare eşuată: reluarea de la offsetul comis dă exact octeţii de după el.
+    rec.feed_out(b"E")
+    rec.feed_cast(cast_line(0.4, "E"))
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
+    await araises(rec.checkpoint(), sqlite3.OperationalError)
+    st.fault = None
+    crash_recorder(st, rec)
+    st2 = store()
+    st2.readopt_enabled = False
+    await st2.recover()
+    r2 = await st2.start_recorder(sid)
+    off = r2.agent_committed[1]
+    agent_stream = b"ABCDE"                       # ce are ringul agentului
+    r2.feed_out(agent_stream[off:])
+    r2.feed_cast(cast_line(0.4, "E"))
+    await r2.checkpoint()
+    check("restart after a failed publication: replay from the committed offset, no byte skipped or doubled",
+          off == 4 and await read_all(st2, sid) == b"ABCDE"
+          and (await read_all(st2, sid, "cast")).count(cast_line(0.4, "E")) == 1, (off, await read_all(st2, sid)))
+    await r2.close()
+    st2.close()
+
+    # gap: păstrat până la publicarea reuşită.
+    st = store(pending_cap=100, total_cap=1 << 20)
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(b"a" * 10)
+    rec.feed_cast(b"h\n")
+    await rec.checkpoint()
+    rec.feed_out(b"x" * 200)                       # overflow
+    C = await rec.resume()
+    rec.gap(200, cast_ts=1.0)
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
+    await araises(rec.checkpoint(), sqlite3.OperationalError)
+    st.fault = None
+    gaps_after_fail = list(rec.gaps)
+    await rec.checkpoint()
+    check("gap recorded only once its marker is published (not consumed by a failed publication)",
+          gaps_after_fail == [] and rec.gaps == [(10, 200)]
+          and await read_all(st, sid) == b"a" * 10 + ts.GAP_MARKER and C[1] == 10, (gaps_after_fail, rec.gaps))
+    # Publicare eşuată, apoi overflow + resume: C include octeţii scrişi (publicaţi la resync).
+    rec.feed_out(b"X")
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError)
+    await araises(rec.checkpoint(), sqlite3.OperationalError)
+    st.fault = None
+    rec.feed_out(b"y" * 200)
+    C = await rec.resume()
+    out_now = await read_all(st, sid)
+    check("resume after a failed publication: written bytes published with their offset, C after them",
+          C[1] == 11 and out_now.endswith(ts.GAP_MARKER + b"X"), (C, out_now[-5:]))
+    # Publicarea pică şi la resync → generaţiile abandonate, C = poziţia comisă, reluare exactă.
+    rec.feed_out(b"Y")
+    st.fault = faults({"txn-between"}, exc=sqlite3.OperationalError, times=2)
+    await araises(rec.checkpoint(), sqlite3.OperationalError)
+    rec.feed_out(b"z" * 200)
+    C = await rec.resume()
+    st.fault = None
+    rec.feed_out(b"Y")                             # reluarea hub-ului de la C
+    await rec.checkpoint()
+    d = await desc(st, sid)
+    check("publication failing again at resume: writers abandoned (recovered), offset not advanced, replay once",
+          C[1] == 11 and await read_all(st, sid) == out_now + b"Y"
+          and td.STATE_RECOVERED in [g.state for g in d.generations], (C, d))
+    await rec.close()
+    st.close()
+
+    # COMMIT incert + poziţia agentului mutată independent: nu e „committed" → readoptare.
+    st = store()
+    st.readopt_enabled = False
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(b"q")
+    rec.feed_cast(b"h\n")
+    await rec.checkpoint()
+
+    def moved(p):
+        if p == "post-commit":
+            con = sqlite3.connect(str(config.DB_PATH), timeout=5)
+            con.execute("UPDATE sessions SET agent_offset=999 WHERE id=?", (sid,))
+            con.commit()
+            con.close()
+            raise sqlite3.OperationalError("lost the COMMIT reply")
+    rec.feed_out(b"r")
+    st.fault = moved
+    ok = await araises(rec.checkpoint(), ts.RecorderLost)
+    st.fault = None
+    check("uncertain COMMIT, agent position moved independently: not taken as committed (re-adoption)",
+          ok and rec.state == "lost")
+    st.close()
+
+
+async def g_review_h2():
+    print("== review H2: epoch change and close are cuts in the FIFO; nothing lost or mis-attributed ==")
+    st = store()
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(b"before")
+    rec.feed_cast(b"h\n")
+    await rec.checkpoint()
+    rec.feed_out(b"-tail")                         # vechiul epoch, încă necapturat
+    hold = Hold("fsync")
+    st.fault = hold
+    fut = asyncio.ensure_future(rec.change_epoch("e2"))
+    entered = await hold.wait_entered()
+    acc1 = rec.feed_out(b"NEW1")                   # noul epoch, sosit în timpul comutării
+    rec.feed_cast(cast_line(0.1, "NEW1"))
+    hold.go.set()
+    await fut
+    st.fault = None
+    ag_switch = tuple(await row("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", sid))
+    out_switch = await read_all(st, sid)
+    await rec.checkpoint()
+    ag = tuple(await row("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", sid))
+    d = await desc(st, sid)
+    check("output during the epoch switch: accepted for the new epoch, not published before the switch",
+          entered and acc1 is True and ag_switch == ("e2", 0) and out_switch == b"before-tail", (ag_switch, out_switch))
+    check("…then published under the new epoch at its own offset, after the old epoch's tail, in order",
+          ag == ("e2", 4) and await read_all(st, sid) == b"before-tailNEW1"
+          and d.generations[-1].plain_len == 4 and d.generations[-2].state == td.STATE_SEALED, (ag, d))
+    rec.feed_out(b"x")
+    f1 = rec.change_epoch("e3")
+    try:
+        rec.change_epoch("e4")
+        two = False
+    except ts.TxStoreError as e:
+        two = e.reason == "busy"
+    await f1
+    check("one epoch change at a time (a second one is refused, not interleaved)", two)
+    await rec.close()
+    st.close()
+
+    # Fără descriptor: comutarea trece prin aceeaşi tranzacţie (CAS pe poziţie).
+    st = store()
+    st.readopt_enabled = False
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    await db.execute("UPDATE sessions SET agent_offset=77 WHERE id=?", sid)   # mutată din afară
+    ok = await araises(rec.change_epoch("e2"), ts.RecorderLost)
+    ag = tuple(await row("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", sid))
+    check("epoch switch without a descriptor: CAS on the agent position (moved → refused, re-adopted)",
+          ok and ag == ("e1", 77) and rec.state == "lost", ag)
+    st.close()
+    st = store()
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    await rec.change_epoch("e2")
+    ag = tuple(await row("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", sid))
+    check("epoch switch without a descriptor commits (e2, 0)", ag == ("e2", 0) and rec.agent_committed == ("e2", 0))
+
+    # Close: ingress oprit la apel; tot ce s-a acceptat înainte se publică; restul refuzat explicit.
+    rec.feed_out(b"one")
+    rec.feed_cast(b"h\n")
+    hold = Hold("fsync")
+    st.fault = hold
+    cf = asyncio.ensure_future(rec.close())
+    entered = await hold.wait_entered()
+    late = rec.feed_out(b"late")
+    state = rec.ingress()
+    hold.go.set()
+    res = await cf
+    st.fault = None
+    check("close drains what was accepted before it; output during close refused with a clear state",
+          entered and late is False and state == "closing" and rec.rejected == 4
+          and await read_all(st, sid) == b"one" and res["rejected"] == 4, (late, state, res))
+    st.close()
+
+    # Close în overflow: lipsă explicită (marker la capăt, mărime raportată, alarmă).
+    st = store(pending_cap=50, total_cap=1 << 20)
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(b"k" * 10)
+    rec.feed_cast(b"h\n")
+    await rec.checkpoint()
+    rec.feed_out(b"z" * 100)
+    res = await rec.close(cast_ts=9.0)
+    ag = await row("SELECT agent_offset FROM sessions WHERE id=?", sid)
+    check("close during an overflow: one GAP_MARKER at the end, size reported, offset not advanced",
+          await read_all(st, sid) == b"k" * 10 + ts.GAP_MARKER and res["lost"] == 100 and ag[0] == 10
+          and any(a[0] == "transcript.gap" for a in st.alarms) and rec.gaps == [(10, 100)], (res, ag))
+    st.close()
+
+
+async def g_review_h3():
+    print("== review H3: fd lifetime — close never releases an fd a worker thread still reads ==")
+    st = store(gen_limits=(4096, 1 << 20))
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    data = os.urandom(300 * 1024)
+    rec.feed_out(data)
+    rec.feed_cast(b"h\n")
+    await rec.close()
+    other = os.path.join(BASE, "other.bin")
+    with open(other, "wb") as f:
+        f.write(b"\xEE" * (400 * 1024))
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    fds = [fd for _g, fd, _s in snap.gens]
+    gen_fds = st._gen_fds
+    hold = Hold("pread")
+    st.fault = hold
+    rt = asyncio.ensure_future(snap.read(0, snap.length))
+    entered = await hold.wait_entered()
+    snap.last_used -= ts.SNAPSHOT_IDLE_SECS + 1
+    st.sweep_idle()                                # închidere logică în timpul pread-ului
+    still_open = all(_fd_open(fd) for fd in fds)
+    reused = os.open(other, os.O_RDONLY)          # încercare de reutilizare a numărului de fd
+    hold.go.set()
+    try:
+        got = await rt
+    except ts.TxStoreError as e:
+        got = e.reason
+    st.fault = None
+    closed_after = not any(_fd_open(fd) for fd in fds)
+    os.close(reused)
+    check("snapshot closed during an in-flight read: its fds stay open until the read returns",
+          entered and still_open and reused not in fds and st._gen_fds == gen_fds - len(fds) and snap.closed,
+          (entered, still_open, reused, fds))
+    check("…and the read never returns another file's bytes (data or aborted)",
+          got == data or got == "aborted", got if isinstance(got, str) else got[:8])
+    check("…the fds are closed once the last reader returned", closed_after)
+    # PlainSnapshot: identitatea fd-ului verificată înaintea FIECĂREI citiri.
+    psid = new_sid()
+    p = os.path.join(config.TRANSCRIPT_DIR, psid + ".out")
+    with open(p, "wb") as f:
+        f.write(b"P" * 1000)
+    s = os.stat(p)
+    await db.execute("INSERT INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state) "
+                     "VALUES(?,?,?,?,?,?,?,?,'pending')", psid, "out", "transcripts", psid + ".out",
+                     s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+    ps = await st.open(psid, "out", access=await access(st, psid))
+    o = os.open(other, os.O_RDONLY)
+    os.dup2(o, ps.fd)                              # numărul de fd arată acum spre alt fişier
+    os.close(o)
+    ok = await araises(ps.read(0, 100), ts.TxStoreError, "downgrade")
+    ps.close()
+    check("PlainSnapshot: fd number now naming another inode → refused before any byte is read", ok)
+    q = os.path.join(config.TRANSCRIPT_DIR, new_sid() + ".out")
+    with open(q, "wb") as f:
+        f.write(b"Q" * 10)
+    qs = os.stat(q)
+    qsid = new_sid()
+    await db.execute("INSERT INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state) "
+                     "VALUES(?,?,?,?,?,?,?,?,'pending')", qsid, "out", "transcripts", os.path.basename(q),
+                     qs.st_dev, qs.st_ino, qs.st_size, qs.st_mtime_ns)
+    check("PlainSnapshot: an inventory row naming another sid's file → refused",
+          await araises(read_all(st, qsid), ts.TxStoreError, "downgrade"))
+    # Anulare (repetată) în timpul deschiderii: nimic construit nu rămâne înregistrat / deschis.
+    before = (st._gen_fds, st._slots, len(st._snapshots))
+    hold = Hold("open-fds")
+    st.fault = hold
+    ot = asyncio.ensure_future(st.open(sid, "out", access=await access(st, sid)))
+    entered = await hold.wait_entered()
+    ot.cancel()
+    await asyncio.sleep(0.01)
+    ot.cancel()
+    hold.go.set()
+    try:
+        await ot
+        cancelled = False
+    except asyncio.CancelledError:
+        cancelled = True
+    st.fault = None
+    check("open cancelled twice while the thread builds: the built snapshot is closed, budgets restored",
+          entered and cancelled and (st._gen_fds, st._slots, len(st._snapshots)) == before,
+          (entered, cancelled, before, (st._gen_fds, st._slots, len(st._snapshots))))
+    # Admitere atomică: două deschideri concurente pe ultimul slot → exact una trece.
+    old_max = ts.MAX_SNAPSHOTS
+    ts.MAX_SNAPSHOTS = st._slots + 1
+    a = await access(st, sid)
+    r = await asyncio.gather(st.open(sid, "out", access=a), st.open(sid, "out", access=a), return_exceptions=True)
+    ts.MAX_SNAPSHOTS = old_max
+    oks = [x for x in r if isinstance(x, ts.Snapshot)]
+    busy = [x for x in r if isinstance(x, ts.TxStoreError) and x.reason == "busy"]
+    for x in oks:
+        x.close()
+    check("snapshot admission is reserved atomically (concurrent opens on the last slot: one busy)",
+          len(oks) == 1 and len(busy) == 1, r)
+    # Store.close cu un cititor în zbor: dir_fd şi conexiunile rămân până se întoarce thread-ul.
+    st2 = store()
+    snap = await st2.open(sid, "out", access=await access(st2, sid))
+    hold = Hold("pread")
+    st2.fault = hold
+    rt = asyncio.ensure_future(snap.read(0, 1000))
+    entered = await hold.wait_entered()
+    dfd = st2.dir_fd
+    st2.close()
+    kept = st2.dir_fd is not None and _fd_open(dfd)
+    hold.go.set()
+    try:
+        await rt
+    except ts.TxStoreError:
+        pass
+    check("Store.close during a read: the directory fd is released only after the worker returned",
+          entered and kept and st2.dir_fd is None)
+    st.close()
+
+
+def _fd_open(fd):
+    try:
+        os.fstat(fd)
+        return True
+    except OSError:
+        return False
+
+
+async def g_review_m():
+    print("== review M1–M4 + activation gate ==")
+    # M1: porniri concurente.
+    st = store()
+    sid = new_sid()
+    await add_session(sid)
+    r = await asyncio.gather(st.start_recorder(sid), st.start_recorder(sid), return_exceptions=True)
+    recs = [x for x in r if isinstance(x, ts.Recorder)]
+    busy = [x for x in r if isinstance(x, ts.TxStoreError) and x.reason == "busy"]
+    if recs:
+        recs[0].feed_out(b"one")
+        recs[0].feed_cast(b"h\n")
+        await recs[0].close()
+    check("two concurrent start_recorder: one writer, the other refused (no recovery over the first)",
+          len(recs) == 1 and len(busy) == 1 and await read_all(st, sid) == b"one", r)
+    # M1: ENOSPC la a doua generaţie la pornire → nimic lăsat în urmă.
+    sid = new_sid()
+    await add_session(sid)
+    nfd = len(os.listdir("/proc/self/fd"))
+    st.fault = faults({"header"}, exc=lambda p: OSError(28, "No space left on device"), times=1)
+    hook = st.fault
+    calls = {"n": 0}
+
+    def second_header(p):
+        if p == "header":
+            calls["n"] += 1
+            if calls["n"] == 2:
+                hook(p)
+    st.fault = second_header
+    ok = await araises(st.start_recorder(sid), OSError)
+    st.fault = None
+    lg = await ledger(sid)
+    check("ENOSPC at the second generation on start: fds closed, generations retired, token dropped",
+          ok and len(os.listdir("/proc/self/fd")) == nfd and sid not in st.tokens
+          and set(lg.values()) <= {"gone"} and not [n for n in names(sid) if n.endswith(".wtx")], (lg, names(sid)))
+    rec = await st.start_recorder(sid)
+    check("…and a later start works", rec.state == "running")
+    # M1: un SEAL/fsync eşuat la roll = defect de scriere, recorderul rămâne utilizabil.
+    rec.feed_out(b"pre")
+    rec.feed_cast(b"h\n")
+    await rec.checkpoint()
+    st.fault = faults({"seal"}, exc=OSError)
+    ok = await araises(rec.cap_now(), ts.TxStoreError, "writeFailed")
+    st.fault = None
+    C = await rec.resume()
+    rec.feed_out(b"post")
+    await rec.checkpoint()
+    check("seal failure during a roll → writeFailed + resume, recorder keeps a current generation",
+          ok and rec.state == "running" and all(rec.cur[k] is not None for k in ts.KIND_NAMES)
+          and await read_all(st, sid) == b"prepost" and C[1] == 3, (C, await read_all(st, sid)))
+    await rec.close()
+    # M1: shutdown cu un worker blocat: aşteptat cu limită, fără readoptare, alarmă.
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    old = ts.SHUTDOWN_SECS
+    ts.SHUTDOWN_SECS = 0.1
+    hold = Hold("fsync")
+    st.fault = hold
+    rec.feed_out(b"x")
+    cp = asyncio.ensure_future(rec.checkpoint())
+    await hold.wait_entered()
+    await st.shutdown()
+    blocked_alarm = any(a[0] == "transcript.shutdown" and "fds abandoned" in a[1] for a in st.alarms)
+    hold.go.set()
+    with contextlib.suppress(BaseException):
+        await cp
+    await asyncio.sleep(0.05)
+    ts.SHUTDOWN_SECS = old
+    st.fault = None
+    check("shutdown with a blocked worker: bounded wait, alarm, no re-adoption",
+          blocked_alarm and rec._task.done() and st.recorders.get(sid) is rec and rec.state == "lost",
+          (blocked_alarm, rec._task.done(), st.alarms[-3:], list(st.recorders)))
+    st.close()
+
+    # M2: re-autorizarea nu poate schimba subiectul; cache-ul e legat de sid şi rută.
+    st = store()
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(b"m2 data")
+    rec.feed_cast(b"h\n")
+    await rec.close()
+    other = new_sid()
+
+    async def reauth_other_principal():
+        return st.access(sid, "someone-else", "test")
+    acc = await access(st, sid)
+    st.bump(sid)
+    ok = await araises(st.open(sid, "out", access=acc, reauthorize=reauth_other_principal), ts.Revoked, "bad-access")
+    check("re-authorization returning another principal's grant → refused", ok)
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    it = snap.iter(0, snap.length, chunk=2, reauthorize=reauth_other_principal)
+    await it.__anext__()
+    st.bump()
+    ok = await araises(it.__anext__(), ts.Revoked, "bad-access")
+    await it.aclose()
+    check("stream re-authorization with another grant → aborted", ok)
+    snap.close()
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    cache = ts.ResponseCache(st, size=2)
+    k = cache.key(snap, 1, representation="raw")
+    cache.put(k, b"R", snap.access)
+    check("cache refuses an Access for another sid (or route)",
+          _raises(lambda: cache.get(k, st.access(other, "u1", "test")), ts.TxStoreError)
+          and _raises(lambda: cache.get(k, st.access(sid, "u1", "replay")), ts.TxStoreError))
+    check("raw and redacted responses never share a cache key",
+          cache.key(snap, 1, representation="raw") != cache.key(snap, 1, representation="redacted"))
+    snap.close()
+    clock = {"t": 1000.0}
+    st.clock = lambda: clock["t"]
+
+    def expire(p):
+        if p == "pread":
+            clock["t"] += 100
+    snap = await st.open(sid, "out", access=await access(st, sid, not_after=1050.0))
+    st.fault = expire
+    ok = await araises(snap.read(0, snap.length), ts.Revoked)
+    st.fault = None
+    snap.close()
+    check("access expiring during the decrypt → nothing handed over", ok)
+    st.clock = time.time
+    st.close()
+
+    # M3: linie completă prea lungă; verify cu buget tare; plafonul fizic la I/O.
+    async def one(c):
+        yield c
+    try:
+        [x async for x in ts.iter_lines(one(b"x" * 100 + b"\n"), max_line=10)]
+        over = False
+    except ts.TxStoreError as e:
+        over = e.reason == "limitExceeded"
+    check("iter_lines: a complete line longer than the cap is refused before it is yielded", over)
+    st = store()
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    rec.feed_out(os.urandom(64 * 1024))
+    rec.feed_cast(b"h\n")
+    await rec.close()
+    v = await st.verify(sid, budget=1024)
+    check("verify: a generation larger than the pass budget is not verified (limitExceeded, not ok)",
+          not v["ok"] and v["limitExceeded"] and any("limitExceeded" in p for p in v["problems"]), v)
+    d = await desc(st, sid)
+    fd = os.open(os.path.join(config.TRANSCRIPT_DIR, ts.gen_name(sid, "out", d.generations[0].gen_id.hex())), os.O_RDONLY)
+    b = ts.Budget(10, phys=50)
+    pr = ts._PRead(fd, 0, limit=40, budget=b)
+    first = pr.read(100)
+    try:
+        pr.read(100)
+        cut = len(first) == 40
+    except ts.TxStoreError:
+        cut = False
+    b2 = ts.Budget(10, phys=50)
+    try:
+        ts._PRead(fd, 0, limit=1000, budget=b2).read(100)
+        phys_refused = False
+    except ts.TxStoreError as e:
+        phys_refused = e.reason == "limitExceeded" and b2.phys_used == 0
+    os.close(fd)
+    check("parse reads never pass phys_len, and the physical budget is charged BEFORE the pread",
+          cut and phys_refused)
+    st.close()
+
+    # M4: cap pe o înregistrare istorică cu un singur kind.
+    st = store(max_bytes=1 << 30, keep_bytes=100)
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    blob = os.urandom(5000)
+    rec.feed_out(blob)
+    await rec.checkpoint()
+    ok = await rec.cap_now(truncate=True)
+    check("cap of a one-kind recording: 3.7 rule on its own stream (no capOneKind failure)",
+          ok and await read_all(st, sid) == ts.GAP_MARKER + blob[-100:])
+    await rec.close()
+    st.close()
+
+    # Poarta de activare.
+    env = {"WEBTERM_TX_RECORDINGS": "1", "WEBTERM_TEST_GATE": "0"}
+    check("WEBTERM_TEST_GATE=0 is off (not truthy)", not ts.test_gate(env) and not ts.test_gate({"WEBTERM_TEST_GATE": "true"}))
+    check("Store refused with WEBTERM_TEST_GATE=0", await araises(_mk(env), ts.TxStoreError, "disabled"))
+    outside = os.path.join(os.path.dirname(__file__), "no-such-volume.db")
+    check("create_test_volume refused outside a harness temp dir (nothing created)",
+          _raises(lambda: ts.create_test_volume(outside), ts.TxStoreError) and not os.path.exists(outside))
+    real = os.path.join(BASE, "real.db")
+    con = sqlite3.connect(real)
+    con.executescript("CREATE TABLE users(id INTEGER); CREATE TABLE hosts(id INTEGER); "
+                      "CREATE TABLE tx_state(key TEXT PRIMARY KEY, value TEXT); INSERT INTO users VALUES(1);")
+    con.commit()
+    con.close()
+    check("create_test_volume refused on a DB with users rows (a real installation)",
+          _raises(lambda: ts.create_test_volume(real), ts.TxStoreError)
+          and sqlite3.connect(real).execute("SELECT COUNT(*) FROM tx_state").fetchone()[0] == 0)
+    copy = os.path.join(BASE, "copy.db")
+    src = sqlite3.connect(str(config.DB_PATH))
+    dst = sqlite3.connect(copy)
+    src.backup(dst)
+    src.close()
+    dst.close()
+    check("a copied / restored DB keeps no valid marker (identity binding) → Store refused",
+          await araises(_mk_db(copy), ts.TxStoreError, "disabled"))
+    missing = os.path.join(BASE, "missing.db")
+    check("Store with a missing DB: refused, the file is not created",
+          await araises(_mk_db(missing), ts.TxStoreError, "disabled") and not os.path.exists(missing))
+
+
+async def _mk_db(path):
+    return store(db_path=path)
+
+
+
 async def main():
     await db.connect()
     try:
@@ -1100,6 +1705,10 @@ async def main():
         await g_pair_and_keys()
         await g_backpressure()
         await g_misc()
+        await g_review_h1()
+        await g_review_h2()
+        await g_review_h3()
+        await g_review_m()
     finally:
         await db.close()
 

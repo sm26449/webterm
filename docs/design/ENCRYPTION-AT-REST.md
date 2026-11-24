@@ -1739,7 +1739,7 @@ unwraps an RK (a source-scan test, like `conntypes_test`).
 
 | Call | Does |
 |---|---|
-| `open(sid, kind, *, access)` → `Snapshot` | `access` is the `txstore.Access` object produced by the route's own authorization step (principal, route, the authz decision and the revocation epochs read **before** that decision), never a purpose string. Decode the descriptor (MAC, installation, sid, kind, flags, RK envelope hash), refuse tombstoned / `damaged` / `absent` / corrupt always, and `quarantined` unless `access` comes from the Owner-recovery route (§12.11.4: it lifts **only** the continuity quarantine), unwrap the RK, open and check the fds of the generations, verify each header against the descriptor's `hdr_mac`, record `list_epoch`; then the linearisation check below. Plaintext (`PlainSnapshot`, same API, one fd) only for a (sid, kind) whose `tx_migration` row is `pending` and whose file still matches the row's (`dev`, `ino`, `size`, `mtime_ns`). Refused as a downgrade (`transcript.downgrade`, alarm): a plaintext file for a sid that has a descriptor, an RK, a descriptor with the `converted` flag, or a `tx_migration` row in any other state (`converted`, `unlinked`, …) — **even if its descriptor is missing** — a plaintext not in the inventory, and any plaintext once `recordings_format = wtx1`. |
+| `open(sid, kind, *, access)` → `Snapshot` | `access` is the `txstore.Access` object produced by the route's own authorization step (principal, route, the authz decision and the revocation epochs read **before** that decision), never a purpose string. Decode the descriptor (MAC, installation, sid, kind, flags, RK envelope hash), refuse tombstoned / `damaged` / `absent` / corrupt / `quarantined` always; a recording in `status = recovery` (moved there one at a time by the Owner-recovery action of §12.11.4, which lifts **only** the continuity quarantine) opens only for an `access` from the Owner-recovery route, unwrap the RK, open and check the fds of the generations, verify each header against the descriptor's `hdr_mac`, record `list_epoch`; then the linearisation check below. Plaintext (`PlainSnapshot`, same API, one fd) only for a (sid, kind) whose `tx_migration` row is `pending` and whose file still matches the row's (`dev`, `ino`, `size`, `mtime_ns`). Refused as a downgrade (`transcript.downgrade`, alarm): a plaintext file for a sid that has a descriptor, an RK, a descriptor with the `converted` flag, or a `tx_migration` row in any other state (`converted`, `unlinked`, …) — **even if its descriptor is missing** — a plaintext not in the inventory, and any plaintext once `recordings_format = wtx1`. |
 | `Snapshot.length` | committed logical length (Σ plain_len) |
 | `Snapshot.read(start, end, *, budget)` / `iter(start, end, *, chunk, budget)` | plaintext of [start, end) |
 | `tail(sid, kind, limit, *, end=None)` | (bytes, end, epoch) of the last `limit` committed bytes, or up to `end` |
@@ -2350,16 +2350,51 @@ Owner decisions (§12.11.8) unchanged; M5 tightened their wording in §12.11.4, 
 
 #### 12.11.10 Implementation notes (PR5a, txstore)
 
-Recorded from the PR5a implementation, to be reviewed with it: `tx_descriptors.list_epoch` is an
-unauthenticated column (drives resume/OSC 133 offset consistency only); WTD1's former reserved u16
-is `flags` (`FLAG_CONVERTED = 1`, unknown bits refused, `ver` stays 1; flags 0 keeps the v1 bytes);
-`txformat.RecordCursor` is the public checked parse-from-entry API used by readers and `verify`; an
-RK-binding failure (`rk-mismatch`, `bad-rk-envelope`) is reported as `keyError`, and recovery skips
-all ledger clean-up for a sid whose descriptor cannot be authenticated; a gap is written as 3.7's
-`GAP_MARKER` bytes at the committed position, its size kept in memory and raised through the alarm
-hook (audit), not inside the recording; `verify`'s resumable cursor is per generation; retire uses
-`fstatat` + `unlinkat` on the directory fd (the `renameat2` scheme stays for PR6 migration).
-Still to do for the appendix: a WTD1 vector with `flags = converted`.
+Recorded from the PR5a implementation and revised after its review (2026-11-24):
+
+- `tx_descriptors.list_epoch` is an unauthenticated column: a hint for resume / OSC 133 offset
+  consistency only. Routes must never use it as proof of authorization or integrity, and re-check
+  the committed bounds when they resync.
+- WTD1's former reserved u16 is `flags` (`FLAG_CONVERTED = 1`, unknown bits refused, `ver` stays 1;
+  flags 0 keeps the v1 bytes). A WTD1 vector with `flags = converted` must be added to the appendix
+  before any interoperability.
+- `txformat.RecordCursor` is the public checked parse-from-entry API used by readers and `verify`
+  (type, seq, tag, watermark on seq). Every parse reads through a reader clamped to the
+  generation's committed `phys_len`, and the request budget is charged for physical bytes before
+  each read, so no byte past the committed prefix is ever read.
+- An RK-binding failure (`rk-mismatch`, `bad-rk-envelope`) is reported as `keyError`, and recovery
+  skips all ledger clean-up for a sid whose descriptor cannot be authenticated.
+- Publication unit (§12.11.1): a checkpoint whose publication fails is not lost. The bytes stay in
+  the writers and the next publication carries everything the writers hold beyond the committed
+  prefix (both kinds), together with the agent position of the last appended capture. If that
+  publication fails again at a `resume`, the generations are abandoned (published live →
+  `recovered` at its committed counts, unpublished → retired), and the offset never covers bytes
+  that are not published. An uncertain COMMIT is resolved by re-reading the descriptors, the agent
+  position and the ledger rows in one read transaction.
+- Epoch change and close are cuts taken synchronously at the call. Bytes fed before
+  `change_epoch(e)` are published under the old position; bytes fed after it count from offset 0
+  of `e` and are published only after the switch has committed. The switch goes through the same
+  CAS'd transaction even with no descriptor. A failed switch re-adopts from the DB. `close()` stops
+  ingress at the call: later bytes are refused (`rejected`), and everything accepted before is
+  drained. An overflow still open at close becomes one `GAP_MARKER` at the end. `feed_*` return
+  whether the bytes were accepted.
+- A gap is written as 3.7's `GAP_MARKER` bytes at the committed position and never advances the
+  agent offset. Its size is kept in memory (`gaps`, once the marker is published) and raised
+  through the alarm hook (audit), not written into the recording. That is acceptable as telemetry
+  only if PR5b correlates the published marker and the audit record durably.
+- `quarantined` does not encode its reason, so it is refused for everyone. Owner recovery opens only
+  `status = recovery`, and only with an `Access` issued by the Store for the recovery route.
+  Re-authorization and cached responses are bound to the same sid, principal and route. Raw and
+  redacted responses never share a cache entry.
+- Snapshot fds are refcounted: a close is logical, and the fds are closed by the last reader
+  thread. Admission (slots, fds) is reserved before any fd is opened. A legacy `PlainSnapshot`
+  re-checks the fd's identity (regular, one link, dev, ino, size, mtime) before every read, and
+  its inventory name must be exactly `<sid>.<kind>`.
+- `verify` has a hard per-pass budget on physical bytes. A generation larger than one pass is
+  reported `limitExceeded` (the report is not `ok`). Its resumable cursor is per generation.
+- Retire uses `fstatat` + `unlinkat` on the directory fd. That holds only under the exclusivity of
+  the coordinated actors (lease, pins), with no anti-TOCTOU promise against an external
+  replacement. The `renameat2` scheme stays for PR6 migration.
 
 ## Appendix: Test vectors (v1)
 
