@@ -1418,6 +1418,40 @@ passed review and the tests of §12.11.7 pass. Revised after the independent rev
 review" until a second review closes §12.11.9. PR5 may land `txstore` and its fixtures before
 then, with writers and migration **not** enabled.
 
+**PR5/PR6 boundary (recheck ee2068b, R-H1).** PR5 ships the writer, the readers and the backup
+path of this section with **recording encryption disabled by default**; PR6 ships the migration
+(§12.11.5), the erasure journal (§12.11.4) and the continuity quarantine. Normative for a PR5
+build:
+
+- *The flag.* Recording encryption is switched on only by `WEBTERM_TX_RECORDINGS=1`. No compose
+  file, `.env` example, installer or documentation sets it; only the test gates do. Absent, empty
+  or any other value → off.
+- *Off (the default), on any volume, legacy or protected.* Recordings are written, read, shared,
+  searched, capped and backed up **exactly as in 3.7**: plaintext `.out`/`.cast`, the 3.7 recorder,
+  the 3.7 readers, the v1 backup members. No `tx_descriptors`/`tx_files`/`session_keys` row is
+  created for a recording. A volume on which such rows or generation files exist (left by a test
+  or by a later build) is not served by the plaintext path: boot refuses with an Owner-facing
+  message (`recordings encrypted by a newer build`), never reads them as absent.
+- *On.* Boot evaluates, after keyring and schema and before reconcile: `migration.ready()`,
+  `erasure_journal.ready()` and `quarantine.ready()` (each a PR6 component reporting that its tables,
+  its journal head and its recovery pass are in place). In a PR5 build these do not exist and
+  report **not ready**, so boot **refuses** the flag on a protected volume (exit with a clear
+  message, System health not reached; the operator removes the flag). The only exception is a
+  volume created by the test fixture helper, which writes `tx_state.test_volume = 1` at creation;
+  nothing else sets it, a restore refuses an archive whose DB carries it, and a gateway that finds
+  it outside a test gate (`WEBTERM_TEST_GATE` unset) refuses to boot. Enabling on a real volume
+  therefore requires PR6.
+- *Restore and backup in PR5.* No backup or restore report claims erasure continuity before the
+  journal exists: a PR5 manifest records `erasure: not-tracked` and lists recordings as plaintext
+  v1 members; restore reports "erasure history: not tracked by this version" and applies no
+  journal reconciliation. An archive carrying WTX1 generations or a WTJ1 journal member is refused
+  by a PR5 build outside a test volume (it cannot honour the access and erasure contract they
+  imply), never restored without them.
+- *Absent vs lost journal.* PR6 distinguishes a dataset that never had a journal (`erasure:
+  not-tracked` in its manifest, or a pre-3.8 archive) from one that had it and lost it (manifest
+  says `tracked`, member missing or unauthentic → quarantine, §12.11.4). PR5 writes only the
+  first form.
+
 #### 12.11.0 Layout and tables
 
 - **Files:** `transcripts/<sid>.<k>.<gen>.wtx` (`k` = `out` | `cast`, `gen` = the gen_id as 32
@@ -1559,13 +1593,22 @@ the stated limit (§12.1).
    `.out` plain_len grew; `sessions.agent_epoch, agent_offset` from S (never the current values).
    Commit → `hub.committed = S`. Exclusive watermark = `data_count`.
 
-**Backpressure (M4).** The pending buffers are capped at 8 MiB per sid. While a job (or a barrier
-held by a backup's `VACUUM INTO`) delays the next checkpoint, output keeps going to browsers and
-into the buffer; past the cap the recorder stops buffering, records the gap position (the `.out`
-logical end at that instant) and rewinds `agent_offset` to the committed value, exactly the
-failure path below: the bytes come back from the agent ring when the queue drains, or as a
-`GAP_MARKER` at the recorded position when the ring no longer has them. A single record append is
-bounded (≤ 64 KiB, one `os.write`) and never runs on the loop.
+**Backpressure (M4; recheck ee2068b, R-H2).** Bounds: the pending buffers are capped at 8 MiB per
+sid **and** 64 MiB for the whole process (`REC_BUFFER_TOTAL`); a job's in-flight batch counts
+against both until the job resolves. While a job (or a barrier held by a backup's `VACUUM INTO`)
+delays the next checkpoint, output keeps going to browsers and into the pending buffer. When a cap
+would be crossed, that sid enters **overflow**: the recorder discards its *pending* buffer (never
+the batch in flight), stops buffering and counts the dropped bytes. It does **not** rewind
+`agent_offset` (memory or DB) while a job is in flight. When the in-flight job has resolved
+(committed, not committed, or the worker lost — "Supervision" below), the recorder re-reads the
+committed position C (descriptor counts + `sessions.agent_epoch/agent_offset`, one read
+transaction) and resumes from C: on an agent host the stream is re-attached at C's agent offset and
+the bytes from there come back from the ring (to the recorder only, never again to browsers); the
+bytes the ring no longer has — and on SSH, telnet and serial, every dropped byte — become **one**
+`GAP_MARKER` at `.out` logical position C carrying the dropped length (the same pair as a `.cast`
+gap event). The recording is `degraded` (§12.11.8 Q5) from the first dropped byte until that marker
+is committed: System health alarm and an audit entry with position and size. A single record
+append is bounded (≤ 64 KiB, one `os.write`) and never runs on the loop.
 5. Readers trust exactly `hub.committed` / the descriptor. Because step 2 captures the offset and
    the counts together, the committed agent offset is always the end of the committed prefix: a
    restart replays from there into a new generation, so the 3.7 duplicate after a crash (bytes in
@@ -1585,6 +1628,39 @@ while degraded (agent restarted) → nothing is replayed from the old ring, the 
 the writer-change job opens a new generation. SSH, telnet and serial sources have no agent ring:
 bytes lost while degraded are gone, the marker records that. A key fault is different: it
 **refuses** the hub (above); only write faults degrade.
+
+**Supervision, worker loss and restart (recheck ee2068b, R-H2).** A batch is `queued` (in the
+pending buffer), `in-flight` (swapped into a job) or `durable` (its commit observed and
+`hub.committed` updated). The **only** source of the resume point is the committed state: the two
+descriptors and `sessions.agent_epoch/agent_offset`, written in the same transaction (hot path
+step 4). Memory is a cache of it and is never trusted after a fault.
+
+- *Supervisor.* One process-wide supervisor awaits every Recorder worker task. Each job's future
+  is resolved in the worker's `finally` (its result, or `RecorderLost`), so no caller waits on a
+  future without an owner. A job's fds and its lease are released only after its blocking I/O call
+  has really returned: a thread still inside `write`/`fsync` keeps them, and the worker joins it
+  before closing anything.
+- *Worker dies or is cancelled mid-job* (an exception outside the job's own handling, or the
+  shutdown cancel after the 5 s budget): the supervisor marks the Recorder `lost`, refuses new jobs
+  for the sid, waits for any thread still in I/O, closes the fds, then re-adopts the sid exactly as
+  boot crash recovery does for one sid (table below): descriptors, ledger and agent position
+  re-read on a fresh connection in one read transaction; the live generation becomes `recovered` at
+  its committed counts; a new generation is opened by a writer-change job; the stream is re-attached
+  at the committed agent offset. Pending and in-flight bytes in memory are dropped, never appended
+  to the new generation: the ring re-delivers them, or they become the gap marker above.
+- *Retry after an uncertain commit* ("Uncertain outcome" above) may only re-publish the same capture
+  whose records are already written and fsynced; a batch is never appended a second time.
+- *Shutdown and gateway restart.* Jobs that did not finish within the 5 s shutdown budget are
+  abandoned with the process; the next boot has no memory state and derives everything from the DB
+  and the directory (crash recovery below), creates the hub with `hub.committed` = the DB values,
+  and the first attach replays from the committed `agent_offset` (agent hosts with the same epoch)
+  or writes a gap marker (no ring, or the agent epoch changed).
+- *Guarantee.* Every agent byte up to the committed agent offset appears in `.out` **exactly
+  once**, or lies inside an interval recorded by a gap marker that carries its position and length;
+  nothing past the committed offset is ever assumed recorded. Tests (#19, extended): kill the worker
+  after the swap, during an append, after the fsync and at `COMMIT`; fill the per-sid and the
+  process cap during a commit; restart the gateway mid-burst; each asserts no duplicate and no
+  unmarked hole by comparing the decrypted `.out` with the agent stream.
 
 **Seal, roll, close.**
 
@@ -1706,10 +1782,49 @@ stream (≤ 64 KiB plaintext, one DATA record or less; also for `PlainSnapshot` 
 output), and (c) before a single-shot response is handed to the transport. A changed sid counter
 or a tombstone → the stream is aborted (connection reset, no trailer; audited). A changed global
 counter → the stream pauses and re-runs the route's own authorization for its principal (the same
-dependency, share-token or replay-token lookup); denied → aborted. **Max delay** after the
-linearisation of a revocation: the chunk already being written plus what the transport already
-holds, ≤ 64 KiB + the server's write buffer high-water mark (64 KiB), and no new decrypt. Bytes
-already handed to the transport before the revocation are not recalled (stated limit).
+dependency, share-token or replay-token lookup); denied → aborted. Every recording response larger
+than 64 KiB is streamed under check (b); the only single-shot bodies are the ones built whole with
+a route cap (preview, text view, `/api/replay/text`, search results), checked once at (c).
+
+**Expiry (recheck ee2068b, R-H3).** `access` carries `not_after`: the earliest time limit the
+authorization relied on — a time-bound binding's `expires_at`, the share link's or replay token's
+expiry, the login session's absolute and idle expiry, and the step-up window when the route
+required step-up. Each check (a)–(c) also compares the monotonic clock with `not_after`; past it →
+the stream pauses and re-runs the authorization as for a global bump; denied → aborted. An expiry
+needs no counter bump. Because a stalled transport never reaches the next check, every open stream
+also has a timer that fires at `not_after` and on every counter bump: it runs the same check and,
+on a refusal, closes the transport and sets the worker's cancel flag.
+
+**Commit/bump fence (R-H3).** A revocation is a DB commit on the DB thread followed by work on the
+loop; a check that ran between the two would pass on old counters. Closed by **bump before commit,
+re-check after**: every access-reducing write (the lists in "Revocation" above) first, synchronously
+on the loop, bumps the counter(s) and sets `fence_pending` for that scope (the sid, or global),
+then submits its transaction; while a fence is pending every check in its scope fails into the
+re-authorization path, and re-authorization **awaits the fence** (commit or rollback) before it
+queries. After the commit or rollback the counters are bumped again and the fence cleared.
+Re-authorization captures the counters before its query and checks them again after its fds are
+open; a mismatch repeats once, then refuses. A refusal closes every fd of the snapshot; each
+re-authorization builds a fresh `access`, never reusing the previous one. **Writers in another
+process** (`python3 -m app.admin` `passwd`, `logout-all`, `disable-2fa`, `sso-only`, `roles` while
+the gateway runs) increment a persisted `tx_state.access_gen` in the same transaction as their
+change; the gateway polls it every second and bumps `access_epoch` when it moved (a poll that fails
+twice in a row also bumps it). For those writers the linearisation point is the poll that observes
+the change, so the stated delay is ≤ 1 s plus the two-part bound below.
+
+**What a revocation stops** (replaces the earlier "≤ 64 KiB + 64 KiB" figure, which did not follow
+from these rules; recheck R-M3). Two separate statements:
+
+1. *Application guarantee.* From the linearisation point of a revocation or expiry (the fence for
+   in-process writers, the observing poll for others), the application authorizes **no further
+   unit** of that stream: at most the one unit whose check had already passed — one chunk of
+   ≤ 64 KiB plaintext, or one single-shot body up to its route cap — is handed to the transport,
+   and no new decrypt is started for the stream (a worker inside one record finishes it, its output
+   is discarded).
+2. *Transport, not recallable.* Bytes already handed to the transport — the ASGI server's buffer,
+   TLS, the kernel socket send buffer, Traefik or any proxy, the browser — are outside the
+   application and cannot be recalled. Their amount depends on the send buffer and proxy buffering
+   and is **not bounded by this design**; no end-to-end byte figure is promised. The test (#15)
+   asserts statement 1 only: no unit is authorized after the fence.
 
 **Caches** are keyed by (sid, kind, descriptor version, generation-list digest, redaction policy
 version, `revocation_epoch[sid]`, `access_epoch`) and are dropped on any bump of those counters;
@@ -1780,6 +1895,54 @@ reads recordings. Who calls it:
 | `hostops backup --live` (host script, other process) | the running gateway, through a local control socket `DATA_DIR/.ctl/backup.sock` (directory 0700, owned by the gateway uid; peer checked with `SO_PEERCRED`: uid 0 or the gateway uid); the gateway runs the same function and streams the WTS1 file back. No socket answer while the boot lock is held by a running gateway → **refused** (never a direct read of a live volume) |
 | `hostops backup` with the app stopped | the host process itself, after taking the boot lock (§12.2: process exclusivity stands in for the barrier), same function |
 | verify / staging of an archive | no snapshot: reads the archive only (§12.10) |
+
+**Control socket protocol (recheck ee2068b, R-M1).** The socket serves live backup only; any
+other use needs its own design.
+
+- *Creation* (boot, under the boot lock, after crash recovery, before routes serve): `DATA_DIR/.ctl`
+  is opened as a directory fd with `O_NOFOLLOW` and checked on that fd (directory, owner = gateway
+  uid, mode 0700; otherwise boot alarm and no socket → live backup refused). A leftover
+  `backup.sock` is unlinked through the dir fd only if `fstatat(…, AT_SYMLINK_NOFOLLOW)` shows a
+  socket owned by the gateway uid; anything else → alarm, no socket. The socket is bound through
+  the dir fd, mode 0600. The spool directory `.ctl/spool/` is emptied at the same point.
+- *Peer check* before reading any byte: `SO_PEERCRED` uid, as seen in the gateway's namespace, must
+  be 0 or the gateway uid; otherwise the connection is closed and audited (peer uid, pid). A host
+  root that the container's user namespace maps to another uid is refused (fail closed; the
+  documented path is `docker exec` into the container as root).
+- *Framing.* Each frame = 4-byte big-endian length + payload. Requests are JSON objects ≤ 4 KiB:
+  `{"v": 1, "op": …, "id": …}` plus only the op's allowlisted keys; an unknown version, op or key,
+  a larger frame or invalid JSON → one `error` frame and close. No secret crosses the socket in
+  either direction except the archive bytes themselves; the archive is in the form the in-app
+  download of the same profile produces (its encryption per §12.10).
+- *Operations* (the only ones):
+  - `snapshot.start {profile, recordings: "all" | "none"}` → the gateway runs `backup_snapshot()`
+    into a private spool file (`O_EXCL`, 0600, random name), fsyncs it, then runs the **full
+    archive verification** (§12.10 verify) on the spool. Only after it passes: `{"ok": true,
+    "snap": <id>, "size": n, "sha256": h}`. Before that nothing of the container is sent; a failed
+    snapshot or verification → `{"ok": false, "code": "backup.busy" | "backup.failed"}`, spool
+    unlinked. Free disk is checked first (estimated size + 10 %), else `backup.noSpace`.
+  - `snapshot.read {snap, offset, length ≤ 1 MiB}` → a header frame `{"ok": true, "offset",
+    "length"}` and one data frame read from the spool only.
+  - `snapshot.release {snap}` → spool unlinked, `{"ok": true}`.
+- *Timeouts and holds.* First request ≤ 10 s after connect, then ≤ 60 s between requests; each
+  response frame must be written within 30 s (a slow peer is disconnected). `snapshot.start`
+  answers within 15 min or fails `backup.busy`. The barrier and the recording pins are held only
+  during snapshot steps 1–4 under their own budgets (VACUUM 120 s) and **at most 10 min in total**;
+  beyond → the snapshot is aborted (`backup.busy`), barrier and pins released. Pins end when the
+  spool is complete (it is a copy); a ready spool lives ≤ 15 min, and ≤ 60 s without a read.
+- *Concurrency.* At most 2 connections and **one** snapshot in flight process-wide (shared with the
+  in-app and scheduled backups' slot); a further connection is closed at accept, a further
+  `snapshot.start` gets `backup.busy`.
+- *Disconnect.* On EOF, reset or timeout at any stage: a snapshot already submitted to the worker
+  is owned by that worker, which checks a cancel flag between steps and on exit unlinks the spool
+  and releases the barrier, pins and fds; a request not yet submitted is dropped by the connection
+  handler, which owns it until submit. Nothing is kept for a later connection.
+- *Consumer side* (`hostops backup --live`): writes into a temp file in the destination directory,
+  checks length, SHA-256 and the archive structure against the `snapshot.start` answer, then
+  renames; a partial output is deleted and never merged with a retry (a retry is a new
+  `snapshot.start`, a new file). Every op is audited (peer uid/pid, op, size), never with secret
+  material. Tests: foreign uid, symlinked or stale socket, slow peer, disconnect after submit, a
+  second concurrent start, hold limits.
 
 Backup "without recordings" still snapshots the journal head and lists every recording as
 `not-requested`, so a restore never mistakes it for a backup that lost them.
@@ -2168,7 +2331,7 @@ Owner decisions (§12.11.8) unchanged; M5 tightened their wording in §12.11.4, 
 | H1 checkpoint not serialised end to end; S2 can commit before S1; autocommit helpers; uncertain commit; stale compactor; roll overrun | §12.11.1 "Per-session coordinator" (one queue per sid, lease held capture → fsync → commit, buffer swap, shielded jobs), "Isolated transaction" (own connection, CAS on version + writer token, monotonic prefix and agent offset, typed cap/merge), "A checkpoint that loses", "Uncertain outcome"; hot path step 2 (hard-limit reservation per record); Cap step 4 (revalidation); tests §12.11.7 #14 |
 | H2 per-pair exclusion impossible while streaming; host live backup not under the barrier | §12.11.3 "One snapshot function, every path" (control socket for `hostops backup --live`, boot lock offline, refusal otherwise), snapshot steps 1–4 (legacy fds pinned, ownership at submit, verify pass then emit pass, rebuild with new CK, corruption ≠ fault), manifest v2 states; test #16 |
 | H3 authentic but stale erasure head; stage/apply window | §12.11.4 journal format, attestation (immutable per-head objects, per-destination read-back), "Freshness" (newest authentic head wins, rollback detection, all destinations or J_v), "Continuity at restore" (reconcile again before apply and before lifting quarantine); §12.11.3 *Apply*; test #17 |
-| H4 no common linearisation point for revocation and open; caches and streams after revoke | §12.11.2 `open(…, access)`, "Revocation and the linearisation point", "Check points while serving" (max delay stated), "Caches"; Owner recovery limited to the continuity quarantine (§12.11.4); test #15 |
+| H4 no common linearisation point for revocation and open; caches and streams after revoke | §12.11.2 `open(…, access)`, "Revocation and the linearisation point", "Check points while serving" (bound restated in "What a revocation stops", recheck R-M3), "Caches"; Owner recovery limited to the continuity quarantine (§12.11.4); test #15 |
 | H5 unlink does not prove identity; partial unlink; global marker too coarse | §12.11.0 `tx_migration` and WTD1 `converted` flag; §12.11.5 inventory, identity-checked unlink (`renameat2` + `fstatat` + `unlinkat` on the dir fd), crash rules, global flag only with no `pending`/`failed`; §12.11.2 per-sid downgrade refusal; test #18 |
 | M1 ledger may unlink a pre-existing file; ambiguous pending; no epoch in WTD1 | §12.11.0 `tx_files` states + inode, ledger compaction, keyring epoch binding; §12.11.1 reservation (`collision`), recovery table rows |
 | M2 manifest v2 and WTJ1 under-specified | §12.11.3 manifest (states, journal member, allowlist, binding, v1 legacy); §12.11.4 journal (endianness, kinds, MAC domain, cap, committed head, incomplete tail) |
@@ -2177,6 +2340,12 @@ Owner decisions (§12.11.8) unchanged; M5 tightened their wording in §12.11.4, 
 | M5 retention vs restore, "release all", key-destruction wording, per-host erasure | §12.11.4 retention table, "What key destroyed means", per-host erasure, Owner recovery (per recording, fresh factor) |
 | M6 last committed output is not proof of idleness | §12.11.6 table and clock rules; test #13 |
 | L1 normative clarifications | §12.11 intro (pointers stay "in review"), §12.11.0 (256 vs 4096), §12.11.1 `recovered` and zero-DATA generation |
+| Recheck (ee2068b) R-H1 PR5/PR6 split leaves existing volumes and restore uncovered | §12.11 intro "PR5/PR6 boundary": `WEBTERM_TX_RECORDINGS` off by default and set only by test gates; off = 3.7 behaviour for recordings and their backup; on = boot refuses a protected volume until PR6's migration, erasure journal and quarantine report ready (test-fixture volumes excepted, guarded); PR5 never claims erasure continuity (`erasure: not-tracked`), refuses WTX1/WTJ1 archives outside tests |
+| Recheck (ee2068b) R-H2 recorder fate after worker loss / overflow during a commit / restart | §12.11.1 "Backpressure" (per-sid + process cap, no rewind while a job is in flight, resume from the re-read commit, one gap marker with position and size, `degraded` per Q5) and "Supervision, worker loss and restart" (supervisor, futures always resolved, fds/lease released after real I/O end, re-adoption from DB only, no second append, exactly-once-or-marked guarantee); test #19 extended |
+| Recheck (ee2068b) R-H3 expiry and the commit→bump window for open streams | §12.11.2 "Expiry" (`not_after` from bindings, share/replay links, login session, step-up window; checked at the same points plus a timer for stalled transports), "Commit/bump fence" (bump before commit + fence, re-check after, fresh `access`; out-of-process writers via `tx_state.access_gen` poll) |
+| Recheck (ee2068b) R-M3 the "~128 KiB" bound did not follow | §12.11.2 "What a revocation stops": (1) no unit authorized after the linearisation point, at most one already-checked chunk ≤ 64 KiB or one capped single-shot body; (2) bytes already in the transport are not recallable and not bounded by this design; all bodies > 64 KiB streamed |
+| Recheck (ee2068b) R-M1 live backup socket protocol | §12.11.3 "Control socket protocol": creation on a checked dir fd, peer check, versioned framing with allowlisted ops (`snapshot.start` / `read` / `release`), full verification before any byte is offered, timeouts, hold limits, concurrency cap, release on disconnect, consumer temp-then-rename |
+| Recheck (ee2068b) R-H4, R-M2, R-M4, R-M5, M6 | not addressed here: R-H4 (WTJ1 freshness authority) and R-M5 (durable unlink identity) are PR6 gates; R-M2 (output frontier for other destinations, WTS v2 cardinality) and R-M4 (WTJ1 crash/epoch reconciliation) stay open before activation; M6 residual unchanged |
 
 ## Appendix: Test vectors (v1)
 
