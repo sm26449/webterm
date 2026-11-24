@@ -527,6 +527,22 @@ CREATE TABLE IF NOT EXISTS tx_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- tx_gaps: fiecare GAP_MARKER al unei înregistrări criptate (§12.11.10), scris în ACEEAŞI tranzacţie
+-- cu octeţii markerului, ca asocierea marker ↔ epoch ↔ interval upstream să supravieţuiască unui
+-- crash şi auditul să o poată referi după gap_id (determinist). published_at NULL = pierdere al
+-- cărei marker nu s-a putut publica (alarmată transcript.gapUnrecorded).
+CREATE TABLE IF NOT EXISTS tx_gaps (
+    sid TEXT NOT NULL,
+    gap_id TEXT NOT NULL,
+    epoch TEXT,
+    upstream_start INTEGER,
+    upstream_size INTEGER NOT NULL,
+    reason TEXT NOT NULL,                       -- skip:<why> | epoch-cut | close
+    out_pos INTEGER,
+    cast_pos INTEGER,
+    published_at REAL,
+    PRIMARY KEY (sid, gap_id)
+);
 """
 
 # additive migrations for DBs created by an older version

@@ -2371,19 +2371,57 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   `recovered` at its committed counts, unpublished → retired), and the offset never covers bytes
   that are not published. An uncertain COMMIT is resolved by re-reading the descriptors, the agent
   position and the ledger rows in one read transaction.
-- **Admission (the contract the PR5b hub must follow; recheck 059f21a R-H2).** One call per agent
-  chunk: `Recorder.feed(out, cast, at=(epoch, offset), agent_bytes=n)` admits the chunk's `.out`
-  bytes and its `.cast` event together or neither, and returns whether it was admitted. There is
-  no separate `.out` / `.cast` entry point, so a checkpoint can only ever publish an agent offset
-  for chunks admitted in both kinds. `at` is where the chunk starts upstream; a chunk that does not
-  start at the recorder's position (a hole, a duplicate, another epoch) raises
-  `TxStoreError("position")` with nothing admitted, and the hub must always pass it. `agent_bytes`
-  is the chunk's upstream length (default `len(out)`). Events that exist only in `.cast` (header,
-  resize) use `feed_cast_only(cast)` and never move the agent offset. A refused chunk is never
-  recorded later. Every byte offered and not recorded since the last `resume` is accounted in
-  upstream (agent) bytes and per kind (`Recorder.loss`, `dropped` = upstream), and kept until the
-  commit that publishes its marker; `resume()` returns the upstream total of the current epoch
-  and starts a new count.
+- **Admission (the contract the PR5b hub must follow; rechecks 059f21a R-H2 and 5053fbd RC-H2,
+  RC-M2).** Two positions exist per sid: the **received** position (`Recorder.received`: the end
+  of everything offered in the current epoch, admitted or counted lost) and the **committed**
+  position (`agent_committed`, `sessions.agent_epoch/agent_offset`, published together with the
+  bytes it covers). The hub follows these rules:
+  - *One call per agent chunk:* `feed(out, cast, at=(epoch, offset), agent_bytes=n)`. `at` and
+    `cast` are mandatory, `n > 0` (default `len(out)`), and at least one representation is
+    non-empty. The call admits the `.out` bytes and the `.cast` event together, or neither. An
+    explicitly empty `cast` means the format omits that event: the offset still moves with `.out`
+    and is committed with it. `.cast`-only events (the header, resizes) use
+    `feed_cast_only(cast, at=received)`: they never move the offset and keep their call order
+    relative to the chunks.
+  - *Preconditions for `at`:* the epoch must be the recorder's (a new epoch goes through
+    `change_epoch` first), and the offset must be exactly `received`. During an overflow, a chunk
+    lying entirely below `received` is a re-offer: it returns `False` and is not counted again.
+    Any other mismatch (a hole, a partial overlap, a duplicate outside an overflow, another epoch)
+    raises `TxStoreError("position")` before anything is admitted or counted. Malformed input
+    raises `badInput`. Both are hub bugs and retryable: nothing changed, and the hub resends from
+    its ring at `received`.
+  - *`False` is final for those bytes, and `ingress()` says why.* `overflow`: each refused
+    upstream byte is counted once, keyed by its position; per-kind counts are real recorder bytes,
+    never synthetic marker bytes. The hub calls `resume()`, which returns C = the committed cursor,
+    re-attaches the agent from C, and replays what the ring still has. `closing` (counted in
+    `rejected`) and a stopped recorder (`lost`/`replaced`/`closed`, counted in `refused`) stop
+    ingress at once. After `close()` or a re-adoption, no later chunk reaches the recorder; the
+    hub feeds the re-adopted recorder from its committed position.
+  - *Attach answers:* with `replay_start` == C there is nothing to do. With `replay_start` > C
+    in the same epoch (the ring lost the prefix), the hub calls `skip_to(epoch, replay_start,
+    reason)`. That writes ONE `GAP_MARKER` for [C, replay_start) and moves the cursor to
+    `replay_start` in the same tick, so the marker, its `tx_gaps` row and the new cursor are
+    published in the same transaction. A crash before that commit leaves C, and the re-attach
+    skips again, once. A crash after it leaves `replay_start`, and the re-attach is a no-op. With
+    `replay_start` < C the hub trims the overlap and feeds from C (`skip_to` refuses it). A source
+    without a ring (or a sid recorded with `track_agent=False`) works the same way: after an
+    overflow, `resume()` and then `skip_to` to the source position the hub reached. That is a
+    terminal loss, made visible by the marker.
+  - *Same-epoch reattach (RC-H1):* `change_epoch(e)` with `e` equal to the current epoch is a
+    no-op: no cut and no offset reset. The publication transaction and the uncertain-COMMIT
+    resolver accept an offset reset to 0 only when the epoch value actually changes. The hub
+    trims the replayed overlap.
+  - *Effects outside the recorder:* a refusal, an overflow or a skip changes only the
+    recording. Browser delivery and the OSC 133 scanner work on the live stream and are not held
+    back by the recorder. When a skip marker or an epoch-cut marker is published, the hub resets
+    its OSC 133 prompt cache for the recording (`osc.gap()`, as 3.7 does for a transcript gap), and
+    a resync of the recording reads the committed bounds again, never `received`.
+  - *Cast header and time:* the hub writes the asciicast header once, as the first `.cast`-only
+    event of a sid whose committed `.cast` is empty. A re-adopted recorder with a committed
+    `.cast` never writes it again. Event times are seconds since the header timestamp, from the
+    hub's clock, and replayed chunks carry their replay time. A gap's `.cast` event carries the
+    time of the skip or cut. Resizes refused in an overflow are not in the agent ring, so they are
+    lost; after `resume()` the hub re-sends the current size as a `.cast`-only resize at C.
 - Epoch change and close are cuts taken synchronously at the call. Bytes admitted before
   `change_epoch(e)` are held for the old epoch **outside the overflow path**: an overflow of `e`
   drops only `e`'s pending bytes, never the held segment (recheck R-H1). The switch commits only
@@ -2400,11 +2438,18 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   abandoned). Whatever was not recorded (an overflow still open, abandoned bytes) becomes one
   `GAP_MARKER` at the end. That owed marker and its size survive a failed close: the retry
   publishes it once, with the same total.
-- A gap is written as 3.7's `GAP_MARKER` bytes and never advances the agent offset. Each published
-  marker is a `Gap` in `gaps` (`.out` and `.cast` positions, upstream size, per-kind bytes when
-  known, epoch, reason `hub | epoch-cut | close`) and is raised through the alarm hook (audit),
-  not written into the recording. That is acceptable as telemetry only if PR5b correlates the
-  published marker and the audit record durably.
+- A gap is written as 3.7's `GAP_MARKER` bytes plus a `.cast` gap event. Its marker bytes are
+  synthetic and never count as loss. Each published marker is a `Gap` in `gaps` (`.out` and
+  `.cast` positions, upstream start and size, per-kind real bytes when known, epoch, reason
+  `skip:<why> | epoch-cut | close`) and a row in `tx_gaps` (sid, deterministic `gap_id`, epoch,
+  upstream interval, reason, positions, `published_at`). The row is written in the same
+  transaction as the marker bytes, so the marker ↔ epoch ↔ interval association survives a
+  crash, for example after a cut marker is published and before the switch commits. The
+  `transcript.gap` alarm (audit) names the `gap_id`. A second publication of an id that is
+  already published is refused (`gap-dup`, re-adoption), and the uncertain-COMMIT resolver also
+  checks the rows. A marker that cannot be published is alarmed as `transcript.gapUnrecorded`
+  with its id, and the alarm says that re-adoption does not repair the loss. It is kept, best
+  effort, as a row with `published_at` NULL.
 - `resume` re-reads the descriptors and the agent position in one read transaction and adopts them
   only if they are exactly what this recorder last committed; anything moved independently (for
   example after a CAS refusal) re-adopts the sid. An uncertain COMMIT compares the descriptors
