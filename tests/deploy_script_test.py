@@ -44,6 +44,15 @@ case "$1 $2" in "compose version") exit 0 ;; esac
 # altfel linia din .env din directorul curent
 img="${WEBTERM_IMAGE:-$(grep -m1 '^WEBTERM_IMAGE=' .env 2>/dev/null | cut -d= -f2-)}"
 case "$*" in
+  # garda 3.8 (H1) şi detecţia instalării noi (M4)
+  "volume ls"*) [ -n "${VOL_LS_FAIL:-}" ] && exit 1; [ -n "${VOLUMES-x}" ] && printf '%s\n' "${VOLUMES-proj_webterm-data}"; exit 0 ;;
+  *"compose -f"*" config"*) printf '%b' "${COMPOSE_CFG:-}"; exit 0 ;;
+  *"ps -a -q app"*) [ -n "${APP_PS-x}" ] && printf '%s\n' "${APP_PS-cid-app-1}"; exit 0 ;;
+  *image.version*)
+    case "$*" in *1111111111*) echo "${NEW_LABEL-${IMG_LABEL:-}}" ;; *) echo "${IMG_LABEL:-}" ;; esac; exit 0 ;;
+  *'"/data"'*) echo "${DATA_VOL:-proj_webterm-data}"; exit 0 ;;
+  *"--entrypoint ls"*) [ -n "${LS_FAIL:-}" ] && exit 125; printf '%b' "${VOL_LS:-}"; exit 0 ;;
+  *keys.py*) exit ${KEYS_PY_RC:-0} ;;
   *"ps -q app"*) echo "cid-app-1"; exit 0 ;;
   *"compose -f"*"pull"*) exit ${PULL_FAILS:-0} ;;
   *"compose -f"*) exit 0 ;;
@@ -323,8 +332,116 @@ def main():
               ">&2" in block and "Upgrading from a version before 3.6.9" in block
               and "Upgrading from a version before 3.6.9" in (ROOT / "docs" / "INSTALL.md").read_text())
 
+        pre38_checks(tmp)
+        master_key_checks(tmp)
+
     print(f"\n{ok}/{total} passed")
     return ok == total
+
+
+MIGRATED = "webterm.db\\nkeys.wtk\\n.lock\\n.maint.lock\\n"
+LEGACY = "webterm.db\\nsecret\\n.lock\\n.maint.lock\\n"
+
+
+def pre38_checks(tmp):
+    """H1 (recenzia PR4): nicio imagine < 3.8 nu porneşte pe un volum migrat — nici rollback-ul
+    manual, nici cel automat din deploy.sh, nici un deploy ţintit spre o versiune veche."""
+    print("── 8. 3.8 migration boundary (rollback / deploy to a pre-3.8 image)")
+
+    def rb(**extra):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        (d / ".prev-image").write_text(NEW + "\n")
+        before = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        r, calls = run(d, "rollback.sh", **extra)
+        after = ((d / ".env").read_text(), (d / ".prev-image").read_text())
+        return r, calls, before == after
+
+    r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS=MIGRATED)
+    out = r.stdout + r.stderr
+    check("rollback.sh spre v3.7.1 pe un volum cu keys.wtk → refuz", r.returncode != 0 and "migrated to 3.8" in out, out[-500:])
+    check("….env şi .prev-image neatinse, niciun `up`", same and "up -d" not in calls, calls)
+    check("…spune ce e de făcut (rămâi pe 3.8 sau restaurează backup-ul de dinainte de migrare)",
+          "stay on 3.8" in out and "BEFORE the migration" in out, out[-500:])
+    check("…volumul e listat read-only, fără reţea, cu imaginea ţintă",
+          f"--network none -v proj_webterm-data:/data:ro --entrypoint ls {NEW}" in calls, calls)
+    r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS=LEGACY)
+    check("rollback.sh spre v3.7.1 pe un volum 3.7 (secret, lacăte) → merge", r.returncode == 0 and not same,
+          (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="v3.8.2", VOL_LS=MIGRATED)
+    check("rollback.sh între versiuni 3.8 pe un volum migrat → merge, volumul nici nu e listat",
+          r.returncode == 0 and "--entrypoint ls" not in calls, (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="", KEYS_PY_RC="1", VOL_LS=MIGRATED)
+    check("imagine fără etichetă şi fără codul de chei 3.8 → tratată ca < 3.8 → refuz",
+          r.returncode != 0 and same and "older than 3.8" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="", KEYS_PY_RC="125", VOL_LS=MIGRATED)
+    check("versiune necunoscută (Docker nu poate porni imaginea) pe volum migrat → refuz",
+          r.returncode != 0 and same and "unknown version" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS_FAIL="1")
+    check("`docker volume ls` eşuat → refuz (nu „volum curat”)", r.returncode != 0 and same, (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="v3.7.1", LS_FAIL="1")
+    check("listarea volumului eşuează → refuz", r.returncode != 0 and same, (r.stdout + r.stderr)[-300:])
+    r, calls, same = rb(IMG_LABEL="v3.7.1", VOLUMES="alt_volum", VOL_LS=MIGRATED)
+    check("volumul de date confirmat absent → nimic de protejat, merge", r.returncode == 0, (r.stdout + r.stderr)[-300:])
+    for marker in ("migrating.wtm", "master.key", "erasures.wtj", "restore-pending.0123", ".restore"):
+        r, calls, same = rb(IMG_LABEL="v3.7.1", VOL_LS="webterm.db\\nsecret\\n%s\\n" % marker)
+        check(f"marker 3.8 `{marker}` → refuz", r.returncode != 0 and same and marker in (r.stdout + r.stderr),
+              (r.stdout + r.stderr)[-300:])
+
+    # deploy.sh: rollback-ul AUTOMAT după o imagine nouă nesănătoasă
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW, "--tag", "v9.9.9"], HEALTH="unhealthy", IMG_LABEL="v3.7.1",
+                   NEW_LABEL="v3.8.0", VOL_LS=MIGRATED)
+    out = r.stdout + r.stderr
+    check("deploy.sh: imaginea 3.8 nesănătoasă pe volum migrat → rollback-ul automat spre 3.7 e REFUZAT",
+          r.returncode != 0 and "Rollback automat" in out and "migrated to 3.8" in out
+          and env_of(d).get("WEBTERM_IMAGE") == NEW and calls.count("up -d app") == 0, out[-700:])
+    # deploy.sh ţintit direct spre o imagine < 3.8
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.7.1", NEW_LABEL="v3.7.1", VOL_LS=MIGRATED)
+    check("deploy.sh spre o imagine < 3.8 pe volum migrat → refuz înainte de `up`",
+          r.returncode != 0 and "up -d" not in calls and "migrated to 3.8" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-400:])
+
+
+CFG = "name: proj\\nservices:\\n  app:\\n    image: x\\nvolumes:\\n  webterm-data:\\n    name: custom_data\\n"
+
+
+def master_key_checks(tmp):
+    """M4 (recenzia PR4): cheia master se creează DOAR pe o instalare nouă confirmată — numele
+    efectiv al volumului din `compose config`, absenţa confirmată de `docker volume ls`, niciun
+    container app; orice eroare Docker = nicio cheie."""
+    print("── 9. master key only on a confirmed fresh install")
+
+    def dep(**extra):
+        d = sandbox(tempfile.mkdtemp(dir=tmp))
+        r, calls = run(d, "deploy.sh", **extra)
+        return r, (d / "secrets" / "master-key" / "master.key").exists(), env_of(d), calls
+
+    for label, extra in (("`docker volume ls` eşuat", dict(VOL_LS_FAIL="1", APP_PS="")),
+                         ("compose nu poate spune numele volumului", dict(COMPOSE_CFG="", VOLUMES="", APP_PS="")),
+                         ("volumul cu numele EFECTIV (suprascris) există",
+                          dict(COMPOSE_CFG=CFG, VOLUMES="custom_data", APP_PS="")),
+                         ("un container app al proiectului există", dict(COMPOSE_CFG=CFG, VOLUMES="", APP_PS="c1"))):
+        r, made, e, _ = dep(**extra)
+        check(f"deploy.sh: {label} → nicio cheie creată, nimic activat",
+              r.returncode == 0 and not made and not e.get("WEBTERM_MASTER_KEY_FILE"), (r.stdout + r.stderr)[-300:])
+    r, made, e, _ = dep(COMPOSE_CFG=CFG, VOLUMES="proj_webterm-data", APP_PS="")
+    check("deploy.sh: alt volum cu numele CONVENŢIONAL există, cel efectiv nu → instalare nouă",
+          (made and e.get("WEBTERM_MASTER_KEY_FILE") == "/run/webterm-key/master.key") if os.geteuid() == 0
+          else r.returncode != 0, (r.stdout + r.stderr)[-300:])
+    # install.sh / setup.sh: aceeaşi regulă, citită din sursă (rularea lor atinge sistemul)
+    for script in ("install.sh", "deploy.sh"):
+        src = (ROOT / script).read_text()
+        fn = src[src.index("data_volume_state() {"):]
+        fn = fn[:fn.index("\n}\n")]
+        check(f"{script}: „none” cere `docker volume ls` reuşit + nume efectiv din compose config",
+              "docker volume ls -q" in fn and "compose_volume_name" in fn and "echo unknown" in fn
+              and "docker volume inspect" not in fn, fn)
+    src = (ROOT / "setup.sh").read_text()
+    check("setup.sh: modul „reduced” doar la cerere explicită (--key-in-volume), niciodată ca plasă",
+          "--key-in-volume" in src and 'if [ "$KEY_IN_VOLUME" = 1 ]' in src
+          and src.count('echo "WEBTERM_KEY_IN_VOLUME=1" >> .env') == 1)
+
 
 
 if __name__ == "__main__":

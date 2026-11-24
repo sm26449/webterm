@@ -192,13 +192,28 @@ if [ -z "$(secret_read webterm_setup_token)" ]; then
   echo "→ Setup token generated and written to secrets/webterm_setup_token."
 fi
 
-# 3.8: are acest proiect deja un volum de date? „none” doar când compose ştie numele proiectului
-# ŞI volumul lipseşte; orice îndoială = „unknown” (atunci nu se creează nicio cheie automat).
+# 3.8 (M4, recenzia PR4): are acest proiect deja un volum de date? Numele EFECTIV vine din
+# `docker compose config` (o suprascriere `name:` a volumului sau a proiectului contează), iar
+# „none" înseamnă ABSENŢĂ CONFIRMATĂ: lista volumelor a reuşit şi numele nu e în ea. O eroare
+# Docker, un nume nerezolvat sau un container app existent = „unknown"/„exists": nicio cheie.
+compose_volume_name() {   # compose_volume_name COMPOSE_FILE → name, or "" when compose cannot tell
+  docker compose -f "$1" config 2>/dev/null | awk '
+    /^volumes:/ { inv = 1; next }
+    /^[^ ]/ { inv = 0 }
+    inv && /^  webterm-data:/ { inw = 1; next }
+    inv && /^  [^ ]/ { inw = 0 }
+    inw && /^    name:/ { sub(/^    name: */, ""); gsub(/"/, ""); print; exit }' || true
+}
 data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unknown
-  local proj
-  proj=$(docker compose -f "$1" config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
-  [ -n "$proj" ] || { echo unknown; return 0; }
-  if docker volume inspect "${proj}_webterm-data" >/dev/null 2>&1; then echo exists; else echo none; fi
+  local vol all cids
+  vol=$(compose_volume_name "$1")
+  [ -n "$vol" ] || { echo unknown; return 0; }
+  all=$(docker volume ls -q 2>/dev/null) || { echo unknown; return 0; }
+  if printf '%s\n' "$all" | grep -qxF "$vol"; then echo exists; return 0; fi
+  # un container app al proiectului (chiar oprit) = instalare existentă, oricum ar arăta volumul
+  cids=$(docker compose -f "$1" ps -a -q app 2>/dev/null) || { echo unknown; return 0; }
+  [ -z "$cids" ] || { echo exists; return 0; }
+  echo none
 }
 
 # --- master key (3.8, encryption at rest; docs/INSTALL.md → Encryption at rest) ---------------
@@ -207,8 +222,10 @@ data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unk
 # a key here: it stays legacy until the operator opts in. Dir 0700 + file 0400, owned by 10001
 # (the app's user; the key reader refuses a file readable by group/others).
 MK_DIR="$SECRETS_DIR/master-key"
+# M4: „nou" = volumul confirmat absent (numele efectiv din compose config, `docker volume ls` reuşit)
+# şi niciun container app al proiectului; orice eroare Docker lasă instalarea fără cheie nouă.
 if [ ! -f "$MK_DIR/master.key" ] && [ -z "${WEBTERM_MASTER_KEY_FILE:-}" ] && [ -z "${WEBTERM_KEY_IN_VOLUME:-}" ] \
-   && [ "$(data_volume_state docker-compose.prod.yml)" = none ]; then
+   && [ -z "${WEBTERM_MASTER_KEY:-}" ] && [ "$(data_volume_state docker-compose.prod.yml)" = none ]; then
   install -d -m 0700 -o 10001 -g 10001 "$MK_DIR"
   head -c 32 /dev/urandom | base64 | install -m 0400 -o 10001 -g 10001 /dev/stdin "$MK_DIR/master.key"
   set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key
@@ -299,6 +316,92 @@ if ! $COMPOSE -f "$FILE" pull; then
     echo "✗ pull failed and ${WEBTERM_IMAGE:-the image} is not available locally." >&2
     exit 1
   fi
+fi
+# ── 3.8: graniţa migrării la criptarea la repaus (H1, recenzia PR4) ──────────────────────────
+# Un volum migrat (keys.wtk, migrating.wtm, master.key, nume rezervate `.wt*`, seturi de restore
+# 3.8) nu poate fi pornit de o imagine mai veche de 3.8: ea nu vede `data/secret`, îşi poate crea
+# unul nou lângă keys.wtk, iar 3.8 refuză apoi volumul amestecat. Deci orice pornire a unei imagini
+# < 3.8 (deploy, rollback automat sau manual, upgrade.sh spre o versiune veche) verifică întâi
+# volumul. Imaginea ≥ 3.8 nu cere nimic. Orice îndoială (volum necunoscut, Docker care eşuează,
+# imagine fără versiune pe un volum migrat) = refuz, cu instrucţiunile de recuperare.
+image_era() {   # image_era IMAGE → 38 | pre38 | unknown
+  local v rc=0
+  v=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null) \
+    || { echo unknown; return 0; }
+  v=${v#v}
+  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+    if [ "${BASH_REMATCH[1]}" -gt 3 ] || { [ "${BASH_REMATCH[1]}" = 3 ] && [ "${BASH_REMATCH[2]}" -ge 8 ]; }; then
+      echo 38
+    else
+      echo pre38
+    fi
+    return 0
+  fi
+  # fără etichetă (imagine construită local): codul de chei 3.8 e în imagine sau nu
+  docker run --rm --network none --entrypoint sh "$1" -c 'test -f /srv/webterm/gateway/app/keys.py' \
+    >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) echo 38 ;; 1) echo pre38 ;; *) echo unknown ;; esac
+}
+data_volume_name() {   # data_volume_name COMPOSE_FILE → the effective name of the data volume, or ""
+  local cid m
+  if [ -n "${WEBTERM_VOLUME:-}" ]; then echo "$WEBTERM_VOLUME"; return 0; fi
+  cid=$(docker compose -f "$1" ps -a -q app 2>/dev/null | head -n1) || cid=""
+  if [ -n "$cid" ]; then
+    m=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$cid" 2>/dev/null) || m=""
+    if [ -n "$m" ]; then echo "$m"; return 0; fi
+  fi
+  docker compose -f "$1" config 2>/dev/null | awk '
+    /^volumes:/ { inv = 1; next }
+    /^[^ ]/ { inv = 0 }
+    inv && /^  webterm-data:/ { inw = 1; next }
+    inv && /^  [^ ]/ { inw = 0 }
+    inw && /^    name:/ { sub(/^    name: */, ""); gsub(/"/, ""); print; exit }' || true
+}
+volume_38_markers() {   # volume_38_markers VOLUME IMAGE → names on stdout; 0 listed, 2 confirmed absent, 1 error
+  local all ls
+  all=$(docker volume ls -q) || return 1
+  printf '%s\n' "$all" | grep -qxF "$1" || return 2
+  ls=$(docker run --rm --network none -v "$1:/data:ro" --entrypoint ls "$2" -A1 /data) || return 1
+  printf '%s\n' "$ls" | grep -E '^(keys\.wtk.*|migrating\.wtm.*|master\.key.*|erasures\.wtj|\.restore|restore-pending\..+|.*\.wt[a-z0-9]*)$' || true
+}
+guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start; 1 refused (message printed)
+  local era vol marks rc=0
+  era=$(image_era "$1")
+  [ "$era" = 38 ] && return 0
+  vol=$(data_volume_name "$2")
+  if [ -z "$vol" ]; then
+    echo "✗ Refusing to start $1: it is not a 3.8 image (${era}) and the data volume of this installation" >&2
+    echo "  cannot be determined, so it cannot be checked for the 3.8 encryption-at-rest migration." >&2
+    echo "  Name it explicitly (docker volume ls) and run again:  WEBTERM_VOLUME=<name> $0 …" >&2
+    return 1
+  fi
+  marks=$(volume_38_markers "$vol" "$1") || rc=$?
+  [ "$rc" = 2 ] && return 0
+  if [ "$rc" != 0 ]; then
+    echo "✗ Refusing to start $1 (${era}): the data volume '$vol' could not be inspected for the 3.8" >&2
+    echo "  encryption-at-rest migration (Docker error). Nothing was changed." >&2
+    return 1
+  fi
+  [ -n "$marks" ] || return 0
+  echo "✗ Refusing to start $1: the data volume '$vol' was migrated to 3.8 encryption at rest" >&2
+  echo "  ($(printf '%s' "$marks" | tr '\n' ' '| sed 's/ $//')), and this image is $([ "$era" = pre38 ] && echo "older than 3.8" || echo "of an unknown version")." >&2
+  echo "  A pre-3.8 gateway cannot read that volume: it would create a new vault key next to the" >&2
+  echo "  protected one, and 3.8 then refuses the mixed volume. Nothing was changed." >&2
+  echo "  Either stay on 3.8 (fix forward: ./deploy.sh <a 3.8.x version>), or go back to 3.7 the only" >&2
+  echo "  safe way: restore the backup taken BEFORE the migration into a new volume" >&2
+  echo "  (docs/INSTALL.md → Encryption at rest, \"Going back to 3.7\")." >&2
+  return 1
+}
+# imaginea pe care compose o va porni: WEBTERM_IMAGE, altfel default-ul din compose
+TARGET_IMG="${WEBTERM_IMAGE:-}"
+if [ -z "$TARGET_IMG" ]; then
+  TARGET_IMG=$($COMPOSE -f "$FILE" config --images 2>/dev/null | grep -m1 -E '/webterm[:@]' || true)
+fi
+if [ -n "$TARGET_IMG" ]; then
+  guard_pre38 "$TARGET_IMG" "$FILE" || exit 1
+else
+  echo "✗ cannot tell which image would start (WEBTERM_IMAGE is empty and compose lists none) — refusing." >&2
+  exit 1
 fi
 $COMPOSE -f "$FILE" up -d --remove-orphans
 

@@ -555,7 +555,7 @@ semantics). Entries are sorted into:
 
 | Group | Entries | Rule |
 |---|---|---|
-| tolerated | `.lock` (regular file), `lost+found` (directory, content not inspected: it is filesystem metadata and may be unreadable), `transcripts/` that is empty or holds only an empty `arhiva/` (what `config.ensure_dirs` creates before boot) | never change the class |
+| tolerated | `.lock` and `.maint.lock` (regular files), `lost+found` (directory, content not inspected: it is filesystem metadata and may be unreadable), `transcripts/` that is empty or holds only an empty `arhiva/` (what `config.ensure_dirs` creates before boot) | never change the class |
 | key artefacts | `secret` (3.7 key), `keys.wtk`, `keys.wtk.tmp`, `master.key`, `master.key.tmp`, `migrating.wtm` (migration intent), `migrating.wtm.tmp` | each must be a regular file (a symlink, directory, FIFO… → `ambiguous`); `secret` must be exactly 32 bytes |
 | staged restore | `restore-pending/` + `.restore-flag` (3.7 mechanism), `.restore/` (3.8, §12.4) | reported as `staged_restore`; never read, applied or removed by PR2 code |
 | new-format markers | `erasures.wtj`, `.restore/`, any other top-level name of the reserved `.wt*` family (`*.wtk`, `*.wtj`, `*.wtx`, `*.wtd`…; only `migrating.wtm` is exempt, and only as the pre-commit/migration marker), and under `transcripts/` (its top level and one level of subdirectories such as `arhiva/`) any name ending in `.wtx`, `.wtd`, `.idx` or of the `.wt*` family | data that only exists once a `keys.wtk` exists. 3.7 never writes these names (its snapshots `*.wtsnap` live in `backups/`, not at the top level). A directory in the scanned set that cannot be opened or listed counts as a marker (absence not proven) → refuse |
@@ -791,8 +791,8 @@ stopped, the rotation command takes the process lock):
    reason to drop ids early.
 
 **Guarantee (wrong or missing key; refusals of kind `invalid-key` or `preflight-io` only).** A boot that refuses
-in preflight writes nothing in `DATA_DIR` except creating `.lock` (empty, 0600) if it did not
-exist. Two refused boots in a row leave, for every
+in preflight writes nothing in `DATA_DIR` except creating `.lock` (empty, 0600) and, from the
+gateway's boot, `.maint.lock` (empty, 0644; PR4 review M3) if they did not exist. Two refused boots in a row leave, for every
 entry under `DATA_DIR` (recursively, symlinks not followed): the same names, types, modes, sizes,
 contents and symlink targets — between the state before the first boot and after the second,
 `.lock` excepted, and between the first and the second boot with `.lock` included. Timestamps
@@ -857,7 +857,12 @@ tested in isolation; these are not implemented and each needs its own change and
    `keys.boot()` (lock, inventory, key source, key check) runs before `config.ensure_dirs()`,
    `core.cleanup_cap_temps()`, the staged-restore apply, the vault and `db.connect`. The
    `BootResult` (lock + `DATA_DIR` fd) is kept in `bootkeys._boot` for the life of the process,
-   also when a later boot step fails; only process exit releases it. A refusal logs one line
+   also when a later boot step fails; only process exit releases it. Before `boot()` returns, the
+   same holds once anything was written (review M2): `ProcessLock.mutated` is set by the first
+   publication or removal and by the hook before it applies a 3.7 restore, and from then on
+   every error path keeps the lock (and `.maint.lock`) in `keys._RETAINED` until exit, a raw
+   `OSError` is reported as `io-error` of kind `operation-incomplete` (never `preflight-io`), and
+   an `invalid-key` refusal is re-labelled `operation-incomplete`. A refusal logs one line
    (`boot refused: <reason> (<name>) [kind=…] — <hint>`, never key material) and the lifespan
    raises, so uvicorn exits non-zero. Test: `boot_keys` "main.lifespan" (wrong key + staging +
    cap temporaries → refused, nothing cleaned up, tree unchanged).
@@ -866,17 +871,34 @@ tested in isolation; these are not implemented and each needs its own change and
    3.7 key it carries), then proves FK_legacy on the **restored** database, then migrates in the
    same boot. A staging next to `migrating.wtm` is refused (`staged-restore-during-migration`; the
    protocol never produces it). Without a source: exactly 3.7 (apply, then `data/secret`).
-3. *FK_legacy proven:* `bootkeys.prove_legacy_key` opens `webterm.db` read-only and immutable
-   (through the pinned `DATA_DIR` fd; no `-wal`/`-shm` is created), collects every `*_encrypted`
-   column and every `app_settings` value that is a Fernet token or a JSON object holding one
-   (SMTP, cloud, the agents' CA key), and requires at least one to decrypt with `secret`.
+   Review M2: with a source, the staging is checked **before** any live mutation
+   (`bootkeys.check_legacy_staging`): `.restore-flag` and `restore-pending/` with `webterm.db`
+   and a 32-byte `secret`, all plain, else `staged-restore-incomplete` (3.7 would silently skip
+   it; a migration does not); and the staged `secret` must prove the staged database by the
+   item-3 rule, else `staged-restore-invalid`. Both are `invalid-key` (nothing written). An apply
+   that then reports nothing applied is `staged-restore-not-applied` (`operation-incomplete`).
+3. *FK_legacy proven:* `bootkeys.prove_legacy_key` first refuses a non-empty `webterm.db-wal`
+   or `webterm.db-journal` (`legacy-db-wal-pending`, before any read: an immutable open cannot
+   see the WAL, so a checkpointed valid token next to newer or mixed values in the WAL would
+   prove nothing; **stop the 3.7 gateway cleanly first**, a clean stop checkpoints the WAL). It
+   then opens `webterm.db` read-only and immutable (through the pinned `DATA_DIR` fd; no
+   `-wal`/`-shm` is created) and takes a **complete inventory** (review H4,
+   `bootkeys.legacy_inventory`): every non-empty row of every `*_encrypted` column of every
+   table and every `app_settings` value (a token, or JSON holding one at any depth), streamed,
+   with no row limit before classification. Each value is classified: a Fernet token (optionally
+   `FKL:`) is a candidate; a placeholder or plain text is not a vault value; `FK:` anywhere →
+   `legacy-db-has-protected-values`; a BLOB / number in an `*_encrypted` column, a broken `FKL:`
+   value, a damaged token (`gA…` that is not a whole token) or unparseable JSON holding `gA` /
+   `FK:` → `legacy-db-unclassifiable` (subject: `table.column` or `app_settings[key]`); more
+   than 500 000 vault values → `legacy-db-inventory-too-large`. None of these is ever
+   `no-ciphertext`. Only **decryption** has a budget (256 values: the first 4 of each source
+   first, then the rest in order), and at least one of them must decrypt with `secret`.
    **Proof rule (owner decision, 2026-11-24): at least one value decrypts.** One decrypting value
    proves the key; the remaining values are not checked one by one, and a value that does not
    decrypt does not refuse the migration when another one does.
-   **Eligibility rule:** a database with no encrypted value at all (or no database) is eligible,
-   because nothing exists that a wrong key could make unreadable; a non-empty `-wal` with no
-   ciphertext in the checkpointed file is refused (`legacy-db-wal-pending`: the probe cannot see
-   the WAL). A value already carrying the `FK:` prefix next to a 3.7 `secret` is refused (mixed
+   **Eligibility rule:** a database with no encrypted value at all in the complete inventory (or
+   no database and no WAL) is eligible, because nothing exists that a wrong key could make
+   unreadable. A value already carrying the `FK:` prefix next to a 3.7 `secret` is refused (mixed
    set). Refusals are `invalid-key` (nothing written) unless a 3.7 restore was applied first
    (`operation-incomplete`).
 4. *Key selection:* `security.encrypt_secret` writes `FK:` + Fernet(FK) on a protected / reduced
@@ -906,16 +928,56 @@ tested in isolation; these are not implemented and each needs its own change and
    lock: none of them encrypts, decrypts, opens `keys.wtk` or publishes anything (argon2 hashes,
    deleted rows, `totp_secret_encrypted` set to NULL). A future command that writes an encrypted
    value must open the keyring read-only through `keys` or join `NEEDS_LOCK`. The read-only
-   commands (list, roles, health) do not lock. There is no rotation or restore CLI yet; the host
+   commands (list, roles, health) do not take `.lock`.
+   Review M3: every admin command but `health` opens the database through
+   `db.connect_maintenance()`: `mode=rw` (a missing database is refused, never created), no
+   SCHEMA / migrations / role seeding / clean-up, no `journal_mode` or other persistent pragma;
+   the live tables and columns must equal the code's (`db.expected_schema()`, built in memory),
+   otherwise it refuses ("start the gateway of this version once"). Coordination uses a second
+   lock file, `DATA_DIR/.maint.lock` (created 0644 and opened read-only, so the service user
+   and a root `docker exec` can both flock it; never written, never removed): the boot holds it
+   **exclusively** from right after `.lock` through the preflight, a 3.7 or 3.8 restore apply,
+   a migration and (from `main.lifespan`) `db.connect()`'s schema step, waiting up to 30 s for
+   running admin commands (`maintenance-busy` after that); the admin commands take it
+   **shared and non-blocking** and refuse (exit 3, "wait until it is up") during those phases.
+   With the gateway up the lock is free, so break-glass stays online; `.lock` is never taken by
+   them. There is no rotation or restore CLI yet; the host
    `scripts/restore.sh` stops the app and refuses while any container uses the volume, and never
    removes `.lock`.
-9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but `.lock`, twice);
+9. *End-to-end:* `tests/boot_keys_test.py`: legacy + no key (tree byte-identical but the two lock files, twice);
    legacy + key (migrated, proven, old values decrypt, new values `FK:`, forward tokens still
    valid); foreign `secret` refused unchanged; no ciphertext eligible; WAL pending refused; mixed
    `FK:` refused; protected + wrong / missing key refused unchanged across two boots; 3.8 staging +
    wrong key refused before any swap, right key applies and re-opens; 3.7 staging + key → restore
    then migrate; second process and admin writers refused; empty volume refused without a key,
-   `reduced` with `WEBTERM_KEY_IN_VOLUME=1`.
+   `reduced` with `WEBTERM_KEY_IN_VOLUME=1`. Review fixes: placeholders before a ciphertext past
+   the old per-column cap, `FK:` past the old 256 cap and in nested settings JSON, a WAL with
+   mixed values next to a valid checkpointed token, unclassifiable values and the inventory cap
+   (H4); the supported and refused 3.7 layouts (M1, below); an incomplete or self-inconsistent
+   3.7 staging refused before any mutation, the lock kept after a failed mutation (M2); admin
+   DB-only refused during the exclusive phase, working after it, no schema change, a missing or
+   different schema refused, the boot refusing while an admin command holds `.maint.lock` (M3).
+
+**3.7 compatibility, precisely (review M1).** "Nothing written but `.lock`" describes the
+**preflight** only: a 3.7 volume without a key source differs from a 3.7 boot by the two empty
+lock files `.lock` and `.maint.lock`; after the preflight the boot makes 3.7's own writes (staged
+restore apply, `ensure_dirs`, schema, clean-up). Supported 3.7 layouts (legacy without a key,
+migrated with one): `secret` (32 bytes) + `webterm.db` with `transcripts/` and `backups/` as plain
+directories; `backups/` as a symlink to another disk (checked through the link by
+`backup.volume_kind`). `transcripts/` as a symlink to another disk is classified `legacy` by
+`keys.classify` **only** on a clean 3.7 set (`secret`, no `keys.wtk`, no `migrating.wtm`, no
+`master.key` or temporaries): the target is scanned through the root link with the same reserved
+-name rules (`keys.find_reserved_through_link`, shared with `backup.volume_kind`) and the boot logs
+a `transcripts-symlink` warning. It boots legacy, but a migration is refused
+(`transcripts-symlink`): a protected volume's backup refuses a symlinked transcripts root (§12.10),
+so the migrated volume could not be backed up; make it a plain directory first. Refused even
+without a key (all `ambiguous`, nothing written but the lock files): a database or other data
+without `secret`; `secret` not exactly 32 bytes or not a regular file; any reserved name at the
+top level (`erasures.wtj`, `.restore`, the `.wt*` family other than the pre-commit marker) or under
+`transcripts/` (also through a symlinked root); a symlink target that cannot be opened or listed;
+a symlinked `transcripts/` next to any new-format artefact. A resolved key source (a non-empty
+`WEBTERM_MASTER_KEY_FILE` / `WEBTERM_MASTER_KEY`, `WEBTERM_KEY_IN_VOLUME=1`, or a key file present
+at the default mount path) means migration, whether or not `.env` was edited recently.
 
 Deployment: `install.sh` / `setup.sh` create `secrets/master-key/master.key` (0400, uid 10001, in a
 0700 directory of the same owner) only on a new install with no existing data volume; compose

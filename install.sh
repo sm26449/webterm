@@ -396,20 +396,43 @@ done
 # rămâne legacy până când operatorul alege, iar upgrade.sh nu creează niciodată o cheie. Fişierul
 # stă în afara volumului, montat la /run/webterm-key (docker-compose.prod.yml): dir 0700 + fişier
 # 0400, ale userului aplicaţiei (10001) — cititorul de chei refuză un fişier lizibil de grup/alţii.
-# 3.8: are acest proiect deja un volum de date? „none” doar când compose ştie numele proiectului
-# ŞI volumul lipseşte; orice îndoială = „unknown” (atunci nu se creează nicio cheie automat).
+# 3.8 (M4, recenzia PR4): are acest proiect deja un volum de date? Numele EFECTIV vine din
+# `docker compose config` (o suprascriere `name:` a volumului sau a proiectului contează), iar
+# „none" înseamnă ABSENŢĂ CONFIRMATĂ: lista volumelor a reuşit şi numele nu e în ea. O eroare
+# Docker, un nume nerezolvat sau un container app existent = „unknown"/„exists": nicio cheie.
+compose_volume_name() {   # compose_volume_name COMPOSE_FILE → name, or "" when compose cannot tell
+  docker compose -f "$1" config 2>/dev/null | awk '
+    /^volumes:/ { inv = 1; next }
+    /^[^ ]/ { inv = 0 }
+    inv && /^  webterm-data:/ { inw = 1; next }
+    inv && /^  [^ ]/ { inw = 0 }
+    inw && /^    name:/ { sub(/^    name: */, ""); gsub(/"/, ""); print; exit }' || true
+}
 data_volume_state() {   # data_volume_state COMPOSE_FILE → none | exists | unknown
-  local proj
-  proj=$(docker compose -f "$1" config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
-  [ -n "$proj" ] || { echo unknown; return 0; }
-  if docker volume inspect "${proj}_webterm-data" >/dev/null 2>&1; then echo exists; else echo none; fi
+  local vol all cids
+  vol=$(compose_volume_name "$1")
+  [ -n "$vol" ] || { echo unknown; return 0; }
+  all=$(docker volume ls -q 2>/dev/null) || { echo unknown; return 0; }
+  if printf '%s\n' "$all" | grep -qxF "$vol"; then echo exists; return 0; fi
+  # un container app al proiectului (chiar oprit) = instalare existentă, oricum ar arăta volumul
+  cids=$(docker compose -f "$1" ps -a -q app 2>/dev/null) || { echo unknown; return 0; }
+  [ -z "$cids" ] || { echo exists; return 0; }
+  echo none
 }
 MK_DIR="$SECRETS_DIR/master-key"
+VOL_STATE=unknown
+[ "$FRESH_ENV" != 1 ] || VOL_STATE=$(data_volume_state docker-compose.prod.yml)
+if [ "$FRESH_ENV" = 1 ] && [ "$VOL_STATE" = unknown ]; then
+  # M4: o eroare Docker nu dovedeşte o instalare nouă — nu creăm şi nu activăm nicio cheie
+  err "cannot confirm that this is a new installation (docker compose config / docker volume ls failed)."
+  err "No master key was created. Fix Docker, then run install.sh again."
+  exit 1
+fi
 if [ -f "$MK_DIR/master.key" ]; then
-  # deja creată (o rulare anterioară); .env se completează doar la o instalare nouă — pe una
-  # existentă, activarea rămâne pasul explicit al operatorului
-  if [ "$FRESH_ENV" = 1 ]; then set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key; fi
-elif [ "$FRESH_ENV" = 1 ] && [ "$(data_volume_state docker-compose.prod.yml)" = none ]; then
+  # deja creată (o rulare anterioară); .env se completează doar la o instalare nouă CONFIRMATĂ —
+  # pe una existentă, activarea rămâne pasul explicit al operatorului
+  if [ "$FRESH_ENV" = 1 ] && [ "$VOL_STATE" = none ]; then set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key; fi
+elif [ "$FRESH_ENV" = 1 ] && [ "$VOL_STATE" = none ]; then
   install -d -m 0700 -o 10001 -g 10001 "$MK_DIR"
   head -c 32 /dev/urandom | base64 | install -m 0400 -o 10001 -g 10001 /dev/stdin "$MK_DIR/master.key"
   set_env WEBTERM_MASTER_KEY_FILE /run/webterm-key/master.key

@@ -226,11 +226,13 @@ async def lifespan(app: FastAPI):
     # DATA_DIR. bootkeys.prepare() ia lock-ul procesului, inventariază volumul, verifică sursa
     # cheii şi abia apoi aplică un restore din staging (sub lock), migrează un volum 3.7 când i
     # s-a dat o cheie şi încarcă seiful. Un volum 3.7 fără cheie configurată porneşte EXACT ca
-    # înainte (starea legacy, nimic scris în afară de `.lock`).
+    # înainte (starea legacy, nimic scris în afară de `.lock` şi `.maint.lock`).
+    # M3: `.maint.lock` (exclusiv) rămâne luat până după db.connect(): comenzile admin doar-DB
+    # (lacăt partajat, fără `.lock`) nu rulează în timpul restore-ului, migrării sau schemei.
     # INV-14 (docs/design/INVARIANTS.md): o cheie lipsă/greşită/divergentă opreşte boot-ul aici,
     # înainte de clean-up, restore, schemă şi orice scriitor.
     try:
-        bootkeys.prepare()
+        bootkeys.prepare(hold_maintenance=True)
     except Exception as e:
         # O linie clară (cod + nume, niciodată material de cheie), apoi ieşire cu cod ≠ 0: uvicorn
         # opreşte procesul când lifespan-ul eşuează. Un restore PORNIT dar neterminat rămâne în
@@ -242,6 +244,7 @@ async def lifespan(app: FastAPI):
     # originalele sunt intacte, temporarele sunt doar spaţiu ocupat
     core.cleanup_cap_temps()
     await db.connect()
+    bootkeys.end_maintenance()
     # Instalare NOUĂ → cheie proprie din prima secundă. Sursa publică a agentului are încorporată
     # cheia MENTAINERULUI; fără o cheie de deployment, fiecare instalare din lume ar împărţi
     # aceeaşi ancoră de încredere pentru update-uri, iar o scurgere a acelei chei ar însemna cod

@@ -113,6 +113,9 @@ def snapshot(d, skip_lock=False):
 
 def boot(d, env=None, **kw):
     kw.setdefault("default_key_file", NODEF)
+    # M2: în proces real lock-ul unui boot eşuat după o scriere rămâne până la ieşire; testele de
+    # crash repornesc în acelaşi proces, deci îl eliberează (bootkeys/boot_keys_test acoperă reţinerea)
+    kw.setdefault("_release_after_mutation", True)
     return K.boot(d, env or {}, **kw)
 
 

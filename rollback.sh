@@ -52,6 +52,85 @@ if [ "$PREV" = "$CUR" ]; then
   exit 1
 fi
 
+# ── 3.8: graniţa migrării la criptarea la repaus (H1, recenzia PR4) ──────────────────────────
+# Un volum migrat (keys.wtk, migrating.wtm, master.key, nume rezervate `.wt*`, seturi de restore
+# 3.8) nu poate fi pornit de o imagine mai veche de 3.8: ea nu vede `data/secret`, îşi poate crea
+# unul nou lângă keys.wtk, iar 3.8 refuză apoi volumul amestecat. Deci orice pornire a unei imagini
+# < 3.8 (deploy, rollback automat sau manual, upgrade.sh spre o versiune veche) verifică întâi
+# volumul. Imaginea ≥ 3.8 nu cere nimic. Orice îndoială (volum necunoscut, Docker care eşuează,
+# imagine fără versiune pe un volum migrat) = refuz, cu instrucţiunile de recuperare.
+image_era() {   # image_era IMAGE → 38 | pre38 | unknown
+  local v rc=0
+  v=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null) \
+    || { echo unknown; return 0; }
+  v=${v#v}
+  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+    if [ "${BASH_REMATCH[1]}" -gt 3 ] || { [ "${BASH_REMATCH[1]}" = 3 ] && [ "${BASH_REMATCH[2]}" -ge 8 ]; }; then
+      echo 38
+    else
+      echo pre38
+    fi
+    return 0
+  fi
+  # fără etichetă (imagine construită local): codul de chei 3.8 e în imagine sau nu
+  docker run --rm --network none --entrypoint sh "$1" -c 'test -f /srv/webterm/gateway/app/keys.py' \
+    >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) echo 38 ;; 1) echo pre38 ;; *) echo unknown ;; esac
+}
+data_volume_name() {   # data_volume_name COMPOSE_FILE → the effective name of the data volume, or ""
+  local cid m
+  if [ -n "${WEBTERM_VOLUME:-}" ]; then echo "$WEBTERM_VOLUME"; return 0; fi
+  cid=$(docker compose -f "$1" ps -a -q app 2>/dev/null | head -n1) || cid=""
+  if [ -n "$cid" ]; then
+    m=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$cid" 2>/dev/null) || m=""
+    if [ -n "$m" ]; then echo "$m"; return 0; fi
+  fi
+  docker compose -f "$1" config 2>/dev/null | awk '
+    /^volumes:/ { inv = 1; next }
+    /^[^ ]/ { inv = 0 }
+    inv && /^  webterm-data:/ { inw = 1; next }
+    inv && /^  [^ ]/ { inw = 0 }
+    inw && /^    name:/ { sub(/^    name: */, ""); gsub(/"/, ""); print; exit }' || true
+}
+volume_38_markers() {   # volume_38_markers VOLUME IMAGE → names on stdout; 0 listed, 2 confirmed absent, 1 error
+  local all ls
+  all=$(docker volume ls -q) || return 1
+  printf '%s\n' "$all" | grep -qxF "$1" || return 2
+  ls=$(docker run --rm --network none -v "$1:/data:ro" --entrypoint ls "$2" -A1 /data) || return 1
+  printf '%s\n' "$ls" | grep -E '^(keys\.wtk.*|migrating\.wtm.*|master\.key.*|erasures\.wtj|\.restore|restore-pending\..+|.*\.wt[a-z0-9]*)$' || true
+}
+guard_pre38() {   # guard_pre38 IMAGE COMPOSE_FILE → 0 may start; 1 refused (message printed)
+  local era vol marks rc=0
+  era=$(image_era "$1")
+  [ "$era" = 38 ] && return 0
+  vol=$(data_volume_name "$2")
+  if [ -z "$vol" ]; then
+    echo "✗ Refusing to start $1: it is not a 3.8 image (${era}) and the data volume of this installation" >&2
+    echo "  cannot be determined, so it cannot be checked for the 3.8 encryption-at-rest migration." >&2
+    echo "  Name it explicitly (docker volume ls) and run again:  WEBTERM_VOLUME=<name> $0 …" >&2
+    return 1
+  fi
+  marks=$(volume_38_markers "$vol" "$1") || rc=$?
+  [ "$rc" = 2 ] && return 0
+  if [ "$rc" != 0 ]; then
+    echo "✗ Refusing to start $1 (${era}): the data volume '$vol' could not be inspected for the 3.8" >&2
+    echo "  encryption-at-rest migration (Docker error). Nothing was changed." >&2
+    return 1
+  fi
+  [ -n "$marks" ] || return 0
+  echo "✗ Refusing to start $1: the data volume '$vol' was migrated to 3.8 encryption at rest" >&2
+  echo "  ($(printf '%s' "$marks" | tr '\n' ' '| sed 's/ $//')), and this image is $([ "$era" = pre38 ] && echo "older than 3.8" || echo "of an unknown version")." >&2
+  echo "  A pre-3.8 gateway cannot read that volume: it would create a new vault key next to the" >&2
+  echo "  protected one, and 3.8 then refuses the mixed volume. Nothing was changed." >&2
+  echo "  Either stay on 3.8 (fix forward: ./deploy.sh <a 3.8.x version>), or go back to 3.7 the only" >&2
+  echo "  safe way: restore the backup taken BEFORE the migration into a new volume" >&2
+  echo "  (docs/INSTALL.md → Encryption at rest, \"Going back to 3.7\")." >&2
+  return 1
+}
+
+# H1: înainte ca .env sau .prev-image să fie atinse — un refuz nu schimbă nimic
+guard_pre38 "$PREV" "$FILE" || exit 1
+
 echo "→ Rollback: ${CUR:-<unset>} → $PREV${PREV_TAG:+ ($PREV_TAG)}"
 set_env WEBTERM_IMAGE "$PREV"
 set_env WEBTERM_IMAGE_TAG "$PREV_TAG"

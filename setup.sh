@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # WebTerm — full gateway installer.
 # Run:  ./setup.sh   (interactive)   or   ./setup.sh <domain-or-ip>
+#       ./setup.sh --key-in-volume <domain-or-ip>   keep the master key INSIDE the data volume
+#                                                   (reduced protection, an explicit choice)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -77,7 +79,17 @@ Nothing was changed — no container was created."
 fi
 
 # 2) Configuration (.env)
-HOST_ARG="${1:-}"
+# M4 (recenzia PR4): modul „reduced" (cheia master în volum) e o ALEGERE explicită, niciodată o
+# plasă tăcută pentru o cheie care n-a putut fi creată.
+KEY_IN_VOLUME="${WEBTERM_KEY_IN_VOLUME:-}"
+HOST_ARG=""
+for _a in "$@"; do
+  case "$_a" in
+    --key-in-volume) KEY_IN_VOLUME=1 ;;
+    -*) err "Unknown option: $_a (expected --key-in-volume)"; exit 2 ;;
+    *) HOST_ARG="$_a" ;;
+  esac
+done
 if [ -f .env ]; then
   say "Found an existing .env — using it. Delete it if you want to reconfigure."
 else
@@ -116,11 +128,38 @@ EOF
   # instalare nouă: .env tocmai scris ŞI niciun volum de date existent (un volum 3.7 rămâne legacy
   # până când operatorul alege). Fişierul stă în afara volumului: dir 0700 + fişier 0400, ale
   # userului aplicaţiei (10001) — cititorul de chei refuză un fişier lizibil de grup/alţii.
-  _proj=$($COMPOSE config 2>/dev/null | sed -n 's/^name: *//p' | head -1)
-  # docker-compose v1 nu tipăreşte `name:`; numele lui implicit = directorul, fără punctuaţie
-  [ -n "$_proj" ] || _proj=$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')
-  if [ -n "$_proj" ] && [ ! -f secrets/master-key/master.key ] \
-     && ! docker volume inspect "${_proj}_webterm-data" >/dev/null 2>&1; then
+  # Numele EFECTIV al volumului vine din `compose config` (o suprascriere `name:` contează), iar
+  # „nou" înseamnă absenţă CONFIRMATĂ (lista volumelor a reuşit şi numele lipseşte). O eroare
+  # Docker nu e „absent": atunci nu se creează nicio cheie şi nu se configurează nimic.
+  _vol=$($COMPOSE config 2>/dev/null | awk '
+    /^volumes:/ { inv = 1; next }
+    /^[^ ]/ { inv = 0 }
+    inv && /^  webterm-data:/ { inw = 1; next }
+    inv && /^  [^ ]/ { inw = 0 }
+    inw && /^    name:/ { sub(/^    name: */, ""); gsub(/"/, ""); print; exit }' || true)
+  if [ -z "$_vol" ] && [ "$COMPOSE" = docker-compose ]; then
+    # docker-compose v1 nu tipăreşte `name:`; numele lui = directorul fără punctuaţie + _webterm-data
+    _vol="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')_webterm-data"
+  fi
+  _vstate=unknown
+  if [ -n "$_vol" ] && _all=$(docker volume ls -q 2>/dev/null); then
+    if printf '%s\n' "$_all" | grep -qxF "$_vol"; then _vstate=exists; else _vstate=none; fi
+  fi
+  if [ "$KEY_IN_VOLUME" = 1 ]; then
+    echo "WEBTERM_KEY_IN_VOLUME=1" >> .env
+    warn "WEBTERM_KEY_IN_VOLUME=1 (your choice): the master key is kept in the data volume, next to"
+    warn "the data (reduced protection; see docs/INSTALL.md → Encryption at rest)."
+  elif [ -f secrets/master-key/master.key ]; then
+    say "secrets/master-key/master.key already exists — left as it is (enable it in .env when you choose)."
+  elif [ "$_vstate" = exists ]; then
+    warn "Existing data volume ($_vol): encryption at rest stays off until you enable it"
+    warn "(docs/INSTALL.md → Encryption at rest)."
+  elif [ "$_vstate" = unknown ]; then
+    rm -f .env
+    err "Cannot confirm that this is a new installation (docker compose config / docker volume ls failed):"
+    err "no master key was created and nothing was configured. Fix Docker, then run setup.sh again."
+    exit 1
+  else
     _sudo=""; [ "$(id -u)" = 0 ] || _sudo="sudo"
     if $_sudo install -d -m 0700 secrets && $_sudo install -d -m 0700 -o 10001 -g 10001 secrets/master-key \
        && head -c 32 /dev/urandom | base64 | $_sudo install -m 0400 -o 10001 -g 10001 /dev/stdin secrets/master-key/master.key; then
@@ -128,9 +167,11 @@ EOF
       warn "Master key created: secrets/master-key/master.key. COPY IT OFF THIS MACHINE now:"
       warn "without it, this installation's backups cannot be restored."
     else
-      echo "WEBTERM_KEY_IN_VOLUME=1" >> .env
-      warn "Could not create secrets/master-key/ (needs root for chown 10001): the master key is kept"
-      warn "in the data volume instead (reduced protection; see docs/INSTALL.md → Encryption at rest)."
+      rm -f .env
+      err "Could not create secrets/master-key/master.key (it needs root to give it to uid 10001)."
+      err "Nothing was configured. Run setup.sh with sudo, or choose reduced protection explicitly:"
+      err "  ./setup.sh --key-in-volume ${HOST_ARG}   (the key then lives in the data volume)"
+      exit 1
     fi
   fi
 fi

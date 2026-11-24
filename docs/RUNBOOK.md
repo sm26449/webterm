@@ -48,6 +48,13 @@ The script switches the `WEBTERM_IMAGE` pin in `.env`, restarts the container,
 and waits for the healthcheck verdict. It is reversible: a second
 `./rollback.sh` brings you back (a swap).
 
+**Not across the 3.8 migration.** If the data volume was migrated to encryption at rest (3.8:
+`keys.wtk` and friends in it), `rollback.sh` — and the automatic rollback in `deploy.sh`, and
+`upgrade.sh` to an older tag — refuse to start an image older than 3.8 and change nothing. A 3.7
+gateway would create a new vault key next to the protected one. Stay on 3.8 and deploy a good 3.8.x
+image, or go back the documented way: restore the backup taken before the migration into a new
+volume (docs/INSTALL.md, *Going back to 3.7*).
+
 **What the pin is.** `upgrade.sh` resolves the tag you asked for to the image's **digest**
 once, right after the pull, and from then on uses only that:
 `WEBTERM_IMAGE=ghcr.io/sm26449/webterm@sha256:…` in `.env`, the host-side kit
@@ -325,16 +332,18 @@ credentials** recovered and decryptable.
    ```bash
    systemctl list-timers webterm-backup.timer
    systemctl status webterm-backup.service      # Result: exit-code = no backups
-   ls -l /var/backups/webterm                   # should grow daily, files end in .enc
+   ls -l /var/backups/webterm                   # should grow daily, files end in .enc (.wtbk when protected)
    ```
-2. **Restore**: `sudo [WEBTERM_BACKUP_PASSPHRASE=...] ./scripts/restore.sh <arhiva.tar.gz|.enc>` —
-   stops the app, **extracts to staging + verifies `integrity_check` BEFORE**
-   touching the current data (a corrupt archive can no longer destroy anything),
-   moves the old state to `/data/.restore-prev` (safety net), then restarts.
-   `.enc` archives require the passphrase. The data directory's `.lock` stays in place.
-   An archive of a **protected** volume (3.8, `keys.wtk`) is restored only when the master
-   key this installation is configured with opens its `keys.wtk`; that is checked with the
-   app image before the app is stopped, and a refusal names the key id the archive needs.
+2. **Restore**: `sudo [WEBTERM_BACKUP_PASSPHRASE=...] ./scripts/restore.sh <archive.wtbk|.tar.gz|.enc>` —
+   makes one private copy of the archive and checks it with the **app's own restore code**
+   (and, for a protected volume, the master key this installation is configured with) before
+   anything stops; then it stops the app, refuses if any other container uses the volume or if
+   Docker cannot tell, and **stages** the archive with the gateway's staging code under the data
+   directory's lock (a lock held by anything else is refused before any change). Starting the app
+   applies it, with the gateway's resumable journal and a safety copy of the previous state. The
+   app is restarted after a refusal or a committed stage, never after a stage that ended in an
+   unknown state (the script says so). `.enc`/`.wtbk` archives require the passphrase; a 3.7
+   archive on a protected volume needs `--legacy-import`. `--verify <archive>` runs only the checks.
 3. **The golden rule**: on a pre-3.8 volume the vault key (`data/secret`) is in the archive.
    Without it, agent tokens and encrypted SSH credentials are UNRECOVERABLE — boot
    explicitly refuses to start with a regenerated key over encrypted data. On a protected
@@ -386,7 +395,11 @@ identical between them, so there is no migration step):
    a new domain means every host has to be re-enrolled by hand.
 3. Let the new install boot **once**. It generates its own signing key, which is correct
    and harmless — it has no hosts yet, and the restore replaces it.
-4. `sudo WEBTERM_BACKUP_PASSPHRASE=... WEBTERM_VOLUME=<name> ./scripts/restore.sh <archive>.enc`
+   For a **protected** installation (3.8, `.wtbk` archives) put the original master key file in
+   `secrets/master-key/master.key` (0400, owned by 10001) **before** this first boot: the new
+   installation is then protected with the same key, which is what the archive needs.
+4. `sudo WEBTERM_BACKUP_PASSPHRASE=... WEBTERM_VOLUME=<name> ./scripts/restore.sh <archive>`
+   (add `--legacy-import` for a pre-3.8 `.tar.gz.enc` onto a new, protected installation)
    — the volume name comes from the install **directory**, so it is `webterm_webterm-data` only
    for `/opt/webterm`; check with `docker volume ls`. Getting it wrong used to restore into a
    volume nothing uses while the app kept its own, and still report success; the script refuses

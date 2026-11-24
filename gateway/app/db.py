@@ -2,7 +2,9 @@
 
 import json
 import logging
+import sqlite3
 import time
+import urllib.parse
 
 import aiosqlite
 
@@ -776,6 +778,74 @@ async def connect() -> None:
     # curăță sesiunile web expirate (altfel tabelul crește la nesfârșit)
     await _conn.execute("DELETE FROM web_sessions WHERE expires < ?", (now(),))
     await _conn.commit()
+
+
+class MaintenanceRefused(RuntimeError):
+    """The maintenance connection (admin DB-only commands) cannot open this database as is."""
+
+
+def expected_schema() -> dict:
+    """{table: (columns…)} the code's SCHEMA + MIGRATIONS produce, built in memory (no file
+    touched). The maintenance connection compares the live database against it (M3)."""
+    con = sqlite3.connect(":memory:")
+    try:
+        con.executescript(SCHEMA)
+        for stmt in MIGRATIONS:
+            try:
+                con.execute(stmt)
+            except sqlite3.Error as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        return _schema_of(con)
+    finally:
+        con.close()
+
+
+def _schema_of(con) -> dict:
+    out = {}
+    for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        qt = '"%s"' % t.replace('"', '""')
+        out[t] = tuple(sorted(r[1] for r in con.execute("PRAGMA table_info(%s)" % qt)))
+    return out
+
+
+async def connect_maintenance() -> None:
+    """M3: the connection of the admin DB-only commands (`python3 -m app.admin`). Unlike
+    connect(): never creates the file (mode=rw: a missing database is a refusal), runs no
+    SCHEMA / migration / seeding / clean-up, and switches no journal mode (the gateway's WAL
+    setting stays as the file has it). The live schema must equal the code's exactly
+    (expected_schema); otherwise MaintenanceRefused — start the gateway once (it migrates), or
+    use the matching image."""
+    global _conn
+    uri = "file:%s?mode=rw" % urllib.parse.quote(str(config.DB_PATH), safe="/")
+    try:
+        conn = await aiosqlite.connect(uri, uri=True)
+    except Exception as e:
+        raise MaintenanceRefused("the database %s cannot be opened (%s): it is never created by an "
+                                 "admin command" % (config.DB_PATH, e)) from None
+    try:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout=5000")
+        live = {}
+        async with conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                "AND name NOT LIKE 'sqlite_%'") as cur:
+            tables = [r[0] for r in await cur.fetchall()]
+        for t in tables:
+            qt = '"%s"' % t.replace('"', '""')
+            async with conn.execute("PRAGMA table_info(%s)" % qt) as cur:
+                live[t] = tuple(sorted(r[1] for r in await cur.fetchall()))
+    except Exception as e:
+        await conn.close()
+        raise MaintenanceRefused("the database %s cannot be read (%s)" % (config.DB_PATH, e)) from None
+    want = expected_schema()
+    if live != want:
+        await conn.close()
+        diff = sorted(set(want) ^ set(live)) or sorted(t for t in want if want[t] != live.get(t))
+        raise MaintenanceRefused("the database schema differs from this version's (%s): start the "
+                                 "gateway of this version once (it migrates the schema), or run the "
+                                 "command from the image that matches the database"
+                                 % ", ".join(diff[:5]))
+    _conn = conn
 
 
 async def close() -> None:

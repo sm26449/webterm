@@ -10,6 +10,9 @@ Entry points (all of them under a `ProcessLock`, whose directory fd is the only 
 `DATA_DIR`):
 
     acquire_lock(data_dir)                          → ProcessLock (flock on DATA_DIR/.lock)
+    acquire_maint_lock(dir_fd, exclusive, wait)     → fd (flock on DATA_DIR/.maint.lock: exclusive
+                                                      for boot / restore / migration phases, shared
+                                                      for the admin DB-only commands)
     classify(lock)                                  → Inventory (empty / legacy / protected / ambiguous)
     resolve_master_key(env, lock, inv)              → ResolvedKey | None
     bootstrap(lock, resolved)                       → (Keyring, ProtectionState)        class empty
@@ -27,11 +30,15 @@ Entry points (all of them under a `ProcessLock`, whose directory fd is the only 
 Every refusal is a `BootRefused` with a short `reason` code, a `subject` (a file or variable
 NAME, never a value) and a `kind`:
 
-    "invalid-key"           preflight refusal: nothing in DATA_DIR was written (only `.lock`)
+    "invalid-key"           preflight refusal: nothing in DATA_DIR was written (only `.lock`
+                            and, from the gateway's boot, `.maint.lock`)
     "preflight-io"          an OSError during preflight (fstat, listing, flock…), normalised at
-                            `boot()`: nothing in DATA_DIR was written (only `.lock`)
-    "operation-incomplete"  a publication started and failed before keys.wtk's rename; a tmp may
-                            remain, the next boot (right key) recovers
+                            `boot()`: nothing in DATA_DIR was written (as above)
+    "operation-incomplete"  a publication started and failed before keys.wtk's rename (or the
+                            `before_migrate` hook had begun a 3.7 restore); a tmp may remain, the
+                            next boot (right key) recovers. Once a mutation began (`lock.mutated`),
+                            `boot()` never releases the lock on an error path: it stays with the
+                            process until exit (M2), and a raw OSError gets this kind
     "commit-unknown"        keys.wtk's rename happened (this boot or an earlier one) and a later
                             step failed (dir fsync, read-back, legacy-secret removal); nothing is
                             undone, the next boot re-verifies
@@ -55,6 +62,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -66,6 +74,10 @@ ENV_KEY_VALUE = "WEBTERM_MASTER_KEY"
 ENV_IN_VOLUME = "WEBTERM_KEY_IN_VOLUME"
 
 LOCK_NAME = ".lock"
+# M3: al doilea lacăt, de coordonare cu comenzile admin doar-DB (care NU iau `.lock`, ca să meargă
+# cu gateway-ul pornit): exclusiv în fazele de boot care pot schimba volumul (preflight, restore,
+# migrare, schema), partajat pentru admin. Niciodată scris, niciodată șters.
+MAINT_LOCK_NAME = ".maint.lock"
 MANIFEST = "keys.wtk"
 MANIFEST_TMP = "keys.wtk.tmp"
 LEGACY_SECRET = "secret"
@@ -166,11 +178,25 @@ class ProcessLock:
         self.path = path
         self.dir_fd = dir_fd
         self.lock_fd = lock_fd
+        self.maint_fd = None      # .maint.lock exclusiv, cât ține faza de boot (M3)
+        # M2: True de la prima scriere a acestui boot în volum (publicare, ștergere, restore 3.7
+        # aplicat de hook). De atunci lock-ul nu se mai eliberează pe nicio cale de eroare.
+        self.mutated = False
 
     def __repr__(self):
         return f"ProcessLock({self.path!r})"
 
+    def end_maintenance(self):
+        """Drop the exclusive .maint.lock (the boot's mutating phases are over); .lock stays."""
+        fd, self.maint_fd = self.maint_fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
     def release(self):
+        self.end_maintenance()
         for fd in (self.lock_fd, self.dir_fd):
             if fd is not None:
                 try:
@@ -219,6 +245,53 @@ def acquire_lock(data_dir):
         if lfd is not None:
             os.close(lfd)
         os.close(dfd)
+        raise
+
+
+def acquire_maint_lock(dir_fd, exclusive, wait=0.0):
+    """M3: flock on DATA_DIR/.maint.lock through `dir_fd`; returns the fd (close it to release).
+    Exclusive: the boot's mutating phases. Shared: the admin DB-only commands, which run next to
+    a live gateway without `.lock`. Non-blocking, retried for up to `wait` seconds, then
+    LockError("maintenance-busy"). The file is created 0644 and opened read-only (flock needs no
+    write access): `docker exec` runs the admin command as root while the gateway runs as the
+    service user, and both must be able to open it. Never written, never removed."""
+    dst = os.fstat(dir_fd)
+    me = os.geteuid()
+    # domeniul de încredere: ca la .lock, plus proprietarul DATA_DIR când rulăm ca root (docker
+    # exec): root poate oricum totul, iar proprietarul directorului e userul serviciului
+    if (dst.st_uid not in (me, 0) and me != 0) or dst.st_mode & 0o022:
+        raise LockError("data-dir-bad-mode" if dst.st_mode & 0o022 else "data-dir-bad-owner", "DATA_DIR")
+    try:
+        fd = os.open(MAINT_LOCK_NAME, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     0o644, dir_fd=dir_fd)
+    except OSError as e:
+        raise LockError("lock-not-regular" if e.errno in (errno.ELOOP, errno.EISDIR) else
+                        "lock-unavailable", MAINT_LOCK_NAME) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise LockError("lock-not-regular", MAINT_LOCK_NAME)
+        if st.st_uid not in (me, 0, dst.st_uid) or st.st_mode & 0o022:
+            raise LockError("lock-bad-owner", MAINT_LOCK_NAME)
+        if me == 0 and st.st_uid == 0 and dst.st_uid != 0:
+            # creat acum de root peste volumul userului serviciului: îl dăm proprietarului
+            # directorului, ca gateway-ul să-l poată deschide oricând (0644 oricum)
+            try:
+                os.fchown(fd, dst.st_uid, dst.st_gid)
+            except OSError:
+                pass
+        op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        deadline = time.monotonic() + max(0.0, wait)
+        while True:
+            try:
+                fcntl.flock(fd, op)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockError("maintenance-busy", MAINT_LOCK_NAME) from None
+                time.sleep(0.1)
+    except BaseException:
+        os.close(fd)
         raise
 
 
@@ -412,6 +485,7 @@ class Inventory:
     leftovers: tuple = ()          # keys.wtk.tmp / master.key.tmp / migrating.wtm.tmp present
     reason: str = ""               # for ambiguous: the first offending entry
     migrating: bool = False        # migrating.wtm present (protected: resume; legacy: pre-commit)
+    transcripts_link: bool = False  # legacy: transcripts/ is a symlink (supported 3.7 layout, M1)
 
 
 def _lstat(lock, name):
@@ -504,9 +578,44 @@ def find_reserved(dir_fd, exempt=()):
     return _scan_reserved(dir_fd, RESERVED_DIR, RESERVED_DIR, RESERVED_SCAN_DEPTH)
 
 
+def is_link(dir_fd, name):
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def find_reserved_through_link(dir_fd):
+    """M1 / R-M3: `transcripts/` as a symlink to another disk is a supported 3.7 layout. On a
+    volume with no key artefact, the same reserved-name scan as find_reserved, through the root
+    link only (below it no other symlink is followed). Returns the first reserved entry, or "";
+    a target that cannot be opened or listed proves nothing → returned as a marker (refusal).
+    One definition: backup.volume_kind uses it too."""
+    what = RESERVED_DIR + " (symlink, unreadable)"
+    try:
+        tfd = os.open(RESERVED_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError:
+        return what
+    try:
+        for n in sorted(os.listdir(tfd)):
+            if is_reserved_name(n, "transcripts"):
+                return f"{RESERVED_DIR}/{n}"
+            if RESERVED_SCAN_DEPTH > 0 and stat.S_ISDIR(os.stat(n, dir_fd=tfd, follow_symlinks=False).st_mode):
+                hit = _scan_reserved(tfd, n, f"{RESERVED_DIR}/{n}", RESERVED_SCAN_DEPTH - 1)
+                if hit:
+                    return hit
+        return ""
+    except OSError:
+        return what
+    finally:
+        os.close(tfd)
+
+
 def classify(lock):
     """§12.9 Inventory: top level of DATA_DIR (+ reserved names under transcripts/), symlinks
-    never followed. Read-only."""
+    never followed — except M1: a `transcripts/` symlink on a volume with `secret` and no key
+    artefact of the new format at all (the supported 3.7 layout) is scanned through the link and
+    stays `legacy` (`transcripts_link=True`). Read-only."""
     names = sorted(os.listdir(lock.dir_fd))
     st = {n: os.stat(n, dir_fd=lock.dir_fd, follow_symlinks=False) for n in names}
 
@@ -534,6 +643,14 @@ def classify(lock):
     # singurul nume rezervat legitim e migrating.wtm (secret, keys.wtk.tmp, master.key*, .lock
     # nu sunt în namespace); orice altceva (un segment, un jurnal) = set amestecat → refuz.
     reserved = find_reserved(lock.dir_fd, exempt=(MIGRATION_MARKER,))
+    link = False
+    if (reserved == f"{RESERVED_DIR} (unreadable)" and has_secret and not has_marker and not leftovers
+            and not in_volume and is_link(lock.dir_fd, RESERVED_DIR)):
+        # M1: layout 3.7 suportat (transcripts/ pe alt disc). Doar pe un set curat 3.7: secret,
+        # fără keys.wtk, fără marker, fără master.key / temporare. Orice urmă a formatului nou
+        # păstrează refuzul (set amestecat), ca în backup.volume_kind.
+        reserved = find_reserved_through_link(lock.dir_fd)
+        link = not reserved
     if reserved:
         return Inventory("ambiguous", staged_restore=staged, reason=f"{reserved} without {MANIFEST}")
     if has_marker:
@@ -545,11 +662,12 @@ def classify(lock):
         return Inventory("ambiguous", staged_restore=staged,
                          reason=f"{MIGRATION_MARKER} without {MANIFEST}: migration published but {MANIFEST} missing")
     if has_secret:
-        return Inventory("legacy", in_volume=in_volume, staged_restore=staged, leftovers=leftovers)
+        return Inventory("legacy", in_volume=in_volume, staged_restore=staged, leftovers=leftovers,
+                         transcripts_link=link)
 
     def tolerated(n):
         mode = st[n].st_mode
-        if n == LOCK_NAME:
+        if n in (LOCK_NAME, MAINT_LOCK_NAME):
             return stat.S_ISREG(mode)
         if n == "lost+found":
             return stat.S_ISDIR(mode)
@@ -744,6 +862,7 @@ def _atomic_publish(lock, name, tmp, data, crash, commit_kind, before_rename=Non
     (before_rename), rename, fsync dir. Failures up to the rename → operation-incomplete; the dir
     fsync after it → `commit_kind` (commit-unknown for keys.wtk; never undone)."""
     dfd = lock.dir_fd
+    lock.mutated = True
     with _phase(KIND_INCOMPLETE, tmp):
         _unlink_leftover(lock, tmp)
         crash(f"{name}:before-tmp")
@@ -875,6 +994,7 @@ def bootstrap(lock, resolved, profile=kr.PROFILE_V1, _crash_at=None):
 
 def _remove_marker(lock, crash):
     """Markerul dispare numai după ce absența lui `secret` e durabilă (fsync înainte de unlink)."""
+    lock.mutated = True
     with _phase(KIND_COMMIT_UNKNOWN, MIGRATION_MARKER):
         os.fsync(lock.dir_fd)
         crash("marker:barrier")
@@ -894,6 +1014,7 @@ def _remove_legacy_secret(lock, ring, marker, crash):
         raise BootRefused("legacy-secret-mismatch", LEGACY_SECRET)
     if not hmac.compare_digest(_secret_digest(secret), marker.secret_digest):
         raise BootRefused("legacy-secret-mismatch", MIGRATION_MARKER)
+    lock.mutated = True
     with _phase(KIND_COMMIT_UNKNOWN, LEGACY_SECRET):
         os.fsync(lock.dir_fd)
         crash("secret:barrier")
@@ -954,6 +1075,7 @@ def _commit_proven_tmp(lock, blob, mk, profile, crash):
         finally:
             os.close(fd)
         crash("resume:proven")
+        lock.mutated = True
         os.rename(MANIFEST_TMP, MANIFEST, src_dir_fd=dfd, dst_dir_fd=dfd)
     crash("keys.wtk:renamed")
     with _phase(KIND_COMMIT_UNKNOWN, MANIFEST):
@@ -1158,24 +1280,48 @@ def _held(lock, resolved, ring):
     return {"master_key": mk, "resolved": _resolved_with(resolved, mk)}
 
 
+# M2: lock-urile unui boot care a început să scrie și apoi a eșuat. Rămân deschise până la
+# ieșirea procesului (nimeni altcineva nu are voie să atingă un volum pe jumătate schimbat).
+_RETAINED = []
+
+
+def release_retained():
+    """Tests only: drop the locks kept by failed boots, as if the process had exited."""
+    while _RETAINED:
+        _RETAINED.pop().release()
+
+
 # INV-14 (docs/design/INVARIANTS.md): lock → inventar → sursă → cheie verificată, înaintea oricărei
 # scrieri; un volum protejat nu cade niciodată pe `secret` sau pe altă sursă.
 def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1, migrate=True,
-         _crash_at=None, before_migrate=None):
+         _crash_at=None, before_migrate=None, maint_wait=None, _release_after_mutation=False):
     """§12.9 order: lock → inventory → key source → open / bootstrap / migrate. On a preflight
-    refusal (kind invalid-key) nothing but `.lock` may have been created; the lock is released on
-    every refusal. A raw OSError that escapes preflight (fstat, listing, flock…) becomes
-    BootRefused("io-error", kind="preflight-io"); publication errors are already typed.
+    refusal (kind invalid-key) nothing but `.lock` (and `.maint.lock`) may have been created; the
+    lock is released on every such refusal. A raw OSError that escapes preflight (fstat,
+    listing, flock…) becomes BootRefused("io-error", kind="preflight-io").
+
+    M2: once this boot wrote anything (`lock.mutated`: a publication, a removal, or the hook
+    applying a 3.7 restore), every error path keeps the lock (and .maint.lock) for the life of
+    the process, a raw OSError becomes kind operation-incomplete, and a preflight-kind refusal
+    is re-labelled operation-incomplete. `_release_after_mutation` exists for the crash tests,
+    which re-boot in the same process.
+
+    `maint_wait` (M3): when not None, the exclusive .maint.lock is taken right after .lock
+    (waiting up to that many seconds for admin DB-only commands to finish) and kept on the
+    returned lock until `lock.end_maintenance()`.
 
     `before_migrate(lock, inv)` (PR4) runs on a `legacy` volume with a valid source, under the
     lock, before anything of the migration is written: the gateway applies a 3.7 staged restore
     there and proves FK_legacy on the database (§12.9 checklist items 2–3). It refuses by raising
-    BootRefused; afterwards the volume must still classify `legacy`."""
+    BootRefused and sets `lock.mutated` before its first write; afterwards the volume must still
+    classify `legacy`."""
     try:
         lock = acquire_lock(data_dir)
     except OSError as e:
         raise _preflight_io(e) from e
     try:
+        if maint_wait is not None:
+            lock.maint_fd = acquire_maint_lock(lock.dir_fd, True, maint_wait)
         inv = classify(lock)
         if inv.kind == "ambiguous":
             raise BootRefused("ambiguous", inv.reason)
@@ -1188,9 +1334,14 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
                 if inv.migrating:
                     # o migrare a început: niciodată înapoi în legacy fără operator
                     raise BootRefused("migration-unfinished", MIGRATION_MARKER)
-                return BootResult(lock, ProtectionState("legacy", None, inv.staged_restore, False,
-                                                        ("legacy-key-in-volume",)),
+                warnings = ("legacy-key-in-volume",) + (("transcripts-symlink",) if inv.transcripts_link else ())
+                return BootResult(lock, ProtectionState("legacy", None, inv.staged_restore, False, warnings),
                                   legacy_key=_read_secret(lock))
+            if inv.transcripts_link:
+                # M1: layout-ul 3.7 cu transcripts/ symlink porneşte legacy, dar nu se migrează:
+                # pe un volum protejat backup-ul refuză o rădăcină symlink (H3, PR3), deci
+                # migrarea ar produce un volum fără backup. Întâi transcripts/ devine director.
+                raise BootRefused("transcripts-symlink", RESERVED_DIR)
             if before_migrate is not None:
                 before_migrate(lock, inv)
                 after = classify(lock)
@@ -1201,13 +1352,34 @@ def boot(data_dir, env, default_key_file=DEFAULT_KEY_FILE, profile=kr.PROFILE_V1
         ring, state = open_protected(lock, inv, resolved, profile, _crash_at)
         return BootResult(lock, state, ring, **_held(lock, resolved, ring))
     except OSError as e:
+        if lock.mutated:
+            _keep(lock, _release_after_mutation)
+            code = errno.errorcode.get(e.errno, "EIO") if e.errno else "EIO"
+            raise BootRefused("io-error", code, KIND_INCOMPLETE) from e
         lock.release()
-        # Low 5: orice OSError brut ajuns aici e din preflight (publicările îl tipizează în
-        # _phase): nimic nu a fost scris de acest boot
+        # Low 5: un OSError brut fără nicio scriere a acestui boot e din preflight
         raise _preflight_io(e) from e
-    except BaseException:
-        lock.release()
+    except BootRefused as e:
+        if lock.mutated:
+            if e.kind in (KIND_INVALID_KEY, KIND_PREFLIGHT_IO):
+                e.kind = KIND_INCOMPLETE
+            _keep(lock, _release_after_mutation)
+        else:
+            lock.release()
         raise
+    except BaseException:
+        if lock.mutated:
+            _keep(lock, _release_after_mutation)
+        else:
+            lock.release()
+        raise
+
+
+def _keep(lock, release):
+    if release:
+        lock.release()
+    else:
+        _RETAINED.append(lock)
 
 
 def _preflight_io(e):

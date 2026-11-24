@@ -38,6 +38,7 @@ ultimul Owner care încă are parolă locală (contul break-glass), în afară d
 import argparse
 import asyncio
 import getpass
+import os
 import sys
 import time
 
@@ -399,6 +400,13 @@ async def cmd_vacuum(_args) -> None:
 # deci nu deschid keys.wtk şi nu publică nimic. O comandă nouă care ar scrie o valoare criptată
 # trebuie fie să deschidă keyring-ul read-only prin keys (fără lock, fără publicare), fie să intre
 # în NEEDS_LOCK. Cele care doar citesc (list, roles, health) rulează oricând.
+#
+# M3 (review PR4): toate (în afară de health) folosesc conexiunea de mentenanţă
+# (db.connect_maintenance): nu creează DB-ul, nu rulează schema/migraţii/seeding şi nu schimbă
+# journal_mode; o schemă diferită de a codului = refuz. Şi iau DATA_DIR/.maint.lock PARTAJAT,
+# neblocant: boot-ul îl ţine EXCLUSIV cât aplică un restore, migrează sau face schema, deci o
+# comandă doar-DB nu poate scrie peste un DB pe jumătate înlocuit; cu gateway-ul pornit normal
+# lacătul e liber şi break-glass-ul rămâne online (`.lock` nu e atins).
 NEEDS_LOCK = frozenset(("vacuum",))
 DB_ONLY = frozenset(("passwd", "disable-2fa", "logout-all", "promote", "sso-only", "enable"))
 
@@ -421,6 +429,27 @@ def _writer_lock(cmd: str):
                   "(docker compose run goes through the entrypoint, which does that)"
                   % (e.reason, e.subject), file=sys.stderr)
         raise SystemExit(3) from None
+
+
+def _maint_lock(cmd: str):
+    """Shared, non-blocking DATA_DIR/.maint.lock; the fd (close to release). Refuses (exit 3)
+    while the gateway is in a mutating boot phase (restore, migration, schema)."""
+    try:
+        dfd = os.open(str(config.DATA_DIR), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as e:
+        print("cannot open the data directory %s (%s)" % (config.DATA_DIR, e.strerror), file=sys.stderr)
+        raise SystemExit(3) from None
+    try:
+        return keys.acquire_maint_lock(dfd, False, 0)
+    except keys.BootRefused as e:
+        if e.reason == "maintenance-busy":
+            print("the gateway is starting and is applying a restore, a migration or the schema "
+                  "right now: wait until it is up, then run `%s` again" % cmd, file=sys.stderr)
+        else:
+            print("cannot take the maintenance lock (%s: %s)" % (e.reason, e.subject), file=sys.stderr)
+        raise SystemExit(3) from None
+    finally:
+        os.close(dfd)
 
 
 async def main() -> None:
@@ -458,7 +487,20 @@ async def main() -> None:
     if args.cmd == "health":
         raise SystemExit(cmd_health(args))
     lock = _writer_lock(args.cmd)
-    await db.connect()
+    maint = None
+    try:
+        maint = _maint_lock(args.cmd)
+        try:
+            await db.connect_maintenance()
+        except db.MaintenanceRefused as e:
+            print(str(e), file=sys.stderr)
+            raise SystemExit(3) from None
+    except BaseException:
+        if maint is not None:
+            os.close(maint)
+        if lock is not None:
+            lock.release()
+        raise
     try:
         await {"list": cmd_list, "passwd": cmd_passwd,
                "disable-2fa": cmd_disable_2fa, "logout-all": cmd_logout_all,
@@ -467,6 +509,7 @@ async def main() -> None:
                "vacuum": cmd_vacuum}[args.cmd](args)
     finally:
         await db.close()
+        os.close(maint)
         if lock is not None:
             lock.release()
 

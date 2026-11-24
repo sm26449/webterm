@@ -37,7 +37,11 @@ case "$1 $2" in
 esac
 # `docker compose -f ... ps -q app` → id de container (scripturile nu mai folosesc nume fixe)
 case "$*" in
-  *"ps -q app"*) [ -n "${NO_APP:-}" ] || echo "cid-app-1"; exit 0 ;;
+  *"ps -q app"*|*"ps -a -q app"*) [ -n "${NO_APP:-}" ] || echo "cid-app-1"; exit 0 ;;
+  # garda 3.8 (H1): eticheta de versiune a imaginii, montarea /data, conţinutul volumului
+  *image.version*) echo "${IMG_LABEL:-}"; exit 0 ;;
+  *'"/data"'*) echo "webterm_webterm-data"; exit 0 ;;
+  *"--entrypoint ls"*) printf '%b' "${VOL_LS:-}"; exit 0 ;;
 esac
 case "$1" in
   login) exit 0 ;;
@@ -189,6 +193,29 @@ def python_programs(d):
     args = [a.decode("utf-8", "replace") for a in raw if a]
     progs = [args[i + 1] for i, a in enumerate(args) if a == "-c" and i + 1 < len(args)]
     return [p for p in progs if "import " in p]          # nu şi comenzile `sh -c`
+
+
+def pre38_checks(tmp):
+    """H1 (recenzia PR4): upgrade.sh spre o imagine < 3.8 pe un volum migrat se opreşte ÎNAINTE de
+    backup, de trusa de pe host şi de deploy (deploy.sh-ul ţintei n-ar mai avea garda)."""
+    print("── pre-3.8 target on a migrated volume")
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, ["-y"], IMG_LABEL="v3.7.1", VOL_LS="webterm.db\nkeys.wtk\n.lock\n")
+    out = r.stdout + r.stderr
+    check("ţintă v3.7.1 pe volum cu keys.wtk → refuz", r.returncode != 0 and "migrated to 3.8" in out, out[-600:])
+    check("…înainte de backup, de sincronizarea trusei şi de deploy",
+          "backup.sh" not in calls and "deploy.sh" not in calls and "deploy-kit" not in calls, calls)
+    check("…cu calea de recuperare (backup-ul de dinainte de migrare)", "BEFORE the migration" in out, out[-600:])
+    check("…lista volumului vine dintr-un container fără reţea, volum read-only",
+          "--network none -v webterm_webterm-data:/data:ro --entrypoint ls" in calls, calls)
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, ["-y"], IMG_LABEL="v3.7.1", VOL_LS="webterm.db\nsecret\n.lock\n.maint.lock\n")
+    check("ţintă v3.7.1 pe volum 3.7 (secret, lacăte) → merge", r.returncode == 0 and "deploy.sh" in calls,
+          (r.stdout + r.stderr)[-400:])
+    d = sandbox(tempfile.mkdtemp(dir=tmp))
+    r, calls = run(d, ["-y"], IMG_LABEL="v3.8.0", VOL_LS="keys.wtk\n")
+    check("ţintă v3.8.0 pe volum migrat → merge, fără să listeze volumul",
+          r.returncode == 0 and "--entrypoint ls" not in calls, (r.stdout + r.stderr)[-400:])
 
 
 def main():
@@ -528,6 +555,7 @@ def main():
 
         reexec_checks(tmp)
         old_style_checks(tmp)
+        pre38_checks(tmp)
 
     print(f"\n{ok}/{total} passed")
     return ok == total

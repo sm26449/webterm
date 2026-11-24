@@ -664,32 +664,13 @@ def _followed_backups(dfd) -> str:
 
 def _followed_transcripts(dfd) -> str:
     """R-M3: `transcripts/` symlink (layout 3.7 suportat) pe un volum fără keys.wtk: acelaşi
-    inventar ca keys.find_reserved (nume rezervate, un nivel de subdirectoare reale), dar prin
+    inventar ca keys.classify (o singură definiţie, keys.find_reserved_through_link), prin
     legătura rădăcinii; sub ea niciun alt symlink nu e urmat. Orice eroare → urmă (refuz)."""
-    what = keystore.RESERVED_DIR + " (symlink, unreadable)"
-    try:
-        tfd = os.open(keystore.RESERVED_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=dfd)
-    except OSError:
-        return what
-    try:
-        for n in sorted(os.listdir(tfd)):
-            if keystore.is_reserved_name(n, "transcripts"):
-                return keystore.RESERVED_DIR + "/" + n
-            if stat.S_ISDIR(os.stat(n, dir_fd=tfd, follow_symlinks=False).st_mode):
-                sfd = os.open(n, _DIR_RO, dir_fd=tfd)
-                try:
-                    for m in os.listdir(sfd):
-                        if keystore.is_reserved_name(m, "transcripts"):
-                            return "%s/%s/%s" % (keystore.RESERVED_DIR, n, m)
-                finally:
-                    os.close(sfd)
-    except OSError:
-        return what
-    finally:
-        os.close(tfd)
-    log.warning("legacy volume: transcripts/ is a symlink to another directory (supported 3.7 "
-                "layout); it was checked through the link and holds no 3.8 recording")
-    return ""
+    hit = keystore.find_reserved_through_link(dfd)
+    if not hit:
+        log.warning("legacy volume: transcripts/ is a symlink to another directory (supported 3.7 "
+                    "layout); it was checked through the link and holds no 3.8 recording")
+    return hit
 
 
 def _new_format_traces(dfd) -> str:
@@ -1286,6 +1267,7 @@ def _forbidden_inodes(signing: bool = True):
     out = set()
     names = (keystore.LEGACY_SECRET, keystore.VOLUME_KEY, keystore.VOLUME_KEY_TMP, KEYS_NAME,
              keystore.MANIFEST_TMP, keystore.MIGRATION_MARKER, "webterm.db", keystore.LOCK_NAME,
+             keystore.MAINT_LOCK_NAME,
              "webterm.db-wal", "webterm.db-shm") + (_SIGNING if signing else ())
     paths = [config.DATA_DIR / n for n in names] + [config.DATA_DIR]
     for p in (os.environ.get(keystore.ENV_KEY_FILE), keystore.DEFAULT_KEY_FILE):

@@ -158,6 +158,14 @@ with a recorded rollback point: `./deploy.sh v3.6.25` (or a digest:
 not become healthy, the script rolls back automatically; any time afterwards,
 `./rollback.sh` returns you to the previous image with a single command.
 
+**The 3.8 migration is a one-way boundary for image rollback.** Once a data volume has been
+migrated to encryption at rest (it holds `keys.wtk`, `migrating.wtm`, `master.key` or another 3.8
+file), no image older than 3.8 may start on it: `deploy.sh` (including its automatic rollback),
+`rollback.sh` and `upgrade.sh` read the target image's version label and the volume first, and
+refuse with nothing changed. Between 3.8.x versions, and on a volume that was never migrated,
+rollback works as before. To go back to 3.7 after a migration, see
+[Going back to 3.7](#going-back-to-37).
+
 <a id="upgrading"></a>
 **Upgrading: one command.** `cd /opt/webterm && sudo ./upgrade.sh` takes the
 latest published version; pass a tag to target one. It resolves the version, checks ghcr auth
@@ -693,11 +701,16 @@ before the restart is applied first, then migrated. If the database's WAL was no
 (an unclean stop), it refuses with `legacy-db-wal-pending`: start once without the key, stop
 cleanly, then start with it.
 
-After the migration there is **no way back to 3.7 on the same volume**: do not start a 3.7 image
-on it. A 3.7 image finds no `data/secret`; it refuses when hosts with stored credentials exist, but
-on an installation without any it creates a new `data/secret` and starts with a vault that cannot
-read the protected values. 3.8 then refuses the volume (`ambiguous`, *secret next to keys.wtk*)
-until that stray file is removed. Rolling back means restoring the backup from step 2. Older
+<a id="going-back-to-37"></a>
+**Going back to 3.7.** After the migration there is **no way back to 3.7 on the same volume**. A
+3.7 image finds no `data/secret`; it refuses when hosts with stored credentials exist, but on an
+installation without any it creates a new `data/secret` and starts with a vault that cannot read
+the protected values. 3.8 then refuses the volume (`ambiguous`, *secret next to keys.wtk*) until
+that stray file is removed. That is why `deploy.sh`, `rollback.sh` and `upgrade.sh` refuse to start
+a pre-3.8 image on a migrated volume (an image without a version label counts as pre-3.8 unless it
+carries the 3.8 key code). The only way back is to restore the backup from step 2 — taken
+**before** the migration — into a new volume with a 3.7 image, or to stay on 3.8 and fix forward
+(`./deploy.sh <a 3.8.x version>`). Older
 backups (`*.wtsnap`, `pre-restore-*.wtsnap.keep`, and any off-host copy made before the migration)
 still contain the old vault key in clear; System health counts them. Scheduled `.wtsnap` files
 expire after 7 days; delete the `.keep` files once you no longer need them.
@@ -727,14 +740,32 @@ Everything that matters is in the `webterm-data` volume (`/data`): `webterm.db`,
 loss is irreversible: without it the fleet can never be updated again.
 
 **On a protected volume (3.8, encryption at rest)** `secret` is replaced by `keys.wtk`, and the
-host scripts follow: `scripts/backup.sh` archives `keys.wtk` (useless without the master key) and
-**never the master key itself**: neither `secrets/master-key/master.key` nor, with
-`WEBTERM_KEY_IN_VOLUME=1`, `/data/master.key`. Keep the key file apart (password manager / recovery
-kit): the archive cannot be restored without it. `scripts/restore.sh` checks, with the app image
-and before it stops the app, that the master key this installation is configured with opens the
-archive's `keys.wtk`, and refuses otherwise (the message gives the key id the archive needs). It
-also refuses archives that mix `secret` and `keys.wtk` or contain key material, and never moves the
-data directory's `.lock`. Pre-3.8 volumes and archives behave as before.
+host scripts hand the work to the gateway's own code, run in the app image
+(`python3 -m app.hostops`): no `tar` and no file swap in the shell.
+
+- `scripts/backup.sh` writes `webterm-<date>.wtbk`: the same encrypted container as a download from
+  Settings → Backup (a portable `WTS1` inside the passphrase layer), produced by the gateway's
+  protected writer — it walks the volume through file descriptors and never picks up a file that is
+  a hard link to a key. The passphrase (`WEBTERM_BACKUP_PASSPHRASE`) is **mandatory** here, and the
+  archive never holds the master key (neither `secrets/master-key/master.key` nor, with
+  `WEBTERM_KEY_IN_VOLUME=1`, `/data/master.key`). With the app running the backup runs inside it;
+  with the app stopped it runs in a fresh container with no network and the key directory mounted
+  read-only. The archive is checked with the restore code before it appears under its final name.
+- `scripts/restore.sh <archive>` makes one private copy of the archive, checks it with the
+  gateway's restore code and the master key this installation is configured with (refusing
+  before the app is stopped, with the key id the archive needs), stops the app, and **stages** the
+  archive with the gateway's staging code under the data directory's own lock. A lock held by
+  anything else, or another container on the volume, is refused before anything changes. The app's
+  next boot applies the staged set with its resumable journal. `.lock` and an in-volume
+  `master.key` are never moved. A pre-3.8 archive (`.tar.gz[.enc]`, with `data/secret`) restores
+  onto a protected volume only with `--legacy-import`, which wraps its vault key under the master
+  key. A protected archive does not restore onto a pre-3.8 volume: configure the key and let 3.8
+  migrate the volume first.
+- A master key given as a value (`WEBTERM_MASTER_KEY`) is never copied by the host scripts: they
+  work with a key file only (or run inside the running app).
+
+Pre-3.8 volumes are archived as before (`webterm-<date>.tar.gz[.enc]`), and their archives are
+staged through the same gateway code.
 
 What is **not** in the volume, and therefore not in the archive: the archive's own
 passphrase (`/etc/default/webterm-backup`), `/opt/webterm/.env`, and the TLS certificates.
@@ -744,7 +775,7 @@ rebuild procedure are in [docs/RUNBOOK.md](RUNBOOK.md#what-the-archive-does-not-
 
 `make backup` writes to `./backups`. Set **`WEBTERM_BACKUP_PASSPHRASE`** (in
 `/etc/default/webterm-backup` for the scheduled timer) and it writes an encrypted
-`.tar.gz.enc`. Without it, an interactive run warns and writes plaintext, but a
+`.tar.gz.enc` (a `.wtbk` on a protected volume, where the passphrase is required). Without it, an interactive run warns and writes plaintext, but a
 **non-interactive run refuses and exits 1** — the archive would contain the vault key
 in the clear. That is deliberate; it also means an unconfigured cron job produces
 nothing at all. `WEBTERM_BACKUP_ALLOW_PLAINTEXT=1` overrides it, and is not advised.

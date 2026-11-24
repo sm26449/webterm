@@ -305,23 +305,44 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
 - Once a data volume has a key manifest (`keys.wtk`), every boot needs exactly the master key it
   was protected with. A missing, wrong or divergent key, an invalid envelope or a tampered manifest
   stops the boot **before** any clean-up, staged-restore apply, schema change or writer, and the
-  data directory is left as it was (only `.lock` may be created). Nothing ever falls back to
+  data directory is left as it was (only the empty lock files `.lock` and `.maint.lock` may be
+  created). Nothing ever falls back to
   `data/secret`, to the in-volume key or to another source.
-- A 3.7 volume with **no** key source configured boots exactly as before (legacy state, nothing
-  written but `.lock`): upgrading the image changes nothing until the operator provides a key. A
-  configured key migrates it once; the old 32-byte key becomes `FK_legacy` only after it has been
-  proven on the database. The proof is **at least one stored encrypted value decrypts with it**
-  (Stefan's decision, 2026-11-24: one value is enough; the others are not checked one by one). A
-  database with encrypted values none of which decrypts is refused (a foreign key file never
-  becomes `FK_legacy`); a database with no encrypted value at all is eligible. A staged 3.7
-  restore is applied first, under the old key, then migrated in the same boot.
+- A 3.7 volume with **no** key source configured boots exactly as before (legacy state): the
+  only difference from 3.7 is in the preflight, which adds the two empty lock files; after it,
+  the boot makes 3.7's own writes (staged-restore apply, schema, clean-up). Upgrading the image
+  changes nothing else until the operator provides a key. Supported 3.7 layouts: `secret` + the
+  database, with `transcripts/` and `backups/` as plain directories or as symlinks to another
+  disk (a `transcripts/` symlink boots legacy with a warning, but is not migrated: make it a plain
+  directory first). Refused, even without a key: a database without `secret`, a `secret` that is
+  not 32 bytes, any name of the new format (`*.wt*`, `.restore`, `master.key`…) or a symlink
+  target that cannot be listed. A resolved key source (an env variable, or a key file at the
+  default mount path) means migration, whether or not the operator edited `.env` recently.
+- A configured key migrates a 3.7 volume once; the old 32-byte key becomes `FK_legacy` only after
+  it has been proven on the database. The proof is **at least one stored encrypted value decrypts
+  with it** (Stefan's decision, 2026-11-24: one value is enough; the others are not checked one by
+  one). The inventory behind it is complete: every row of every `*_encrypted` column and every
+  `app_settings` value (JSON at any depth) is classified, without a row limit; only decryption has
+  a budget. A database with encrypted values none of which decrypts is refused (a foreign key file
+  never becomes `FK_legacy`); a database with no encrypted value at all is eligible. Refused as
+  well: a non-empty WAL or hot journal (the probe cannot see it: stop the 3.7 gateway cleanly
+  first), any `FK:` value next to a 3.7 `secret` (a mixed set), a value that looks encrypted but
+  is not a token, an inventory over the hard cap. A staged 3.7 restore must be complete and its
+  own `secret` must prove its own database before anything is touched; it is then applied under
+  the old key and migrated in the same boot.
+- Once a boot has started to change the volume (a 3.7 restore applied, a key file published), it
+  keeps the data-directory lock until the process exits, on every error path, and reports the
+  failure as `operation-incomplete`, never as a preflight refusal.
 - A new, empty volume needs an external key, or `WEBTERM_KEY_IN_VOLUME=1` (reduced protection,
   shown as such). One process at a time on the keys: the gateway and `app.admin vacuum` hold the
-  same lock on the data directory. The break-glass admin commands that change only database rows
-  (`passwd`, `disable-2fa`, `logout-all`, `promote`, `sso-only`, `enable`) run while the gateway
-  holds that lock, as in 3.7: they never open, write or publish key material (Stefan's decision,
-  2026-11-24). A new admin command that writes an encrypted value must open the keyring read-only
-  or take the lock.
+  same lock on the data directory (`.lock`). The break-glass admin commands that change only
+  database rows (`passwd`, `disable-2fa`, `logout-all`, `promote`, `sso-only`, `enable`) run while
+  the gateway holds that lock, as in 3.7: they never open, write or publish key material (Stefan's
+  decision, 2026-11-24). They use a maintenance connection that never creates the database, runs
+  no schema step and changes no journal mode (a schema other than the code's is refused), and take
+  `.maint.lock` shared; the boot holds it exclusively through the preflight, a restore, a
+  migration and the schema step, so an admin command is refused (not queued) during those. A new
+  admin command that writes an encrypted value must open the keyring read-only or take the lock.
 - Every backup and snapshot of a protected volume is a `WTS1` container that needs the key held
   apart from the data; it never contains the master key or the old key in clear. Older 3.7 backups
   that do hold the old key are listed in System health until they are deleted.
@@ -332,5 +353,5 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `prove_legacy_key`, `legacy_inventory`, `check_legacy_staging`; `db.py` `connect_maintenance`; `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`.
 **Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`.

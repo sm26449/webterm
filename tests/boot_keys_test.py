@@ -118,8 +118,12 @@ def tree(d):
     return out
 
 
+LOCKS = (".lock", ".maint.lock")
+
+
 def without_lock(t):
-    return {k: v for k, v in t.items() if k != ".lock"}
+    # preflight-ul scrie doar cele două fişiere de lacăt (goale, niciodată scrise)
+    return {k: v for k, v in t.items() if k not in LOCKS}
 
 
 def prepare(env):
@@ -152,9 +156,11 @@ def test_legacy_no_key():
     core.cleanup_cap_temps()
     after = tree(d)
     check("starea e legacy", res.state.mode == "legacy" and bootkeys.STATE["mode"] == "legacy", res.state)
-    check("arborele e identic octet cu octet în afară de .lock", without_lock(after) == before,
+    check("arborele e identic octet cu octet în afară de .lock/.maint.lock", without_lock(after) == before,
           set(after.items()) ^ set(before.items()))
     check(".lock creat 0600, gol", ".lock" in after and after[".lock"][1] == 0o600 and after[".lock"][2] == 0)
+    check(".maint.lock creat 0644, gol (deschis read-only şi de root, M3)", ".maint.lock" in after
+          and after[".maint.lock"][1] == 0o644 and after[".maint.lock"][2] == 0, after.get(".maint.lock"))
     v = fernet(secret).encrypt(b"x").decode()
     check("seiful = data/secret (o valoare 3.7 se decriptează)", security.decrypt_secret(v) == "x")
     new = security.encrypt_secret("nou")
@@ -369,9 +375,10 @@ def test_legacy_staged_restore_then_migrate():
     (d / ".restore-flag").write_text("1700000000")
     kf, _ = key_file("legacy-restore-bad")
     e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
-    check("restore 3.7 nedovedibil → refuz, kind operation-incomplete (restore-ul s-a aplicat)",
-          e is not None and e.reason == "legacy-key-unproven" and e.kind == keys.KIND_INCOMPLETE, e)
-    check("…volumul rămâne legacy (nicio cheie publicată)", (d / "secret").exists() and not (d / "keys.wtk").exists())
+    check("M2: restore 3.7 al cărui secret nu-i deschide DB-ul → refuz ÎNAINTE de restore (invalid-key)",
+          e is not None and e.reason == "staged-restore-invalid" and e.kind == keys.KIND_INVALID_KEY, e)
+    check("…volumul rămâne legacy (nicio cheie publicată), staging-ul neaplicat",
+          (d / "secret").exists() and not (d / "keys.wtk").exists() and (d / ".restore-flag").exists())
 
 
 def test_exclusion():
@@ -488,7 +495,8 @@ def test_empty_volume():
     use(d)
     e = refusal({})
     check("volum gol fără cheie → no-source", e is not None and e.reason == "no-source", e)
-    check("…a creat DOAR DATA_DIR şi .lock", sorted(os.listdir(d)) == [".lock"], os.listdir(d))
+    check("…a creat DOAR DATA_DIR, .lock şi .maint.lock", sorted(os.listdir(d)) == [".lock", ".maint.lock"],
+          os.listdir(d))
     check("…mesajul spune ce e de făcut", "WEBTERM_KEY_IN_VOLUME=1" in bootkeys.describe_refusal(e))
     res = prepare({"WEBTERM_KEY_IN_VOLUME": "1"})
     check("WEBTERM_KEY_IN_VOLUME=1 → reduced, master.key în volum", res.state.mode == "reduced"
@@ -531,6 +539,320 @@ def test_lifespan_order():
     check("…staging-ul neatins, arborele identic (fără .lock)", without_lock(tree(d)) == without_lock(before))
 
 
+# ── H4: inventar complet, separat de bugetul de decriptare ─────────────────────
+def _fill(d, rows=(), settings=()):
+    con = sqlite3.connect(str(d / "webterm.db"))
+    for v in rows:
+        con.execute("INSERT INTO hosts(token_encrypted) VALUES(?)", (v,))
+    for k, v in settings:
+        con.execute("INSERT INTO app_settings(key, value) VALUES(?, ?)", (k, v))
+    con.commit()
+    con.close()
+
+
+def test_h4_inventory():
+    print("── H4: placeholdere înaintea ciphertext-ului, FK: după plafon, WAL amestecat, neclasificabil")
+    # 40 de placeholdere (peste vechiul plafon de 32/coloană), apoi un token al ALTEI chei
+    d, _ = legacy_volume("h4-placeholders", encrypted=False)
+    _fill(d, ["pending-%d" % i for i in range(40)] + [fernet(os.urandom(32)).encrypt(b"x").decode()])
+    kf, _ = key_file("h4-placeholders")
+    before = tree(d)
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("placeholdere apoi ciphertext străin după vechiul plafon/coloană → legacy-key-unproven "
+          "(nu „no-ciphertext”)", e is not None and e.reason == "legacy-key-unproven", e)
+    check("…nimic scris", without_lock(tree(d)) == before)
+
+    d, secret = legacy_volume("h4-placeholders-ok", encrypted=False)
+    _fill(d, ["pending-%d" % i for i in range(40)] + [fernet(secret).encrypt(b"x").decode()])
+    kf, _ = key_file("h4-placeholders-ok")
+    res = prepare({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("…acelaşi lucru cu tokenul cheii bune → proven", res.state.migrated
+          and bootkeys.STATE["legacy_proof"] == "proven", bootkeys.STATE)
+    bootkeys.release()
+
+    # 300 de tokenuri valide (peste vechiul plafon global de 256), apoi un FK:
+    d, secret = legacy_volume("h4-fk-late")
+    f = fernet(secret)
+    _fill(d, [f.encrypt(b"t%d" % i).decode() for i in range(300)] + [security.FK_PREFIX + f.encrypt(b"z").decode()])
+    kf, _ = key_file("h4-fk-late")
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("FK: după 300 de valori (peste vechiul plafon 256) → legacy-db-has-protected-values",
+          e is not None and e.reason == "legacy-db-has-protected-values" and e.subject == "hosts.token_encrypted", e)
+
+    # FK: într-un JSON imbricat din app_settings, după 5000 de rânduri de setări
+    d, secret = legacy_volume("h4-fk-json")
+    _fill(d, settings=[("k%05d" % i, "v") for i in range(5001)]
+          + [("zz_cloud", '{"a": {"b": ["%s"]}}' % (security.FK_PREFIX + fernet(secret).encrypt(b"c").decode()))])
+    kf, _ = key_file("h4-fk-json")
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("FK: într-un JSON imbricat, după 5000 de setări → refuz", e is not None
+          and e.reason == "legacy-db-has-protected-values", e)
+
+    # WAL amestecat: fişierul checkpointat are un token valid, WAL-ul o valoare FK:
+    d, secret = legacy_volume("h4-wal", encrypted=False)
+    src = Path(ROOT) / "h4-wal-src"
+    src.mkdir()
+    con = sqlite3.connect(str(src / "webterm.db"))
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE hosts(id INTEGER PRIMARY KEY, token_encrypted TEXT)")
+    con.execute("INSERT INTO hosts(token_encrypted) VALUES(?)", (fernet(secret).encrypt(b"old").decode(),))
+    con.commit()
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute("INSERT INTO hosts(token_encrypted) VALUES(?)",
+                (security.FK_PREFIX + fernet(os.urandom(32)).encrypt(b"new").decode(),))
+    con.commit()
+    for n in ("webterm.db", "webterm.db-wal"):
+        (d / n).write_bytes((src / n).read_bytes())
+    con.close()
+    check("(fixture: WAL nevid, token valid în fişier)", (d / "webterm.db-wal").stat().st_size > 0)
+    kf, _ = key_file("h4-wal")
+    before = tree(d)
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("WAL nevid, chiar cu un token valid în fişier → legacy-db-wal-pending (nu „proven”)",
+          e is not None and e.reason == "legacy-db-wal-pending", e)
+    check("…nimic scris (nici -shm)", without_lock(tree(d)) == before)
+    check("…mesajul spune să opreşti curat gateway-ul 3.7", "stop the 3.7 gateway cleanly" in
+          bootkeys.describe_refusal(e))
+
+    # valoare neclasificabilă: un BLOB într-o coloană *_encrypted / un FKL: fără token
+    for name, v in (("h4-blob", b"\x80binary"), ("h4-fkl", security.FK_LEGACY_PREFIX + "nu-e-token"),
+                    ("h4-trunc", "gAAAAAB-trunchiat")):
+        d, _ = legacy_volume(name)
+        _fill(d, [v])
+        kf, _ = key_file(name)
+        e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+        check("%s → legacy-db-unclassifiable (refuz explicit)" % name, e is not None
+              and e.reason == "legacy-db-unclassifiable" and e.subject == "hosts.token_encrypted", e)
+
+    # inventar peste plafon → refuz explicit, nu „no-ciphertext”
+    d, secret = legacy_volume("h4-cap")
+    _fill(d, [fernet(secret).encrypt(b"t").decode() for _ in range(6)])
+    kf, _ = key_file("h4-cap")
+    saved = bootkeys._MAX_VAULT_VALUES
+    bootkeys._MAX_VAULT_VALUES = 5
+    try:
+        e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    finally:
+        bootkeys._MAX_VAULT_VALUES = saved
+    check("inventar peste plafon → legacy-db-inventory-too-large", e is not None
+          and e.reason == "legacy-db-inventory-too-large", e)
+
+    # bugetul de decriptare ia întâi primele valori ale FIECĂREI surse
+    d, secret = legacy_volume("h4-budget", encrypted=False)
+    other = fernet(os.urandom(32))
+    _fill(d, [other.encrypt(b"x").decode() for _ in range(300)],
+          settings=[("smtp", fernet(secret).encrypt(b"p").decode())])
+    kf, _ = key_file("h4-budget")
+    res = prepare({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("300 de valori ale altei chei + una bună în app_settings → proven (bugetul atinge fiecare sursă)",
+          res.state.migrated and bootkeys.STATE["legacy_proof"] == "proven", bootkeys.STATE)
+    bootkeys.release()
+
+
+# ── M1: layout-uri 3.7 suportate ───────────────────────────────────────────────
+def test_m1_layouts():
+    print("── M1: transcripts/ symlink (3.7) → legacy cu avertisment; migrarea şi seturile amestecate refuzate")
+    d, _ = legacy_volume("m1-link")
+    ext = Path(ROOT) / "m1-link-ext"
+    (d / "transcripts").rename(ext)
+    (d / "transcripts").symlink_to(ext)
+    before = tree(d)
+    res = prepare({})
+    check("transcripts/ symlink, fără cheie → legacy", res.state.mode == "legacy", res.state)
+    check("…cu avertismentul transcripts-symlink", "transcripts-symlink" in bootkeys.STATE["warnings"],
+          bootkeys.STATE)
+    check("…nimic schimbat în afară de lacăte", without_lock(tree(d)) == before)
+    bootkeys.release()
+    kf, _ = key_file("m1-link")
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": kf})
+    check("…cu cheie → refuz transcripts-symlink (o migrare ar lăsa un volum fără backup)",
+          e is not None and e.reason == "transcripts-symlink" and e.kind == keys.KIND_INVALID_KEY, e)
+    check("…nimic schimbat", without_lock(tree(d)) == before)
+
+    (ext / "seg.wtx").write_bytes(b"x")
+    e = refusal({})
+    check("ţinta symlink-ului cu o înregistrare 3.8 → ambiguous (set amestecat)",
+          e is not None and e.reason == "ambiguous" and "seg.wtx" in e.subject, e)
+    (ext / "seg.wtx").unlink()
+    (ext / "arhiva" / "old.wtd").write_bytes(b"x")
+    e = refusal({})
+    check("…şi un nivel mai jos (arhiva/) → ambiguous", e is not None and e.reason == "ambiguous", e)
+    (ext / "arhiva" / "old.wtd").unlink()
+    (d / "master.key").write_bytes(b"x" * 45)
+    e = refusal({})
+    check("symlink + master.key (urmă a formatului nou) → refuz", e is not None and e.reason == "ambiguous", e)
+    (d / "master.key").unlink()
+
+    d, _ = legacy_volume("m1-nosecret")
+    (d / "secret").unlink()
+    e = refusal({})
+    check("DB fără secret → refuz (ambiguous)", e is not None and e.reason == "ambiguous", e)
+    d, _ = legacy_volume("m1-marker")
+    (d / "erasures.wtj").write_bytes(b"x")
+    e = refusal({})
+    check("marker rezervat la rădăcină → refuz", e is not None and e.reason == "ambiguous"
+          and "erasures.wtj" in e.subject, e)
+
+
+# ── M2: lock-ul după o mutaţie; staging incomplet ──────────────────────────────
+def _lock_free(d):
+    try:
+        keys.acquire_lock(str(d)).release()
+        return True
+    except keys.BootRefused as x:
+        return x.reason != "locked"
+
+
+def test_m2_lock_after_mutation():
+    print("── M2: după o mutaţie lock-ul rămâne al procesului; staging 3.7 incomplet refuzat înainte")
+    d, secret = legacy_volume("m2-incomplete")
+    (d / ".restore-flag").write_text("1700000000")
+    (d / "restore-pending").mkdir()
+    make_db(d / "restore-pending" / "webterm.db", [fernet(secret).encrypt(b"x").decode()])
+    kf, _ = key_file("m2-incomplete")
+    before = tree(d)
+    bootkeys.release()
+    try:
+        bootkeys.prepare(env={"WEBTERM_MASTER_KEY_FILE": kf})
+        e = None
+    except keys.BootRefused as x:
+        e = x
+    check("staging 3.7 fără secret + cheie → refuz staged-restore-incomplete, invalid-key",
+          e is not None and e.reason == "staged-restore-incomplete" and e.kind == keys.KIND_INVALID_KEY, e)
+    check("…nimic schimbat, lock eliberat (nicio mutaţie)", without_lock(tree(d)) == before and _lock_free(d))
+    bootkeys.release()
+
+    # un restore 3.7 care începe să scrie şi cade cu OSError brut
+    d, secret = legacy_volume("m2-oserror")
+    (d / ".restore-flag").write_text("1700000000")
+    (d / "restore-pending").mkdir()
+    (d / "restore-pending" / "secret").write_bytes(secret)
+    make_db(d / "restore-pending" / "webterm.db", [fernet(secret).encrypt(b"x").decode()])
+    kf, _ = key_file("m2-oserror")
+    orig = backup.apply_pending_restore
+
+    def half_apply(*_a, **_k):
+        (d / "webterm.db").write_bytes(b"jumatate")
+        raise OSError(5, "disk error")
+    backup.apply_pending_restore = half_apply
+    try:
+        try:
+            bootkeys.prepare(env={"WEBTERM_MASTER_KEY_FILE": kf})
+            e = None
+        except keys.BootRefused as x:
+            e = x
+    finally:
+        backup.apply_pending_restore = orig
+    check("OSError brut după ce restore-ul a început → io-error, kind operation-incomplete (nu preflight-io)",
+          e is not None and e.reason == "io-error" and e.kind == keys.KIND_INCOMPLETE, e)
+    check("…lock-ul rămâne al procesului (alt boot → locked)", not _lock_free(d))
+    check("…şi .maint.lock (admin doar-DB refuză)", _maint_busy(d))
+    bootkeys.release()
+    check("…eliberat doar la „ieşirea procesului”", _lock_free(d))
+
+    # o publicare a migrării care cade cu o excepţie oarecare → lock reţinut
+    d, _ = legacy_volume("m2-publish")
+    kf, _ = key_file("m2-publish")
+
+    def boom(step):
+        if step == "keys.wtk:tmp-written":
+            raise RuntimeError("crash simulat")
+    try:
+        keys.boot(str(d), {"WEBTERM_MASTER_KEY_FILE": kf}, _crash_at=boom)
+        e = None
+    except RuntimeError as x:
+        e = x
+    check("migrare întreruptă după prima scriere → lock reţinut", e is not None and not _lock_free(d), e)
+    keys.release_retained()
+    check("…release_retained (teste) îl eliberează", _lock_free(d))
+    # un refuz preflight (cheie lipsă) eliberează în continuare lock-ul
+    e = refusal({"WEBTERM_MASTER_KEY_FILE": os.path.join(ROOT, "keys", "lipseste-m2")})
+    check("refuz preflight → lock eliberat", e is not None and _lock_free(d), e)
+
+
+# ── M3: admin doar-DB: conexiune de mentenanţă + .maint.lock ───────────────────
+def _maint_busy(d):
+    dfd = os.open(str(d), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.close(keys.acquire_maint_lock(dfd, False, 0))
+        return False
+    except keys.BootRefused as x:
+        return x.reason == "maintenance-busy"
+    finally:
+        os.close(dfd)
+
+
+def _admin(*argv):
+    orig = sys.argv
+    sys.argv = ["app.admin", *argv]
+    try:
+        run(admin.main())
+        return 0
+    except SystemExit as x:
+        return x.code
+    finally:
+        sys.argv = orig
+
+
+def _schema(path):
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        return (con.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall(),
+                con.execute("PRAGMA journal_mode").fetchone()[0])
+    finally:
+        con.close()
+
+
+def test_m3_admin_maintenance():
+    print("── M3: admin doar-DB: fără schemă/migrări, refuz în fazele exclusive ale boot-ului")
+    from app import db
+    d = Path(ROOT) / "m3"
+    d.mkdir()
+    use(d)
+    kf, _ = key_file("m3")
+    e_missing = _admin("enable", "nimeni@x.co")
+    check("DB lipsă → refuz (exit 3), DB-ul NU se creează", e_missing == 3 and not (d / "webterm.db").exists(),
+          e_missing)
+    bootkeys.release()
+    bootkeys.prepare(env={"WEBTERM_MASTER_KEY_FILE": kf}, hold_maintenance=True)
+    check("boot în faza exclusivă: .maint.lock ţinut", _maint_busy(d))
+
+    async def seed():
+        await db.connect()
+        await db.execute("INSERT INTO users(email, password_hash, created) VALUES(?,?,?)",
+                         "ana@x.co", security.hash_password("vechea-parola-lunga"), 1000.0)
+        await db.close()
+    run(seed())
+    check("admin enable în timpul fazei exclusive → refuz neblocant (exit 3)", _admin("enable", "ana@x.co") == 3)
+    bootkeys.end_maintenance()
+    before = _schema(d / "webterm.db")
+    check("după faza exclusivă (gateway pornit normal) → rulează", _admin("enable", "ana@x.co") == 0)
+    check("…list rulează şi ea", _admin("list") == 0)
+    check("…nicio schimbare de schemă sau de journal_mode", _schema(d / "webterm.db") == before)
+    con = sqlite3.connect(str(d / "webterm.db"))
+    con.execute("ALTER TABLE users ADD COLUMN viitor TEXT")
+    con.commit()
+    con.close()
+    check("schemă diferită de a codului → refuz (exit 3)", _admin("enable", "ana@x.co") == 3)
+    check("…boot-ul aşteaptă / refuză cât ţine o comandă admin lacătul partajat", _boot_waits(d, kf))
+    bootkeys.release()
+
+
+def _boot_waits(d, kf):
+    dfd = os.open(str(d), os.O_RDONLY | os.O_DIRECTORY)
+    held = keys.acquire_maint_lock(dfd, False, 0)
+    os.close(dfd)
+    bootkeys.release()
+    try:
+        keys.boot(str(d), {"WEBTERM_MASTER_KEY_FILE": kf}, maint_wait=0.2)
+        return False
+    except keys.BootRefused as x:
+        return x.reason == "maintenance-busy" and _lock_free(d)
+    finally:
+        os.close(held)
+
+
 def main_():
     test_legacy_no_key()
     test_legacy_migrates()
@@ -542,6 +864,10 @@ def main_():
     test_admin_db_only_while_running()
     test_empty_volume()
     test_lifespan_order()
+    test_h4_inventory()
+    test_m1_layouts()
+    test_m2_lock_after_mutation()
+    test_m3_admin_maintenance()
     print(f"\n{ok}/{total} passed")
     raise SystemExit(0 if ok == total else 1)
 

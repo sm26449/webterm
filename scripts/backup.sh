@@ -30,10 +30,11 @@ set -euo pipefail
 # written by host-health.sh --record). A nightly backup that failed only in journald was invisible
 # until the day it was needed. Best effort: never changes this script's exit code; no secrets in it.
 BK_SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
-BK_REASON="" BK_ARCHIVE="" BK_ENCRYPTED=false BK_OFFHOST=none
+BK_REASON="" BK_ARCHIVE="" BK_ENCRYPTED=false BK_OFFHOST=none BK_TMP=""
 # shellcheck disable=SC2329  # invoked through the EXIT trap
 _bk_status() {
   local rc=$? st=ok msg
+  [ -z "${BK_TMP:-}" ] || rm -f "$BK_TMP"      # o arhivă neverificată nu rămâne niciodată
   [ -x "$BK_SELF_DIR/host-health.sh" ] || return 0
   if [ "$rc" != 0 ]; then
     st=error; msg="${BK_REASON:-the backup failed (exit code $rc)}"
@@ -145,8 +146,11 @@ if regular("keys.wtk"):
     if present("secret"):
         sys.exit("REFUSING: /data/secret next to keys.wtk — the volume mixes old and new key files "
                  "(docs/INSTALL.md, Encryption at rest: `ambiguous`)")
-    kind = "reduced" if present("master.key") else "protected"
-    names = ("keys.wtk", "agent-signing.key", "agent-signing.pub", "transcripts")
+    # H3 (recenzia PR4): arhiva unui volum protejat NU se face aici cu tar. O scrie gateway-ul
+    # (python3 -m app.hostops backup, în imaginea app-ului): inventar prin fd-uri, filtre
+    # inode/nlink, perechea de semnare verificată, WTS1 portabil sub WTBK1. Aici doar clasificăm.
+    print("kind: %s" % ("reduced" if present("master.key") else "protected"))
+    sys.exit(0)
 else:
     # fără keys.wtk: 3.7, exact ca înainte. Dar urme ale formatului nou fără manifest = volum
     # inconsistent (acelaşi refuz ca backup.volume_kind în gateway), nu „legacy".
@@ -185,15 +189,140 @@ PY
 )
 printf '%s\n' "$BK_RUN" | grep -v '^kind: ' || true
 VOLKIND=$(printf '%s\n' "$BK_RUN" | sed -n 's/^kind: //p')
+
+# ── volum protejat (3.8): arhiva o scrie gateway-ul, nu tar-ul din shell (H3) ─────────────────
+# `python3 -m app.hostops backup` în imaginea app-ului: inventarul prin fd-uri şi filtrele
+# inode/nlink ale backup.py (un hardlink spre cheie nu intră), perechea de semnare verificată,
+# WTS1 portabil sub WTBK1 cu parola de mai jos. Cu app-ul pornit rulează ÎN el (`docker exec`,
+# sub `.maint.lock` partajat); oprit, într-un container nou care ia `.lock`. Arhiva se scrie într-un
+# temporar, se verifică cu codul restore-ului şi abia apoi se publică (rename atomic).
+find_app() {   # → APP_CID ("" = none); 1 when Docker cannot tell
+  local ids id m svc
+  APP_CID="${WEBTERM_APP_CONTAINER:-}"
+  if [ -n "$APP_CID" ]; then
+    m=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$APP_CID") || return 1
+    [ "$m" = "$VOLUME" ] || { APP_ERR="container $APP_CID mounts '${m:-nothing}' at /data, not '$VOLUME'"; return 1; }
+    return 0
+  fi
+  ids=$(docker ps -a -q --filter "volume=$VOLUME") || { APP_ERR="docker ps failed"; return 1; }
+  for id in $ids; do
+    m=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$id") \
+      || { APP_ERR="docker inspect failed"; return 1; }
+    [ "$m" = "$VOLUME" ] || continue
+    svc=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$id") \
+      || { APP_ERR="docker inspect failed"; return 1; }
+    [ "$svc" = app ] || continue
+    APP_CID=$id
+    return 0
+  done
+  return 0
+}
+# Aceeaşi construcţie ca în restore.sh: imaginea exactă a app-ului, ca userul serviciului, fără
+# reţea; din cheie doar CĂILE (WEBTERM_MASTER_KEY_FILE / WEBTERM_KEY_IN_VOLUME) şi montarea
+# read-only a directorului ei. O cheie dată ca valoare (WEBTERM_MASTER_KEY) nu se copiază.
+APP_IMG="" KEY_ARGS=()
+app_run_args() {
+  local envs kf kv want mounts typ name src dst found=""
+  APP_IMG=$(docker inspect --format '{{.Image}}' "$APP_CID") || { APP_ERR="cannot inspect $APP_CID"; return 1; }
+  envs=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$APP_CID") \
+    || { APP_ERR="cannot inspect $APP_CID"; return 1; }
+  if printf '%s\n' "$envs" | grep -q '^WEBTERM_MASTER_KEY=.'; then
+    APP_ERR="the master key is given as a value (WEBTERM_MASTER_KEY) and the app is stopped: start the app (the backup then runs inside it), or use a key file"
+    return 1
+  fi
+  kf=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_MASTER_KEY_FILE=//p' | head -n1)
+  kv=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_KEY_IN_VOLUME=//p' | head -n1)
+  KEY_ARGS=(-e "WEBTERM_MASTER_KEY_FILE=$kf" -e "WEBTERM_KEY_IN_VOLUME=$kv")
+  want="${kf:-/run/secrets/webterm_master_key}"
+  if [ -z "$kf" ] && [ "$kv" = 1 ]; then want=""; fi
+  [ -n "$want" ] || return 0
+  mounts=$(docker inspect --format '{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}{{println}}{{end}}' "$APP_CID") \
+    || { APP_ERR="cannot inspect $APP_CID"; return 1; }
+  while IFS='|' read -r typ name src dst; do
+    if [ -z "$dst" ] || [ "$dst" = /data ]; then continue; fi
+    case "$want" in "$dst"|"$dst"/*) ;; *) continue ;; esac
+    [ "$typ" = volume ] && src="$name"
+    KEY_ARGS+=(-v "$src:$dst:ro")
+    found=1
+  done <<<"$mounts"
+  if [ -z "$found" ] && [ -n "$kf" ]; then
+    APP_ERR="the key file $kf is not on a mount of the app container"
+    return 1
+  fi
+  return 0
+}
+hostops() {   # hostops live|ro|rw ARGS…
+  local mode="$1"; shift
+  if [ "$mode" = live ]; then
+    docker exec -i -u "$OWNER" -e WEBTERM_BACKUP_PASSPHRASE "$APP_CID" python3 -m app.hostops "$@"
+    return
+  fi
+  local ro=""; [ "$mode" = ro ] && ro=":ro"
+  docker run --rm -i --network none --user "$OWNER" --entrypoint python3 \
+    -v "$VOLUME:/data$ro" "${KEY_ARGS[@]}" -e WEBTERM_BACKUP_PASSPHRASE "$APP_IMG" -m app.hostops "$@"
+}
+bk_refuse() {   # bk_refuse REASON MESSAGE…
+  BK_REASON="$1"; shift
+  printf '%s\n' "$@" >&2
+  exit 1
+}
+
 case "$VOLKIND" in
-  legacy) HOLDS="the vault key (data/secret)" ;;
+  legacy)
+    HOLDS="the vault key (data/secret)"
+    ARCHIVE="$OUT/webterm-$STAMP.tar.gz"
+    ;;
   protected|reduced)
     HOLDS="the database and the fleet signing key"
+    OWNER="${WEBTERM_UID:-10001:10001}"
+    # §12.10: o arhivă care pleacă de pe maşină cere DOUĂ secrete (parola + cheia master)
+    [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ] || bk_refuse "refused: no WEBTERM_BACKUP_PASSPHRASE for a protected volume" \
+      "REFUSING: the data volume is protected (keys.wtk): its backup is always encrypted with" \
+      "          WEBTERM_BACKUP_PASSPHRASE (and needs the master key to restore). Set it in" \
+      "          /etc/default/webterm-backup and run this again."
+    APP_ERR=""
+    find_app || bk_refuse "cannot identify the app container" "REFUSING: cannot identify the app container of '$VOLUME' ($APP_ERR)."
+    [ -n "$APP_CID" ] || bk_refuse "no app container uses the data volume" \
+      "REFUSING: no app container uses volume '$VOLUME': a protected volume is archived by the app's own code."
+    STATE=$(docker inspect --format '{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$APP_CID") \
+      || bk_refuse "cannot inspect the app container" "REFUSING: cannot inspect the app container $APP_CID."
+    case "$STATE" in
+      "true|healthy"|"true|") MODE=live; VMODE=live; LIVE=(--live) ;;
+      true*) bk_refuse "the app is not healthy" \
+               "REFUSING: the app is running but not healthy (${STATE#*|}): back up once it is healthy." ;;
+      *) app_run_args || bk_refuse "the key setup cannot be reproduced" "REFUSING: $APP_ERR."
+         MODE=rw; VMODE=ro; LIVE=() ;;
+    esac
+    ARCHIVE="$OUT/webterm-$STAMP.wtbk"
+    BK_TMP="$OUT/.webterm-$STAMP.wtbk.tmp"
+    rm -f "$BK_TMP"
+    rc=0
+    HO_OUT=$( { (umask 077; hostops "$MODE" backup "${LIVE[@]}" >"$BK_TMP"); } 2>&1 ) || rc=$?
+    if [ "$rc" != 0 ]; then
+      bk_refuse "the protected backup was refused" "$(printf '%s' "$HO_OUT" | tail -n3)" \
+        "REFUSING: the gateway did not write the archive (exit $rc) — nothing was published."
+    fi
+    SHA_REP=$(printf '%s\n' "$HO_OUT" | sed -n 's/^sha256: //p')
+    SHA_GOT=$(sha256sum "$BK_TMP" | cut -d' ' -f1)
+    if [ -z "$SHA_REP" ] || [ "$SHA_REP" != "$SHA_GOT" ]; then
+      bk_refuse "the archive was truncated in transit" \
+        "REFUSING: the archive on disk is not the one the gateway wrote (truncated?) — nothing was published."
+    fi
+    VOLKIND=$(printf '%s\n' "$HO_OUT" | sed -n 's/^kind: //p')
+    rc=0
+    V_OUT=$(hostops "$VMODE" verify --sha256 "$SHA_GOT" <"$BK_TMP" 2>&1) || rc=$?
+    [ "$rc" = 0 ] || bk_refuse "the new archive failed its restore check" "$(printf '%s' "$V_OUT" | tail -n3)" \
+      "REFUSING: the new archive did not pass the restore check — nothing was published."
+    chmod 600 "$BK_TMP"
+    mv -f "$BK_TMP" "$ARCHIVE"
+    BK_TMP=""
+    BK_ENCRYPTED=true
     # Cheia master NU e în arhivă, cu bună ştiinţă: fără ea arhiva nu se poate restaura.
+    echo "ENCRYPTED backup: $ARCHIVE (verified)"
     echo "note: the data volume is protected (keys.wtk): the master key is NOT in this archive."
     if [ "$VOLKIND" = reduced ]; then
-      echo "      The key is inside the volume (WEBTERM_KEY_IN_VOLUME=1, /data/master.key): restore.sh"
-      echo "      reuses it only on this same volume; keep a copy of it apart for any other case."
+      echo "      The key is inside the volume (WEBTERM_KEY_IN_VOLUME=1, /data/master.key): keep a copy"
+      echo "      of it apart — the archive cannot be restored anywhere without it."
     else
       echo "      Restoring it needs the same key file (secrets/master-key/master.key in the install"
       echo "      directory): keep a copy off this machine (recovery kit, docs/INSTALL.md)."
@@ -202,14 +331,15 @@ case "$VOLKIND" in
   *) BK_REASON="the snapshot did not report the volume kind"; echo "REFUSING: unknown volume kind" >&2; exit 1 ;;
 esac
 
-ARCHIVE="$OUT/webterm-$STAMP.tar.gz"
 BK_REASON=""
 BK_ARCHIVE=$(basename "$ARCHIVE")
 chmod 600 "$ARCHIVE" 2>/dev/null || true
 
 # Criptare (recomandat): arhiva conține cheia seifului. Cu o parolă → openssl AES-256;
 # fără openssl sau fără parolă → avertizăm zgomotos (arhiva rămâne în clar, doar 0600).
-if [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ]; then
+if [ "$VOLKIND" != legacy ]; then
+  :   # deja criptată (WTBK1, scrisă de gateway)
+elif [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ]; then
   if command -v openssl >/dev/null 2>&1; then
     # AES-256-CBC + PBKDF2 (200k). NU e AEAD, şi asta e o limitare a uneltei, nu o scăpare:
     # `openssl enc` refuză din construcţie cifrurile autentificate („AEAD ciphers not
@@ -253,7 +383,7 @@ fi
 #   WEBTERM_BACKUP_REMOTE=gdrive:webterm-backups
 #   WEBTERM_BACKUP_REMOTE_KEEP_DAYS=30   (opțional: șterge copiile mai vechi de-atât)
 if [ -n "${WEBTERM_BACKUP_REMOTE:-}" ]; then
-  if [ "${ARCHIVE##*.}" != "enc" ]; then
+  if [ "$BK_ENCRYPTED" != true ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the off-host upload: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
@@ -269,7 +399,7 @@ if [ -n "${WEBTERM_BACKUP_REMOTE:-}" ]; then
     echo "backup uploaded: $WEBTERM_BACKUP_REMOTE/$(basename "$ARCHIVE")"
     if [ -n "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS:-}" ]; then
       rclone delete "$WEBTERM_BACKUP_REMOTE" --min-age "${WEBTERM_BACKUP_REMOTE_KEEP_DAYS}d" \
-        --include "webterm-*.tar.gz.enc"
+        --include "webterm-*.tar.gz.enc" --include "webterm-*.wtbk"
     fi
   fi
 fi
@@ -279,7 +409,7 @@ fi
 #   WEBTERM_BACKUP_RSYNC=user@host:/cale/backups/   (pune-ţi cheia SSH în ~/.ssh; auth pe cheie)
 #   WEBTERM_BACKUP_RSYNC_KEEP_DAYS=30               (opţional: şterge pe remote mai vechi de-atât)
 if [ -n "${WEBTERM_BACKUP_RSYNC:-}" ]; then
-  if [ "${ARCHIVE##*.}" != "enc" ]; then
+  if [ "$BK_ENCRYPTED" != true ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the rsync off-host copy: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     echo "                  Set WEBTERM_BACKUP_PASSPHRASE and run it again." >&2
@@ -297,7 +427,7 @@ if [ -n "${WEBTERM_BACKUP_RSYNC:-}" ]; then
     if [ -n "${WEBTERM_BACKUP_RSYNC_KEEP_DAYS:-}" ]; then
       _rh=${WEBTERM_BACKUP_RSYNC%%:*}; _rp=${WEBTERM_BACKUP_RSYNC#*:}
       ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$_rh" \
-        "find '$_rp' -name 'webterm-*.tar.gz.enc' -mtime +${WEBTERM_BACKUP_RSYNC_KEEP_DAYS} -delete" 2>/dev/null || true
+        "find '$_rp' \\( -name 'webterm-*.tar.gz.enc' -o -name 'webterm-*.wtbk' \\) -mtime +${WEBTERM_BACKUP_RSYNC_KEEP_DAYS} -delete" 2>/dev/null || true
     fi
   fi
 fi
@@ -307,7 +437,7 @@ fi
 # simplu ar scurge-o, iar cine o are îţi poate şterge/înlocui depozitul de backup).
 #   WEBTERM_BACKUP_FTPS=ftp://nas.local/backups/    WEBTERM_BACKUP_FTPS_USER=u  WEBTERM_BACKUP_FTPS_PASSWORD=p
 if [ -n "${WEBTERM_BACKUP_FTPS:-}" ]; then
-  if [ "${ARCHIVE##*.}" != "enc" ]; then
+  if [ "$BK_ENCRYPTED" != true ]; then
     BK_REASON="refused the off-host copy of an UNENCRYPTED archive"
     echo "REFUSING the FTPS off-host copy: the archive is UNENCRYPTED (it holds $HOLDS)." >&2
     exit 1
@@ -332,7 +462,7 @@ fi
 # cu nimic (tipic: toate arhivele sunt deja criptate, deci `webterm-*.tar.gz` rămâne
 # neexpandat), `ls` iese cu 2 şi ar rupe scriptul DUPĂ ce arhiva a fost deja făcută —
 # backup raportat ca eşuat şi, mai rău, rotaţia nu s-ar mai executa niciodată.
-{ ls -1t "$OUT"/webterm-*.tar.gz.enc "$OUT"/webterm-*.tar.gz 2>/dev/null || true; } \
+{ ls -1t "$OUT"/webterm-*.wtbk "$OUT"/webterm-*.tar.gz.enc "$OUT"/webterm-*.tar.gz 2>/dev/null || true; } \
   | tail -n +"$((KEEP + 1))" | xargs -r rm -f
 
 echo "backup: $ARCHIVE (keeping newest $KEEP)"
