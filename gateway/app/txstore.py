@@ -2,10 +2,11 @@
 
 PR5a: implemented and tested in isolation, **not wired** into core.py. A `Store` refuses to exist
 unless `WEBTERM_TX_RECORDINGS=1`, `WEBTERM_TEST_GATE=1` (both checked before anything is opened)
-*and* the volume is a test-fixture volume: an existing DB (opened `mode=rw`, never created) under
-the system temp dir whose `tx_state.test_volume` marker binds that file's identity (written only
-by `create_test_volume`, which refuses a DB with `users` / `hosts` rows). This guards against
-accidents, not against an operator who can write the DB. Enabling on a real volume needs PR6
+*and* the volume is a test-fixture volume: an existing DB (opened `mode=rw`, never created) and a
+transcripts dir, both in one private harness dir under the system temp dir, whose
+`tx_state.test_volume` marker binds both identities (written only by `create_test_volume`, which
+refuses a DB with `users` / `hosts` rows). This guards against accidents, not against an operator
+who can write the DB. Enabling on a real volume needs PR6
 (migration, erasure journal, quarantine).
 
 Layout (§12.11.0): `transcripts/<sid>.<k>.<gen>.wtx` (k = out | cast, gen = 32 lowercase hex) and
@@ -44,6 +45,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from . import config
 from . import keyring
@@ -69,11 +71,13 @@ def test_gate(env=None):
     return env.get(ENV_TEST_GATE, "") == "1"
 
 
-def _volume_binding(db_path):
-    """(realpath, marker) of a test volume: the DB must already exist under the system temp dir
-    (where the test harness creates its data dirs), and the marker binds the file's identity
-    (dev, ino, path), so a copied or restored DB does not carry a valid marker. This is a guard
-    against accidents, not access control against an operator who can write the DB."""
+def _volume_binding(db_path, transcripts_dir=None):
+    """(db realpath, transcripts realpath, marker) of a test volume. Both roots live in ONE private
+    harness dir (a mode-0700 dir of ours under the system temp dir): the DB file directly in it,
+    the transcripts dir below it (default `<that dir>/transcripts`). The marker binds both
+    identities (dev, ino, path), so a copied or restored DB, or a transcripts dir elsewhere (another
+    volume), does not carry a valid marker. This is a guard against accidents, not access control
+    against an operator who can write the DB."""
     real = os.path.realpath(str(db_path))
     root = os.path.realpath(tempfile.gettempdir())
     parent = os.path.dirname(real)
@@ -81,11 +85,26 @@ def _volume_binding(db_path):
         raise TxStoreError("disabled", "a test volume lives in a harness temp dir only")
     try:
         st = os.stat(real)
+        pst = os.stat(parent)
     except OSError:
         raise TxStoreError("disabled", "test volume DB missing") from None
     if not stat.S_ISREG(st.st_mode):
         raise TxStoreError("disabled", "test volume DB is not a regular file")
-    return real, f"1:{st.st_dev}:{st.st_ino}:{real}"
+    # Directorul fixture-ului e privat (al nostru, 0700): un DB într-un temp partajat nu e un volum de test.
+    if pst.st_uid != os.geteuid() or pst.st_mode & 0o077:
+        raise TxStoreError("disabled", "test volume dir is not a private harness dir")
+    treal = os.path.realpath(str(transcripts_dir) if transcripts_dir is not None
+                             else os.path.join(parent, "transcripts"))
+    if treal == parent or os.path.commonpath([treal, parent]) != parent:
+        raise TxStoreError("disabled", "transcripts dir outside the test volume's dir")
+    try:
+        tst = os.stat(treal)
+    except OSError:
+        raise TxStoreError("disabled", "test volume transcripts dir missing") from None
+    if not stat.S_ISDIR(tst.st_mode):
+        raise TxStoreError("disabled", "test volume transcripts dir is not a directory")
+    return real, treal, (f"2:{st.st_dev}:{st.st_ino}:{real}:"
+                         f"{tst.st_dev}:{tst.st_ino}:{treal}")
 
 
 def _connect_rw(path):
@@ -94,22 +113,28 @@ def _connect_rw(path):
                            check_same_thread=False, timeout=5)
 
 
-def create_test_volume(db_path, env=None):
-    """The test-fixture helper: marks a volume `tx_state.test_volume` with its identity binding.
-    Nothing else sets it. Refused outside a test gate, for a DB outside a harness temp dir, and for
-    a DB that has any `users` or `hosts` row (a real installation)."""
+def create_test_volume(db_path, transcripts_dir=None, env=None):
+    """The test-fixture helper: marks a volume `tx_state.test_volume` with its identity binding (DB
+    file + transcripts dir). Nothing else sets it. Refused outside a test gate, for roots outside
+    one private harness dir, for a DB that has any `users` or `hosts` row (a real installation),
+    and on any read error that is not a proven absent table."""
     if not test_gate(env):
         raise TxStoreError("disabled", "test volumes exist only under WEBTERM_TEST_GATE=1")
-    real, marker = _volume_binding(db_path)
+    real, _treal, marker = _volume_binding(db_path, transcripts_dir)
     con = _connect_rw(real)
     try:
         for table in ("users", "hosts"):
             try:
-                has = con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
-            except sqlite3.OperationalError:
-                has = False                       # tabel absent: nu e o instalare reală
+                # Absenţa se dovedeşte din sqlite_master; orice altă eroare de citire = refuz.
+                present = con.execute("SELECT 1 FROM sqlite_master WHERE name=?",
+                                      (table,)).fetchone() is not None
+                has = present and con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+            except sqlite3.Error as e:
+                raise TxStoreError("disabled", f"cannot prove {table} empty: {e}") from None
             if has:
                 raise TxStoreError("disabled", f"{table} has rows: not a fresh test volume")
+        if _volume_binding(db_path, transcripts_dir)[2] != marker:
+            raise TxStoreError("disabled", "test volume changed while marking")
         con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('test_volume', ?)", (marker,))
     finally:
         con.close()
@@ -439,15 +464,20 @@ class Store:
         # Poarta se verifică înaintea oricărei deschideri; DB-ul se deschide mode=rw (nu-l creează).
         if not test_gate(env):
             raise TxStoreError("disabled", "test volume outside a test gate")
-        self._db_path, marker = _volume_binding(db_path or config.DB_PATH)
+        self._db_path, tdir, marker = _volume_binding(db_path or config.DB_PATH, transcripts_dir)
         try:
             self._r = self._connect()
             row = self._r.execute("SELECT value FROM tx_state WHERE key='test_volume'").fetchone()
             if row is None or not hmac.compare_digest(str(row[0]), marker):
                 raise TxStoreError("disabled", "encrypted recordings need PR6 on a real volume")
             self._w = self._connect()
-            self.dir_fd = os.open(str(transcripts_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-                                  | os.O_CLOEXEC)
+            self.dir_fd = os.open(tdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            # Identitatea EFECTIV deschisă (fd-ul directorului, DB-ul re-stat-at după conectare) e
+            # cea din marker: o cale schimbată între verificare şi deschidere nu trece.
+            dst = os.fstat(self.dir_fd)
+            if (not marker.endswith(f":{dst.st_dev}:{dst.st_ino}:{tdir}")
+                    or _volume_binding(self._db_path, tdir)[2] != marker):
+                raise TxStoreError("disabled", "test volume identity changed while opening")
         except BaseException:
             self.close()
             raise
@@ -486,6 +516,7 @@ class Store:
         self.fault = None
         self.gen_id_source = os.urandom
         self._supervised = set()
+        self.abandoned = []                      # shutdown: sid-uri cu worker abandonat (nu e curat)
         self.on_readopt = None
         self.readopt_enabled = True              # teste: un „crash" de proces nu se readoptă pe loc
 
@@ -983,7 +1014,9 @@ class Store:
     async def shutdown(self):
         """Close every recorder (bounded), then stop the remaining workers and WAIT for them (their
         blocking calls included) before their fds are closed. A worker still stuck after the
-        bound is abandoned with its fds left open (never reused under it) and an alarm."""
+        bound is abandoned with its fds left open (never reused under it) and an alarm. Returns the
+        sids whose worker was abandoned (empty = a clean finalisation); a non-empty result also
+        stays in `abandoned`, and the integration must not reuse this Store."""
         self._shutting = True
         for rec in list(self.recorders.values()):
             if rec.state != "running":
@@ -1004,7 +1037,9 @@ class Store:
             if t.done():
                 rec._close_fds()
             else:
+                self.abandoned.append(rec.sid)
                 self.alarm("transcript.shutdown", f"{rec.sid}: worker still blocked; fds abandoned")
+        return list(self.abandoned)
 
     # ── revocation counters and fences (§12.11.2) ──
 
@@ -1086,16 +1121,22 @@ class Store:
             self._gen_fds -= nfds
 
     async def _make_snapshot(self, cls, *args, nfds, force=False):
-        """Reserve, construct on the loop, open the fds on a thread; any failure or cancel closes
-        it (io() returns only after the thread did, so nothing built is ever abandoned)."""
+        """Reserve, construct and REGISTER on the loop (so `close()` sees a snapshot still being
+        built), open the fds on a thread inside the fd guard, then re-check synchronously before
+        returning: a Store closed (or the snapshot closed) meanwhile gets nothing. Any failure or
+        cancel closes it (io() returns only after the thread did, so nothing built is abandoned)."""
+        if self._closing:
+            raise TxStoreError("closed", "store closed")
         self._reserve(nfds, force=force)
         snap = cls(self, *args, reserved=nfds)
+        self._snapshots.add(snap)
         try:
-            await self.io(snap._open_fds)
+            await self.io(snap._open_guarded)
+            if self._closing or snap.closed:
+                raise TxStoreError("closed", "store closed while opening")
         except BaseException:
             snap.close()
             raise
-        self._snapshots.add(snap)
         return snap
 
     @contextlib.asynccontextmanager
@@ -1419,6 +1460,12 @@ class _FdOwner:
             yield
         finally:
             self._leave()
+
+    def _open_guarded(self):
+        # Deschiderea fd-urilor e ea însăşi un „utilizator": un close() concurent (Store.close,
+        # sweep) nu eliberează lista cât timp thread-ul încă adaugă fd-uri; ultimul care iese le închide.
+        with self._using():
+            self._open_fds()
 
     def close(self):
         with self._lk:
@@ -1853,6 +1900,17 @@ class ResponseCache:
 # ── Recorder ─────────────────────────────────────────────────────────────────
 
 
+class Gap(NamedTuple):
+    """One published GAP_MARKER: where it sits in each kind and what it stands for."""
+    out_pos: int                                  # logical .out position of the marker
+    cast_pos: int                                 # logical .cast position of its gap event
+    size: int                                     # upstream (agent) bytes lost
+    out: object                                   # recorder .out bytes lost (None: unknown, hub gap)
+    cast: object                                  # recorder .cast bytes lost (None: unknown)
+    epoch: object                                 # agent epoch the lost bytes belong to
+    reason: str                                   # hub | epoch-cut | close
+
+
 @dataclass
 class _Plan:
     op: str                                       # extend | cap | merge
@@ -1866,21 +1924,32 @@ class _Plan:
     out_grew: bool = False
     list_epoch: int = None                        # cap/merge: the one seen at build time
     prefix: dict = None                           # cap/merge: kind → tuple(P generations)
+    ident: dict = field(default_factory=dict)     # listed gen hex → (kind, dev, ino) of the ledger row
 
 
 class Recorder:
     """One per recorded sid: a worker task with a FIFO job queue (§12.11.1).
 
-    Ingress contract (the hub, PR5b): `feed_out` / `feed_cast` return whether the bytes were
-    accepted; refused bytes are never recorded later. `ingress()` says why: "open"; "overflow"
-    (call `resume()`: C is where the agent replays from, and what the ring no longer has becomes
-    ONE `gap(size)` at C); "closing" (`close()` was called: nothing fed after it is recorded,
-    counted in `rejected`); or the recorder state. An epoch change is a cut at the call: bytes fed
-    BEFORE `change_epoch(e)` belong to the old epoch and are published under its position; bytes
-    fed AFTER it count from offset 0 of `e` and are published only after the switch committed. A
-    failed switch re-adopts the sid from the DB (the committed position decides where the hub
-    re-attaches). `gap()` writes synthetic marker bytes and never advances the agent offset (the
-    skipped source bytes are upstream's to account for)."""
+    Ingress contract (the hub, PR5b; §12.11.10 "Admission"): ONE call per agent chunk,
+    `feed(out, cast, at=(epoch, offset), agent_bytes=n)`, admits both representations of that chunk
+    together or neither, and returns whether they were admitted. `at` is where the chunk starts in
+    the agent stream; a chunk that does not start at the recorder's position is refused with
+    `TxStoreError("position")` before anything is admitted. Events that exist only in `.cast` (the
+    header, resizes) go through `feed_cast_only` and never move the agent offset. Refused bytes
+    are never recorded later. `ingress()` says why: "open"; "overflow" (call `resume()`: C is
+    where the agent replays from, and what the ring no longer has becomes ONE `gap(size)` at C);
+    "closing" (`close()` was called: nothing fed after it is recorded, counted in `rejected`); or
+    the recorder state. Every byte offered and not recorded since the last resume is accounted in
+    upstream (agent) bytes plus per kind (`loss`), and that accounting is kept until the commit
+    that publishes its marker.
+
+    An epoch change is a cut at the call: bytes admitted BEFORE `change_epoch(e)` belong to the
+    old epoch and are held outside the overflow path (an overflow of `e` never drops them); the
+    switch commits only after they are published, or after ONE durable GAP_MARKER for exactly the
+    old-epoch bytes that could not be (then alarmed). Bytes admitted AFTER the call count from
+    offset 0 of `e` and are published only after the switch committed. A failed switch re-adopts
+    the sid from the DB. `gap()` writes synthetic marker bytes and never advances the agent offset
+    (the skipped source bytes are upstream's to account for)."""
 
     def __init__(self, store, sid, *, track_agent=True):
         self.store = store
@@ -1902,17 +1971,27 @@ class Recorder:
         self.pending = {k: bytearray() for k in KIND_NAMES}
         self.inflight = 0
         self.overflow = False
-        self.dropped = 0
-        self.rejected = 0
+        self.rejected = 0                         # oferite după close()
+        self.refused = 0                          # oferite unui recorder care nu mai rulează
         self.degraded = False
         self.closing = False
-        self.gap_pending = []                     # (pos, size) ale markerelor încă în buffer
+        self.cast_pos = 0
+        # Pierderea epoch-ului curent de la ultimul resume (octeţi upstream + per kind); păstrată
+        # până la commit-ul care publică markerul ei (R-H2).
+        self._loss = self._new_loss(None)
+        self._close_gap = None                    # markerul datorat la close, păstrat între încercări
+        self.gap_pending = []                     # Gap-uri ale markerelor încă în `pending`
         self._gaps_unpub = []                     # scrise în writer, încă nepublicate
         self.gaps = []
         # Poziţia agentului căreia îi corespund octeţii din writere (ultima captură scrisă); se
         # publică DOAR împreună cu ei (H1: prefixele şi offsetul se mişcă împreună).
         self._written_agent = (None, 0)
-        # Tăietura de epoch în aşteptare: {"old": (epoch, offset), "bufs": {kind: bytearray}, "new": e}
+        # Poziţia acoperită de octeţii publicaţi (= agent_committed când track_agent).
+        self._covered = (None, 0)
+        # Unde începe `pending` în fluxul agentului (capătul ultimei capturi).
+        self._pend_from = (None, 0)
+        # Tăietura de epoch în aşteptare: {"old": (epoch, offset), "bufs": {kind: bytearray},
+        # "gaps": [Gap], "new": e, "loss": pierderea vechiului epoch, "owed": markerul datorat}
         self._switch = None
         self.cap_not_before = 0.0
         self.capping = False
@@ -1971,8 +2050,10 @@ class Recorder:
                 raise TxStoreError("notFound", "no session row for the agent position")
             self.agent_committed = (ag[0], ag[1] or 0)
         self.agent_epoch, self.agent_offset = self.agent_committed
-        self._written_agent = self.agent_committed
+        self._written_agent = self._covered = self._pend_from = self.agent_committed
+        self._loss = self._new_loss(self.agent_epoch)
         self.out_pos = self.committed_len("out")
+        self.cast_pos = self.committed_len("cast")
 
     def committed_len(self, kind):
         d = self.committed[kind]
@@ -2022,25 +2103,68 @@ class Recorder:
                     g.fd = None
             self.cur[k] = None
             self.done[k] = []
-        self._drop_buffers()
+        self._drop_buffers(include_switch=True)
 
     # ── loop side (synchronous, no file I/O) ──
 
-    def _all_buffers(self):
-        return [self.pending] + ([self._switch["bufs"]] if self._switch is not None else [])
+    @staticmethod
+    def _new_loss(epoch):
+        return {"epoch": epoch, "agent": 0, "out": 0, "cast": 0}
 
-    def _drop_buffers(self):
-        """Clears every pending buffer (ingress + an epoch cut's); returns the `.out` bytes."""
-        bufs = self._all_buffers()
-        lost = sum(len(b["out"]) for b in bufs)
+    def _lose(self, agent, out, cast, loss=None):
+        L = self._loss if loss is None else loss
+        L["agent"] += agent
+        L["out"] += out
+        L["cast"] += cast
+
+    @property
+    def dropped(self):
+        """Upstream bytes of the current epoch offered and not recorded since the last resume."""
+        return self._loss["agent"]
+
+    @property
+    def loss(self):
+        return dict(self._loss)
+
+    def _drop_buffers(self, include_switch=False):
+        """Clears `pending` (and, only when the recorder stops, an epoch cut's held segment).
+        Returns the (.out, .cast) lengths cleared from `pending`."""
+        bufs = [self.pending]
+        if include_switch and self._switch is not None:
+            bufs.append(self._switch["bufs"])
+            self._switch["gaps"] = []
+        lost = (len(self.pending["out"]), len(self.pending["cast"]))
         self.store.buffered_total -= sum(len(x) for b in bufs for x in b.values())
         for b in bufs:
             for x in b.values():
                 x.clear()
+        self.gap_pending = []
         return lost
 
     def _buffered(self):
-        return sum(len(x) for b in self._all_buffers() for x in b.values()) + self.inflight
+        # Segmentul reţinut al vechiului epoch NU intră în contabilitatea overflow-ului (R-H1): e
+        # deja admis şi nu poate fi reluat după comutare; doar `pending` + lotul în zbor contează.
+        return sum(len(x) for x in self.pending.values()) + self.inflight
+
+    def _held_end(self):
+        # Capătul octeţilor DEŢINUŢI (capturaţi sau în `pending`). În overflow `pending` e gol şi
+        # agent_offset include octeţi aruncaţi (nu se derulează), deci capătul e începutul lui.
+        return self._pend_from if self.overflow else (self.agent_epoch, self.agent_offset)
+
+    def _unpublished(self, kind):
+        """Plaintext bytes the writers hold beyond the committed descriptor for `kind`."""
+        d = self.committed[kind]
+        have = {e.gen_id: e.plain_len for e in d.generations} if d else {}
+        return sum(g.writer.plain_len - have.get(g.gen_id, 0) for g in self._writers(kind))
+
+    def _recount_pos(self):
+        sw = self._switch["bufs"] if self._switch is not None else None
+        for k in KIND_NAMES:
+            n = self.committed_len(k) + self._unpublished(k) + len(self.pending[k]) + (len(sw[k]) if sw else 0)
+            if k == "out":
+                self.out_pos = n
+            else:
+                self.cast_pos = n
 
     def ingress(self):
         if self.state != "running":
@@ -2049,70 +2173,98 @@ class Recorder:
             return "closing"
         return "overflow" if self.overflow else "open"
 
-    def _feed(self, kind, data):
+    def feed(self, out, cast=b"", *, at=None, agent_bytes=None):
+        """Admission of ONE agent chunk: its `.out` bytes and its `.cast` event together, or
+        neither (see the class docstring). `at` = (epoch, offset) where the chunk starts upstream;
+        `agent_bytes` = its upstream length (default `len(out)`). Returns whether it was admitted."""
+        if not all(isinstance(x, (bytes, bytearray, memoryview)) for x in (out, cast)):
+            raise TxStoreError("badInput", "feed takes bytes")
+        ab = len(out) if agent_bytes is None else agent_bytes
+        if type(ab) is not int or ab < 0:
+            raise TxStoreError("badInput", "agent_bytes must be a non-negative int")
+        if at is not None and (not isinstance(at, tuple) or len(at) != 2 or type(at[1]) is not int):
+            raise TxStoreError("badInput", "at must be (epoch, offset)")
+        n = len(out) + len(cast)
         if self.state != "running":
-            self.dropped += len(data)
+            self.refused += n
             return False
         if self.closing:
-            self.rejected += len(data)
+            self.rejected += n
             return False
         if self.overflow:
-            if kind == "out":
-                self.dropped += len(data)
+            self._lose(ab, len(out), len(cast))
             return False
-        n = len(data)
+        if at is not None and at != (self.agent_epoch, self.agent_offset):
+            # Un fragment care nu începe la poziţia recorderului (lipsă / dublură / alt epoch) nu
+            # se admite nicio parte din el: hub-ul are o eroare de ordine.
+            raise TxStoreError("position", f"chunk at {at}, recorder at {(self.agent_epoch, self.agent_offset)}")
         if self._buffered() + n > self.store.pending_cap or self.store.buffered_total + n > self.store.total_cap:
-            self._enter_overflow(n if kind == "out" else 0)
+            self._enter_overflow()
+            self._lose(ab, len(out), len(cast))
             return False
-        self.pending[kind] += data
+        self.pending["out"] += out
+        self.pending["cast"] += cast
         self.store.buffered_total += n
+        self.agent_offset += ab
+        self.out_pos += len(out)
+        self.cast_pos += len(cast)
         return True
 
-    def feed_out(self, data, agent_bytes=None):
-        """`.out` bytes from `_process_output`; advances the agent offset in memory. Returns
-        whether they were accepted (see the class docstring for a refusal)."""
-        ok = self._feed("out", data)
-        if ok:
-            self.agent_offset += len(data) if agent_bytes is None else agent_bytes
-            self.out_pos += len(data)
-        return ok
+    def feed_cast_only(self, cast):
+        """A `.cast`-only event (header, resize): no agent bytes, the offset does not move."""
+        return self.feed(b"", cast, agent_bytes=0)
 
-    def feed_cast(self, data):
-        return self._feed("cast", data)
-
-    def _enter_overflow(self, incoming):
-        # Doar bufferele în aşteptare se aruncă, niciodată lotul în zbor; agent_offset NU se derulează
-        # cât timp un job e în zbor (§12.11.1 Backpressure).
-        lost = self._drop_buffers()
-        self.overflow = True
-        self.dropped += lost + incoming
+    def _enter_overflow(self):
+        # Doar `pending` se aruncă: niciodată lotul în zbor, nici segmentul reţinut al unei tăieturi
+        # de epoch; agent_offset NU se derulează (§12.11.1 Backpressure), pierderea se numără exact.
+        if not self.overflow:
+            e0, o0 = self._pend_from
+            held = self.agent_offset - o0 if e0 == self.agent_epoch else self.agent_offset
+            out_n, cast_n = self._drop_buffers()
+            self._lose(max(0, held), out_n, cast_n)
+            self.overflow = True
         if not self.degraded:
             self.degraded = True
             self.store.alarm("transcript.degraded", f"{self.sid}: recording buffer overflow")
 
     async def resume(self):
         """After an overflow or a write fault: queued behind the in-flight job, publishes (or
-        abandons) what the writers hold, re-reads the committed position C from the DB, drops
-        every pending buffer (superseded by the replay) and resumes there. Returns C =
-        (agent_epoch, agent_offset, out_pos, dropped). Refused while an epoch change is pending."""
+        abandons) what the writers hold, re-reads the committed descriptors and position C from the
+        DB (both must be what this recorder last committed, else re-adoption), drops `pending`
+        (superseded by the replay) and resumes there. Returns C = (agent_epoch, agent_offset,
+        out_pos, dropped upstream bytes). Refused while an epoch change is pending."""
         if self._switch is not None:
             raise TxStoreError("busy", "epoch change in progress: resume after it")
         return await self._submit("resync")
 
     def gap(self, size, cast_ts=0.0):
-        """One GAP_MARKER at the current position, carrying the lost length (recorded in `gaps`
-        once published, audited by the caller); the same position as a `.cast` gap event."""
+        """One GAP_MARKER at the current position, carrying the lost upstream length (recorded in
+        `gaps` once published, audited by the caller); the same position as a `.cast` gap event."""
         if self.overflow or self.state != "running" or self.closing or self._switch is not None:
             raise TxStoreError("busy", "resume first")
-        self._add_gap(self.out_pos, size, cast_ts)
+        if type(size) is not int or size < 0:
+            raise TxStoreError("badInput", "gap size")
+        self._add_gap(size, cast_ts, reason="hub", epoch=self.agent_epoch)
 
-    def _add_gap(self, pos, size, cast_ts):
+    def _add_gap(self, size, cast_ts, *, reason, epoch, out=None, cast=None, into_switch=False):
+        """Marker bytes into `pending` (or into an epoch cut's held segment, BEFORE every byte of
+        the new epoch); the positions of everything after it shift accordingly."""
         ev = gap_event(cast_ts)
-        self.pending["out"] += GAP_MARKER
-        self.pending["cast"] += ev
+        if into_switch:
+            sw = self._switch
+            bufs, lst = sw["bufs"], sw["gaps"]
+            pos = [self.committed_len(k) + self._unpublished(k) + len(bufs[k]) for k in KIND_NAMES]
+        else:
+            bufs, lst = self.pending, self.gap_pending
+            pos = [self.out_pos, self.cast_pos]
+        g = Gap(pos[0], pos[1], size, out, cast, epoch, reason)
+        bufs["out"] += GAP_MARKER
+        bufs["cast"] += ev
         self.store.buffered_total += len(GAP_MARKER) + len(ev)
         self.out_pos += len(GAP_MARKER)
-        self.gap_pending.append((pos, size))
+        self.cast_pos += len(ev)
+        lst.append(g)
+        return g
 
     # ── jobs ──
 
@@ -2145,10 +2297,15 @@ class Recorder:
         if self._switch is not None:
             raise TxStoreError("busy", "epoch change in progress")
         fut = self._submit("epoch", new_epoch)
-        self._switch = {"old": (self.agent_epoch, self.agent_offset), "bufs": self.pending,
-                        "new": new_epoch}
+        # Segmentul vechi (cu markerele lui şi pierderea vechiului epoch) se mută în tăietură: din
+        # acest moment niciun overflow al noului epoch nu-l mai atinge (R-H1).
+        self._switch = {"old": self._held_end(), "bufs": self.pending, "gaps": self.gap_pending,
+                        "new": new_epoch, "loss": self._loss, "owed": None}
         self.pending = {k: bytearray() for k in KIND_NAMES}
+        self.gap_pending = []
+        self._loss = self._new_loss(new_epoch)
         self.agent_epoch, self.agent_offset = new_epoch, 0
+        self._pend_from = (new_epoch, 0)
         return fut
 
     async def cap_now(self, truncate=True):
@@ -2227,38 +2384,49 @@ class Recorder:
         sid = self.sid
 
         def load(c):
-            return (c.execute("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?",
-                              (sid,)).fetchone(),)
-        (ag,) = await self.store.fresh_read(load)
-        if self.track_agent and ag is not None:
-            self.agent_committed = (ag[0], ag[1] or 0)
-        lost_old = 0
+            return (c.execute("SELECT kind, blob, version FROM tx_descriptors WHERE sid=?", (sid,)).fetchall(),
+                    c.execute("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?", (sid,)).fetchone())
+        try:
+            rows, ag = await self.store.fresh_read(load)
+        except (sqlite3.Error, OSError) as e:
+            raise _NeedReadopt(f"resync cannot read the committed state: {e}") from None
+        # Descriptorii şi cursorul se adoptă ÎMPREUNĂ (R-M2): dacă DB-ul nu mai e exact ce a comis
+        # acest recorder (ceva s-a mutat independent), nu se adoptă doar cursorul → readoptare.
+        db_desc = {k: (v, bytes(b)) for k, b, v in rows}
+        for k in KIND_NAMES:
+            d = self.committed[k]
+            mine = (d.version, self.store.encode(d)) if d else None
+            if db_desc.get(k) != mine:
+                raise _NeedReadopt(f"{k}: descriptor moved under the writer")
+        if self.track_agent:
+            if ag is None or (ag[0], ag[1] or 0) != tuple(self.agent_committed):
+                raise _NeedReadopt("agent position moved under the writer")
+        self._drop_buffers()                      # reluarea de la C le înlocuieşte (doar `pending`)
+        self._written_agent = self._covered
         if self._switch is not None:
-            # resume() cerut înaintea unei schimbări de epoch încă în coadă: segmentul vechiului
-            # epoch nu se mai poate relua de la agent → pierdut, numărat exact.
-            lost_old = len(self._switch["bufs"]["out"])
-        self._drop_buffers()                      # reluarea de la C le înlocuieşte
-        self._written_agent = self.agent_committed
-        if self._switch is not None:
-            self._switch["old"] = self.agent_committed
+            # Tăietura rămâne intactă (segmentul vechi se publică de jobul ei); reluarea e în noul epoch.
             self.agent_epoch, self.agent_offset = self._switch["new"], 0
         else:
-            self.agent_epoch, self.agent_offset = self.agent_committed
-        self.out_pos = self.committed_len("out")
-        dropped, self.dropped = self.dropped + lost_old, 0
+            self.agent_epoch, self.agent_offset = self._covered
+        self._pend_from = (self.agent_epoch, self.agent_offset)
+        self._recount_pos()
+        lost, self._loss = self._loss, self._new_loss(self.agent_epoch)
         self.overflow = False
-        return (self.agent_epoch, self.agent_offset, self.out_pos, dropped)
+        return (self.agent_epoch, self.agent_offset, self.out_pos, lost["agent"])
 
     def _capture(self):
-        """The batch and its agent position, taken in ONE tick. With an epoch cut pending, only
-        the old epoch's segment is captured (the new epoch's bytes wait for the switch)."""
-        if self._switch is not None:
-            src, agent_end = self._switch["bufs"], self._switch["old"]
-            self._switch["bufs"] = {k: bytearray() for k in KIND_NAMES}
+        """The batch, its agent position and its markers, taken in ONE tick. With an epoch cut
+        pending, only the old epoch's held segment is captured (the new epoch's bytes wait for
+        the switch)."""
+        sw = self._switch
+        if sw is not None:
+            src, agent_end, gaps = sw["bufs"], sw["old"], sw["gaps"]
+            sw["bufs"], sw["gaps"] = {k: bytearray() for k in KIND_NAMES}, []
         else:
-            src, agent_end = self.pending, (self.agent_epoch, self.agent_offset)
-            self.pending = {k: bytearray() for k in KIND_NAMES}
-        return {k: bytes(src[k]) for k in KIND_NAMES}, agent_end
+            src, agent_end, gaps = self.pending, self._held_end(), self.gap_pending
+            self.pending, self.gap_pending = {k: bytearray() for k in KIND_NAMES}, []
+            self._pend_from = agent_end
+        return {k: bytes(src[k]) for k in KIND_NAMES}, agent_end, gaps
 
     async def _job_checkpoint(self):
         """Capture → append → fsync → publish. The publication unit is everything the writers hold
@@ -2266,30 +2434,31 @@ class Recorder:
         included), with the agent position of the last appended capture: both prefixes and the
         offset move together or not at all, and nothing is ever appended twice."""
         self._check_token()
-        if not self.overflow:
-            batch, agent_end = self._capture()
-            size = sum(len(b) for b in batch.values())
-            gaps, self.gap_pending = self.gap_pending, []
-            self.inflight += size
+        held = self._switch is not None
+        batch, agent_end, gaps = self._capture()
+        size = sum(len(b) for b in batch.values())
+        # Segmentul reţinut al unei tăieturi nu intră în contabilitatea overflow-ului (R-H1).
+        counted = 0 if held else size
+        pre = {k: self._unpublished(k) for k in KIND_NAMES}
+        self.inflight += counted
+        try:
+            self.store._fault("captured")
             try:
-                self.store._fault("captured")
-                try:
-                    touched = await self._append(batch)
-                    await self._fsync(touched)
-                except (OSError, txformat.TxFormatError) as e:
-                    await self._writer_failed(e)
-                    raise TxStoreError("writeFailed", str(e)) from None
-                self._written_agent = agent_end
-                self._gaps_unpub += gaps
-            finally:
-                self.inflight -= size
-                self.store.buffered_total -= size
+                touched = await self._append(batch)
+                await self._fsync(touched)
+            except (OSError, txformat.TxFormatError) as e:
+                await self._writer_failed(e, {k: pre[k] + len(batch[k]) for k in KIND_NAMES})
+                raise TxStoreError("writeFailed", str(e)) from None
+            self._written_agent = agent_end
+            self._gaps_unpub += gaps
+        finally:
+            self.inflight -= counted
+            self.store.buffered_total -= size
         if not self._dirty():
             return self._snapshot_state()
+        had_gaps = bool(self._gaps_unpub)
         await self._publish(self._plan(self._written_agent))
-        if self._gaps_unpub:
-            self.gaps += self._gaps_unpub
-            self._gaps_unpub = []
+        if had_gaps:
             self.degraded = False
         elif not self.overflow and self.degraded and not self.dropped:
             self.degraded = False
@@ -2389,11 +2558,21 @@ class Recorder:
                 os.fsync(self.store.dir_fd)
         await self.store.io(run)
 
-    async def _abandon_writers(self, why):
+    async def _abandon_writers(self, why, lost=None):
         """Abandon every generation of the writers: a published one becomes `recovered` at its
         committed counts in the next publication, an unpublished one is retired; new ones are
-        opened, and the written position falls back to the committed one."""
+        opened, and the written position falls back to the committed one. What they held is
+        counted as lost (upstream bytes from the published position to the end of the captures;
+        with an epoch cut pending those are the old epoch's, which `_job_epoch` accounts)."""
         self.store.alarm("transcript.writeFailed", f"{self.sid}: {why}")
+        if lost is None:
+            lost = {k: self._unpublished(k) for k in KIND_NAMES}
+        if self._switch is None:
+            e0, o0 = self._pend_from
+            ce, co = self._covered
+            self._lose(max(0, o0 - co) if e0 == ce else o0, lost["out"], lost["cast"])
+        else:
+            self._lose(0, lost["out"], lost["cast"], loss=self._switch["loss"])
         for k in KIND_NAMES:
             for g in self.done[k] + [self.cur[k]]:
                 if g is None:
@@ -2407,16 +2586,22 @@ class Recorder:
                         await self._retire_unpublished(g)
             self.done[k] = []
             self.cur[k] = None
-        self._written_agent = self.agent_committed
+        self._written_agent = self._covered
         self._gaps_unpub = []
+        if self._switch is None:
+            # `pending` continuă după octeţii abandonaţi: nu mai e contiguu cu prefixul publicat →
+            # aruncat (numărat), reluare de la C. Cu o tăietură, `pending` e al noului epoch (offset 0).
+            self._enter_overflow()
         for k in KIND_NAMES:
             await self._reopen(k)
+        self._recount_pos()
 
-    async def _writer_failed(self, err):
+    async def _writer_failed(self, err, lost=None):
         """fsync error / ambiguous write: abandon the generations, discard pending, and ask for a
-        resume from the committed position."""
-        await self._abandon_writers(err)
-        self._enter_overflow(0)
+        resume from the committed position. With an epoch cut pending, the abandoned bytes are the
+        old epoch's (marked by `_job_epoch`); the new epoch's `pending` starts at its offset 0 and
+        stays valid, so it is not discarded."""
+        await self._abandon_writers(err, lost)
 
     async def _retire_unpublished(self, g):
         st = self.store
@@ -2426,7 +2611,7 @@ class Recorder:
         await st.retire(self.sid, g.kind, hexid)
 
     def _plan(self, agent_end, *, epoch_change=False):
-        new, start, listed = {}, {}, []
+        new, start, listed, ident = {}, {}, [], {}
         for k in KIND_NAMES:
             old = self.committed[k]
             gens = list(old.generations) if old else []
@@ -2440,6 +2625,7 @@ class Recorder:
                 if idx is None:
                     gens.append(ent)
                     listed.append(g.gen_id.hex())
+                    ident[g.gen_id.hex()] = (k, g.dev, g.ino)
                 else:
                     gens[idx] = ent
             if old is None and not gens:
@@ -2450,7 +2636,7 @@ class Recorder:
             new[k] = (d, self.store.encode(d))
         out_grew = "out" in new and sum(g.plain_len for g in new["out"][0].generations) > self.committed_len("out")
         return _Plan("extend", start, new, listed, agent=agent_end, agent_prev=self.agent_committed,
-                     epoch_change=epoch_change, out_grew=out_grew)
+                     epoch_change=epoch_change, out_grew=out_grew, ident=ident)
 
     def _txn_body(self, plan):
         st = self.store
@@ -2497,12 +2683,16 @@ class Recorder:
                               (b, d.version, le_bump, int(plan.out_grew and k == "out"), now, sid, k))
                 st._fault("txn-between")
             for h in plan.listed:
+                # Identitatea rândului (sid, kind, inode), nu doar starea lui (R-M2).
+                k, dev, ino = plan.ident[h]
                 n = c.execute("UPDATE tx_files SET state='published' WHERE gen_id=? AND sid=? "
-                              "AND state='created'", (h, sid)).rowcount
+                              "AND kind=? AND dev=? AND ino=? AND state='created'",
+                              (h, sid, k, dev, ino)).rowcount
                 if n != 1:
                     raise Refused("ledger", f"{h} not created by us")
-            for _k, h in plan.retired:
-                c.execute("UPDATE tx_files SET state='retired' WHERE gen_id=? AND state='published'", (h,))
+            for k, h in plan.retired:
+                c.execute("UPDATE tx_files SET state='retired' WHERE gen_id=? AND sid=? AND kind=? "
+                          "AND state='published'", (h, sid, k))
             if self.track_agent and plan.agent is not None:
                 c.execute("UPDATE sessions SET agent_epoch=?, agent_offset=? WHERE id=?",
                           (plan.agent[0], plan.agent[1], sid))
@@ -2534,38 +2724,57 @@ class Recorder:
 
     async def _resolve(self, plan):
         """Uncertain COMMIT: everything the transaction writes is re-read in ONE read transaction
-        on a fresh connection — the descriptors, the agent position and the ledger rows. Committed
-        only if all of it is the plan's result; not committed only if all of it is still the
-        start; anything else (something moved independently) is unknown → re-adoption."""
+        on a fresh connection — the descriptors (blob, version, list_epoch), the agent position and
+        the ledger rows with their identity (sid, kind, inode). Committed only if all of it is the
+        plan's result; not committed only if all of it is still the start; anything else (something
+        moved independently), or a re-read that itself fails, is unknown → re-adoption."""
         sid = self.sid
         listed = list(plan.listed)
         retired = [h for _k, h in plan.retired]
+        rkind = {h: k for k, h in plan.retired}
         track = self.track_agent and plan.agent is not None
+        compact = plan.op in ("cap", "merge")
 
         def load(c):
-            descs = {k: c.execute("SELECT blob, version FROM tx_descriptors WHERE sid=? AND kind=?",
+            descs = {k: c.execute("SELECT blob, version, list_epoch FROM tx_descriptors WHERE sid=? AND kind=?",
                                   (sid, k)).fetchone() for k in plan.start}
             ag = c.execute("SELECT agent_epoch, agent_offset FROM sessions WHERE id=?",
                            (sid,)).fetchone() if track else None
             led = {}
             for h in listed + retired:
-                r = c.execute("SELECT state FROM tx_files WHERE gen_id=?", (h,)).fetchone()
-                led[h] = r[0] if r else None
+                r = c.execute("SELECT state, sid, kind, dev, ino FROM tx_files WHERE gen_id=?", (h,)).fetchone()
+                led[h] = tuple(r) if r else None
             return descs, ag, led
-        descs, ag, led = await self.store.fresh_read(load)
+        try:
+            descs, ag, led = await self.store.fresh_read(load)
+        except (sqlite3.Error, OSError, TxStoreError):
+            return "unknown"                      # rezultatul nu se poate stabili: readoptare
         agent_now = (ag[0], ag[1] or 0) if ag is not None else None
 
         def at(r, version, blob):
             return (r[1] if r else 0) == version and (bytes(r[0]) if r else None) == blob
-        if (all(at(descs[k], plan.new[k][0].version, plan.new[k][1]) for k in plan.new)
+
+        def le_is(r, want):
+            return not compact or (r is not None and r[2] == want)
+
+        def ours(h, states):
+            r = led[h]
+            if r is None or r[0] not in states or r[1] != sid:
+                return False
+            if h in plan.ident:
+                return (r[2], r[3], r[4]) == tuple(plan.ident[h])
+            return r[2] == rkind.get(h)
+        le_after = (plan.list_epoch or 0) + (1 if plan.op == "cap" else 0)
+        if (all(at(descs[k], plan.new[k][0].version, plan.new[k][1]) and le_is(descs[k], le_after)
+                for k in plan.new)
                 and (not track or agent_now == tuple(plan.agent))
-                and all(led[h] == "published" for h in listed)
-                and all(led[h] in ("retired", "gone") for h in retired)):
+                and all(ours(h, ("published",)) for h in listed)
+                and all(ours(h, ("retired", "gone")) for h in retired)):
             return "committed"
-        if (all(at(descs[k], *plan.start[k]) for k in plan.start)
+        if (all(at(descs[k], *plan.start[k]) and le_is(descs[k], plan.list_epoch) for k in plan.start)
                 and (not track or agent_now == tuple(plan.agent_prev))
-                and all(led[h] == "created" for h in listed)
-                and all(led[h] == "published" for h in retired)):
+                and all(ours(h, ("created",)) for h in listed)
+                and all(ours(h, ("published",)) for h in retired)):
             return "not-committed"
         return "unknown"
 
@@ -2584,8 +2793,14 @@ class Recorder:
             self.to_recover[k] = set()
         if plan.op == "cap":
             self.list_epoch += 1
-        if self.track_agent and plan.agent is not None:
-            self.agent_committed = tuple(plan.agent)
+        if plan.agent is not None:
+            self._covered = tuple(plan.agent)
+            if self.track_agent:
+                self.agent_committed = tuple(plan.agent)
+        if plan.op == "extend" and self._gaps_unpub:
+            # O publicare „extend" listează TOT ce ţin writerele: markerele scrise sunt acum comise.
+            self.gaps += self._gaps_unpub
+            self._gaps_unpub = []
 
     async def _maybe_roll(self, force=False, reopen=True):
         """SEAL the current generations that are full (or all, `force`), open the next ones
@@ -2730,7 +2945,7 @@ class Recorder:
         the one seen at build time); P ‖ L → T ‖ L, T published, P retired, then unlinked."""
         self._check_token()
         await self._job_checkpoint()
-        new, start, listed, retired = {}, {}, [], []
+        new, start, listed, retired, ident = {}, {}, [], [], {}
         for k in KIND_NAMES:
             if k not in built:
                 continue
@@ -2747,9 +2962,10 @@ class Recorder:
             start[k] = (old.version, self.store.encode(old))
             new[k] = (d, self.store.encode(d))
             listed.append(built[k].gen_id.hex())
+            ident[built[k].gen_id.hex()] = (k, built[k].dev, built[k].ino)
             retired += [(k, g.gen_id.hex()) for g in P]
         plan = _Plan("cap" if truncate else "merge", start, new, listed, retired, list_epoch=list_epoch,
-                     prefix={k: tuple(prefix[k]) for k in built})
+                     prefix={k: tuple(prefix[k]) for k in built}, ident=ident)
         try:
             await self._publish(plan)
         except Refused:
@@ -2763,17 +2979,65 @@ class Recorder:
             await self.store.retire(self.sid, k, h)
         return True
 
+    async def _checkpoint_or_flush(self):
+        """One checkpoint; if it fails short of a re-adoption, publish what the writers hold or
+        abandon them (`_flush_dirty`). Afterwards the writers hold nothing unpublished."""
+        try:
+            await self._job_checkpoint()
+        except _NeedReadopt:
+            raise
+        except Refused as e:
+            if self.state == "replaced":
+                raise
+            raise _NeedReadopt(f"publication refused: {e}") from None
+        except (TxStoreError, OSError, sqlite3.Error, txformat.TxFormatError):
+            await self._flush_dirty()
+
+    async def _emit_owned(self, owed, *, into_switch, cast_ts, reason, epoch):
+        """A marker the recorder owes (epoch cut, close): emitted once, its Gap kept in `owed`
+        across attempts, re-emitted only when the writers holding it were abandoned. Returns the
+        published Gap, or None when it could not be published."""
+        for _attempt in (0, 1):
+            g = owed.get("gap")
+            if g is not None and any(x is g for x in self.gaps):
+                return g
+            if g is None or not any(x is g for x in self._gaps_unpub):
+                owed["gap"] = g = self._add_gap(owed["agent"], cast_ts, reason=reason, epoch=epoch,
+                                                out=owed["out"], cast=owed["cast"], into_switch=into_switch)
+            await self._checkpoint_or_flush()
+            if any(x is g for x in self.gaps):
+                return g
+        return None
+
     async def _job_epoch(self, new_epoch):
-        """The switch for the cut taken in `change_epoch`: publish the old epoch's segment under
-        its position, seal, then publish (new_epoch, 0) through the same CAS'd transaction (with
+        """The switch for the cut taken in `change_epoch`. The old epoch's held segment is
+        published under its position; whatever of the old epoch is not covered by published bytes
+        after that (an overflow before the cut, a failed write or publication of the segment)
+        becomes ONE GAP_MARKER for exactly those upstream bytes, published BEFORE the switch, then
+        alarmed. Then SEAL, then (new_epoch, 0) through the same CAS'd transaction (with
         uncertain-COMMIT resolution) even when no descriptor exists yet. Only then do the new
-        epoch's bytes become capturable. A failure re-adopts from the DB."""
+        epoch's bytes become capturable. A failure re-adopts from the DB; a marker that could not
+        be published is alarmed with its exact size first."""
         self._check_token()
         sw = self._switch
         if sw is None or sw["new"] != new_epoch:
             raise _NeedReadopt("epoch job without its cut")
         try:
-            await self._job_checkpoint()
+            await self._checkpoint_or_flush()
+            oe, oo = sw["old"]
+            ce, co = self._covered
+            uncovered = max(0, oo - co) if ce == oe else oo
+            owed = sw["owed"]
+            if owed is None and (uncovered or any(sw["loss"][k] for k in ("agent", "out", "cast"))):
+                owed = sw["owed"] = {"agent": sw["loss"]["agent"] + uncovered, "out": sw["loss"]["out"],
+                                     "cast": sw["loss"]["cast"], "gap": None}
+            if owed is not None:
+                g = await self._emit_owned(owed, into_switch=True, cast_ts=0.0, reason="epoch-cut", epoch=oe)
+                if g is None:
+                    self.store.alarm("transcript.gapUnrecorded",
+                                     f"{self.sid}: {owed['agent']} bytes of epoch {oe} lost, marker not published")
+                    raise _NeedReadopt("epoch cut: gap marker not published")
+                self.store.alarm("transcript.gap", f"{self.sid}: {owed['agent']} bytes of epoch {oe} lost at the cut")
             await self._maybe_roll(force=True)
             plan = self._plan((new_epoch, 0), epoch_change=True)
             if plan.new or self.track_agent:
@@ -2788,29 +3052,43 @@ class Recorder:
             # Tăietura nu rămâne pe jumătate: octeţii noului epoch aşteaptă un comutator comis.
             raise _NeedReadopt(f"epoch change failed: {e}") from None
         self._switch = None
-        self._written_agent = self.agent_committed
+        self._written_agent = self._covered
+        self._recount_pos()
         return self.agent_committed
 
     async def _job_finalize(self, cast_ts=0.0):
-        """Close: drain (final checkpoint of everything accepted before close), an explicit gap
-        for an overflow still open, SEAL both kinds, publish; retire never-published generations.
-        A failure leaves the recorder retryable (close() again)."""
+        """Close: drain (final checkpoint of everything accepted before close; a failed one is
+        published or abandoned), then ONE GAP_MARKER for everything not recorded (an overflow
+        still open, abandoned bytes), SEAL both kinds, publish; retire never-published
+        generations. The owed marker and its accounting are kept across attempts: a failure
+        leaves the recorder retryable (close() again) with the same total."""
         if self.store.tokens.get(self.sid) != self.token:
             self.state = "replaced"
             return None
         self.closing = True
-        await self._job_checkpoint()
-        lost = None
-        if self.overflow:
-            # Lipsa se reprezintă exact: un marker la capătul prefixului comis, mărimea în `gaps`;
-            # offsetul agentului NU avansează peste ce s-a înregistrat.
-            lost, self.dropped = self.dropped, 0
-            self.overflow = False
-            self.agent_epoch, self.agent_offset = self.agent_committed
-            self.out_pos = self.committed_len("out")
-            self._add_gap(self.out_pos, lost, cast_ts)
-            self.store.alarm("transcript.gap", f"{self.sid}: {lost} bytes lost before close")
-            await self._job_checkpoint()
+        await self._checkpoint_or_flush()
+        L = self._loss
+        if self._close_gap is None and (self.overflow or any(L[k] for k in ("agent", "out", "cast"))):
+            self._close_gap = {"agent": 0, "out": 0, "cast": 0, "gap": None, "epoch": self.agent_epoch,
+                               "alarmed": False}
+        if self._close_gap is not None:
+            cg = self._close_gap
+            if cg["gap"] is None or not any(x is cg["gap"] for x in self.gaps):
+                # Pierderea nouă (o încercare anterioară eşuată) se adaugă la aceeaşi, nu se înlocuieşte.
+                for k in ("agent", "out", "cast"):
+                    cg[k] += L[k]
+                self._loss = self._new_loss(self.agent_epoch)
+                # Offsetul agentului NU avansează peste ce s-a înregistrat.
+                self.overflow = False
+                self.agent_epoch, self.agent_offset = self._pend_from = self._covered
+                self._recount_pos()
+                g = await self._emit_owned(cg, into_switch=False, cast_ts=cast_ts, reason="close",
+                                           epoch=cg["epoch"])
+                if g is None:
+                    raise TxStoreError("writeFailed", "close: gap marker not published")
+            if not cg["alarmed"]:
+                cg["alarmed"] = True
+                self.store.alarm("transcript.gap", f"{self.sid}: {cg['agent']} bytes lost before close")
         await self._maybe_roll(force=True, reopen=False)
         for k in KIND_NAMES:
             g = self.cur[k]
@@ -2822,7 +3100,7 @@ class Recorder:
         if self.store.tokens.get(self.sid) == self.token:
             del self.store.tokens[self.sid]
         res = self._snapshot_state()
-        res["lost"] = lost
+        res["lost"] = self._close_gap["agent"] if self._close_gap is not None else None
         res["rejected"] = self.rejected
         return res
 

@@ -2371,23 +2371,60 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   `recovered` at its committed counts, unpublished → retired), and the offset never covers bytes
   that are not published. An uncertain COMMIT is resolved by re-reading the descriptors, the agent
   position and the ledger rows in one read transaction.
-- Epoch change and close are cuts taken synchronously at the call. Bytes fed before
-  `change_epoch(e)` are published under the old position; bytes fed after it count from offset 0
-  of `e` and are published only after the switch has committed. The switch goes through the same
-  CAS'd transaction even with no descriptor. A failed switch re-adopts from the DB. `close()` stops
-  ingress at the call: later bytes are refused (`rejected`), and everything accepted before is
-  drained. An overflow still open at close becomes one `GAP_MARKER` at the end. `feed_*` return
-  whether the bytes were accepted.
-- A gap is written as 3.7's `GAP_MARKER` bytes at the committed position and never advances the
-  agent offset. Its size is kept in memory (`gaps`, once the marker is published) and raised
-  through the alarm hook (audit), not written into the recording. That is acceptable as telemetry
-  only if PR5b correlates the published marker and the audit record durably.
+- **Admission (the contract the PR5b hub must follow; recheck 059f21a R-H2).** One call per agent
+  chunk: `Recorder.feed(out, cast, at=(epoch, offset), agent_bytes=n)` admits the chunk's `.out`
+  bytes and its `.cast` event together or neither, and returns whether it was admitted. There is
+  no separate `.out` / `.cast` entry point, so a checkpoint can only ever publish an agent offset
+  for chunks admitted in both kinds. `at` is where the chunk starts upstream; a chunk that does not
+  start at the recorder's position (a hole, a duplicate, another epoch) raises
+  `TxStoreError("position")` with nothing admitted, and the hub must always pass it. `agent_bytes`
+  is the chunk's upstream length (default `len(out)`). Events that exist only in `.cast` (header,
+  resize) use `feed_cast_only(cast)` and never move the agent offset. A refused chunk is never
+  recorded later. Every byte offered and not recorded since the last `resume` is accounted in
+  upstream (agent) bytes and per kind (`Recorder.loss`, `dropped` = upstream), and kept until the
+  commit that publishes its marker; `resume()` returns the upstream total of the current epoch
+  and starts a new count.
+- Epoch change and close are cuts taken synchronously at the call. Bytes admitted before
+  `change_epoch(e)` are held for the old epoch **outside the overflow path**: an overflow of `e`
+  drops only `e`'s pending bytes, never the held segment (recheck R-H1). The switch commits only
+  after the held bytes are published, or after ONE durable `GAP_MARKER` for exactly the old-epoch
+  upstream bytes that are not covered by published bytes (an overflow before the cut, a failed
+  write or publication of the segment) has been published, then alarmed (`transcript.gap`). If
+  even that marker cannot be published, the loss is alarmed with its size
+  (`transcript.gapUnrecorded`) and the sid is re-adopted from the DB. Bytes admitted after the
+  call count from offset 0 of `e` and are published only after the switch has committed; a write
+  fault on the old segment does not discard them. The switch goes through the same CAS'd
+  transaction even with no descriptor. A `resume` already queued before the cut keeps the held
+  segment and resumes in `e`. `close()` stops ingress at the call: later bytes are refused
+  (`rejected`), and everything accepted before is drained (a failed drain is published or
+  abandoned). Whatever was not recorded (an overflow still open, abandoned bytes) becomes one
+  `GAP_MARKER` at the end. That owed marker and its size survive a failed close: the retry
+  publishes it once, with the same total.
+- A gap is written as 3.7's `GAP_MARKER` bytes and never advances the agent offset. Each published
+  marker is a `Gap` in `gaps` (`.out` and `.cast` positions, upstream size, per-kind bytes when
+  known, epoch, reason `hub | epoch-cut | close`) and is raised through the alarm hook (audit),
+  not written into the recording. That is acceptable as telemetry only if PR5b correlates the
+  published marker and the audit record durably.
+- `resume` re-reads the descriptors and the agent position in one read transaction and adopts them
+  only if they are exactly what this recorder last committed; anything moved independently (for
+  example after a CAS refusal) re-adopts the sid. An uncertain COMMIT compares the descriptors
+  (blob, version, and `list_epoch` for cap / merge), the agent position and the ledger rows with
+  their identity (sid, kind, inode); a re-read that itself fails is "unknown" and re-adopts.
 - `quarantined` does not encode its reason, so it is refused for everyone. Owner recovery opens only
   `status = recovery`, and only with an `Access` issued by the Store for the recovery route.
   Re-authorization and cached responses are bound to the same sid, principal and route. Raw and
   redacted responses never share a cache entry.
 - Snapshot fds are refcounted: a close is logical, and the fds are closed by the last reader
-  thread. Admission (slots, fds) is reserved before any fd is opened. A legacy `PlainSnapshot`
+  thread (opening the fds counts as a reader). Admission (slots, fds) is reserved before any fd is
+  opened, and a snapshot is registered before its fds are opened, so `Store.close()` reaches one
+  still being built; it is re-checked synchronously before it is returned. `shutdown()` returns
+  the sids whose worker it had to abandon (empty = clean); a non-empty result means the Store must
+  not be reused.
+- Test gate (recheck R-M3): the test-volume marker binds the DB file and the transcripts dir
+  (dev, ino, path). Both live in one private (0700, ours) harness dir under the system temp dir;
+  a transcripts dir elsewhere, or a replaced one, is refused, and the identity actually opened
+  (the directory fd, the DB re-stat after connecting) must match the marker.
+  `create_test_volume` refuses unless it can prove `users` / `hosts` absent or empty. A legacy `PlainSnapshot`
   re-checks the fd's identity (regular, one link, dev, ino, size, mtime) before every read, and
   its inventory name must be exactly `<sid>.<kind>`.
 - `verify` has a hard per-pass budget on physical bytes. A generation larger than one pass is
