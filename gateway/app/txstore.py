@@ -6,8 +6,10 @@ unless `WEBTERM_TX_RECORDINGS=1`, `WEBTERM_TEST_GATE=1` (both checked before any
 transcripts dir, both in one private harness dir under the system temp dir, whose
 `tx_state.test_volume` marker binds both identities (written only by `create_test_volume`, which
 refuses a DB with `users` / `hosts` rows). This guards against accidents, not against an operator
-who can write the DB. Enabling on a real volume needs PR6
-(migration, erasure journal, quarantine).
+who can write the DB. A real volume (PR6b) opens only with `real_volume=True`, which only
+`txhub.boot` passes, with a protected keyring; the boot then requires the migration, the erasure
+journal and the quarantine to report ready. The plaintext-migration primitives (`convert_plain`,
+the identity-checked unlink) live here too; their orchestration is `migration.py`.
 
 Layout (§12.11.0): `transcripts/<sid>.<k>.<gen>.wtx` (k = out | cast, gen = 32 lowercase hex) and
 the cache `transcripts/<sid>.<k>.<gen>.idx`, created through a directory fd, never renamed or
@@ -32,11 +34,14 @@ Nothing else in the gateway opens a generation, decodes a descriptor or unwraps 
 import asyncio
 import collections
 import contextlib
+import ctypes
+import errno
 import hashlib
 import hmac
 import json
 import os
 import pathlib
+import platform
 import re
 import secrets
 import sqlite3
@@ -107,6 +112,21 @@ def _volume_binding(db_path, transcripts_dir=None):
                          f"{tst.st_dev}:{tst.st_ino}:{treal}")
 
 
+def _has_test_marker(db_path):
+    """True when the DB carries `tx_state.test_volume` (read-only probe; an unreadable DB refuses)."""
+    real = os.path.realpath(str(db_path))
+    try:
+        con = sqlite3.connect(pathlib.Path(real).as_uri() + "?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as e:
+        raise TxStoreError("disabled", f"cannot read the DB: {type(e).__name__}") from None
+    try:
+        return con.execute("SELECT 1 FROM tx_state WHERE key='test_volume'").fetchone() is not None
+    except sqlite3.Error as e:
+        raise TxStoreError("disabled", f"cannot read tx_state: {type(e).__name__}") from None
+    finally:
+        con.close()
+
+
 def _connect_rw(path):
     # mode=rw: niciodată nu creează fişierul (un DB lipsă nu devine un volum gol).
     return sqlite3.connect(pathlib.Path(path).as_uri() + "?mode=rw", uri=True, isolation_level=None,
@@ -144,8 +164,9 @@ def create_test_volume(db_path, transcripts_dir=None, env=None):
 
 # Tabelele care, nevide, înseamnă „înregistrări criptate pe volum" (PR6a: + migrare + carantină).
 TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps", "tx_migration", "tx_quarantine")
-# Chei tx_state care există doar după jurnalul de ştergeri / un restore urmărit (§12.11.4).
-TX_STATE_KEYS = ("erasure_head", "attested_heads", "continuity")
+# Chei tx_state care există doar după jurnalul de ştergeri / un restore urmărit (§12.11.4) sau după
+# inventarul migrării (§12.11.5, PR6b): un volum cu ele nu mai e servit de calea 3.7.
+TX_STATE_KEYS = ("erasure_head", "attested_heads", "continuity", "recordings_format", "migration_inventory")
 # La rădăcina DATA_DIR: jurnalul WTJ1, temp-ul lui şi cozile tăiate la boot.
 TX_TOP_PREFIX = "erasures.wtj"
 
@@ -213,6 +234,58 @@ def inventory(data_dir=None, db_path=None) -> list:
     if f:
         found.append("transcripts: " + f)
     return found
+
+
+# ── plaintext migration helpers (§12.11.5) ──────────────────────────────────
+
+DEL_PREFIX = ".wt-del-"                 # numele privat al unei ştergeri verificate (pasul 6)
+MIG_FREE_SLACK = 64 * 1024 * 1024       # spaţiu liber cerut: 2 × mărimea + 64 MiB
+RENAME_NOREPLACE = 1
+
+
+def _load_renameat2():
+    """renameat2(2) through libc, or the raw syscall when libc has no wrapper; None = unavailable
+    (then nothing is ever deleted by the migration: fail closed)."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return None
+    fn = getattr(libc, "renameat2", None)
+    if fn is not None:
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        return fn
+    nr = {"x86_64": 316, "aarch64": 276}.get(platform.machine())
+    sc = getattr(libc, "syscall", None)
+    if nr is None or sc is None:
+        return None
+    sc.restype = ctypes.c_long
+
+    def raw(a, b, c, d, e):
+        return sc(ctypes.c_long(nr), ctypes.c_int(a), ctypes.c_char_p(b), ctypes.c_int(c),
+                  ctypes.c_char_p(d), ctypes.c_uint(e))
+    return raw
+
+
+_renameat2 = _load_renameat2()
+
+
+def renameat2_noreplace(dfd, old, new):
+    """Atomic rename inside one directory fd that never replaces an existing `new`."""
+    if _renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 unavailable")
+    if _renameat2(dfd, os.fsencode(old), dfd, os.fsencode(new), RENAME_NOREPLACE) != 0:
+        e = ctypes.get_errno()
+        if e == errno.ENOENT:
+            raise FileNotFoundError(e, os.strerror(e), old)
+        raise OSError(e, os.strerror(e), old)
+
+
+def _same_plain(st, ident, what):
+    """The plaintext's fd still is the inventoried file: regular, one link, same identity."""
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+            or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != tuple(ident)):
+        raise TxStoreError("changed", f"{what}: differs from its inventory row")
 
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -523,7 +596,8 @@ class Store:
 
     def __init__(self, *, transcripts_dir, kwk, installation_id, db_path=None, env=None,
                  max_bytes=None, keep_bytes=None, gen_limits=None, op_gen_cap=OP_GEN_CAP,
-                 pending_cap=PENDING_CAP, total_cap=REC_BUFFER_TOTAL, clock=time.time):
+                 pending_cap=PENDING_CAP, total_cap=REC_BUFFER_TOTAL, clock=time.time,
+                 real_volume=False):
         env = os.environ if env is None else env
         # Starea minimă pentru close() înainte de orice deschidere (un refuz nu lasă resurse).
         self._w = self._r = None
@@ -533,26 +607,17 @@ class Store:
         self._io_busy = 0
         self._closing = False
         self._released = False
+        self.real_volume = False
         if not enabled(env):
             raise TxStoreError("disabled", f"{ENV_FLAG} is not 1")
-        # PR5: activ doar pe un volum de test, şi doar sub o poartă de test (§12.11 PR5/PR6).
-        # Poarta se verifică înaintea oricărei deschideri; DB-ul se deschide mode=rw (nu-l creează).
-        if not test_gate(env):
-            raise TxStoreError("disabled", "test volume outside a test gate")
-        self._db_path, tdir, marker = _volume_binding(db_path or config.DB_PATH, transcripts_dir)
         try:
-            self._r = self._connect()
-            row = self._r.execute("SELECT value FROM tx_state WHERE key='test_volume'").fetchone()
-            if row is None or not hmac.compare_digest(str(row[0]), marker):
-                raise TxStoreError("disabled", "encrypted recordings need PR6 on a real volume")
-            self._w = self._connect()
-            self.dir_fd = os.open(tdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            # Identitatea EFECTIV deschisă (fd-ul directorului, DB-ul re-stat-at după conectare) e
-            # cea din marker: o cale schimbată între verificare şi deschidere nu trece.
-            dst = os.fstat(self.dir_fd)
-            if (not marker.endswith(f":{dst.st_dev}:{dst.st_ino}:{tdir}")
-                    or _volume_binding(self._db_path, tdir)[2] != marker):
-                raise TxStoreError("disabled", "test volume identity changed while opening")
+            # PR6b: un volum REAL (fără marker de test) se deschide doar când apelantul o cere
+            # explicit (txhub.boot, cu un keyring protejat); migrarea, jurnalul de ştergeri şi
+            # carantina trebuie apoi să raporteze ready, altfel boot-ul închide Store-ul şi refuză.
+            if real_volume and not _has_test_marker(db_path or config.DB_PATH):
+                self._open_real(db_path or config.DB_PATH, transcripts_dir)
+            else:
+                self._open_test(db_path or config.DB_PATH, transcripts_dir, env)
         except BaseException:
             self.close()
             raise
@@ -593,7 +658,46 @@ class Store:
         self._supervised = set()
         self.abandoned = []                      # shutdown: sid-uri cu worker abandonat (nu e curat)
         self.on_readopt = None
+        # PR6b: `await before_writer(sid)` înaintea oricărui writer (migrarea unei sesiuni vii la
+        # pornirea writer-ului, §12.11.5); o excepţie TxStoreError refuză pornirea.
+        self.before_writer = None
         self.readopt_enabled = True              # teste: un „crash" de proces nu se readoptă pe loc
+
+    def _open_test(self, db_path, transcripts_dir, env):
+        # PR5: volum de test, doar sub o poartă de test (§12.11 PR5/PR6). Poarta se verifică
+        # înaintea oricărei deschideri; DB-ul se deschide mode=rw (nu-l creează).
+        if not test_gate(env):
+            raise TxStoreError("disabled", "test volume outside a test gate")
+        self._db_path, tdir, marker = _volume_binding(db_path, transcripts_dir)
+        self._r = self._connect()
+        row = self._r.execute("SELECT value FROM tx_state WHERE key='test_volume'").fetchone()
+        if row is None or not hmac.compare_digest(str(row[0]), marker):
+            raise TxStoreError("disabled", "not a test volume (a real volume opens only from txhub.boot)")
+        self._w = self._connect()
+        self.dir_fd = os.open(tdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # Identitatea EFECTIV deschisă (fd-ul directorului, DB-ul re-stat-at după conectare) e
+        # cea din marker: o cale schimbată între verificare şi deschidere nu trece.
+        dst = os.fstat(self.dir_fd)
+        if (not marker.endswith(f":{dst.st_dev}:{dst.st_ino}:{tdir}")
+                or _volume_binding(self._db_path, tdir)[2] != marker):
+            raise TxStoreError("disabled", "test volume identity changed while opening")
+
+    def _open_real(self, db_path, transcripts_dir):
+        # Căile se rezolvă O DATĂ (un `transcripts` symlink suportat, §12.10), apoi directorul se
+        # deschide cu O_NOFOLLOW: tot ce urmează trece prin fd-ul lui, nu prin cale.
+        self._db_path = os.path.realpath(str(db_path))
+        tdir = os.path.realpath(str(transcripts_dir))
+        self._r = self._connect()
+        self._w = self._connect()
+        # markerul re-citit pe conexiunea deschisă: un marker apărut între verificare şi deschidere
+        # nu transformă un volum de test într-unul real
+        if self._r.execute("SELECT 1 FROM tx_state WHERE key='test_volume'").fetchone() is not None:
+            raise TxStoreError("disabled", "test volume marker appeared while opening")
+        try:
+            self.dir_fd = os.open(tdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as e:
+            raise TxStoreError("disabled", f"cannot open the transcripts dir: {e.strerror}") from None
+        self.real_volume = True
 
     # ── plumbing ──
 
@@ -1052,6 +1156,8 @@ class Store:
             raise TxStoreError("busy", "recorder already running")
         self._starting.add(sid)
         try:
+            if self.before_writer is not None:
+                await self.before_writer(sid)
             rec = Recorder(self, sid, track_agent=track_agent)
             await rec._start()
             self.recorders[sid] = rec
@@ -1385,6 +1491,319 @@ class Store:
             n += 1
             total += sum(g.phys_len for g in d.generations)
         return {"recordings": n, "bytes": total}
+
+    # ── plaintext migration primitives (§12.11.5, PR6b; order, inventory, janitor: migration.py) ──
+    #
+    # Aici, şi numai aici, se scriu generaţiile unei înregistrări migrate (modulul docstring:
+    # „nimic altceva nu deschide o generaţie"). Apelantul ţine lease-ul sid-ului.
+
+    def plain_dir_fd(self, dirn):
+        """(fd, own) of `transcripts/` (the Store's fd, not to be closed) or `transcripts/arhiva/`
+        (opened here with O_NOFOLLOW through the Store's fd; the caller closes it)."""
+        if dirn == "transcripts":
+            return self.dir_fd, False
+        if dirn == "arhiva":
+            return os.open("arhiva", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                           dir_fd=self.dir_fd), True
+        raise TxStoreError("bad-row", f"unknown plaintext dir {dirn!r}")
+
+    def _pin_plain_sync(self, dirn, name, ident):
+        """Step 1: the plaintext opened through its dir fd (O_NOFOLLOW) and checked on the fd:
+        regular, one link, (dev, ino, size, mtime_ns) = the inventory row's."""
+        dfd, own = self.plain_dir_fd(dirn)
+        try:
+            try:
+                fd = os.open(name, _RDONLY, dir_fd=dfd)
+            except FileNotFoundError:
+                raise TxStoreError("absent", f"{dirn}/{name}") from None
+            except OSError as e:
+                raise TxStoreError("changed", f"{dirn}/{name}: {e.strerror}") from None
+        finally:
+            if own:
+                os.close(dfd)
+        try:
+            _same_plain(os.fstat(fd), ident, f"{dirn}/{name}")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _encrypt_plain_sync(self, fd, writer, size):
+        """Step 3: the whole plaintext (no truncation) from the pinned fd into the writer,
+        hashed on the way. Returns the SHA-256 hex."""
+        h = hashlib.sha256()
+        pos = 0
+        while pos < size:
+            b = os.pread(fd, min(CAP_CHUNK, size - pos), pos)
+            if not b:
+                raise TxStoreError("changed", "plaintext shorter than its inventory size")
+            h.update(b)
+            writer.write(b)
+            pos += len(b)
+        return h.hexdigest()
+
+    def _seal_sync(self, built):
+        for g in built.values():
+            g.writer.seal()
+            os.fsync(g.fd)
+        os.fsync(self.dir_fd)
+
+    def _hash_snapshot_sync(self, snap, limit=None):
+        big = Budget(1 << 62, pre_first=1 << 62)
+        h = hashlib.sha256()
+        n = 0
+        end = snap.length if limit is None else min(limit, snap.length)
+        with snap._using():
+            for piece in snap._chunks(0, end, big, CAP_CHUNK):
+                h.update(piece)
+                n += len(piece)
+        return h.hexdigest(), n
+
+    def _verify_gen_file_sync(self, sid, kind, g, rk):
+        """verify_full of the sealed generation on a NEW read-only fd, same inode as created."""
+        w = g.writer
+        fd = os.open(g.name, _RDONLY, dir_fd=self.dir_fd)
+        try:
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) != (g.dev, g.ino):
+                raise TxStoreError("corrupt", "migrated generation replaced under us")
+            txformat.verify_full(_PRead(fd, 0, limit=w.phys_len), rk, kind=KINDS[kind],
+                                 sid=_sid_bytes(sid), gen_id=g.gen_id, data_count=w.data_count,
+                                 plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac)
+        finally:
+            os.close(fd)
+
+    async def decrypted_digest(self, sid, kind, desc, rk):
+        """(SHA-256 hex, length) of what a reader serves for `desc` (the reader path itself)."""
+        snap = await self._make_snapshot(Snapshot, sid, kind, desc, rk, 0, None,
+                                         nfds=len(desc.generations), force=True)
+        try:
+            return await self.io(self._hash_snapshot_sync, snap)
+        finally:
+            snap.close()
+
+    async def converted_prefix_digest(self, sid, kind, size):
+        """(SHA-256 hex, length) of the first `size` bytes a reader serves from the committed
+        (sid, kind). The descriptor must be authentic, `ok` and flagged `converted` (a crash rule
+        re-checks a conversion against it before the plaintext is unlinked)."""
+        def load(c):
+            return (c.execute("SELECT blob, version, status FROM tx_descriptors WHERE sid=? AND kind=?",
+                              (sid, kind)).fetchone(),
+                    c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone())
+        drow, krow = await self.read(load)
+        if drow is None or krow is None:
+            raise TxStoreError("notFound", f"{sid}.{kind}: no published conversion")
+        if drow[2] != "ok":
+            raise TxStoreError("quarantined", f"{sid}.{kind}: {drow[2]}")
+        env = bytes(krow[0])
+        d = self.decode((drow[0], drow[1]), sid, kind, env)
+        if not d.flags & txdesc.FLAG_CONVERTED:
+            raise TxStoreError("integrity", f"{sid}.{kind}: descriptor not flagged converted")
+        rk = self.rk_for(sid, env)
+        snap = await self._make_snapshot(Snapshot, sid, kind, d, rk, 0, None,
+                                         nfds=len(d.generations), force=True)
+        try:
+            return await self.io(self._hash_snapshot_sync, snap, size)
+        finally:
+            snap.close()
+
+    async def convert_plain(self, sid, rows, *, origin, live=False):
+        """Steps 1–5 of §12.11.5 for one sid (`rows` = {kind: (dir, name, (dev, ino, size,
+        mtime_ns))}, both kinds of the pair when both exist). Caller holds the lease. Returns
+        ({kind: sha256 hex}, {kind: pinned fd}) — the caller owns the fds (step 6, then close).
+
+        The RK is drawn here but committed only with the descriptors (step 5), so until that
+        commit the plaintext stays the readable form (`_open_plain` refuses plaintext once an RK
+        exists); a crash before it leaves only `created` generations, which `recover()` unlinks.
+        Raises TxStoreError: `absent` / `changed` (→ failed), `disk` (postponed), anything else
+        (retried); nothing is published then and every generation created here is retired."""
+        sidb = _sid_bytes(sid)
+        if origin not in ("migrated", "orphan"):
+            raise TxStoreError("bad-argument", "origin")
+        fds, built, sha = {}, {}, {}
+        ok = False
+        try:
+            for k, (dirn, name, ident) in rows.items():
+                if k not in KINDS:
+                    raise TxStoreError("bad-row", k)
+                try:
+                    fds[k] = await self.io(self._pin_plain_sync, dirn, name, ident)
+                except TxStoreError as e:
+                    e.kind = k
+                    raise
+            need = sum(2 * ident[2] for _d, _n, ident in rows.values()) + MIG_FREE_SLACK
+            vfs = await self.io(os.fstatvfs, self.dir_fd)
+            if vfs.f_bavail * vfs.f_frsize < need:
+                raise TxStoreError("disk", f"needs {need} bytes free")
+            rk = secrets.token_bytes(32)
+            env = keyring.wrap_under_kwk(self.kwk, keyring.KT_RK, rk)
+            for k in rows:
+                gid, fd, dev, ino, name = await self.reserve_and_create(sid, k)
+                built[k] = g = _Gen(k, gid, name, fd, None, dev, ino)
+                g.writer = await self.io(txformat.Writer, _File(fd, self), rk, kind=KINDS[k], sid=sidb,
+                                         gen_id=gid, created_ms=int(self.clock() * 1000))
+                sha[k] = await self.io(self._encrypt_plain_sync, fds[k], g.writer, rows[k][2][2])
+            self._fault("mig-written")
+            await self.io(self._seal_sync, built)
+            self._fault("mig-sealed")
+            gens = {}
+            for k, g in built.items():
+                w = g.writer
+                gens[k] = txdesc.Generation(g.gen_id, txdesc.STATE_SEALED, w.data_count, w.plain_len,
+                                            w.phys_len, w.hdr_mac)
+                await self.io(self._verify_gen_file_sync, sid, k, g, rk)
+                d = txdesc.Descriptor(self.inst, sidb, KINDS[k], 0, b"\0" * 32, (gens[k],))
+                got, n = await self.decrypted_digest(sid, k, d, rk)
+                if got != sha[k] or n != rows[k][2][2]:
+                    raise TxStoreError("readback", f"{sid}.{k}: decrypted copy differs")
+                # Fişierul fixat e încă exact rândul inventarului (altfel: schimbat în timpul migrării).
+                try:
+                    await self.io(lambda fd=fds[k], k=k: _same_plain(os.fstat(fd), rows[k][2], f"{sid}.{k}"))
+                except TxStoreError as e:
+                    e.kind = k
+                    raise
+            self._fault("mig-verified")
+            try:
+                await self.txn(self._convert_txn(sid, rows, built, gens, env, sha, origin, live))
+            except Uncertain:
+                # rezultatul se citeşte înapoi: convertit cu hash-ul nostru = publicat
+                done = await self.fresh_read(lambda c: [c.execute(
+                    "SELECT state, sha256 FROM tx_migration WHERE sid=? AND kind=?", (sid, k)).fetchone()
+                    for k in rows])
+                if not all(r is not None and r[0] == "converted" and r[1] == sha[k]
+                           for r, k in zip(done, rows)):
+                    raise TxStoreError("uncertain", "conversion commit not confirmed") from None
+            for g in built.values():
+                g.published = True
+            self.drop_key(sid)
+            self._fault("mig-committed")
+            ok = True
+            return sha, fds
+        except Exception:
+            # eşec în proces: generaţiile nepublicate sunt ale noastre (O_EXCL + inode) → retrase acum
+            for k, g in built.items():
+                if not g.published:
+                    hexid = g.gen_id.hex()
+                    with contextlib.suppress(Exception):
+                        await self.txn(lambda c, h=hexid: c.execute(
+                            "UPDATE tx_files SET state='retired' WHERE gen_id=? AND state='created'", (h,)))
+                        await self.retire(sid, k, hexid)
+            raise
+        finally:
+            # moartea procesului (BaseException): doar fd-urile; registrul decide la boot
+            for g in built.values():
+                if g.fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(g.fd)
+                    g.fd = None
+            if not ok:
+                for fd in fds.values():
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+
+    def _convert_txn(self, sid, rows, built, gens, env, sha, origin, live):
+        sidb = _sid_bytes(sid)
+
+        def fn(c):
+            if (c.execute("SELECT 1 FROM session_keys WHERE sid=?", (sid,)).fetchone()
+                    or c.execute("SELECT 1 FROM tx_descriptors WHERE sid=?", (sid,)).fetchone()):
+                raise Refused("integrity", "the session already has an encrypted recording")
+            for k, (dirn, name, ident) in rows.items():
+                r = c.execute("SELECT state, dir, name, dev, ino, size, mtime_ns FROM tx_migration "
+                              "WHERE sid=? AND kind=?", (sid, k)).fetchone()
+                if (r is None or r[0] not in ("pending", "orphan") or (r[1], r[2]) != (dirn, name)
+                        or tuple(r[3:]) != tuple(ident)):
+                    raise Refused("cas", f"{sid}.{k}: inventory row moved")
+            c.execute("INSERT INTO session_keys(sid, envelope, created, origin) VALUES(?,?,?,?)",
+                      (sid, env, self.clock(), origin))
+            for k, g in built.items():
+                dirn, _name, ident = rows[k]
+                d = txdesc.Descriptor(self.inst, sidb, KINDS[k], 1, keyring.envelope_hash(env),
+                                      (gens[k],), txdesc.FLAG_CONVERTED)
+                # §12.11.6: committed_at = mtime-ul textului clar (niciodată „acum"); arhiva îşi
+                # păstrează ceasul de retenţie în archived_at.
+                mtime = ident[3] / 1e9
+                c.execute("INSERT INTO tx_descriptors(sid, kind, blob, version, list_epoch, committed_at, "
+                          "archived_at, status) VALUES(?,?,?,?,?,?,?,'ok')",
+                          (sid, k, self.encode(d), 1, 1 if live else 0, mtime,
+                           mtime if dirn == "arhiva" else None))
+                n = c.execute("UPDATE tx_files SET state='published' WHERE gen_id=? AND sid=? AND kind=? "
+                              "AND dev=? AND ino=? AND state='created'",
+                              (g.gen_id.hex(), sid, k, g.dev, g.ino)).rowcount
+                if n != 1:
+                    raise Refused("ledger", f"{g.gen_id.hex()} not created by us")
+                c.execute("UPDATE tx_migration SET state='converted', sha256=?, error=NULL "
+                          "WHERE sid=? AND kind=?", (sha[k], sid, k))
+                self._fault("mig-txn-between")
+        return fn
+
+    # step 6: identity-checked unlink (renameat2 NOREPLACE → fstatat → unlinkat → dir fsync)
+
+    def rename_private_sync(self, dirn, name):
+        """Moves `name` to a fresh private `.wt-del-<random>` name (RENAME_NOREPLACE) in the same
+        directory. Returns the private name; FileNotFoundError when `name` is absent."""
+        dfd, own = self.plain_dir_fd(dirn)
+        try:
+            priv = DEL_PREFIX + secrets.token_hex(12)
+            renameat2_noreplace(dfd, name, priv)
+            return priv
+        finally:
+            if own:
+                os.close(dfd)
+
+    def unlink_private_sync(self, dirn, name, priv, ident, pin_st=None):
+        """The file now at `priv` is unlinked only when it is regular, has one link and its
+        (dev, ino, size, mtime_ns) equal the row's (and the pinned fd's, when given); then the
+        directory is fsynced. Otherwise it is renamed back (NOREPLACE). Returns 'unlinked',
+        'mismatch' (back in place) or 'stuck' (left under `priv`)."""
+        dfd, own = self.plain_dir_fd(dirn)
+        try:
+            st = os.stat(priv, dir_fd=dfd, follow_symlinks=False)
+            same = (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                    and (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) == tuple(ident)
+                    and (pin_st is None or (pin_st.st_dev, pin_st.st_ino) == (st.st_dev, st.st_ino)))
+            if not same:
+                try:
+                    renameat2_noreplace(dfd, priv, name)
+                    return "mismatch"
+                except OSError:
+                    return "stuck"
+            os.unlink(priv, dir_fd=dfd)
+            os.fsync(dfd)
+            return "unlinked"
+        finally:
+            if own:
+                os.close(dfd)
+
+    def unlink_held_sync(self, dirn, priv, ident):
+        """Crash rule: a leftover private name holding exactly the row's identity is unlinked."""
+        dfd, own = self.plain_dir_fd(dirn)
+        try:
+            try:
+                st = os.stat(priv, dir_fd=dfd, follow_symlinks=False)
+            except FileNotFoundError:
+                return "absent"
+            if not (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                    and (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) == tuple(ident)):
+                return "other"
+            os.unlink(priv, dir_fd=dfd)
+            os.fsync(dfd)
+            return "unlinked"
+        finally:
+            if own:
+                os.close(dfd)
+
+    def list_private_sync(self, dirn):
+        """Leftover `.wt-del-*` names in `dirn` ([] when the directory does not exist)."""
+        try:
+            dfd, own = self.plain_dir_fd(dirn)
+        except FileNotFoundError:
+            return []
+        try:
+            return sorted(n for n in os.listdir(dfd) if n.startswith(DEL_PREFIX))
+        finally:
+            if own:
+                os.close(dfd)
 
     # ── full integrity check ──
 

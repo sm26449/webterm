@@ -2728,7 +2728,8 @@ refused at boot because the Store opens only test-fixture volumes until PR6b bri
   token and replay links of the sid revoked, `session_keys`, both descriptors, `tx_gaps` and
   `tx_quarantine` rows deleted, ledger `published → retired`, `erasure_head` advanced. A recording
   still in the plaintext migration inventory (`tx_migration` pending / failed) is refused
-  (`transcript.erasePlaintext`): its plaintext is PR6b's to remove. Per-host erasure is not in PR6a.
+  (`transcript.erasePlaintext`): its plaintext is PR6b's to remove (PR6b: migrated first, then
+  erased, §12.11.12). Per-host erasure is not in PR6a.
 - **Attestation.** Destinations come from the configured off-host backup target (`cloudbackup.
   attest_destinations`): SFTP writes with `O_EXCL` (refuses overwrites); FTPS cannot, so each upload
   has a fresh name (`<inst>.erasures.<n>.<nonce>.wtj`); Google Drive and Dropbox have no read-back yet
@@ -2778,6 +2779,61 @@ refused at boot because the Store opens only test-fixture volumes until PR6b bri
   `tx_quarantine`; the `erasure_head` / `attested_heads` / `continuity` keys; `erasures.wtj*` at the
   top; generation files under `transcripts/`), used by the flag-off boot refusal, the tracked-backup
   check and the restore staging.
+
+#### 12.11.12 Implementation notes (PR6b, migration)
+
+PR6b ships `gateway/app/migration.py` (inventory, order, janitor, crash rules, writer-start hook,
+health) and the migration primitives in `txstore.Store` (`convert_plain`, the identity-checked
+unlink). With them, `txhub.boot` opens a **real protected volume** when `WEBTERM_TX_RECORDINGS=1`
+(still off by default; no compose file, example or installer sets it): `Store(real_volume=True)`,
+then `erasure.boot`, `Store.recover()`, `migration.boot`; any of the three not ready → the Store is
+closed and the boot refused. A legacy volume (no protected keyring) is still refused with the flag
+on; a test-volume marker still needs a test gate. Where the code had to choose, it chose:
+
+- **RK committed with the descriptors.** Step 2's RK is drawn in memory and inserted in step 5's
+  transaction, not before step 3: `Store._open_plain` refuses plaintext once an RK exists, so an
+  earlier RK would make a pending recording unreadable between steps 2 and 5. A crash before step
+  5 leaves only `created` generations, which `Store.recover()` unlinks at the next boot.
+- **Inventory.** `tx_state.migration_inventory` marks it taken (once per volume). A name outside the
+  allowlist is a `failed` row keyed by its path (`transcripts/<name>`, kind `-`); a recording in
+  both `transcripts/` and `arhiva/` → `failed` (`duplicate`), both files kept; a file without a
+  session row in either directory → `orphan` (migrated with `origin = orphan`; no route serves an
+  orphan yet, which is stricter than §12.11.5's owner-level download). `.cap-tmp`, generation
+  files and `.wt-del-*` names are not inventoried. A later plaintext is never served (no row) and
+  is listed as stray in System health.
+- **Pairs.** Both kinds are converted in one transaction. When one kind is `absent` / `changed`, it
+  goes `failed` and the other kind is converted alone (a one-kind recording).
+- **Changed during the migration** (the pinned fd's identity differs after the read-back) → `failed`
+  at once (§12.11.5 says retry later; the retry would fail at step 1 anyway).
+- **Writer start.** `Store.before_writer` = `migration.at_writer_start`: a sid with `pending` /
+  `orphan` rows is converted first (at most 2 at once, `list_epoch` = 1); the writer is **refused**
+  (`transcript.migrationPending`, the hub does not attach) while a kind of the sid is still
+  `pending`, `orphan` or `failed`. A failed row therefore blocks that session's terminal until an
+  Owner resolves it; there is no route for that yet (`migration.process` after a manual fix of the
+  row; open item).
+- **Unlink.** `renameat2` through libc or the raw syscall (x86_64, aarch64); unavailable, or a
+  filesystem refusing `RENAME_NOREPLACE` → nothing is deleted, the row stays `converted` with the
+  error, retried after the backoff (each retry re-verifies against the published descriptor).
+- **Crash rules.** As §12.11.5. The re-verification of a `converted` row hashes the first `size`
+  bytes the reader serves from the authentic descriptor (it must carry `converted`), so a live
+  session that appended after its conversion is still checked; a quarantined descriptor is
+  skipped until lifted.
+- **Global flag** only when no row is `pending`, `orphan`, `failed` **or `converted`** (a converted
+  row still has its plaintext on disk); then `arhiva/` is removed if empty (`config.ensure_dirs`
+  recreates it empty at the next boot; harmless).
+- **Erasure of a pending recording** = migrate, then erase: `erasure.erase` calls
+  `migration.before_erase` (outside the lease, after the live check), which converts the sid and
+  unlinks its plaintext through the identity check; destroying the RK then makes the converted copy
+  unreadable. `transcript.erasePlaintext` still refuses whatever could not be migrated (`pending`,
+  `orphan`, `failed`, or `converted` with the plaintext still present). A tombstoned sid's
+  plaintext (a crash between the journal append and the migration, or a restore) is removed by the
+  same identity-checked unlink without conversion, row `unlinked` with `error = erased`.
+- **Retention.** With the flag on, `core.purge_archive` no longer touches `arhiva/` (the migration
+  owns those files); purging converted recordings by `archived_at` is not implemented yet.
+- **Inventory of artefacts.** `txstore.TX_STATE_KEYS` now includes `recordings_format` and
+  `migration_inventory`, so a flag-off build refuses a volume that went through the migration.
+- **System health:** `crypto.migration` (info while migrating, warning on failed rows, stray
+  plaintext or leftover private names, ok once the flag is published). Never critical.
 
 ## Appendix: Test vectors (v1)
 

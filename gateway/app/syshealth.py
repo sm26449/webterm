@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import (agentca, alert_history, backup, bootkeys, config, conntypes, db, edgeguard, edgemtls, erasure,
+from . import (agentca, alert_history, backup, bootkeys, config, conntypes, db, edgeguard, edgemtls, erasure, migration,
                fwddomain, healthcmd, hoststatus, owners)
 
 log = logging.getLogger("webterm")
@@ -237,6 +237,9 @@ MESSAGES = {
     "crypto_protected": "Encryption at rest is on (master key: {source})",
     "crypto_raw_copies": "{count} backup file(s) still contain the old vault key in clear",
     "crypto_raw_copies_ok": "No stored backup contains the old vault key",
+    "migration_done": "Every recording is encrypted ({converted} migrated from plaintext)",
+    "migration_progress": "Migrating recordings to encrypted storage: {done} of {total} done, {mb} MB left ({one_kind} one-kind, {orphans} orphans)",
+    "migration_failed": "{failed} recording file(s) could not be migrated and {stray} are outside the inventory; their plaintext is kept ({error})",
     "erasure_ok": "Erased recordings are journalled and attested off-host",
     "erasure_journal_broken": "The erasure journal is damaged ({diag}): every recording is quarantined",
     "erasure_uncertain": "An erasure did not finish ({diag}): erasure is refused until the gateway restarts",
@@ -287,6 +290,7 @@ WHY = {
     "crypto.protection": "Backups and snapshots of a protected volume cannot be read without the master key held apart from the data.",
     "crypto.legacy_copies": "A backup made before the migration holds the old vault key in clear: whoever has the file can read the credentials it protected.",
     "crypto.erasure": "An erased recording must stay erased after a restore; that needs the erasure journal intact and a copy of its head off this machine.",
+    "crypto.migration": "Until every old recording is migrated, its plaintext copy is still on the disk, readable by whoever can read the volume.",
 }
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
@@ -1053,6 +1057,23 @@ async def c_crypto_erasure() -> Optional[Result]:
     return Result(sev, key, {k: str(v) for k, v in params.items()}, doc="encryption")
 
 
+async def c_crypto_migration() -> Optional[Result]:
+    """3.8 PR6b (§12.11.5): the migration of plaintext recordings to WTX1. Only while encrypted
+    recordings are active. Never critical: the plaintext is kept, never deleted unverified."""
+    d = await migration.status()
+    if d is None:
+        return None
+    if d["failed"] or d["stray"] or d["leftovers"]:
+        return Result("warning", "migration_failed", {"failed": d["failed"] + d["leftovers"],
+                                                      "stray": d["stray"], "error": d["error"] or "?"},
+                      doc="encryption")
+    if d["todo"] or d["format"] != "wtx1":
+        return Result("info", "migration_progress", {
+            "done": d["done"], "total": d["total"], "mb": round(d["left_bytes"] / 1048576, 1),
+            "one_kind": d["one_kind"], "orphans": d["orphans"]}, doc="encryption")
+    return Result("ok", "migration_done", {"converted": d["converted"]})
+
+
 async def c_crypto_legacy_copies() -> Optional[Result]:
     """3.8 wiring item 5: on a migrated volume, 3.7 snapshots (`*.wtsnap`) and pre-restore copies
     (`*.wtsnap.keep`) still hold the raw 3.7 vault key. Counted, never opened."""
@@ -1202,6 +1223,7 @@ CHECKS: list = [
     Check("crypto.protection", "config", c_crypto_protection, alert="none"),
     Check("crypto.legacy_copies", "config", c_crypto_legacy_copies),
     Check("crypto.erasure", "fast", c_crypto_erasure, critical=True),
+    Check("crypto.migration", "fast", c_crypto_migration),
     Check("certs.main", "fast", _cert_check("main"), alert="none", critical=True),  # certmon alerts
     Check("certs.forward", "fast", _cert_check("forward"), alert="none", critical=True),
     Check("certs.authentik", "fast", _cert_check("authentik"), alert="none", critical=True),

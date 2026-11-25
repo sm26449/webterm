@@ -45,7 +45,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from . import config, keyring, txstore
+from . import config, keyring, migration, txstore
 
 log = logging.getLogger("webterm.erasure")
 
@@ -607,6 +607,10 @@ async def erase(st, sid, *, clock=time.time):
     rec = st.recorders.get(sid)
     if sid in st._starting or (rec is not None and rec.state not in ("closed", "lost", "replaced")):
         raise ErasureError("session.live", "the session is live; close it first", 409)
+    # PR6b (§12.11.5): o înregistrare încă în clar se migrează întâi (textul clar dispare prin
+    # unlink-ul verificat), apoi ştergerea normală distruge RK-ul. Ce nu se poate migra rămâne
+    # refuzat mai jos (transcript.erasePlaintext): niciodată „şters" cu textul clar pe disc.
+    await migration.before_erase(st, sid)
     async with st.lease(sid):
         async with st.barrier:
             if sid in st.tombstoned:
@@ -617,10 +621,10 @@ async def erase(st, sid, *, clock=time.time):
                         [r[0] for r in c.execute("SELECT kind FROM tx_descriptors WHERE sid=?",
                                                  (sid,)).fetchall()],
                         c.execute("SELECT 1 FROM tx_migration WHERE sid=? AND state IN "
-                                  "('pending','failed')", (sid,)).fetchone())
+                                  "('pending','orphan','failed','converted')", (sid,)).fetchone())
             env, kinds, plain = await st.read(load)
             if plain is not None:
-                # PR6a nu atinge copiile în clar (migrarea e PR6b): niciodată „şters" fără ele
+                # textul clar e încă pe disc (nemigrat, eşuat, sau convertit dar neşters): refuz
                 raise ErasureError("transcript.erasePlaintext",
                                    "this recording is not migrated yet; it cannot be erased", 409)
             if env is None and not kinds:

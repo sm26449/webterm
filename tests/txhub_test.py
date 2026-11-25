@@ -2,7 +2,8 @@
 
 Groups:
   * boot decision (§12.11 PR5/PR6 boundary): flag off with encrypted rows → refused; a test-volume
-    marker outside a test gate → refused; flag on without a protected keyring → refused;
+    marker outside a test gate → refused; flag on without a protected keyring → refused; flag on
+    with a protected keyring on a real volume → boots (PR6b);
   * hub adapter with a fake agent stream (§12.11.10 Admission): ring, replay_start past the cursor
     (one marker), same-epoch reattach (no-op), overlap trimmed, a new agent epoch, overflow →
     resume → one marker, a ringless (SSH-like) source, close (sealed, verified);
@@ -43,7 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 import httpx  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
-from app import accounts, admin, api, authz, config, core, db, replay, security, share_api, shares, txhub  # noqa: E402
+from app import accounts, admin, api, authz, config, core, db, migration, replay, security, share_api, shares, txhub  # noqa: E402
 from app import txstore as ts  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -153,9 +154,17 @@ async def g_boot_clean():
     check("flag on without a protected keyring → refused",
           await araises(txhub.boot(None, env={"WEBTERM_TX_RECORDINGS": "1", "WEBTERM_TEST_GATE": "1"}),
                         txhub.BootRefused))
-    check("flag on, no test volume → refused (PR6 needed on a real volume)",
-          await araises(txhub.boot(FakeRing(), env={"WEBTERM_TX_RECORDINGS": "1",
-                                                    "WEBTERM_TEST_GATE": "1"}), txhub.BootRefused))
+    # PR6b: un volum real PROTEJAT porneşte (migrarea, jurnalul şi carantina raportează ready);
+    # artefactele boot-ului se curăţă ca restul testului să pornească de pe un volum curat.
+    st = await txhub.boot(FakeRing(), env={"WEBTERM_TX_RECORDINGS": "1"})
+    check("flag on, real protected volume (no test volume, no test gate) → boots, migration ready",
+          st is not None and st.real_volume and migration.ready() and txhub.active())
+    await txhub.shutdown()
+    await db.execute("DELETE FROM tx_state")
+    for n in os.listdir(config.DATA_DIR):
+        if n.startswith("erasures.wtj"):
+            os.remove(os.path.join(config.DATA_DIR, n))
+    check("…and the cleaned volume is clean again", await txhub.encrypted_recordings_present() == "")
 
 
 async def g_boot_after():

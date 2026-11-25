@@ -49,7 +49,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
 import httpx  # noqa: E402
 
-from app import api, authz, backup, config, db, security, syshealth, txhub  # noqa: E402
+from app import api, authz, backup, config, db, migration, security, syshealth, txhub  # noqa: E402
 from app import erasure as er  # noqa: E402
 from app import keyring as kr  # noqa: E402
 from app import snapshot as wts  # noqa: E402
@@ -258,6 +258,7 @@ async def reboot():
     st = await txhub.boot(FakeRing())
     er.set_destinations(fake_dests)
     await er.stop()          # janitorul nu concurează cu apelurile explicite ale testului
+    await migration.stop()
     return st
 
 
@@ -295,6 +296,7 @@ async def g_boot_and_route(c, uid, host_id):
     er.set_destinations(fake_dests)
     check("janitor started at boot", er._s.task is not None)
     await er.stop()
+    await migration.stop()
     check("flag on: header-only journal created, journal + quarantine ready",
           journal_path().read_bytes() == er.header(INST) and er.journal_ready() and er.quarantine_ready()
           and er.active())

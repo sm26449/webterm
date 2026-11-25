@@ -1,17 +1,19 @@
 """Encrypted recordings wired into the live hub and the readers (ENCRYPTION-AT-REST.md §12.11, PR5b).
 
 Everything here is inert unless `txstore.enabled()` (`WEBTERM_TX_RECORDINGS=1`) **and** a
-`txstore.Store` was opened at boot (`boot`). In a PR5 build the Store only opens on a test-fixture
-volume under a test gate, so on every real installation `active()` is False and core.py, the
-routes and the backup keep the 3.7 code byte for byte (§12.11 "PR5/PR6 boundary").
+`txstore.Store` was opened at boot (`boot`). The flag is off by default (no compose file, example
+or installer sets it), so on every real installation `active()` is False and core.py, the routes
+and the backup keep the 3.7 code byte for byte (§12.11 "PR5/PR6 boundary"). Since PR6b the flag
+on a protected volume opens it and migrates its plaintext recordings (`migration.py`).
 
 Pieces:
 
 * `boot(ring)`: the boot decision. Flag off with encrypted rows / generation files on the volume →
   refused ("recordings encrypted by a newer build"), never read as absent. Flag on without a
-  protected keyring, or on a volume the Store refuses (no test volume, no test gate) → refused.
-  A `tx_state.test_volume` marker outside a test gate → refused. Then crash recovery, before any
-  hub exists.
+  protected keyring (a legacy volume) → refused. A `tx_state.test_volume` marker outside a test
+  gate → refused. Flag on with a protected keyring (PR6b): the real volume opens, then the erasure
+  journal, crash recovery and the plaintext migration (`migration.boot`) must all report ready,
+  before any hub exists; otherwise refused.
 * `Recording`: the per-hub adapter that owns the sid's `txstore.Recorder` and follows the §12.11.10
   Admission contract (`at` on every chunk, retryable vs terminal refusals, `skip_to` when the
   source position jumps past the recorder's, overlap trimmed, `change_epoch` on a new agent epoch,
@@ -34,7 +36,7 @@ import logging
 import os
 import time
 
-from . import authz, cloudbackup, config, db, erasure, security, txstore
+from . import authz, cloudbackup, config, db, erasure, migration, security, txstore
 
 log = logging.getLogger("webterm.txhub")
 
@@ -101,12 +103,12 @@ async def boot(ring, env=None):
         raise BootRefused("%s=1 needs a protected volume (master key); remove the flag"
                           % txstore.ENV_FLAG)
     try:
+        # PR6b: un volum real PROTEJAT (ring nu e None, verificat mai sus) se deschide; un volum de
+        # test rămâne legat de poarta de test. Volumul legacy e refuzat mai sus.
         st = txstore.Store(transcripts_dir=config.TRANSCRIPT_DIR, kwk=ring.kwk,
-                           installation_id=ring.installation_id, env=env)
+                           installation_id=ring.installation_id, env=env, real_volume=True)
     except txstore.TxStoreError as e:
-        raise BootRefused("%s=1 refused: %s (encrypted recordings need the migration, the erasure "
-                          "journal and the quarantine of a later build; remove the flag)"
-                          % (txstore.ENV_FLAG, e)) from None
+        raise BootRefused("%s=1 refused: %s (remove the flag)" % (txstore.ENV_FLAG, e)) from None
     try:
         # PR6a (§12.11.4 "Every boot"): jurnalul de ştergeri verificat faţă de capul comis şi
         # tombstone-urile re-aplicate ÎNAINTE de recovery şi de orice cititor
@@ -114,16 +116,22 @@ async def boot(ring, env=None):
         if not (erasure.journal_ready() and erasure.quarantine_ready()):
             raise BootRefused("%s=1 refused: the erasure journal or the quarantine pass is not ready"
                               % txstore.ENV_FLAG)
-        # migration.ready() vine în PR6b: până atunci Store-ul refuză orice volum real (mai sus),
-        # deci aici ajunge doar un volum de test sub o poartă de test.
         await st.recover()
+        # PR6b (§12.11.5): inventarul textului clar (o dată per volum) şi regulile de crash ale
+        # migrării, după recovery (generaţiile `created` ale unei conversii întrerupte sunt deja
+        # şterse) şi înainte de reconcile / orice writer.
+        await migration.boot(st)
+        if not migration.ready():
+            raise BootRefused("%s=1 refused: the recording migration is not ready" % txstore.ENV_FLAG)
     except BaseException:
+        migration.reset()
         erasure.reset()
         st.close()
         raise
     install(st)
     erasure.set_destinations(cloudbackup.attest_destinations)
     erasure.start(st)
+    migration.start(st)
     # M3: baseline-ul lui access_gen se citeşte ÎNAINTE de a servi şi înainte de bucla de poll; o
     # mutaţie CLI comisă după el se vede ca bump. Necitibil → `have` fals → primul poll face bump.
     await poll_once(baseline=True)
@@ -162,6 +170,7 @@ async def shutdown() -> None:
         _poll_task.cancel()
         _poll_task = None
     await erasure.stop()
+    await migration.stop()
     if st is None:
         return
     for r in list(_recordings.values()):
@@ -179,6 +188,7 @@ def uninstall() -> None:
     global _store, _poll_task
     _store = None
     erasure.reset()
+    migration.reset()
     if _poll_task is not None:
         _poll_task.cancel()
         _poll_task = None

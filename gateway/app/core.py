@@ -481,6 +481,10 @@ async def archive_closed_transcripts(now: Optional[float] = None) -> int:
 def purge_archive(now: Optional[float] = None) -> int:
     """Șterge definitiv transcripturile arhivate mai vechi de retenție. Rulat
     de janitor. Întoarce câte fișiere a șters."""
+    if txhub.active():
+        # 3.8 PR6b: fişierele în clar din arhivă sunt ale migrării (inventar, unlink verificat,
+        # archived_at = mtime-ul lor); un unlink aici, fără rând şi fără verificare, ar ocoli-o.
+        return 0
     if not config.ARCHIVE_DIR.exists():
         return 0
     cutoff = (now or time.time()) - config.ARCHIVE_RETENTION_DAYS * 86400
