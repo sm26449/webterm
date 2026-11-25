@@ -2600,6 +2600,11 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
   once (then 503 `transcript.busy`; in the body: an empty result); a result whose content was read
   under an `Access` that no longer holds loses its snippet and count, and disappears when it
   matched only through that content. An automation token still gets metadata only.
+  *Visibility (recheck R-M1)* is checked separately from content: at both emission points each
+  result on a 2FA host is kept only while the caller's step-up window for that host is still
+  open (`security` window record read synchronously, so an explicit close counts as well as the
+  expiry); otherwise the whole result goes (id, title, note, host), even when it matched on
+  metadata alone.
 - **Replay links (M1).** The decision behind a public replay read is the link row plus the
   issuer's current rights (`_replay_row`); its deadline is the earliest of the link's expiry and
   the issuer's earliest time-bound binding (the same grants the decision used), so an open stream
@@ -2607,23 +2612,61 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
 - **Finalize accounting (M2).** `Recording._finalize` drains under one deadline
   (`SHUTDOWN_SECS`), passing through as many epoch switches, skips and resumes as it needs, then
   closes the recorder. What the adapter's backlog still holds is accounted, never dropped
-  silently: bytes of the recorder's current epoch past `received` (holes included) go to
-  `Recorder.close(unoffered=n)` and join the close `GAP_MARKER` and its `tx_gaps` row (counted
-  once per recorder across close retries); bytes of another epoch (a switch that never committed),
-  bytes without a comparable position, and everything when the recorder is lost and not
-  re-adopted (or the close failed or timed out) raise `transcript.gapUnrecorded` with their size.
-  `close_report` keeps the numbers. The backlog is capped in bytes (8 MiB) **and** in entries
+  silently. The adapter hands the backlog's extents to `Recorder.close(held=[(epoch, offset,
+  n)…])` and the recorder's **worker** splits them once every job queued before the close has run
+  (recheck R-M2: a skip or epoch switch that commits late has already moved `received`, so its
+  hole is not counted twice nor charged to another epoch): bytes of the current epoch past
+  `received` (holes included) join the close `GAP_MARKER` and its `tx_gaps` row (counted once per
+  recorder across close retries), the rest comes back as the result's `unrecorded`. The adapter
+  empties the backlog **only on a confirmed result** (a dict with `unoffered` / `unrecorded`): a
+  recorder replaced before the job runs raises `RecorderLost` (it used to return `None`, which
+  the adapter read as success); that, a timeout, a malformed result or a lost recorder not
+  re-adopted leave every held byte reported as `transcript.gapUnrecorded` with its size, as do
+  bytes of another epoch and bytes without a position. `close_report` keeps the numbers. The backlog is capped in bytes (8 MiB) **and** in entries
   (`BACKLOG_MAX_ITEMS`): at the entry cap, a new item of the same epoch extends the last entry
   into a placeholder up to its end; anything else is counted without an entry.
 - **Revocation counters (M3).** The `access_gen` baseline is read at boot before serving and
   before the poller starts; any later first read (the baseline failed, a Store installed without
   boot) bumps the global counter. Bulk share revocation fences and updates the **same fixed set**
-  of rows (`UPDATE … WHERE id IN (…)`); shares that appear meanwhile are taken by up to two more
-  fenced passes, then by a global fence over the predicate. Replay-link deletion takes the ids and
-  the sids from one read. Still open before activation (unchanged): role / binding / account
-  changes bump the global counter after their commit (`authz.bump_epoch`), not under a fence
-  before it; a delayed or failing `access_gen` channel is bounded only by the 1 s poll and the
-  two-failure bump; the per-stream timer for a stalled transport.
+  of rows, identified by `(id, share_token)` **and** the account criterion (`UPDATE … WHERE (id,
+  share_token) IN (VALUES …) AND <criterion> RETURNING id`, recheck R-M3): a link replaced
+  meanwhile (another token, possibly another account's) is not touched by that pass, and is taken
+  by the next one only if it still matches the criterion. Shares that appear meanwhile are taken
+  by up to two more fenced passes, then by a global fence over the predicate, also with
+  `RETURNING`. Guests are disconnected by the sids the UPDATEs **returned** (every guest of such a
+  sid), plus, on a sid whose link was replaced concurrently, the guests that joined with the token
+  seen by the sweep (`hub.revoke_shares(token_hashes=)`; the new link's guests stay). A guest
+  joining while a revocation runs is caught at the join: `shared_ws` captures the counters before
+  its token lookup and, if the sid's counter moved, reads the token again and joins only when it
+  is still valid and the counter did not move again (`_guest_admit_ok`; the join itself is
+  synchronous with that last check), so a revocation either refuses the guest or commits after
+  the join, when its `revoke_shares` sees it. Replay-link deletion takes the ids and the sids from
+  one read.
+- **Access changes are fenced before their commit (before activation).** Role, binding, account
+  and SSO-mapping writes, and a host update that can move its visibility, run inside
+  `authz.access_change()` (taken together with `authz.bindings_lock`): bump + global fence before
+  the commit, bump again after it, the same pattern as a share revocation, so no chunk passes
+  between the commit and the bump. The grant cache is cleared **before** the fence drops (even on
+  an error), so a reader released by it re-decides from the database even when the caller's own
+  `authz.bump_epoch()` comes later. Covered: account create / delete / disable / enable, SSO
+  bindings dropped when a local password is set, binding add / remove / expiry change, the expired
+  binding sweep (only when it deletes something), custom role create / edit / delete, SSO group
+  mapping add / delete, the config-driven mapping apply, the per-account SSO / SCIM role sync,
+  host purge, and a host PATCH that moves folder / tags / `via_host_id` / connection type. With
+  the flag off no fence is registered and `access_change()` does nothing (3.7 identical).
+- **Cross-process writers: what the poll does and does not bound.** The admin CLI and any other
+  process stamp `tx_state.access_gen` in the transaction of their change; they cannot reach the
+  gateway's fences. The gateway learns the change at the first `poll_once` that reads the new
+  value: one read every `POLL_SECS` (1 s) **plus the time that read takes**. The interval is a
+  cadence, not a deadline: a poll blocked on the database (a long write elsewhere holding the
+  file) delays the bump for as long as it is blocked. A failed read is retried at the next tick;
+  two failed reads in a row bump the counter blind (fail closed), so a failing channel bounds the
+  window at about two intervals plus the failed reads' own durations. Between the CLI's COMMIT
+  and the observing poll, readers keep emitting under their earlier decision: up to that window
+  of already-authorized units (one chunk ≤ 64 KiB per HTTP stream per check; one history frame
+  per WebSocket read). Still open before activation: an operation-level deadline for this channel
+  (a watchdog that bumps when no poll completed within its bound), the per-stream timer for a
+  stalled transport, and alarm visibility.
 - **Inventory of mixed formats (boot, backup).** One definition: `keys.find_reserved` /
   `find_reserved_through_link` (the `.wt*` / `.wtx` / `.wtd` / `.idx` namespace under
   `transcripts/` and one level of subdirectories such as `arhiva/`; a `transcripts` symlink is
@@ -2651,9 +2694,11 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
     without the flag still stamps it). On a tx volume the command and the stamp are one
     transaction; the command's stdout is held until the COMMIT returned, a failed stamp or commit
     rolls everything back, prints no success and exits non-zero.
-  - *Revocation helpers:* `revoke_all_shares` keeps the 3.7 predicate UPDATE; the fenced
-    fixed-set path and the replay-link read change only which rows are fenced (no fence exists
-    when the flag is off). `txhub.revoking*` are no-ops.
+  - *Revocation helpers:* `revoke_all_shares` keeps the 3.7 predicate UPDATE and the 3.7 guest
+    loop; the fenced `(id, token)` path, `RETURNING`, the token-filtered guest disconnect and the
+    guest join re-check run only when the flag is on. `txhub.revoking*` and
+    `authz.access_change()` are no-ops. `BrowserClient.share_hash` is set for share guests but
+    read only by the flag-on path.
   - *Signatures only:* `core.attach_replay` / `read_tail_tx` take a `grant` instead of a
     principal string, and `BrowserClient.send_bytes` accepts an optional `gate` (unused when the
     flag is off); the WebSocket routes build their decision closures without calling them.

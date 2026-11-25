@@ -4,6 +4,7 @@ the Add-host connection test with its pending generated key. Moved out of api.py
 shared host helpers live in `hostmodel.py`. Mounted in main.py next to `api.router`.
 """
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -537,7 +538,9 @@ async def update_host(host_id: int, host: HostPatch, request: Request,
         sets.append("hostkey_alarm=NULL")
     if not sets and not pend_given:
         return {"ok": True, "changed": False}
-    async with authz.bindings_lock:
+    # 3.8: gard înainte de commit doar când vizibilitatea hostului se poate schimba
+    async with authz.bindings_lock, (authz.access_change() if scope_moved or "via_host_id" in given
+                                     or "connection_type" in given else contextlib.nullcontext()):
         if scope_moved:
             # revizuirea 3.6.10: între verificarea de sus şi scriere au trecut step-up-ul şi alte
             # aşteptări — cineva a putut marca hostul crown-jewel, mutat folderul/etichetele sau

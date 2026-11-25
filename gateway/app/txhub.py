@@ -157,6 +157,8 @@ def install(st) -> None:
     _wrap_alarm(st)
     if _on_authz_bump not in authz.epoch_listeners:
         authz.epoch_listeners.append(_on_authz_bump)
+    if _authz_fence not in authz.change_fences:
+        authz.change_fences.append(_authz_fence)
 
 
 def start_poller() -> None:
@@ -197,6 +199,8 @@ def uninstall() -> None:
         _poll_task = None
     with contextlib.suppress(ValueError):
         authz.epoch_listeners.remove(_on_authz_bump)
+    if _authz_fence in authz.change_fences:
+        authz.change_fences.remove(_authz_fence)
     _recordings.clear()
     committed_at.clear()
     _poll_state.update(have=False, last=None, fails=0)
@@ -223,6 +227,11 @@ def bump(sid=None) -> None:
 
 def _on_authz_bump() -> None:
     bump(None)
+
+
+def _authz_fence():
+    """`authz.access_change()`'s fence: a GLOBAL revocation fence around the access change."""
+    return revoking(None)
 
 
 @contextlib.asynccontextmanager
@@ -289,6 +298,13 @@ def snapshot():
     """(sid counters, global counter) captured before an authorization decision."""
     st = _store
     return (dict(st.sid_epoch), st.access_epoch) if st is not None else None
+
+
+def sid_unchanged(snap, sid) -> bool:
+    """Synchronous: no revocation of `sid` began since `snap` (its counter is the same). False
+    when inactive or without a snapshot (fail closed: the caller re-checks its credential)."""
+    st = _store
+    return st is not None and snap is not None and st.sid_epoch[sid] == snap[0].get(sid, 0)
 
 
 def access_since(snap, sid, principal, route, *, not_after=None):
@@ -417,19 +433,23 @@ async def emit_chunks(grant, data, chunk=None):
         yield data[i:i + step]
 
 
-def search_emit(snap, found, deadline):
+def search_emit(snap, found, deadline, visible=None):
     """Search results at emission (synchronous, H2). None = the decision itself is stale (a
     global counter or fence moved, or the caller's own deadline passed): re-run or refuse. Per
     result, content (snippet, count) read under an `Access` that no longer holds is dropped; a
-    result that matched only through that content is dropped whole."""
+    result that matched only through that content is dropped whole. `visible(res, now)` (recheck
+    R-M1) = may this result be shown AT ALL now (its host's step-up window still open), checked
+    independently of any content match: False drops the whole result (id, title, note, host)."""
     st = _store
     if st is None or snap is None:
         return None
-    if st.access_epoch != snap[1] or st.fenced(None) or (deadline is not None
-                                                         and st.clock() >= deadline):
+    now = st.clock()
+    if st.access_epoch != snap[1] or st.fenced(None) or (deadline is not None and now >= deadline):
         return None
     out = []
     for res, acc, meta_hit in found:
+        if visible is not None and not visible(res, now):
+            continue                             # R-M1: nici metadatele (titlu, notă, id, host)
         if res["matches"] or res["snippet"]:
             try:
                 if acc is None:
@@ -659,23 +679,26 @@ class Recording:
         t.add_done_callback(_finalizers.discard)
         return t
 
-    def _unoffered(self, rec):
-        """(bytes of `rec`'s current epoch the backlog holds past `received`, holes included;
-        bytes of any other epoch or without a position). Used once, at close."""
-        re_, ro = rec.received
-        end, other = ro, self.unpositioned
+    def _held(self):
+        """(the backlog's positioned extents `(epoch, offset, n)` for `Recorder.close(held=)`, bytes
+        without a position). The recorder's WORKER splits the extents against its cursor once the
+        jobs queued before the close have run (recheck R-M2); used once per close attempt."""
+        held, other = [], self.unpositioned
         for it in self.backlog:
-            if it.pos is not None and it.pos[0] == re_:
-                end = max(end, it.pos[1] + it.n)
+            if it.pos is not None:
+                held.append((it.pos[0], it.pos[1], it.n))
             else:
                 other += it.n
-        return end - ro, other
+        return held, other
 
     async def _finalize(self):
         """Drain under ONE deadline (every pending epoch switch / skip / resume, as many passes as
         they need), then close the recorder. Whatever the backlog still holds is accounted: the
-        current epoch's bytes join the close marker (`close(unoffered=)`, durable), the rest is
-        alarmed with its size (`transcript.gapUnrecorded`). `close_report` keeps the numbers."""
+        recorder's worker splits it (`close(held=)`, after the jobs queued before the close): the
+        current epoch's bytes join the close marker (durable), the rest is alarmed with its size
+        (`transcript.gapUnrecorded`). The backlog is emptied only on a confirmed close result; a
+        replaced recorder, a timeout or a malformed result leave every held byte alarmed as not
+        covered by a confirmed marker (recheck R-M2). `close_report` keeps the numbers."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SHUTDOWN_SECS
         report = self.close_report = {"unoffered": 0, "unrecorded": 0, "closed": False}
@@ -697,14 +720,20 @@ class Recording:
                 rec = self.rec
                 if rec is None or rec.state != "running":
                     break
-                same, other = self._unoffered(rec)
+                held, other = self._held()
                 try:
-                    await asyncio.wait_for(rec.close(cast_ts=self.ts(), unoffered=same),
-                                           SHUTDOWN_SECS * 2)
+                    res = await asyncio.wait_for(rec.close(cast_ts=self.ts(), held=held),
+                                                 SHUTDOWN_SECS * 2)
                 except txstore.RecorderLost:
                     await asyncio.sleep(0)
                     continue
-                report.update(unoffered=same, unrecorded=other, closed=True)
+                # R-M2: doar un rezultat CONFIRMAT (markerul de close publicat) goleşte backlog-ul;
+                # altfel octeţii rămân număraţi şi `finally` îi alarmează ca neconfirmaţi
+                if not isinstance(res, dict) or not isinstance(res.get("unoffered"), int) \
+                        or not isinstance(res.get("unrecorded"), int):
+                    log.warning("recording %s: close not confirmed (%r)", self.sid[:8], type(res).__name__)
+                    break
+                report.update(unoffered=res["unoffered"], unrecorded=other + res["unrecorded"], closed=True)
                 self.backlog.clear()
                 self.backlog_bytes = 0
                 self.unpositioned = 0

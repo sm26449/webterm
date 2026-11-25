@@ -1238,11 +1238,18 @@ async def execute_returning(sql: str, *args):
     # oricărei alte corutine din acel interval eşua cu „cannot commit transaction - SQL statements in
     # progress" (văzut în producţie pe 3.7.0-rc2: reconciliere eşuată la reconectarea în masă a
     # agenţilor; reprodus: 200 din 400 de scrieri concurente).
+    rows = await execute_returning_all(sql, *args)
+    return rows[0] if rows else None
+
+
+async def execute_returning_all(sql: str, *args) -> list:
+    """`execute_returning` for a write that may touch several rows: every RETURNING row, in the
+    same single serialized step (used where the caller must act on EXACTLY the rows it changed)."""
     joined = await _joined()
     rows = await _conn.execute_fetchall(sql, args)
     if not joined:
         await _conn.commit()
-    return rows[0] if rows else None
+    return list(rows)
 
 
 # 3.6 (roluri): id-ul unui cont e cheia de proprietate pentru audit (`actor_id`), sesiuni,

@@ -552,7 +552,7 @@ async def update_account(body: AccountUpdate, request: Request, user=Depends(sec
     if body.new_password:
         # 3.6.2: o parolă locală nouă = rolurile din grupuri SSO pleacă ACUM (cine ştie parola nu
         # moşteneşte ce dau grupurile); legăturile manuale rămân
-        async with authz.bindings_lock:
+        async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
             n = 0
             for b in await db.fetchall(
                     "SELECT b.id, b.scope_kind, r.key FROM role_bindings b JOIN roles r"
@@ -872,7 +872,7 @@ async def create_user(body: UserIn, request: Request, user=Depends(authz.perm('u
         raise ApiError(409, "account.emailTaken", "an account with that email already exists")
     pw = await security.hash_password_async(body.password)
     crown = []
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         if role:
             role = await _recheck_granter(user, role, kind, value, None, expires=expires)
             crown = await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
@@ -916,7 +916,7 @@ async def delete_user(uid: int, body: ReauthOnly, request: Request,
         raise ApiError(403, "authz.ownerOnly", "only an Owner can delete an Owner")
     await _check_can_strip(grants, uid)
     await stepup.reauth_for_access_change(user, request, body, "delete a WebTerm account")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         # drepturile celui care şterge, pe starea de ACUM (o retrogradare concurentă contează)
         authz.forget_cached(user["id"])
         g = await authz.grants_for_user(user["id"])
@@ -1021,7 +1021,7 @@ async def add_binding(uid: int, body: BindingIn, request: Request,
     # factor nu se consumă pe o cerere care oricum se întoarce cu 409)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         # 3.6 (cursă): între verificare şi scriere au trecut re-auth-ul şi al doilea factor — un
         # Admin retrogradat între timp nu are voie să-şi vadă acordarea aterizând. Re-verificăm
         # SUB lock, pe drepturile de ACUM (şi pe definiţia de ACUM a rolului).
@@ -1094,7 +1094,7 @@ async def remove_binding(uid: int, bid: int, body: ReauthOnly, request: Request,
     info = (await authz.role_by_id(row["role_id"])) or _UNKNOWN_ROLE
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         await _recheck_granter(user, info, row["scope_kind"], row["scope_value"], uid,
                                removing=True)
         if (row["role_key"] == "owner" and row["scope_kind"] == "all"
@@ -1193,7 +1193,7 @@ async def set_binding_expiry(uid: int, bid: int, body: BindingExpiryIn, request:
         await authz.check_grant_lifetime(grants, info, row["scope_kind"], row["scope_value"], new)
         await authz.check_crown(info, row["scope_kind"], row["scope_value"], body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "change a WebTerm account's access")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         # revizuirea 3.6.10: re-auth-ul a fost un punct de suspendare — legătura s-a putut schimba
         # (alt sfârşit, scoasă, expirată). Totul se decide din nou pe rândul de ACUM: „mai scurt"
         # (reguli de scoatere) sau „mai lung" (reguli de acordare) se recalculează aici.
@@ -1355,7 +1355,7 @@ async def create_role(body: RoleIn, request: Request, user=Depends(authz.perm('r
     authz.check_can_define(grants, perms)
     await _role_name_free(name, None)
     await stepup.reauth_for_access_change(user, request, body, "create a role")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         g = await _fresh_grants(user, "roles.manage")
         authz.check_can_define(g, perms)
         await _role_name_free(name, None)
@@ -1415,7 +1415,7 @@ async def edit_role(rid: int, body: RoleIn, request: Request,
     await _role_name_free(name, rid)
     await _check_config_map_role(rid, perms)
     await stepup.reauth_for_access_change(user, request, body, "change a role")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         g = await _fresh_grants(user, "roles.manage")
         role = await _custom_role(rid)                 # definiţia de ACUM, nu cea de mai sus
         authz.check_can_define(g, role.perms | perms)
@@ -1480,7 +1480,7 @@ async def delete_role(rid: int, body: ReauthOnly, request: Request,
                            "mapping(s), %(tokens)d token(s)) — remove those first" % use, vars=use)
     await _refuse_if_used()
     await stepup.reauth_for_access_change(user, request, body, "delete a role")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         g = await _fresh_grants(user, "roles.manage")
         role = await _custom_role(rid)
         authz.check_can_define(g, role.perms)
@@ -1586,7 +1586,7 @@ async def add_oidc_role(body: OidcRoleIn, request: Request,
     _check_wildcard(grants, grp, role, kind)
     await authz.check_crown(role, kind, value, body.confirm_crown_jewel)
     await stepup.reauth_for_access_change(user, request, body, "map an SSO group to a role")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         g = await _fresh_grants(user, "users.manage")
         fresh = await authz.role_by_id(role.id)
         if fresh is None:
@@ -1632,7 +1632,7 @@ async def delete_oidc_role(mid: int, body: ReauthOnly, request: Request,
     await authz.check_can_grant(grants, info, row["scope_kind"], row["scope_value"], removing=True)
     _check_wildcard(grants, row["grp"], info, row["scope_kind"])
     await stepup.reauth_for_access_change(user, request, body, "remove an SSO group mapping")
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         g = await _fresh_grants(user, "users.manage")
         row = await db.fetchone("SELECT * FROM oidc_group_roles WHERE id=?", mid)
         if not row:
@@ -4618,13 +4618,21 @@ async def _search_tx(request: Request, user, q: str):
                 return txhub.earliest([base, txhub.stepup_deadline(uid, row["host_id"])])
             return base
         found = await core.search_transcripts_tx(rows, q, principal, snap, not_after=deadline)
-        results = txhub.search_emit(snap, found, base)
+        host_of = {r["id"]: r["host_id"] for r in rows}
+
+        def visible(res, now, host_of=host_of, gated=gated):
+            # Recheck R-M1: vizibilitatea unui rezultat de pe un host 2FA ţine cât fereastra de
+            # step-up, INDEPENDENT de potrivirea în conţinut — expirată (sau închisă) înainte de
+            # emitere → rezultatul dispare întreg, nu doar snippet-ul. Recitită sincron, la emitere.
+            hid = host_of.get(res["id"])
+            return hid not in gated or txhub.stepup_deadline(uid, hid) > now
+        results = txhub.search_emit(snap, found, base, visible)
         if results is None:
             continue                              # decizia e veche: o reluăm, o dată
 
-        async def body(snap=snap, found=found, base=base):
+        async def body(snap=snap, found=found, base=base, visible=visible):
             # ultima verificare, după middleware, chiar înainte de predarea către transport
-            out = txhub.search_emit(snap, found, base)
+            out = txhub.search_emit(snap, found, base, visible)
             yield json.dumps({"sessions": out if out is not None else []}).encode()
         return StreamingResponse(body(), media_type="application/json",
                                  headers={"Cache-Control": "no-store"})
@@ -6288,6 +6296,20 @@ async def _send_osc133(client, hub, span: Optional[dict]) -> None:
 IDLE_CLOSING_REASON = "session is being closed for inactivity; reload"
 
 
+async def _guest_admit_ok(snap, sid: str, token_hash: str) -> bool:
+    """3.8 (recheck R-M3): may a share guest join the hub NOW. A revocation of `sid` begun since
+    `snap` (bump BEFORE its commit) → the token is read again; a counter still unchanged after a
+    read that found it valid means any later revocation commits after the join, so its
+    `hub.revoke_shares` sees this guest. True returns with nothing awaited after the last check:
+    the caller adds the guest synchronously. Two moves in a row → refused (fail closed)."""
+    if txhub.sid_unchanged(snap, sid):
+        return True
+    snap = txhub.snapshot()
+    r = await db.fetchone("SELECT 1 FROM sessions WHERE id=? AND share_token=? AND share_expires > ?",
+                          sid, token_hash, time.time())
+    return r is not None and txhub.sid_unchanged(snap, sid)
+
+
 @router.websocket("/ws/shared/{token}")
 async def shared_ws(ws: WebSocket, token: str):
     """Vizitator prin link de share. `share_writable` → poate și TASTA (opt-in la
@@ -6303,6 +6325,9 @@ async def shared_ws(ws: WebSocket, token: str):
         await ws.close(code=4429)
         return
     row = None
+    # 3.8 (recheck R-M3): contoarele ÎNAINTE de citirea tokenului — o revocare începută după ele
+    # se vede la intrarea în hub (no-op când înregistrările criptate sunt oprite)
+    tx_snap = txhub.snapshot() if txhub.active() else None
     if 8 <= len(token) <= 128:
         row = await db.fetchone(
             "SELECT * FROM sessions WHERE share_token=? AND share_expires > ?",
@@ -6335,6 +6360,7 @@ async def shared_ws(ws: WebSocket, token: str):
         # MOMENTUL în care cineva îl foloseşte e exact ce vrei să afli. Deci mereu necunoscut.
         client.known = False
         client.tx_decide = _ws_guest_decider(security.sha256_hex(token), row["id"])
+        client.share_hash = security.sha256_hex(token)
     await ws.send_text(json.dumps({"type": "init", "state": row["state"],
                                    "title": row["title"], "readonly": not writable,
                                    "writable": writable,
@@ -6388,6 +6414,14 @@ async def shared_ws(ws: WebSocket, token: str):
         # live unui invitat încă nemarcat blocat (review lot 1, F1).
         if start_locked:
             client.lock()
+        if tx_snap is not None and not await _guest_admit_ok(tx_snap, row["id"], security.sha256_hex(token)):
+            # revocat cât ne ataşam (de ex. „Revocă tot" în curs): niciun octet live
+            try:
+                await ws.send_text(json.dumps({"type": "revoked"}))
+                await ws.close(code=4403)
+            except Exception:                    # noqa: BLE001
+                pass
+            return
         # un kill de inactivitate în zbor (3.8; mereu False în 3.7.1) — refuz SINCRON cu adăugarea
         if hub.idle_closing:
             await ws.close(code=4410, reason=IDLE_CLOSING_REASON)

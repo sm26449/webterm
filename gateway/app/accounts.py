@@ -69,7 +69,7 @@ async def disable(uid: int, *, by: str, actor: str, ip: str, reason: str) -> Opt
     deactivated by its `sub` alone, never linked to SCIM — SCIM can never re-enable it, and it is
     never turned back into 'scim*'). Raises LastOwner (nothing changed, audited, alerted).
     → {"email", "tokens", "shares", "replay_links"} of what was revoked."""
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         row = await db.fetchone("SELECT id, email, COALESCE(disabled, 0) AS d FROM users WHERE id=?",
                                 uid)
         if row is None:
@@ -131,7 +131,7 @@ async def enable(uid: int, *, actor: str, ip: str, how: str, actor_id: Optional[
     """Re-enable (idempotent: an active account → None). `how` goes to the audit/alert text.
     `recheck` = an async callable run under the bindings lock first (the caller's rights, fresh).
     → the account's email when it was re-enabled."""
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         if recheck is not None:
             await recheck()
         row = await db.fetchone("SELECT email, COALESCE(disabled, 0) AS d FROM users WHERE id=?",

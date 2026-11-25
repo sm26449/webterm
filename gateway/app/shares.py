@@ -30,38 +30,63 @@ async def revoke_all_shares(owner_email: str | None = None,
     if owner_email or owner_id is not None:
         # id-ul e cheia; emailul rămâne rezervă pentru share-urile create înainte de migrare.
         # Cheiat DOAR pe email, o schimbare de email scotea share-urile de sub orice revocare.
-        where = " WHERE share_token IS NOT NULL AND (share_by_id=? OR share_by=?)"
+        cond = "share_token IS NOT NULL AND (share_by_id=? OR share_by=?)"
         args = (owner_id, owner_email)
     else:
-        where = " WHERE share_token IS NOT NULL"
+        cond = "share_token IS NOT NULL"
         args = ()
-    rows = await db.fetchall("SELECT id, share_expires FROM sessions" + where, *args)
-    sids = {r["id"] for r in rows}
+    where = " WHERE " + cond
+    rows = await db.fetchall("SELECT id, share_token, share_expires FROM sessions" + where, *args)
     if not txhub.active():
+        sids = {r["id"] for r in rows}
         await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
                          " share_writable=0" + where, *args)
-    else:
-        # 3.8 (M3): gardul şi mutaţia pe ACELAŞI set fix de rânduri (UPDATE pe id-uri, nu pe predicat);
-        # un share apărut între timp e prins de trecerea următoare, tot cu gard. După 3 treceri, un
-        # gard global peste predicat (fail-closed: orice citire în curs se re-autorizează).
-        todo = set(sids)
-        for _pass in range(3):
-            if not todo:
-                break
-            async with txhub.revoking_many(todo):
-                for chunk in _chunks(sorted(todo)):
-                    await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                                     " share_writable=0 WHERE id IN (%s)" % ",".join("?" * len(chunk)),
-                                     *chunk)
-            todo = {r["id"] for r in await db.fetchall("SELECT id FROM sessions" + where, *args)}
-            sids |= todo
-        if todo:
-            async with txhub.revoking(None):
-                await db.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL,"
-                                 " share_writable=0" + where, *args)
-    for sid, hub in list(core.hubs.items()):
-        if sid in sids:
-            await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
+        for sid, hub in list(core.hubs.items()):
+            if sid in sids:
+                await hub.revoke_shares()      # închide invitaţii deja conectaţi (stop broadcast)
+        return sum(1 for r in rows if (r["share_expires"] or 0) > now)
+    # 3.8 (M3, recheck R-M3): gardul şi mutaţia pe ACELAŞI set fix de rânduri, identificate prin
+    # (id, tokenul de atunci) ŞI criteriul de cont: un link înlocuit între timp (alt token, poate
+    # al altui cont) nu e atins de această trecere; dacă încă se potriveşte criteriului, îl prinde
+    # trecerea următoare, tot cu gard. Sid-urile revocate sunt EXACT cele întoarse de RETURNING.
+    # După 3 treceri, un gard global peste predicat (fail-closed: orice citire în curs se
+    # re-autorizează), tot cu RETURNING.
+    revoked: set = set()                         # sid-uri al căror share l-am anulat NOI
+    stale: dict = {}                             # sid → tokenuri văzute, înlocuite între timp
+    todo = {r["id"]: r["share_token"] for r in rows}
+    for _pass in range(3):
+        if not todo:
+            break
+        async with txhub.revoking_many(todo):
+            for chunk in _chunks(sorted(todo.items())):
+                got = await db.execute_returning_all(
+                    "UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0"
+                    " WHERE (id, share_token) IN (VALUES %s) AND %s RETURNING id"
+                    % (",".join("(?,?)" for _ in chunk), cond),
+                    *[x for pair in chunk for x in pair], *args)
+                revoked |= {g["id"] for g in got}
+        for sid, tok in todo.items():
+            if sid not in revoked:
+                stale.setdefault(sid, set()).add(tok)
+        todo = {r["id"]: r["share_token"] for r in await db.fetchall(
+            "SELECT id, share_token FROM sessions" + where, *args)}
+    if todo:
+        async with txhub.revoking(None):
+            got = await db.execute_returning_all(
+                "UPDATE sessions SET share_token=NULL, share_expires=NULL,"
+                " share_writable=0" + where + " RETURNING id", *args)
+            revoked |= {g["id"] for g in got}
+    # Invitaţii conectaţi: pe un sid revocat de noi niciun token nu mai e valid → toţi afară; pe
+    # unul înlocuit concurent, doar cei intraţi cu tokenul văzut de noi (mort oricum), nu cei ai
+    # linkului nou. Hub-urile se caută DUPĂ sid-urile schimbate, nu după instantaneul iniţial.
+    for sid in sorted(revoked):
+        hub = core.hubs.get(sid)
+        if hub:
+            await hub.revoke_shares()
+    for sid in sorted(set(stale) - revoked):
+        hub = core.hubs.get(sid)
+        if hub:
+            await hub.revoke_shares(token_hashes=stale[sid])
     return sum(1 for r in rows if (r["share_expires"] or 0) > now)
 
 

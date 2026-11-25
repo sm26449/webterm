@@ -2020,6 +2020,10 @@ class Recorder:
         self._loss = self._new_loss(None)
         self._close_gap = None                    # markerul datorat la close, păstrat între încercări
         self._unoffered_taken = False             # `close(unoffered=)` contabilizat o singură dată
+        # R-M2: împărţirea backlog-ului hub-ului (`close(held=)`) — calculată O DATĂ, în worker, după
+        # joburile dinaintea închiderii: (octeţi ai epoch-ului curent → marker, octeţi neatribuibili)
+        self._held_split = None
+        self._unoffered_total = 0
         self.gap_pending = []                     # Gap-uri ale markerelor încă în `pending`
         self._gaps_unpub = []                     # scrise în writer, încă nepublicate
         self.gaps = []
@@ -2421,16 +2425,30 @@ class Recorder:
     def checkpoint(self):
         return self._submit("checkpoint")
 
-    def close(self, cast_ts=0.0, unoffered=0):
+    def close(self, cast_ts=0.0, unoffered=0, held=None):
         """Close: ingress stops NOW (later bytes are refused, counted in `rejected`); the finalize
         job drains everything accepted before, seals and publishes. An overflow still open then is
         recorded as one GAP_MARKER at the end (`cast_ts` for its `.cast` event), its size in
         `gaps` and the result's `lost`, and alarmed. `unoffered` = upstream bytes of the current
         epoch the hub held past `received` and never offered (its backlog at close, PR5b M2): they
-        join the same close marker, counted once per recorder even when close() is retried."""
+        join the same close marker, counted once per recorder even when close() is retried.
+        `held` (recheck R-M2) = the hub's backlog as `(epoch, offset, n)` extents, classified by
+        the WORKER against `received` once every job queued before the close has run (a late skip
+        or epoch switch is not counted twice nor charged to another epoch): bytes of the current
+        epoch past `received` (holes included) join the close marker, the rest come back as the
+        result's `unrecorded` for the caller to alarm. The result always carries `unoffered` and
+        `unrecorded`; a recorder replaced before the job runs raises `RecorderLost` (no result =
+        no confirmation: the caller keeps its accounting)."""
         if not isinstance(unoffered, int) or unoffered < 0:
             raise TxStoreError("badInput", "unoffered")
-        fut = self._submit("finalize", cast_ts, unoffered)
+        if held is not None:
+            try:
+                held = tuple((e, int(o), int(n)) for e, o, n in held)
+            except (TypeError, ValueError):
+                raise TxStoreError("badInput", "held") from None
+            if any(o < 0 or n < 0 for _e, o, n in held):
+                raise TxStoreError("badInput", "held")
+        fut = self._submit("finalize", cast_ts, unoffered, held)
         self.closing = True
         return fut
 
@@ -3359,7 +3377,7 @@ class Recorder:
         self._recount_pos()
         return self.agent_committed
 
-    async def _job_finalize(self, cast_ts=0.0, unoffered=0):
+    async def _job_finalize(self, cast_ts=0.0, unoffered=0, held=None):
         """Close: drain (final checkpoint of everything accepted before close; a failed one is
         published or abandoned), then ONE GAP_MARKER for everything not recorded (an overflow
         still open, abandoned bytes), SEAL both kinds, publish; retire never-published
@@ -3367,14 +3385,29 @@ class Recorder:
         leaves the recorder retryable (close() again) with the same total."""
         if self.store.tokens.get(self.sid) != self.token:
             self.state = "replaced"
-            return None
+            # R-M2: înlocuit ≠ închis. Fără rezultat, apelantul nu primeşte o confirmare falsă şi
+            # păstrează (sau alarmează) octeţii pe care îi ţine; înainte întorcea None, citit ca succes.
+            raise RecorderLost("replaced", f"{self.sid}: a newer writer owns this sid; not finalized")
         self.closing = True
+        if held is not None and self._held_split is None:
+            # R-M2: împărţirea se face AICI, după joburile dinaintea close-ului (un skip / o comutare
+            # comise târziu au mutat deja `received`), nu faţă de cursorul de la apel
+            re_, ro = self.received
+            end, other = ro, 0
+            for e, o, n in held:
+                if e == re_:
+                    end = max(end, o + n)         # sub `received`: deja acoperit (înregistrat / marker)
+                else:
+                    other += n                    # alt epoch: nu poate deveni markerul acestuia
+            self._held_split = (end - ro, other)
+        held_same, held_other = self._held_split or (0, 0)
         await self._checkpoint_or_flush()
         L = self._loss
-        if unoffered and not self._unoffered_taken:
+        if (unoffered or held_same) and not self._unoffered_taken:
             # octeţii pe care hub-ul nu i-a mai putut oferi: pierdere terminală, în ACELAŞI marker
             self._unoffered_taken = True
-            self._lose(unoffered, 0, 0)
+            self._unoffered_total = unoffered + held_same
+            self._lose(unoffered + held_same, 0, 0)
         if self._close_gap is None and (self.overflow or any(L[k] for k in ("agent", "out", "cast"))):
             ce, co = self._covered
             self._close_gap = {"agent": 0, "out": 0, "cast": 0, "gap": None, "epoch": self.agent_epoch,
@@ -3411,6 +3444,8 @@ class Recorder:
         res = self._snapshot_state()
         res["lost"] = self._close_gap["agent"] if self._close_gap is not None else None
         res["rejected"] = self.rejected
+        res["unoffered"] = self._unoffered_total
+        res["unrecorded"] = held_other
         return res
 
 

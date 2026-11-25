@@ -232,7 +232,7 @@ async def sync_user(uid: int, email: str, groups, *, ip: str, via: str,
                            "SSO roles NOT synced (%s): no groups claim" % via, actor_id=uid)
         return {"added": [], "removed": [], "kept_last_owner": [], "skipped": True}
     gs = claim_groups(groups)
-    async with authz.bindings_lock:
+    async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
         # sub lock: o editare de rol concurentă nu poate strecura o permisiune doar-de-Owner
         add_roles = await scim_grantable_roles() if scim else None
         desired, matched = await _desired(gs)
@@ -508,7 +508,7 @@ async def reconcile_config(raw: Optional[str] = None) -> dict:
     try:
         desired, errors, warnings, owner_refused = await _resolve_entries(raw)
         out["errors"], out["warnings"], out["owner_refused"] = errors, warnings, owner_refused
-        async with authz.bindings_lock:
+        async with authz.bindings_lock, authz.access_change():   # 3.8: gard înainte de commit
             rows = await db.fetchall(
                 "SELECT id, grp, role_id, scope_kind, scope_value, COALESCE(source, 'ui') AS source"
                 " FROM oidc_group_roles")

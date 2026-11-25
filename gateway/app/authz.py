@@ -25,6 +25,7 @@ the docs can say so honestly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -180,6 +181,30 @@ bindings_lock = asyncio.Lock()         # serialises binding mutations (check-the
 # Ascultători sincroni ai unui bump (3.8, txhub: contorul global de acces al înregistrărilor
 # criptate). Gol când înregistrările criptate sunt oprite — comportamentul rămâne cel din 3.7.
 epoch_listeners: list = []
+# 3.8 (recheck, before activation): gardurile intrate ÎNAINTE de commit-ul unei schimbări de acces
+# (txhub: bump global + gard), ca între commit şi bump să nu treacă niciun chunk. Gol când
+# înregistrările criptate sunt oprite — `access_change()` e atunci un no-op (3.7 identic).
+change_fences: list = []
+
+
+@contextlib.asynccontextmanager
+async def access_change():
+    """Wrap an access-changing write (roles, bindings, accounts, SSO maps, host scope) with the
+    same pattern as a share revocation: bump + fence BEFORE the commit, bump again after it.
+    While the fence is up, recording readers re-authorize (they wait for it before emitting). On
+    the way out — success or not — the grant cache is cleared BEFORE the fence drops, so a
+    reader released by it re-decides from the database, even when the caller's own
+    `bump_epoch()` comes later. No listeners (flag off) → nothing at all happens here."""
+    if not change_fences:
+        yield
+        return
+    async with contextlib.AsyncExitStack() as stack:
+        for fn in list(change_fences):
+            await stack.enter_async_context(fn())
+        try:
+            yield
+        finally:
+            _cache.clear()
 
 
 def epoch() -> int:
@@ -1575,15 +1600,19 @@ async def sweep_expired_bindings() -> list:
             " r.key AS role_key, r.name AS role_name, u.email FROM role_bindings b"
             " LEFT JOIN roles r ON r.id=b.role_id LEFT JOIN users u ON u.id=b.user_id"
             " WHERE b.expires IS NOT NULL AND b.expires <= ?", now)
-        for r in rows:
-            await db.execute("DELETE FROM role_bindings WHERE id=? AND expires IS NOT NULL"
-                             " AND expires <= ?", r["id"], now)
-            out.append({"user_id": r["user_id"], "email": r["email"] or "",
-                        "role": r["role_key"] or r["role_name"] or "?",
-                        "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or "",
-                        "source": r["source"] or "manual", "expires": r["expires"]})
-        if out:
-            bump_epoch()
+        if not rows:
+            return out
+        # 3.8: gardul doar când chiar se şterge ceva (sweep-ul rulează la fiecare minut)
+        async with access_change():
+            for r in rows:
+                await db.execute("DELETE FROM role_bindings WHERE id=? AND expires IS NOT NULL"
+                                 " AND expires <= ?", r["id"], now)
+                out.append({"user_id": r["user_id"], "email": r["email"] or "",
+                            "role": r["role_key"] or r["role_name"] or "?",
+                            "scope_kind": r["scope_kind"], "scope_value": r["scope_value"] or "",
+                            "source": r["source"] or "manual", "expires": r["expires"]})
+            if out:
+                bump_epoch()
     return out
 
 

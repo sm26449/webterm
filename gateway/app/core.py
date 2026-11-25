@@ -928,6 +928,8 @@ class BrowserClient:
         # 3.8 (§12.11.10): decizia WS-ului pentru citirile de istoric (resync), setată de ruta WS;
         # None = nicio citire din înregistrarea criptată (fail-closed)
         self.tx_decide = None
+        # recheck R-M3: hash-ul tokenului de share cu care a intrat un invitat (None = owner / necunoscut)
+        self.share_hash = None
 
     def tx_principal(self) -> str:
         return ("user:%s" % self.user_id) if self.user_id is not None else ("guest:%s" % self.id)
@@ -1985,12 +1987,15 @@ class SessionHub:
     async def broadcast_roster(self) -> None:
         await self.broadcast_json({"type": "roster", "clients": self.roster()})
 
-    async def revoke_shares(self) -> None:
+    async def revoke_shares(self, token_hashes=None) -> None:
         """Owner-ul a revocat share-ul: notifică invitaţii (`revoked`) şi le închide socketul,
         oprind broadcast-ul. Clienţii-owner (autentificaţi) rămân. Instant; revalidarea din
-        shared_ws e plasa de siguranţă (prinde şi expirarea cât e conectat)."""
+        shared_ws e plasa de siguranţă (prinde şi expirarea cât e conectat). `token_hashes`
+        (recheck R-M3): doar invitaţii intraţi cu unul din aceste tokenuri (un link înlocuit
+        concurent: cei ai linkului nou rămân); un invitat fără token cunoscut iese oricum."""
         for c in list(self.clients):
-            if not c.is_owner:
+            if not c.is_owner and (token_hashes is None or c.share_hash is None
+                                   or c.share_hash in token_hashes):
                 self.clients.discard(c)          # opreşte fan-out-ul imediat
                 try:
                     await c.send_text(json.dumps({"type": "revoked"}))
@@ -3772,19 +3777,20 @@ async def purge_host(host_id: int, *, _depth: int = 0) -> None:
     # hostul — altfel o legătură (sau un token plafonat pe host) rămasă s-ar lipi singură de
     # următorul host cu acelaşi id. Rândurile de audit primesc id-ul negat (ca cheile de deploy):
     # rămân în jurnal, dar nu mai sunt atribuite hostului nou.
-    await db.execute("DELETE FROM role_bindings WHERE scope_kind='host' AND scope_value=?",
-                     str(host_id))
-    await db.execute("DELETE FROM api_tokens WHERE scope_kind='host' AND scope_value=?",
-                     str(host_id))
-    # 3.6.2: şi o mapare SSO pe `host:<id>` — altfel următorul login SSO ar re-crea legătura
-    # pe hostul NOU cu acelaşi id
-    from . import ssomap
-    await ssomap.note_config_host_change(host_id, "deleted")
-    await db.execute("DELETE FROM oidc_group_roles WHERE scope_kind='host' AND scope_value=?",
-                     str(host_id))
-    await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)
-    await db.execute("DELETE FROM hosts WHERE id=?", host_id)
-    authz.bump_epoch()
+    async with authz.access_change():       # 3.8: gard înainte de commit (legături pe host)
+        await db.execute("DELETE FROM role_bindings WHERE scope_kind='host' AND scope_value=?",
+                         str(host_id))
+        await db.execute("DELETE FROM api_tokens WHERE scope_kind='host' AND scope_value=?",
+                         str(host_id))
+        # 3.6.2: şi o mapare SSO pe `host:<id>` — altfel următorul login SSO ar re-crea legătura
+        # pe hostul NOU cu acelaşi id
+        from . import ssomap
+        await ssomap.note_config_host_change(host_id, "deleted")
+        await db.execute("DELETE FROM oidc_group_roles WHERE scope_kind='host' AND scope_value=?",
+                         str(host_id))
+        await db.execute("UPDATE audit_log SET host_id=? WHERE host_id=?", -host_id, host_id)
+        await db.execute("DELETE FROM hosts WHERE id=?", host_id)
+        authz.bump_epoch()
 
     # starea din RAM cheiată pe host_id — ar fi moştenită de hostul următor cu acelaşi id
     pending_updates.pop(host_id, None)

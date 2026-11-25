@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 import httpx  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
-from app import admin, api, authz, config, core, db, replay, security, share_api, shares, txhub  # noqa: E402
+from app import accounts, admin, api, authz, config, core, db, replay, security, share_api, shares, txhub  # noqa: E402
 from app import txstore as ts  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -768,6 +768,71 @@ async def g_emission(c, uid, token, big, data):
         authz.bump_epoch()
 
 
+async def g_search_stepup(c, uid, token):
+    print("== search: a 2FA host's step-up window expiring before emission (recheck R-M1) ==")
+    cookie = {"cookie": f"{security.COOKIE_NAME}={token}"}
+    h2 = (await c.post("/api/hosts", json={"name": "h-rm1"})).json()["id"]
+    await db.execute("UPDATE hosts SET require_2fa=1 WHERE id=?", h2)
+    sid = await new_session(h2, state="closed")
+    await db.execute("UPDATE sessions SET title=?, note=? WHERE id=?", "rm1meta title", "rm1meta note", sid)
+    user = await db.fetchone("SELECT * FROM users WHERE id=?", uid)
+    st = txhub.store()
+
+    def open_window(secs=300):
+        security._stepup_windows[(uid, h2)] = (time.time(), time.time() + secs)
+
+    def expire():
+        security._stepup_windows[(uid, h2)] = (time.time() - 600, time.time() - 1)
+
+    async def run_search():
+        resp = await api._search_tx(mkreq(cookie), user, "rm1meta")
+        return resp, b"".join([x async for x in resp.body_iterator])
+
+    def ids(body):
+        return [s["id"] for s in json.loads(body)["sessions"]]
+    try:
+        open_window()
+        _resp, body = await run_search()
+        check("R-M1: control — a metadata-only hit on a 2FA host with an open step-up window",
+              sid in ids(body), body[:200])
+        expire()
+        _resp, body = await run_search()
+        check("R-M1: control — window expired before the selection → not selected at all",
+              sid not in ids(body), body[:200])
+        # Expirarea între selecţia SQL şi calculul snippet-ului (citirea conţinutului).
+        open_window()
+        orig_tail = st.search_tail
+
+        async def tail_then_expire(s, **kw):
+            if s == sid:
+                expire()
+            return await orig_tail(s, **kw)
+        st.search_tail = tail_then_expire
+        try:
+            _resp, body = await run_search()
+        finally:
+            st.search_tail = orig_tail
+        out = json.loads(body)["sessions"]
+        check("R-M1: window expired between the selection and the snippet → the whole result is gone",
+              sid not in ids(body) and "rm1meta" not in body.decode(), out)
+        # Expirarea după rută (middleware), înainte de consumarea corpului.
+        open_window()
+        resp = await api._search_tx(mkreq(cookie), user, "rm1meta")
+        expire()
+        body = b"".join([x async for x in resp.body_iterator])
+        check("R-M1: window expired after the route, before the body is consumed → no id/title/note",
+              sid not in ids(body) and "rm1meta" not in body.decode(), body[:200])
+        # Fereastra închisă explicit (logout de step-up), nu doar expirată.
+        open_window()
+        resp = await api._search_tx(mkreq(cookie), user, "rm1meta")
+        security._stepup_windows.pop((uid, h2), None)
+        body = b"".join([x async for x in resp.body_iterator])
+        check("R-M1: window closed before the body → result dropped", sid not in ids(body), body[:200])
+    finally:
+        security._stepup_windows.pop((uid, h2), None)
+        await db.execute("UPDATE hosts SET require_2fa=0 WHERE id=?", h2)
+
+
 # ── 3c. finalize accounting, counters, admin, inventory (PR5b review M2–M4) ───
 
 
@@ -839,6 +904,55 @@ async def g_finalize(host_id):
         check("lost recorder at close (no re-adoption): the backlog is alarmed, never silent",
               r.close_report["closed"] is False and r.close_report["unrecorded"] == 6 and al, (r.close_report, al))
         await real.close()
+        # R-M2: recorderul înlocuit înainte ca workerul să ruleze finalize → NU e o confirmare.
+        sid, hub, r = await fresh_rec(host_id)
+        e, o = r.rec.received
+        r.rec.skip_to = Pending()
+        r.feed((e, o + 4), b"w" * 8)
+        st.tokens[sid] = "someone-else"
+        n0 = len(st.alarms)
+        await close_hub(hub)
+        al = [a for a in st.alarms[n0:] if a[0] == "transcript.gapUnrecorded"]
+        check("R-M2: recorder replaced before finalize → not reported closed, the 8 held bytes alarmed",
+              r.close_report["closed"] is False and r.close_report["unrecorded"] == 8 and al
+              and " 8 bytes" in al[-1][1], (r.close_report, al))
+        st.tokens.pop(sid, None)
+        # R-M2: rezultatul fără confirmare (None) nu goleşte backlog-ul în tăcere.
+        sid, hub, r = await fresh_rec(host_id)
+        e, o = r.rec.received
+        r.rec.skip_to = Pending()
+        r.feed((e, o + 2), b"v" * 5)
+        real = r.rec
+        real_close = real.close
+
+        def unconfirmed(**kw):
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result(None)
+            return fut
+        real.close = unconfirmed
+        n0 = len(st.alarms)
+        await close_hub(hub)
+        al = [a for a in st.alarms[n0:] if a[0] == "transcript.gapUnrecorded"]
+        check("R-M2: a close without a confirmed result → backlog alarmed (5 bytes), never 'closed'",
+              r.close_report["closed"] is False and r.close_report["unrecorded"] == 5 and al,
+              (r.close_report, al))
+        real.close = real_close
+        await real.close()
+        # R-M2: împărţirea e făcută de worker DUPĂ joburile dinaintea close-ului: un skip comis
+        # târziu nu e numărat de două ori; octeţii altui epoch revin ca `unrecorded`.
+        sid, hub, r = await fresh_rec(host_id)
+        rec = r.rec
+        e, o = rec.received
+        skip = rec.skip_to(e, o + 10, "ring", cast_ts=0.0)
+        fin = rec.close(held=[(e, o + 3, 4), (e, o + 12, 6), ("other-epoch", 0, 9)])
+        await skip
+        res = await fin
+        gaps = [(g.size, g.reason) for g in rec.gaps]
+        check("R-M2: late skip [o, o+10) + held → close marker = 8 (o+10..o+18), no double count",
+              res["unoffered"] == 8 and res["unrecorded"] == 9 and (10, "skip:ring") in gaps
+              and gaps[-1] == (8, "close") and sum(sz for sz, _ in gaps) == 18, (res, gaps))
+        check("R-M2: recording sealed and verified after the reconciled close", (await st.verify(sid)).get("ok"))
+        await close_hub(hub)
         # Close imediat după un overflow: contabilitate completă (înregistrat + goluri = oferit).
         sid, hub, r = await fresh_rec(host_id)
         old_cap = st.pending_cap
@@ -934,6 +1048,260 @@ async def g_counters(c, host_id, uid, big):
         txhub.revoking_many = orig
     check("replay-link deletion: the fence comes from the same read as the deleted ids",
           n == 1 and fenced == [{big}], (n, fenced))
+
+
+class GuestWS:
+    """A share guest's socket for `api.shared_ws`: stays connected until `leave` is set."""
+
+    def __init__(self):
+        self.headers = {"origin": os.environ["WEBTERM_PUBLIC_URL"], "user-agent": "t"}
+        self.client = type("C", (), {"host": "10.9.8.7"})()
+        self.query_params = {}
+        self.bins, self.texts, self.closed = [], [], None
+        self.leave = asyncio.Event()
+
+    async def accept(self):
+        pass
+
+    async def send_text(self, t):
+        self.texts.append(t)
+
+    async def send_bytes(self, b):
+        self.bins.append(bytes(b))
+
+    async def close(self, code=1000, reason=None):
+        self.closed = code
+        self.leave.set()
+
+    async def receive(self):
+        await self.leave.wait()
+        return {"type": "websocket.disconnect"}
+
+
+def fake_guest(hub, token_hash):
+    ws, cl = ws_client(hub, guest=True)
+    cl.share_hash = token_hash
+    ws.closed = None
+
+    async def close(code=1000, reason=None):
+        ws.closed = code
+    ws.close = close
+    hub.clients.add(cl)
+    return ws, cl
+
+
+async def g_share_sweep(c, host_id, uid):
+    print("== bulk share revocation: concurrent replace, guests by revoked id (recheck R-M3) ==")
+    other = uid + 4242                            # alt cont (doar id-ul contează pentru criteriu)
+    x = await new_session(host_id)
+    y = await new_session(host_id)
+    tok = {}
+    for s in (x, y):
+        tok[s] = security.sha256_hex("a-" + s)
+        await db.execute("UPDATE sessions SET share_token=?, share_expires=?, share_by_id=?, share_by=?"
+                         " WHERE id=?", tok[s], time.time() + 3600, uid, "o@x.co", s)
+    hx, hy = await hub_for(x), await hub_for(y)
+    gx_old, _ = fake_guest(hx, tok[x])            # invitat al linkului lui A pe X
+    gy_old, _ = fake_guest(hy, tok[y])
+    orig = txhub.revoking_many
+    passes = []
+    b_tok = security.sha256_hex("b-" + x)
+    a2_tok = security.sha256_hex("a2-" + y)
+    new_guests = {}
+
+    @contextlib.asynccontextmanager
+    async def spy(sids):
+        passes.append(set(sids))
+        if len(passes) == 1:
+            # între SELECT şi UPDATE: B înlocuieşte linkul pe X; A îşi roteşte propriul link pe Y
+            await db.execute("UPDATE sessions SET share_token=?, share_by_id=?, share_by=? WHERE id=?",
+                             b_tok, other, "b@x.co", x)
+            await db.execute("UPDATE sessions SET share_token=? WHERE id=?", a2_tok, y)
+            new_guests["bx"] = fake_guest(hx, b_tok)[0]
+            new_guests["ay2"] = fake_guest(hy, a2_tok)[0]
+        async with orig(sids):
+            yield
+    txhub.revoking_many = spy
+    try:
+        await shares.revoke_all_shares("o@x.co", uid)
+    finally:
+        txhub.revoking_many = orig
+    rx = await db.fetchone("SELECT share_token, share_by_id FROM sessions WHERE id=?", x)
+    ry = await db.fetchone("SELECT share_token FROM sessions WHERE id=?", y)
+    check("R-M3: a link replaced concurrently by another account is NOT touched by A's sweep",
+          rx["share_token"] == b_tok and rx["share_by_id"] == other, dict(rx))
+    check("R-M3: A's own link rotated on the same sid during the sweep is revoked (next pass)",
+          ry["share_token"] is None and len(passes) >= 2 and y in passes[1], (dict(ry), passes))
+    check("R-M3: guests of A's old token on the replaced sid are disconnected; B's guest stays",
+          gx_old.closed == 4403 and new_guests["bx"].closed is None, (gx_old.closed, new_guests["bx"].closed))
+    check("R-M3: every guest of a revoked sid is disconnected (old and rotated token)",
+          gy_old.closed == 4403 and new_guests["ay2"].closed == 4403,
+          (gy_old.closed, new_guests["ay2"].closed))
+    # Fallback global: un share nou apărut chiar înaintea gardului global → revocat ŞI invitaţii lui
+    # deconectaţi (hub-urile după RETURNING, nu după instantaneul iniţial).
+    z = await new_session(host_id)
+    hz = await hub_for(z)
+    calls = []
+
+    @contextlib.asynccontextmanager
+    async def churn(sids):
+        calls.append(set(sids))
+        async with orig(sids):
+            yield
+        # după fiecare trecere apare un share nou (alt sid) — 3 treceri nu converg
+        s = await new_session(host_id)
+        await db.execute("UPDATE sessions SET share_token=?, share_expires=? WHERE id=?",
+                         security.sha256_hex("n-" + s), time.time() + 3600, s)
+    late = {}
+    orig_rev = txhub.revoking
+
+    @contextlib.asynccontextmanager
+    async def before_global(sid=None):
+        if sid is None:
+            t = security.sha256_hex("late-" + z)
+            await db.execute("UPDATE sessions SET share_token=?, share_expires=? WHERE id=?",
+                             t, time.time() + 3600, z)
+            late["ws"] = fake_guest(hz, t)[0]
+        async with orig_rev(sid):
+            yield
+    await db.execute("UPDATE sessions SET share_token=?, share_expires=? WHERE id=?",
+                     security.sha256_hex("g-" + x), time.time() + 3600, x)
+    txhub.revoking_many = churn
+    txhub.revoking = before_global
+    try:
+        await shares.revoke_all_shares()
+    finally:
+        txhub.revoking_many = orig
+        txhub.revoking = orig_rev
+    left = await db.fetchone("SELECT COUNT(*) AS n FROM sessions WHERE share_token IS NOT NULL")
+    check("R-M3: global fallback revokes everything, incl. a share created right before it",
+          left["n"] == 0 and len(calls) == 3, (left["n"], len(calls)))
+    check("R-M3: global fallback disconnects the guests of a sid absent from every earlier selection",
+          late.get("ws") is not None and late["ws"].closed == 4403, late)
+    # Un invitat care se conectează CÂT rulează revocarea (token citit valid, revocarea încheiată
+    # înainte să intre în hub) nu rămâne conectat.
+    w = await new_session(host_id)
+    plain = "guest-race-" + w
+    await db.execute("UPDATE sessions SET share_token=?, share_expires=?, share_by_id=? WHERE id=?",
+                     security.sha256_hex(plain), time.time() + 3600, uid, w)
+    hw = await hub_for(w)
+    orig_replay = core.attach_replay
+
+    async def replay_then_revoke(*a, **kw):
+        out = await orig_replay(*a, **kw)
+        await shares.revoke_all_shares(None, uid)
+        return out
+    core.attach_replay = replay_then_revoke
+    gws = GuestWS()
+    try:
+        task = asyncio.create_task(api.shared_ws(gws, plain))
+        await asyncio.wait_for(asyncio.shield(task), 5)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        core.attach_replay = orig_replay
+    guests = [cl for cl in hw.clients if not cl.is_owner]
+    check("R-M3: a guest whose token was read just before the revoke never joins the hub",
+          gws.closed == 4403 and not guests and any('"revoked"' in t for t in gws.texts),
+          (gws.closed, len(guests), gws.texts[-2:]))
+    gws.leave.set()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(task, 5)
+    # Control: fără revocare, acelaşi drum îl ataşează.
+    plain2 = "guest-ok-" + w
+    await db.execute("UPDATE sessions SET share_token=?, share_expires=? WHERE id=?",
+                     security.sha256_hex(plain2), time.time() + 3600, w)
+    gws2 = GuestWS()
+    task = asyncio.create_task(api.shared_ws(gws2, plain2))
+    for _ in range(200):
+        if any(not cl.is_owner for cl in hw.clients):
+            break
+        await asyncio.sleep(0.01)
+    check("R-M3: control — a guest with a valid token joins the hub",
+          any(not cl.is_owner for cl in hw.clients) and gws2.closed is None, gws2.closed)
+    await shares.revoke_all_shares(None, uid)
+    check("R-M3: control — the joined guest is disconnected by the next revoke", gws2.closed == 4403)
+    gws2.leave.set()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(task, 5)
+    for h in (hx, hy, hz, hw):
+        await close_hub(h)
+
+
+async def g_access_fence(uid):
+    print("== access changes: bump + fence BEFORE the commit (roles, bindings, accounts) ==")
+    st = txhub.store()
+    check("access_change: txhub registered its fence", txhub._authz_fence in authz.change_fences)
+    seen = []
+    orig_exec = db.execute
+
+    async def spy(sql, *a):
+        if sql.lstrip().upper().startswith(("DELETE FROM ROLE_BINDINGS", "UPDATE USERS SET DISABLED")):
+            seen.append((sql.split()[0], st.fenced(None), st.access_epoch, uid in authz._cache))
+        return await orig_exec(sql, *a)
+    # un cont-ţintă cu o legătură expirată (sweep) şi apoi dezactivat (accounts.disable)
+    tid = await db.execute("INSERT INTO users(id, email, password_hash, created) VALUES("
+                           + db.NEXT_USER_ID_SQL + ",?,?,?)", "fence@x.co", "x", time.time())
+    role = await db.fetchone("SELECT id FROM roles WHERE key='viewer'") or \
+        await db.fetchone("SELECT id FROM roles LIMIT 1")
+    await db.execute("INSERT INTO role_bindings(user_id, role_id, scope_kind, scope_value, source, expires,"
+                     " created) VALUES(?,?,?,?,?,?,?)", tid, role["id"], "all", "", "manual",
+                     time.time() - 5, time.time())
+    await authz.grants_for_user(uid)              # un grant în cache, ca un cititor activ
+    acc = st.access("fence-sid", "user:%s" % uid, "test")
+    e0 = st.access_epoch
+    db.execute = spy
+    try:
+        gone = await authz.sweep_expired_bindings()
+    finally:
+        db.execute = orig_exec
+    check("sweep of an expired binding: fenced and bumped BEFORE its DELETE commits",
+          gone and seen and seen[0][1] and seen[0][2] > e0, (gone, seen, e0))
+    check("sweep: a reader's Access taken before the change fails at once (no chunk between commit and bump)",
+          await araises(_check_async(st, acc), ts.TxStoreError))
+    check("sweep: bumped again after the commit, fence gone", st.access_epoch > seen[0][2]
+          and not st.fenced(None), (st.access_epoch, seen))
+    e1 = st.access_epoch
+    seen.clear()
+    db.execute = spy
+    try:
+        await authz.sweep_expired_bindings()      # nimic expirat: fără gard, fără bump
+    finally:
+        db.execute = orig_exec
+    check("sweep with nothing expired: no fence, no bump", st.access_epoch == e1 and not seen,
+          (st.access_epoch, e1, seen))
+    seen.clear()
+    db.execute = spy
+    try:
+        await accounts.disable(tid, by="scim", actor="test", ip="-", reason="test")
+    finally:
+        db.execute = orig_exec
+    check("account disable: fenced and bumped BEFORE its UPDATE commits",
+          seen and seen[0][1] and seen[0][2] > e1 and not st.fenced(None), (seen, e1))
+    # Cache-ul de granturi e golit ÎNAINTE de ridicarea gardului, chiar dacă bump_epoch vine mai târziu.
+    await authz.grants_for_user(uid)
+    released = []
+
+    async def waiter():
+        await st.wait_fences("any")
+        released.append(uid in authz._cache)
+    async with authz.access_change():
+        t = asyncio.create_task(waiter())
+        await asyncio.sleep(0.01)
+        check("access_change: a reader waits while the fence is up", not released and st.fenced(None))
+    await t
+    check("access_change: the reader is released with the grant cache already cleared",
+          released == [False], released)
+    e2 = st.access_epoch
+    with contextlib.suppress(RuntimeError):
+        async with authz.access_change():
+            raise RuntimeError("write failed")
+    check("access_change: a failed write still bumps and drops the fence (fail closed)",
+          st.access_epoch > e2 and not st.fenced(None))
+
+
+async def _check_async(st, acc):
+    st.check(acc)
 
 
 def _rec_fence(log_, orig, sids):
@@ -1034,6 +1402,14 @@ async def g_flag_off(host_id, stream, tx_sid):
     st = txhub.store()
     txhub.uninstall()
     check("flag off: txhub inactive", not txhub.active())
+    authz._cache["flag-off-probe"] = "kept"
+    e_auth = authz.epoch()
+    async with authz.access_change():
+        pass
+    check("flag off: no access-change fence registered; access_change is a no-op (cache, epoch)",
+          authz.change_fences == [] and authz._cache.get("flag-off-probe") == "kept"
+          and authz.epoch() == e_auth)
+    authz._cache.pop("flag-off-probe", None)
     sid = await new_session(host_id)
     hub = await hub_for(sid)
     check("flag off: the 3.7 handles are open", hub._tx is None and hub.out_f is not None)
@@ -1106,8 +1482,11 @@ async def main():
         c, token = await login()             # cookie-ul iniţial a expirat în g_stream_revocation
         await g_ws_history(c, host_id, uid, token)
         await g_emission(c, uid, token, big, data)
+        await g_search_stepup(c, uid, token)
         await g_finalize(host_id)
         await g_counters(c, host_id, uid, big)
+        await g_share_sweep(c, host_id, uid)
+        await g_access_fence(uid)
         await g_admin()
         g_inventory()
         stream = [b"hello\r\n", b"\x1b[1mbold\x1b[0m\r\n", "ünï\r\n".encode(), b"x" * 3000]
