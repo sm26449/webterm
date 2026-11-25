@@ -1223,6 +1223,14 @@ class Store:
         try:
             if self.before_writer is not None:
                 await self.before_writer(sid)
+            # H2: un writer nu redeschide istoricul unei înregistrări din cohorta unui restore fără
+            # dovadă (orice kind în tx_quarantine cu motiv `continuity`): refuzat până la dovadă /
+            # recuperarea explicită, auditată, a Owner-ului. Verificat DUPĂ conversia de la pornire
+            # (care păstrează carantina pe descriptorul nou).
+            if await self.read(lambda c: c.execute(
+                    "SELECT 1 FROM tx_quarantine WHERE sid=? AND reason='continuity' LIMIT 1",
+                    (sid,)).fetchone()) is not None:
+                raise TxStoreError("quarantined", f"{sid}: recording in the continuity quarantine")
             rec = Recorder(self, sid, track_agent=track_agent)
             await rec._start()
             self.recorders[sid] = rec
@@ -1442,9 +1450,13 @@ class Store:
                     c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone(),
                     c.execute("SELECT dir, name, dev, ino, size, mtime_ns, state FROM tx_migration "
                               "WHERE sid=? AND kind=?", (sid, kind)).fetchone(),
-                    c.execute("SELECT value FROM tx_state WHERE key='recordings_format'").fetchone())
-        drow, krow, mrow, fmt = await self.read(load)
+                    c.execute("SELECT value FROM tx_state WHERE key='recordings_format'").fetchone(),
+                    c.execute("SELECT 1 FROM tx_quarantine WHERE sid=? AND kind=?", (sid, kind)).fetchone())
+        drow, krow, mrow, fmt, qrow = await self.read(load)
         if drow is None:
+            if qrow is not None:
+                # H2: text clar din cohorta unui restore fără dovadă: refuzat pentru oricine
+                raise TxStoreError("quarantined", f"{sid}.{kind}: plaintext in quarantine")
             return await self._open_plain(sid, kind, access, krow, mrow, fmt)
         status = drow[2]
         if status in ("damaged", "absent"):
@@ -1496,6 +1508,9 @@ class Store:
                               "WHERE sid=? AND kind=?", (sid, kind)).fetchone(),
                     c.execute("SELECT value FROM tx_state WHERE key='recordings_format'").fetchone())
         drow, krow, mrow, fmt = self._run_read(load)
+        if self._run_read(lambda c: c.execute("SELECT 1 FROM tx_quarantine WHERE sid=? AND kind=?",
+                                              (sid, kind)).fetchone()) is not None:
+            return False
         return (drow is None and krow is None and (fmt is None or fmt[0] != "wtx1")
                 and mrow is not None and mrow[4] == "pending" and tuple(mrow[:4]) == tuple(ident))
 
@@ -1654,11 +1669,15 @@ class Store:
         def load(c):
             return (c.execute("SELECT blob, version, status FROM tx_descriptors WHERE sid=? AND kind=?",
                               (sid, kind)).fetchone(),
-                    c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone())
-        drow, krow = await self.read(load)
+                    c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone(),
+                    c.execute("SELECT reason FROM tx_quarantine WHERE sid=? AND kind=?", (sid, kind)).fetchone())
+        drow, krow, qrow = await self.read(load)
         if drow is None or krow is None:
             raise TxStoreError("notFound", f"{sid}.{kind}: no published conversion")
-        if drow[2] != "ok":
+        # H2: o conversie păstrată în carantina de CONTINUITATE se re-verifică totuşi (doar hash,
+        # nimic servit), ca textul clar să poată fi şters; orice altă stare / motiv: amânat
+        if drow[2] != "ok" and not (drow[2] in ("quarantined", "recovery") and qrow is not None
+                                    and qrow[0] == "continuity"):
             raise TxStoreError("quarantined", f"{sid}.{kind}: {drow[2]}")
         env = bytes(krow[0])
         d = self.decode((drow[0], drow[1]), sid, kind, env)
@@ -1788,10 +1807,13 @@ class Store:
                 # §12.11.6: committed_at = mtime-ul textului clar (niciodată „acum"); arhiva îşi
                 # păstrează ceasul de retenţie în archived_at.
                 mtime = ident[3] / 1e9
+                # H2: un (sid, kind) din cohorta unui restore fără dovadă rămâne în carantină şi
+                # după conversie: descriptorul nou NU e servibil până la dovadă / recuperarea Owner
+                held = c.execute("SELECT 1 FROM tx_quarantine WHERE sid=? AND kind=?", (sid, k)).fetchone()
                 c.execute("INSERT INTO tx_descriptors(sid, kind, blob, version, list_epoch, committed_at, "
-                          "archived_at, status) VALUES(?,?,?,?,?,?,?,'ok')",
+                          "archived_at, status) VALUES(?,?,?,?,?,?,?,?)",
                           (sid, k, self.encode(d), 1, 1 if live else 0, mtime,
-                           mtime if dirn == "arhiva" else None))
+                           mtime if dirn == "arhiva" else None, "quarantined" if held else "ok"))
                 n = c.execute("UPDATE tx_files SET state='published' WHERE gen_id=? AND sid=? AND kind=? "
                               "AND dev=? AND ino=? AND state='created'",
                               (g.gen_id.hex(), sid, k, g.dev, g.ino)).rowcount

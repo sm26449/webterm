@@ -279,6 +279,12 @@ async def statuses():
     return {(r["sid"], r["kind"]): r["status"] for r in await db.fetchall("SELECT sid, kind, status FROM tx_descriptors")}
 
 
+async def set_marker(st, mark):
+    """The continuity marker as a restore would have written it (threshold / known heads)."""
+    await st.txn(lambda c: er._set_json(c, "continuity", mark))
+    er._s.continuity = mark
+
+
 async def unquarantine_all():
     await db.execute("UPDATE tx_descriptors SET status='ok' WHERE status='quarantined'")
     await db.execute("DELETE FROM tx_quarantine")
@@ -575,9 +581,51 @@ def g_freshness():
         p = er.parse(data, K, INST) if data else None
         return er.DestResult(did, True, p, data)
 
-    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j4)
-    check("J_v of the same installation, longer → proven (volume), J* = J_v",
+    def live(j, att=None):
+        return er.Live("same", er.parse(j, K, INST).head, att or {})
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j4, live=live(j4))
+    check("J_v of the same installation, longer, holding the live head → proven (volume), J* = J_v",
           d.state == "proven" and d.proof == "volume" and d.head.n == 4 and d.journal == j4)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j4)
+    check("H1: J_v without the live database's head (unknown) → not a proof", d.proof == "none")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j3, live=live(j4))
+    check("H1: J_v cleanly shortened below the live committed head (n=4 → 3) → no proof, threshold unmet",
+          d.state == "unproven" and d.proof == "none" and d.short and d.threshold.n == 4 and d.head.n == 3)
+    t3 = bytearray(j3)
+    t3[er.prefix_len(3) - 1] ^= 1
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=bytes(t3), live=live(j3))
+    check("H1: a COMMITTED entry with a bad MAC is never a valid prefix → no proof",
+          d.proof == "none" and d.short)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=bytes(t3), live=live(j2))
+    check("H1: a bad entry AFTER the committed head is a crash tail (boot rule) → proof by the volume",
+          d.proof == "volume" and d.head.n == 2)
+    fork_live = er.Live("same", er.parse(build(ents[:1] + [(5555, bytes([5] * 16), 2, bytes(32))]), K, INST).head)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j3, live=fork_live)
+    check("H1: J_v whose entry at the live head differs (fork vs the DB) → no proof", d.proof == "none" and d.short)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j3, live=er.Live("bad"))
+    check("H1: live database unreadable → no threshold known → no proof", d.proof == "none")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j3, live=live(j2, {"gone": 3}))
+    check("M1: the live database's attested heads are merged (n > J* stays an obligation)",
+          d.known.get("gone") == 3 and d.proof == "volume")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=None, live=live(j2, {"gone": 3}),
+                          dest_results=[dest("a", j2)], required_dests={"a"})
+    check("M1: …and block a destination proof while that destination does not answer", d.proof == "none")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, dest_results=[dest("a", None)],
+                          required_dests={"a"})
+    check("M1: a reachable destination with an EMPTY listing never proves", d.proof == "none" and d.state == "unproven")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, dest_results=[dest("a", j3)],
+                          required_dests={"a"}, live=live(j4))
+    check("M1: a destination below the live threshold (3 < 4) → no proof", d.proof == "none" and d.short)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=None, tracked=True, dest_results=[dest("a", j3)],
+                          required_dests={"a"}, known_attested={}, live=er.Live("same", er.EMPTY_HEAD), mode="prove")
+    check("M1: proving later, a destination nobody knew to hold anything (our own upload) proves nothing",
+          d.proof == "none")
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=None, tracked=True, dest_results=[dest("a", j3)],
+                          required_dests={"a"}, known_attested={"a": 3}, live=er.Live("same", er.EMPTY_HEAD),
+                          mode="prove")
+    check("M1: …one known at the restore to hold n=3 that still does → proof", d.proof == "destinations")
+    check("summary carries the threshold and the merged known heads",
+          set(d.summary(1)) == {"state", "proof", "since", "n", "threshold", "known"} and d.summary(1)["known"] == {"a": 3})
     d = er.decide_restore(k_erase=K, inst=INST, j_b=j3, tracked=True, dest_results=[dest("a", j2)],
                           required_dests={"a"}, known_attested={"a": 3})
     check("stale authentic head (n=2) where a source recorded 3 → rolled back, no proof; never overrides",
@@ -613,9 +661,24 @@ def g_freshness():
     d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=build(ents[:1], inst=bytes(16)))
     check("J_v of another installation → not a candidate, not proof", d.proof == "none" and d.head.n == 2)
     out, proven, head = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j3, live_journal=j4,
-                                           stage_summary={"state": "proven", "proof": "volume"})
+                                           stage_summary={"state": "proven", "proof": "volume"},
+                                           threshold=er.parse(j4, K, INST).head, live_ok=True)
     check("apply: an erasure made between stage and apply (J_v longer) is kept, nothing shorter published",
           out is None and proven and head.n == 4)
+    out, proven, head = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j2, live_journal=j3,
+                                           stage_summary={"state": "proven", "proof": "volume"},
+                                           threshold=er.parse(j4, K, INST).head, live_ok=True)
+    check("H1 apply: the live DB head moved to 4 but J_v holds 3 → not proven (re-checked under the lock)",
+          not proven and out is None and head.n == 3)
+    out, proven, head = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j3, live_journal=j3,
+                                           stage_summary={"state": "proven", "proof": "volume"},
+                                           threshold=er.parse(j3, K, INST).head, live_ok=False)
+    check("H1 apply: the live database not of this installation / unreadable → not proven", not proven)
+    out, proven, head = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j3, live_journal=None,
+                                           stage_summary={"state": "proven", "proof": "destinations"},
+                                           threshold=er.EMPTY_HEAD, live_ok=True)
+    check("M1 apply: a stage proof by destinations is not re-verifiable at boot → never lifts the quarantine",
+          not proven and out == j3)
     out, proven, head = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j3, live_journal=None,
                                            stage_summary={"state": "proven", "proof": "volume"})
     check("apply: J_v gone since the stage → J* published, no proof any more", out == j3 and not proven)
@@ -774,8 +837,11 @@ def g_backup_restore():
               info.get("erasure") == "proven" and info.get("erasure_proof") == "destinations", info)
         backup.apply_pending_restore(keys=hk)
         hk = reopen(hk)
-        check("…J* (n=3, from the destination) becomes the volume journal, no quarantine marker",
-              (config.DATA_DIR / er.JOURNAL_NAME).read_bytes() == j3 and tx_state("continuity") is None)
+        cont = tx_state("continuity") or {}
+        check("…J* (n=3, from the destination) becomes the volume journal; M1: the proof is re-verified live "
+              "by the janitor (marker kept, with what it must reach)",
+              (config.DATA_DIR / er.JOURNAL_NAME).read_bytes() == j3 and cont.get("state") == "unproven"
+              and cont.get("known", {}).get(d.id) == 3 and cont.get("n") == 3, cont)
         # divergenţă la stage
         fork = build(ents[:1] + [(7777, bytes([7] * 16), 1, bytes(32))])
         (config.DATA_DIR / er.JOURNAL_NAME).write_bytes(fork)
@@ -819,6 +885,110 @@ def g_backup_restore():
         hk_inv = ts.inventory(config.DATA_DIR, config.DB_PATH)
         check("shared inventory names the journal and the tx state", "erasures.wtj" in hk_inv
               and "tx_state.erasure_head" in hk_inv and "tx_descriptors" in hk_inv, hk_inv)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
+class _Crash(Exception):
+    pass
+
+
+def _crash_at(step):
+    def f(name):
+        if name == step:
+            raise _Crash(name)
+    return f
+
+
+def g_h1_restore():
+    print("== H1: restore against the live committed head (stage AND apply) ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-h1")
+        ents = [(2000 + i, s, 3, bytes(32)) for i, s in enumerate(sids(4))]
+        j1, j2, j3 = build(ents[:1]), build(ents[:2]), build(ents[:3])
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1, descs=["ef" * 16])
+        jp.write_bytes(j1)
+        blob = backup.make_encrypted(PASS, keys=hk)            # backup la n=1
+        # după backup: ştergerea n=2 comisă (jurnal + DB)
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        h2 = er.parse(j2, K, INST).head
+        # (a) jurnalul viu pierde CURAT intrarea 2 (prefixul 1 e compatibil cu backup-ul)
+        jp.write_bytes(j1)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("cleanly shortened live journal (DB head n=2, journal n=1) → stage says unproven",
+              info.get("erasure") == "unproven" and info.get("erasure_proof") == "none", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…apply: quarantine + the threshold (n=2, its MAC) kept in the continuity marker",
+              cont.get("state") == "unproven" and cont.get("threshold", {}).get("n") == 2
+              and cont["threshold"]["mac"] == h2.mac.hex() and cont.get("n") == 1, cont)
+        # (b) intrarea comisă n=2 cu MAC stricat: stage şi apply decid la fel
+        set_head(config.DB_PATH, j2)
+        t = bytearray(j2)
+        t[-1] ^= 1
+        jp.write_bytes(bytes(t))
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("committed entry with a bad MAC → never a valid prefix: stage unproven",
+              info.get("erasure") == "unproven", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…apply (same criterion): unproven, threshold n=2", cont.get("threshold", {}).get("n") == 2, cont)
+        # (c) cădere DUPĂ publicarea jurnalului: reluarea nu face din jurnalul publicat o dovadă
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j1)
+        d = FakeDest("sftp:u@h:22/h1")
+
+        def fetch(k, inst):
+            return [er.DestResult(d.id, True, er.parse(j3, k, inst), j3)], [d.id]
+        info = backup.stage_restore(blob, PASS, keys=hk, erasure_fetch=fetch)
+        check("a destination holding n=3 (beyond the live head) → stage proven by destinations",
+              info.get("erasure_proof") == "destinations", info)
+        backup._fault = _crash_at("apply:erasure-journal")
+        try:
+            crashed = raises(lambda: backup.apply_pending_restore(keys=hk), _Crash)
+        finally:
+            backup._fault = None
+        check("crash right after the journal publication (volume journal = J*, n=3)",
+              crashed and jp.read_bytes() == j3)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…resume: the journal WE published is not J_v → still unproven, threshold from the flag",
+              cont.get("state") == "unproven" and cont.get("threshold", {}).get("n") == 2
+              and cont.get("known", {}).get(d.id) == 3, cont)
+        # (d) dovedit de volum, cădere după DB: reluarea păstrează dovada (jurnalul atinge pragul)
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("journal holding the live head → stage proven by the volume",
+              info.get("erasure_proof") == "volume", info)
+        backup._fault = _crash_at("apply:db")
+        try:
+            raises(lambda: backup.apply_pending_restore(keys=hk), _Crash)
+        finally:
+            backup._fault = None
+        check("…crash after the DB copy: the live DB is now the restored one (head n=1)",
+              (tx_state("erasure_head") or {}).get("n") == 1)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        check("…resume: proven from the flag and re-checked on the journal left (n=2 ≥ threshold) → no marker",
+              tx_state("continuity") is None and jp.read_bytes() == j2)
+        # (e) ştergere comisă ÎNTRE stage şi apply, cu jurnalul pierzând-o: apply o vede
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        set_head(config.DB_PATH, j3)                 # capul DB-ului viu avansează la 3 ...
+        jp.write_bytes(j2)                           # ... dar jurnalul n-o mai are
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("live head advanced after stage but missing from J_v → apply (re-checked under the lock) unproven",
+              info.get("erasure_proof") == "volume" and cont.get("threshold", {}).get("n") == 3, (info, cont))
     finally:
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
@@ -892,6 +1062,10 @@ async def g_recovery(st, c, uid, host_id, keep):
           and await er.try_prove(st) is False and er.continuity() is not None)
     d.fail = False
     await er.attest_once(st)
+    check("M1: a destination only WE uploaded to after the restore (nothing known of it) proves nothing",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    n_now = er._s.parsed.n
+    await set_marker(st, {"state": "unproven", "since": since, "n": n_now, "known": {d.id: n_now}})
     ok = await er.try_prove(st)
     s = await statuses()
     check("every destination proves the head → continuity quarantine lifted, journal quarantine kept",
@@ -901,6 +1075,86 @@ async def g_recovery(st, c, uid, host_id, keep):
     return st
 
 
+def _extend(journal, sid, t_ms=7000):
+    """`journal` + one authentic entry (another host of the same dataset erasing `sid`)."""
+    p = er.parse(journal, K, INST)
+    return journal + er.encode_entry(K, INST, p.head.mac, p.n + 1, t_ms, sid, 3, bytes(32))
+
+
+async def _until_waiting(task, rounds=50):
+    for _ in range(rounds):
+        await asyncio.sleep(0.01)
+        if task.done():
+            return False
+    return True
+
+
+async def g_prove_race(st, host_id):
+    print("== H3: proof later, under the barrier, against concurrent erasures ==")
+    d = FakeDest("sftp:u@h:22/race")
+    DESTS[:] = [d]
+    cur = journal_path().read_bytes()
+    n0 = er.parse(cur, K, INST).n
+    x = bytes([0x42] * 16)
+    old = _extend(cur, x)                              # gazda veche a şters x după restore-ul nostru
+    d.objs[er.object_name(INST, n0 + 1)] = old
+    rec, _ = await make_rec(st, host_id)
+    await st.txn(lambda c: er._quarantine_all_sync(c, "continuity", time.time()))
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n0, "known": {d.id: n0 + 1}})
+    async with st.barrier:
+        task = asyncio.ensure_future(er.try_prove(st))
+        waiting = await _until_waiting(task)
+    ok = await task
+    check("barrier busy: try_prove waits for it, then adopts the destination's longer chain",
+          waiting and ok and journal_path().read_bytes() == old and x.hex() in st.tombstoned
+          and er.continuity() is None and er._s.head_db.n == n0 + 1
+          and (await head_db())["n"] == n0 + 1 and (await statuses())[(rec, "out")] == "ok")
+    # ştergere concurentă ÎNAINTE de adoptare: ramura destinaţiei nu o conţine → fork, nimic adoptat
+    cur = journal_path().read_bytes()
+    n1 = er.parse(cur, K, INST).n
+    y = bytes([0x43] * 16)
+    d.objs[er.object_name(INST, n1 + 1)] = _extend(cur, y)
+    victim, _ = await make_rec(st, host_id)
+    await st.txn(lambda c: er._quarantine_all_sync(c, "continuity", time.time()))
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n1, "known": {d.id: n1 + 1}})
+    async with st.barrier:
+        erase_t = asyncio.ensure_future(er.erase(st, victim))
+        e_wait = await _until_waiting(erase_t)
+        prove_t = asyncio.ensure_future(er.try_prove(st))
+        p_wait = await _until_waiting(prove_t)
+    res = await erase_t
+    ok = await prove_t
+    after = er.parse(journal_path().read_bytes(), K, INST)
+    check("concurrent erasure first, then try_prove: fork detected under the barrier → nothing adopted",
+          e_wait and p_wait and res["erased"] and ok is False and after.n == n1 + 1
+          and after.entries[-1].sid_hex == victim and y.hex() not in st.tombstoned, (ok, after.n))
+    check("…the local tombstone survives, the quarantine stays, the conflict is reported",
+          victim in st.tombstoned and er.continuity() is not None and er.health_has("erasure_conflict"))
+    check("erase answers `destroyed` once the DB step committed (not just journalled)", res.get("state") == "destroyed")
+    er._s.conflict = ""
+    await st.txn(lambda c: c.execute("DELETE FROM tx_state WHERE key='continuity'"))
+    er._s.continuity = None
+    await unquarantine_all()
+    # M1: un obiect atestat care a dispărut între timp se încarcă din nou
+    d2 = FakeDest("sftp:u@h:22/vanish")
+    DESTS[:] = [d2]
+    await er.attest_once(st)
+    name = er._s.attested[d2.id]["name"]
+    del d2.objs[name]
+    er._s.dests[d2.id]["verified"] = 0
+    out = await er.attest_once(st)
+    check("M1: the attested object vanished → re-checked hourly, uploaded again, attested",
+          out[d2.id] == "ok" and name in d2.objs and er._s.dests[d2.id]["state"] == "ok")
+    puts = d2.puts
+    er._s.dests[d2.id]["verified"] = 0
+    d2.fail = True
+    out = await er.attest_once(st)
+    check("…an unreachable destination at the re-check keeps its state (no false alarm, no re-upload)",
+          out[d2.id] == "ok" and d2.puts == puts)
+    d2.fail = False
+    DESTS[:] = []
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
@@ -908,6 +1162,7 @@ async def main():
     g_codec()
     g_freshness()
     g_backup_restore()
+    g_h1_restore()
     config.ensure_dirs()
     security.init_crypto(config.load_secret())
     await db.connect()
@@ -928,6 +1183,7 @@ async def main():
         await g_attest(st, host_id)
         DESTS[:] = []
         st = await g_recovery(st, c, uid, host_id, keep)
+        await g_prove_race(st, host_id)
     finally:
         await txhub.shutdown()
         await db.close()

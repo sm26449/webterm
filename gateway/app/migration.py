@@ -32,7 +32,8 @@ Active only with encrypted recordings on (`txhub.boot` → `boot(st)` after the 
   unlink (the journal entry is the intent), row → `unlinked` with `error = erased`.
 * **Global flag**: `tx_state.recordings_format = wtx1` once no row is `pending`, `orphan`, `failed`
   or `converted` (stricter than §12.11.5, which names only pending/failed: a converted row still has
-  its plaintext on disk); then an empty `arhiva/` is removed.
+  its plaintext on disk) AND a residual inventory under the Store barrier finds no plaintext name
+  and no unexplained private name; then an empty `arhiva/` is removed.
 * **Health** (`status`): migrated n / N, bytes left, one-kind, orphans, failed, stray plaintext (a
   file that appeared after the inventory: never served), leftover private names, last error.
 """
@@ -75,6 +76,7 @@ class _State:
     last_error: str = ""
     stray: list = field(default_factory=list)
     leftovers: list = field(default_factory=list)
+    format_block: str = ""        # M2: de ce nu e publicat recordings_format (rows | residual | leftovers)
 
 
 _s = _State()
@@ -264,12 +266,40 @@ async def _unlink_step(st, sid, kind, dirn, name, ident, pin_fd, *, ok_error=Non
 
 async def _absent(st, sid, kind, dirn, ident, *, ok_error=None):
     """The plaintext is not under its name any more (crash after the rename or after unlinkat):
-    a private name holding exactly the row's identity is unlinked; the row → unlinked."""
+    a private name holding exactly the row's identity is unlinked; the row → unlinked.
+
+    M2: otherwise "verified absent" (no private name at all: the row → unlinked with error
+    `absent`) is told apart from a CONFLICT (a private name with another identity is there: we
+    cannot say where the plaintext went → `failed`, the Owner resolves it; the global format flag
+    stays down). The identity check assumes no other process with write access to the directory
+    races us, and an unlink never removes copies made elsewhere (backups, snapshots)."""
+    other = False
     for priv in await st.io(st.list_private_sync, dirn):
-        if await st.io(st.unlink_held_sync, dirn, priv, ident) == "unlinked":
-            break
-    await _set_row(st, sid, kind, "unlinked", ok_error)
-    return "unlinked"
+        res = await st.io(st.unlink_held_sync, dirn, priv, ident)
+        if res == "unlinked":
+            await _set_row(st, sid, kind, "unlinked", ok_error)
+            return "unlinked"
+        other = other or res == "other"
+    if other:
+        await _fail(st, sid, kind, "conflict: gone from its name while a private name holds another file",
+                    "transcript.migrationUnlink")
+        return "failed"
+    await _set_row(st, sid, kind, "unlinked", ("%s; absent" % ok_error) if ok_error else "absent")
+    return "absent"
+
+
+def physical_outcome(r) -> str:
+    """What happened to a row's plaintext on disk: unlinked (identity-checked delete) | absent
+    (verified gone: neither under its name nor under a private name) | kept (still on disk, retried
+    later: backup pin, no renameat2, pending) | failed (identity changed / conflict: still there)."""
+    state, err = r["state"], r.get("error") or ""
+    if state == "unlinked":
+        return "absent" if err.endswith("absent") else "unlinked"
+    if state == "missing":
+        return "absent"
+    if state == "failed":
+        return "failed"
+    return "kept"
 
 
 def _ident(r):
@@ -601,14 +631,40 @@ async def _scan(st):
 
 
 async def maybe_publish_format(st):
-    """`recordings_format = wtx1` once nothing is pending, orphan, failed or converted."""
-    def fn(c):
-        if c.execute("SELECT 1 FROM tx_migration WHERE state IN ('pending','orphan','failed','converted') "
-                     "LIMIT 1").fetchone():
-            return False
-        c.execute("INSERT OR IGNORE INTO tx_state(key, value) VALUES('recordings_format', 'wtx1')")
-        return True
-    done = await st.txn(fn)
+    """`recordings_format = wtx1` once nothing is pending, orphan, failed or converted AND (M2) a
+    residual inventory taken now finds nothing: no plaintext name outside the inventory, no
+    private `.wt-del-*` name nobody explains. The listing and the publication run under the
+    Store's barrier (no conversion, erasure, backup step 1 or writer ledger commit in between: the
+    only processes that create names under `transcripts/` while the gateway runs) and inside ONE
+    transaction with the row check. A residue blocks the flag until the Owner resolves it
+    (`_s.format_block` names why; System health lists stray / leftovers)."""
+    async with st.barrier:
+        if await st.read(lambda c: c.execute(
+                "SELECT value FROM tx_state WHERE key='recordings_format'").fetchone()) is not None:
+            _s.format_block = ""
+            return True
+        entries = await st.io(list_plain_sync, st)
+        left = []
+        for d in ("transcripts", "arhiva"):
+            left += ["%s/%s" % (d, n) for n in await st.io(st.list_private_sync, d)]
+
+        def fn(c):
+            if c.execute("SELECT 1 FROM tx_migration WHERE state IN ('pending','orphan','failed','converted') "
+                         "LIMIT 1").fetchone():
+                return "rows"
+            # niciun rând activ: orice nume listat e text clar rezidual (apărut după inventar)
+            if entries:
+                return "residual"
+            if left:
+                return "leftovers"
+            c.execute("INSERT OR IGNORE INTO tx_state(key, value) VALUES('recordings_format', 'wtx1')")
+            return ""
+        why = await st.io(st._run_txn, fn)
+    _s.format_block = why
+    if why in ("residual", "leftovers"):
+        st.alarm("transcript.migrationResidual", "recordings_format held back: %s (%s)" % (
+            why, ", ".join(["%s/%s" % (e["dir"], e["name"]) for e in entries][:3] or left[:3])))
+    done = not why
     if done:
         with contextlib.suppress(OSError):
             os.rmdir("arhiva", dir_fd=st.dir_fd)      # doar dacă e gol
@@ -682,5 +738,6 @@ async def status():
         "stray": len(_s.stray),
         "leftovers": len(_s.leftovers),
         "error": (err[0] if err else "") or _s.last_error,
+        "format_block": _s.format_block,
         "failed_sids": await failed_sessions(st),
     }

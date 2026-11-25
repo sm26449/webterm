@@ -569,6 +569,68 @@ async def g_socket(st, hk):
     finally:
         ctlsock._s.worker = None
         gate.set()
+    # M3: două conexiuni care cer start în ACELAŞI timp, cât estimarea de spaţiu (primul await)
+    # durează: slotul se ia sincron, deci exact una trece; slotul se eliberează după worker
+    saved_est = ctlsock._estimate
+    calls = {"n": 0, "workers": 0}
+
+    def slow_est():
+        calls["n"] += 1
+        time.sleep(0.3)
+        return 0
+
+    def quick(f, include, cancel):
+        calls["workers"] += 1
+        f.write(b"x")
+    ctlsock._estimate = slow_est
+    ctlsock._s.worker = quick
+    try:
+        start = {"v": 1, "op": "snapshot.start", "id": 1, "profile": "portable", "recordings": "none"}
+        s1 = await asyncio.to_thread(raw_conn, path)
+        s2 = await asyncio.to_thread(raw_conn, path)
+        await asyncio.gather(asyncio.to_thread(send, s1, start), asyncio.to_thread(send, s2, start))
+        a1, a2 = await asyncio.gather(asyncio.to_thread(recv, s1), asyncio.to_thread(recv, s2))
+        codes = sorted(str((a or {}).get("code")) for a in (a1, a2))
+        check("M3: two concurrent starts during the space estimate → exactly one admitted, the other busy",
+              codes.count("backup.busy") == 1 and calls["n"] == 1 and calls["workers"] == 1, (a1, a2, calls))
+        s1.close()
+        s2.close()
+        for _ in range(100):
+            if ctlsock._s.inflight is None and not spool_files():
+                break
+            await asyncio.sleep(0.01)
+        check("…the slot is free again once the worker finished, nothing spooled",
+              ctlsock._s.inflight is None and spool_files() == [])
+        # deconectare în faza de estimare: slotul se eliberează, niciun spool, niciun worker
+        calls.update(n=0, workers=0)
+        s1 = await asyncio.to_thread(raw_conn, path)
+        await asyncio.to_thread(send, s1, start)
+        await asyncio.sleep(0.05)
+        held = ctlsock._s.inflight is not None
+        s1.close()
+        for _ in range(100):
+            if ctlsock._s.inflight is None and calls["n"] == 1:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.4)
+        check("M3: disconnect during the estimate → slot held during it, released after, no spool",
+              held and ctlsock._s.inflight is None and spool_files() == [], (held, calls, spool_files()))
+        # buget agregat: spool-urile gata + estimarea peste partea permisă din disc → noSpace, slot liber
+        saved_share = ctlsock.SPOOL_SHARE
+        ctlsock.SPOOL_SHARE = 0.0
+        ctlsock._estimate = lambda: 1
+        try:
+            s1 = await asyncio.to_thread(raw_conn, path)
+            await asyncio.to_thread(send, s1, start)
+            a1 = await asyncio.to_thread(recv, s1)
+            s1.close()
+        finally:
+            ctlsock.SPOOL_SHARE = saved_share
+        check("M3: aggregate spool budget exceeded → backup.noSpace, the slot released",
+              a1 and a1.get("code") == "backup.noSpace" and ctlsock._s.inflight is None, a1)
+    finally:
+        ctlsock._estimate = saved_est
+        ctlsock._s.worker = None
     # spool gata, necitit: expiră
     c = await asyncio.to_thread(ctlsock.Client, path)
     try:
@@ -656,6 +718,75 @@ async def g_purge(st):
         sql("DELETE FROM tx_migration WHERE sid=?", mig)
     finally:
         txhub._store = None
+
+
+# ── 5b. H2: the cohort of a restore without proof ───────────────────────────
+
+
+async def refused_with(coro, reason):
+    try:
+        r = await coro
+    except ts.TxStoreError as e:
+        return e.reason == reason
+    if hasattr(r, "close"):
+        r.close()
+    return False
+
+
+async def g_h2_cohort(st, hk):
+    print("== H2: restore without proof quarantines the whole cohort, pending plaintext included ==")
+    e, e_out, _ec, _ = await make_rec(st, chunks=2)
+    p = os.urandom(16).hex()
+    p_out = os.urandom(600)
+    (config.TRANSCRIPT_DIR / (p + ".out")).write_bytes(p_out)
+    (config.TRANSCRIPT_DIR / (p + ".cast")).write_bytes(CAST_HDR)
+    sql("INSERT INTO sessions(id, host_id, title, state, created, rows, cols, closed_at) VALUES(?,?,?,?,?,?,?,?)",
+        p, 1, "t", "closed", time.time(), 24, 80, time.time())
+    for kind in ("out", "cast"):
+        f = os.stat(config.TRANSCRIPT_DIR / ("%s.%s" % (p, kind)))
+        sql("INSERT INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state) "
+            "VALUES(?,?,?,?,?,?,?,?,'pending')", p, kind, "transcripts", "%s.%s" % (p, kind),
+            f.st_dev, f.st_ino, f.st_size, f.st_mtime_ns)
+    sql("INSERT OR REPLACE INTO tx_state(key, value) VALUES('migration_inventory', '1')")   # inventarul a rulat
+    check("before: the pending plaintext is served (inventoried, identical)", await read_all(st, p) == p_out)
+    blob = await backup_blob(hk)
+    _mem, man = archive(blob, hk)
+    r = recs_of(man)
+    check("mixed archive: an encrypted pair (included) and a pending plaintext (legacy)",
+          r.get((e, "out"), ("",))[0] == "included" and r.get((p, "out"), ("",))[0] == "legacy", r)
+    await close_store(st)
+    os.unlink(config.DATA_DIR / er.JOURNAL_NAME)       # alt host: fără jurnal, fără destinaţie
+    hk = apply(blob, hk)
+    remark()
+    q = set(sql("SELECT sid, kind FROM tx_quarantine WHERE reason='continuity'"))
+    check("restore without proof: the cohort (descriptors AND plaintext without a descriptor) in tx_quarantine",
+          {(p, "out"), (p, "cast"), (e, "out"), (e, "cast")} <= q, q)
+    st = await open_store()
+    await mg.boot(st)
+    check("read BEFORE migration: the pending plaintext is refused (quarantined), so is the encrypted pair",
+          await refused_with(read_all(st, p), "quarantined") and await refused_with(read_all(st, e), "quarantined"))
+    await mg.run_once(st)
+    stat_p = dict(sql("SELECT kind, status FROM tx_descriptors WHERE sid=?", p))
+    check("migration converts it into a descriptor that stays quarantined; plaintext unlinked",
+          stat_p == {"out": "quarantined", "cast": "quarantined"}
+          and not (config.TRANSCRIPT_DIR / (p + ".out")).exists(), stat_p)
+    check("read AFTER migration: still refused", await refused_with(read_all(st, p), "quarantined"))
+    check("writer start for a cohort member → refused",
+          await refused_with(st.start_recorder(p, track_agent=False), "quarantined"))
+    await er.recover(st, p)
+    snap = await st.open(p, "out", access=st.access(p, "t", ts.OWNER_RECOVERY_ROUTE, owner_recovery=True))
+    try:
+        got = await snap.read(0, snap.length)
+    finally:
+        snap.close()
+    await er.release(st, p)
+    check("explicit Owner recovery → release: the same bytes, served normally",
+          got == p_out and await read_all(st, p) == p_out
+          and not sql("SELECT 1 FROM tx_quarantine WHERE sid=?", p))
+    await er.recover(st, e)
+    await er.release(st, e)
+    sql("DELETE FROM tx_state WHERE key='continuity'")
+    return st, hk
 
 
 # ── 6. 3.7 archive onto a migrated volume ───────────────────────────────────
@@ -756,6 +887,7 @@ async def main():
     await g_concurrent(st, hk)
     await g_socket(st, hk)
     await g_purge(st)
+    st, hk = await g_h2_cohort(st, hk)
     await g_legacy_onto_migrated(st, hk)
 
 

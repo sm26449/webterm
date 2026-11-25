@@ -565,6 +565,50 @@ async def g_flag(st):
     return st
 
 
+async def g_residual(st):
+    print("== M2: residual inventory before the global flag; verified absent vs conflict ==")
+    await wipe()
+    sid = sid_new()
+    pair(TD, sid)
+    await add_session(sid, "closed")
+    st = await reboot(st)
+    late = sid_new()
+    write(TD, late + ".out", b"appeared after the inventory")
+    await mg.run_once(st)
+    fmt = await db.fetchone("SELECT value FROM tx_state WHERE key='recordings_format'")
+    check("plaintext that appeared after the inventory → recordings_format held back (residual)",
+          fmt is None and mg._s.format_block == "residual" and (await mg.status())["format_block"] == "residual"
+          and await state(sid, "out") == "unlinked")
+    os.remove(os.path.join(TD, late + ".out"))
+    write(TD, ts.DEL_PREFIX + "feedbeef", b"unexplained private name")
+    await mg.run_once(st)
+    fmt = await db.fetchone("SELECT value FROM tx_state WHERE key='recordings_format'")
+    check("an unexplained private name → held back too (leftovers), never deleted",
+          fmt is None and mg._s.format_block == "leftovers" and ts.DEL_PREFIX + "feedbeef" in ls())
+    os.remove(os.path.join(TD, ts.DEL_PREFIX + "feedbeef"))
+    await mg.run_once(st)
+    fmt = await db.fetchone("SELECT value FROM tx_state WHERE key='recordings_format'")
+    check("…resolved → published", fmt and fmt["value"] == "wtx1" and mg._s.format_block == "")
+    # absent verificat vs conflict
+    a, b = sid_new(), sid_new()
+    for x in (a, b):
+        await db.execute("INSERT INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state) "
+                         "VALUES(?, 'out', 'transcripts', ?, 1, 2, 3, 4, 'converted')", x, x + ".out")
+    res = await mg._absent(st, a, "out", "transcripts", (1, 2, 3, 4))
+    r = (await rows())[(a, "out")]
+    check("gone from its name and no private name at all → verified absent (unlinked, error 'absent')",
+          res == "absent" and r["state"] == "unlinked" and r["error"] == "absent" and mg.physical_outcome(r) == "absent")
+    write(TD, ts.DEL_PREFIX + "0badc0de", b"someone else")
+    res = await mg._absent(st, b, "out", "transcripts", (1, 2, 3, 4))
+    r = (await rows())[(b, "out")]
+    check("…a private name holding ANOTHER file → conflict (failed), nothing deleted",
+          res == "failed" and r["state"] == "failed" and "conflict" in r["error"]
+          and ts.DEL_PREFIX + "0badc0de" in ls() and mg.physical_outcome(r) == "failed")
+    os.remove(os.path.join(TD, ts.DEL_PREFIX + "0badc0de"))
+    await db.execute("DELETE FROM tx_migration WHERE sid IN (?, ?)", a, b)
+    return st
+
+
 async def g_rules(st):
     print("== crash rules, erased sids, no renameat2 ==")
     await wipe()
@@ -722,6 +766,9 @@ async def g_owner_resolution(st, c, host_id, migrated):
     check("Owner discard: plaintext deleted (identity-checked), sid tombstoned in the journal, rows unlinked",
           r.status_code == 200 and r.json()["n"] == n0 + 1 and plain_present(f2) == [] and f2 in st.tombstoned
           and await state(f2, "out") == "unlinked" and await state(f2, "cast") == "unlinked", r.text)
+    check("…the answer says the journal entry is confirmed and the plaintext's PHYSICAL outcome per kind",
+          r.status_code == 200 and r.json().get("state") == "destroyed"
+          and r.json().get("plaintext") == {"out": "unlinked", "cast": "unlinked"}, r.text)
     await mg.at_writer_start(f2)
     check("…after the discard nothing blocks the session's writer", True)
     audit = await db.fetchall("SELECT detail FROM audit_log WHERE path LIKE '/api/recordings/migration/%' "
@@ -746,6 +793,7 @@ async def main():
         st = await g_crash(st)
         st = await g_unverified(st)
         st = await g_flag(st)
+        st = await g_residual(st)
         st = await g_rules(st)
         mg.reset()
         st.close()

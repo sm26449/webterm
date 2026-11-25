@@ -71,8 +71,12 @@ ATTEST_INTERVAL = 30.0
 ATTEST_BACKOFF_MAX = 1800.0
 PROVE_INTERVAL = 600.0
 FETCH_MAX_OBJECTS = 4                            # câte obiecte (cele mai noi) se încearcă per destinaţie
+PROVE_MAX_OBJECTS = 64                           # try_prove: toate obiectele de după restore, cel mult atâtea
+REVERIFY_INTERVAL = 3600.0                       # un read-back vechi nu dovedeşte că obiectul mai există azi
+KNOWN_MAX = 64                                   # destinaţii ţinute în pragurile unui restore
 
 _OBJ_RE = re.compile(r"^([0-9a-f]{32})\.erasures\.([0-9a-f]{16})(?:\.([0-9a-f]{8,32}))?\.wtj$")
+_PLAIN_NAME = re.compile(r"^([0-9a-f]{32})\.(out|cast)$")
 _RD = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 
@@ -138,6 +142,64 @@ class Head:
 
 
 EMPTY_HEAD = Head(0, 0, ZERO_MAC)
+
+
+def reaches(p, t):
+    """True when the authentic prefix `p` (Parsed or None) holds the committed head `t` (same n,
+    same MAC). An empty threshold is reached by anything, a missing journal by nothing else."""
+    if t.n == 0:
+        return True
+    return p is not None and p.n >= t.n and hmac.compare_digest(p.entries[t.n - 1].mac, t.mac)
+
+
+def known_from_json(doc):
+    """{destination id: n} kept by a restore (staging summary, flag, continuity marker)."""
+    if type(doc) is not dict or len(doc) > KNOWN_MAX:
+        raise JournalError("bad-known")
+    for k, v in doc.items():
+        if type(k) is not str or not 0 < len(k) <= 512 or type(v) is not int or v < 0:
+            raise JournalError("bad-known")
+    return dict(doc)
+
+
+def merge_known(*sources):
+    """Per destination the highest head any source knows it holds (H1/M1: praguri îmbinate)."""
+    out = {}
+    for src in sources:
+        for d, n in (src or {}).items():
+            if type(d) is str and type(n) is int and n >= 0:
+                out[d] = max(out.get(d, 0), n)
+    if len(out) > KNOWN_MAX:
+        # fail closed: păstrăm pragurile cele mai mari (obligaţiile n > J* rămân)
+        out = dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0]))[:KNOWN_MAX])
+    return out
+
+
+@dataclass(frozen=True)
+class Live:
+    """What the LIVE volume's database says about the dataset being restored (H1): `state` =
+    same (same installation, erasure state readable) | foreign (another installation: nothing
+    of it applies) | none (no database) | bad (unreadable: no threshold known → no proof)."""
+    state: str
+    head: Head = EMPTY_HEAD
+    attested: dict = field(default_factory=dict)
+
+
+def live_state(db_path, live_inst, inst):
+    """`Live` of the database at `db_path` for installation `inst`, when the live keyring is
+    `live_inst`. Read BEFORE the live journal: an erasure appends the journal before it commits
+    the head, so a journal read afterwards is never behind the head read here."""
+    if live_inst is None or not hmac.compare_digest(bytes(live_inst), bytes(inst)):
+        return Live("foreign")
+    if not os.path.exists(str(db_path)):
+        return Live("none")
+    try:
+        head, att, _ids = staged_state(db_path)
+    except (JournalError, sqlite3.Error, OSError):
+        return Live("bad")
+    known = {d: v["n"] for d, v in att.items()
+             if type(d) is str and isinstance(v, dict) and type(v.get("n")) is int and v["n"] >= 0}
+    return Live("same", head or EMPTY_HEAD, merge_known(known))
 
 
 @dataclass
@@ -641,13 +703,16 @@ async def _journal_and_destroy(st, sid, kinds, env, clock):
         raise ErasureError("transcript.erasureUncertain",
                            "the erasure was journalled but not completed; restart the gateway",
                            503) from None
-    if gens is None:
+    confirmed = gens is not None
+    if not confirmed:
+        # Observaţie PR6: COMMIT incert = durabil în jurnal, distrugerea în DB neconfirmată; boot-ul
+        # o re-aplică. Ruta spune asta explicit (nu „distrus").
         gens = []
         s.uncertain = "commit-uncertain"
-    else:
+    elif s.head_db.n < n:
         s.head_db = Head(n, t_ms, e.mac)
     st._fault("erase-committed")
-    return n, gens
+    return n, gens, confirmed
 
 
 async def erase(st, sid, *, clock=time.time):
@@ -675,11 +740,12 @@ async def erase(st, sid, *, clock=time.time):
                                    "this recording is not migrated yet; it cannot be erased", 409)
             if env is None and not kinds:
                 raise ErasureError("transcript.missing", "no recording for this session", 404)
-            n, gens = await _journal_and_destroy(st, sid, kinds, env, clock)
+            n, gens, confirmed = await _journal_and_destroy(st, sid, kinds, env, clock)
         for hexid, kind in gens:
             await st.retire(sid, kind, hexid)
     _kick()
-    return {"erased": True, "n": n, "attested": await attested_everywhere(n)}
+    return {"erased": True, "n": n, "state": "destroyed" if confirmed else "journalled",
+            "attested": await attested_everywhere(n)}
 
 
 def _ready_or_raise(st, sid):
@@ -720,21 +786,28 @@ async def discard_failed(st, sid, *, clock=time.time):
                                                  (sid,)).fetchall()])
             env, kinds = await st.read(load)
             kinds = sorted(set(kinds) | {r["kind"] for r in rows})
-            n, gens = await _journal_and_destroy(st, sid, kinds, env, clock)
+            n, gens, confirmed = await _journal_and_destroy(st, sid, kinds, env, clock)
         for hexid, kind in gens:
             await st.retire(sid, kind, hexid)
         left = {}
         for r in await migration._rows(st, sid):
             if r["state"] in migration.WORK_STATES:
                 left[r["kind"]] = await migration._drop_erased(st, r)
+        # Observaţie PR6: rezultatul FIZIC al textului clar, per kind, distinct de tombstone:
+        # unlinked (ştergere verificată) | absent (nu mai era nici sub nume, nici sub un nume privat)
+        # | kept (amânat: pin de backup / fără renameat2) | failed (identitate schimbată: rămâne pe disc)
+        plain = {r["kind"]: migration.physical_outcome(r) for r in await migration._rows(st, sid)
+                 if r["kind"] in left}
     _kick()
-    return {"discarded": True, "n": n, "attested": await attested_everywhere(n), "kinds": left}
+    return {"discarded": True, "n": n, "state": "destroyed" if confirmed else "journalled",
+            "attested": await attested_everywhere(n), "kinds": left, "plaintext": plain}
 
 
 async def attested_everywhere(n):
     """True when every configured destination holds a head ≥ n (no destination → False)."""
     ds = await destinations()
-    return bool(ds) and all(_s.attested.get(d.id, {}).get("n", 0) >= n for d in ds)
+    return bool(ds) and all(_s.attested.get(d.id, {}).get("n", 0) >= n
+                            and (_s.dests.get(d.id) or {}).get("state") != "missing" for d in ds)
 
 
 def _kick():
@@ -757,12 +830,14 @@ def parse_object_name(name):
     return bytes.fromhex(m.group(1)), int(m.group(2), 16)
 
 
-async def _commit_attested(st, dest_id, head, name):
+async def _commit_attested(st, dest_id, head, name, *, again=False):
     def fn(c):
         cur = _get_json(c, "attested_heads") or {}
         if not isinstance(cur, dict):
             cur = {}
-        if cur.get(dest_id, {}).get("n", -1) < head.n:
+        old = cur.get(dest_id, {}).get("n", -1)
+        # `again`: acelaşi cap, încărcat din nou după ce obiectul a dispărut (numele se schimbă)
+        if old < head.n or (again and old == head.n):
             cur[dest_id] = {"n": head.n, "time": head.time_ms, "name": name}
             _set_json(c, "attested_heads", cur)
         return cur
@@ -785,11 +860,27 @@ async def attest_once(st=None, dests=None, clock=time.time):
     data = None
     for d in dests:
         rec = s.attested.get(d.id)
+        again = False
         if head.n == 0 or (rec and rec.get("n", 0) >= head.n):
-            out[d.id] = s.dests.get(d.id, {}).get("state", "ok") if head.n else "ok"
-            if head.n and out[d.id] != "rolled-back":
+            info = s.dests.get(d.id) or {}
+            # M1: un read-back reuşit cândva nu dovedeşte că obiectul mai există azi: din oră în
+            # oră lista destinaţiei trebuie să-l mai conţină, altfel se încarcă din nou
+            if head.n and rec and rec.get("name") and info.get("verified", 0) + REVERIFY_INTERVAL <= clock():
+                try:
+                    present = rec["name"] in set(await d.list())
+                except Exception as e:           # noqa: BLE001 — inaccesibilă: nu ştim, nu stricăm starea
+                    log.warning("erasure: cannot re-check %s: %s", d.id, type(e).__name__)
+                    present = None
+                if present is True:
+                    s.dests[d.id] = dict(info, state="ok", verified=clock())
+                elif present is False:
+                    log.warning("erasure n=%d: the attested object vanished from %s", rec.get("n", 0), d.id)
+                    s.dests[d.id] = {"state": "missing", "since": clock(), "error": "object-missing",
+                                     "next": 0, "tries": 0, "verified": 0}
+            if (s.dests.get(d.id) or {}).get("state") != "missing":
                 out[d.id] = "ok"
-            continue
+                continue
+            again = rec is not None and rec.get("n", 0) == head.n
         info = s.dests.get(d.id) or {}
         if info.get("next", 0) > clock():
             out[d.id] = info.get("state", "failing")
@@ -814,8 +905,9 @@ async def attest_once(st=None, dests=None, clock=time.time):
             p = parse(back, s.journal.k, st.inst)
             if p.n != head.n or p.bad or not hmac.compare_digest(p.head.mac, head.mac):
                 raise JournalError("readback-unauthentic")
-            s.attested = await _commit_attested(st, d.id, head, name)
-            s.dests[d.id] = {"state": "ok", "since": None, "error": "", "next": 0, "tries": 0}
+            s.attested = await _commit_attested(st, d.id, head, name, again=again)
+            s.dests[d.id] = {"state": "ok", "since": None, "error": "", "next": 0, "tries": 0,
+                             "verified": clock()}
             out[d.id] = "ok"
         except Exception as e:                   # noqa: BLE001 — o destinaţie căzută nu opreşte celelalte
             prevs = s.dests.get(d.id) or {}
@@ -823,49 +915,76 @@ async def attest_once(st=None, dests=None, clock=time.time):
             since = prevs.get("since") or clock()
             delay = min(ATTEST_BACKOFF_MAX, ATTEST_INTERVAL * (2 ** min(tries, 6)))
             err = getattr(e, "reason", "") or type(e).__name__
-            s.dests[d.id] = {"state": "failing", "since": since, "error": err, "next": clock() + delay,
-                             "tries": tries, "n": head.n}
-            out[d.id] = "failing"
+            keep = "missing" if prevs.get("state") == "missing" else "failing"
+            s.dests[d.id] = {"state": keep, "since": since, "error": err, "next": clock() + delay,
+                             "tries": tries, "n": head.n, "verified": 0}
+            out[d.id] = keep
             log.warning("erasure n=%d not attested on %s: %s", head.n, d.id, err)
     return out
 
 
-async def fetch_head(d, k_erase, inst):
+async def fetch_head(d, k_erase, inst, check_from=None):
     """The newest authentic journal a destination holds for `inst`: (Parsed, bytes) or None when it
-    holds none; raises on an unreachable destination. Objects are tried newest first."""
+    holds none; raises on an unreachable destination. Objects are tried newest first.
+
+    `check_from` (try_prove, H3/M1): EVERY object named above that n is read (at most
+    PROVE_MAX_OBJECTS, else JournalError) and all the authentic ones must lie on one chain
+    (ErasureConflict otherwise): after a restore our own uploads can be newer than the
+    attestation of the dataset we were restored from, and a fork with it must not hide."""
     names = []
     for n in await d.list():
         p = parse_object_name(n)
         if p is not None and p[0] == bytes(inst):
             names.append((p[1], n))
     names.sort(reverse=True)
-    for _n, name in names[:FETCH_MAX_OBJECTS]:
+    if check_from is None:
+        for _n, name in names[:FETCH_MAX_OBJECTS]:
+            try:
+                raw = bytes(await d.get(name))
+                p = parse(raw, k_erase, inst)
+            except JournalError:
+                continue
+            if p.bad or p.n != _n:
+                continue                              # neautentic sau nume minţit: nu e dovadă
+            return p, raw[:p.valid_len]
+        return None
+    above = [x for x in names if x[0] > check_from]
+    if len(above) > PROVE_MAX_OBJECTS:
+        raise JournalError("too-many", "too many journal objects to check")
+    pick = above + [x for x in names if x[0] <= check_from][:FETCH_MAX_OBJECTS]
+    got = []
+    for _n, name in pick:
         try:
             raw = bytes(await d.get(name))
             p = parse(raw, k_erase, inst)
         except JournalError:
             continue
         if p.bad or p.n != _n:
-            continue                              # neautentic sau nume minţit: nu e dovadă
-        return p, raw[:p.valid_len]
-    return None
+            continue
+        got.append((name, p, raw[:p.valid_len]))
+    if not got:
+        return None
+    best = _on_one_chain([(name, p) for name, p, _raw in got])
+    return next((p, raw) for name, p, raw in got if name == best[0])
 
 
 @dataclass
 class DestResult:
     id: str
     ok: bool                       # a răspuns (nimic sau un jurnal autentic)
-    parsed: Parsed = None
+    parsed: Parsed = None          # None = niciun jurnal autentic: o destinaţie GOALĂ nu e dovadă (M1)
     data: bytes = None
     error: str = ""
 
 
-async def fetch_all(dests, k_erase, inst):
+async def fetch_all(dests, k_erase, inst, check_from=None):
     out = []
     for d in dests:
         try:
-            got = await fetch_head(d, k_erase, inst)
+            got = await fetch_head(d, k_erase, inst, check_from)
             out.append(DestResult(d.id, True, got[0] if got else None, got[1] if got else None))
+        except ErasureConflict:
+            out.append(DestResult(d.id, False, error="conflict"))
         except Exception as e:                   # noqa: BLE001 — inaccesibilă = fără dovadă
             out.append(DestResult(d.id, False, error=getattr(e, "reason", "") or type(e).__name__))
     return out
@@ -910,19 +1029,34 @@ class Decision:
     head: Head = EMPTY_HEAD
     rolled_back: list = field(default_factory=list)
     unreachable: list = field(default_factory=list)
+    threshold: Head = EMPTY_HEAD    # capul comis al volumului viu (aceeaşi instalare): J* trebuie să-l atingă
+    known: dict = field(default_factory=dict)       # destinaţie → cap cunoscut (toate sursele + ce s-a văzut)
+    short: bool = False             # sursele NU ating pragul cunoscut (H1): fără dovadă
 
     def summary(self, since):
-        return {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n}
+        return {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n,
+                "threshold": self.threshold.to_json(), "known": dict(self.known)}
 
 
 def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_results=(),
-                   required_dests=(), known_attested=None):
+                   required_dests=(), known_attested=None, live=None, mode="stage"):
     """The restore's erasure decision. `j_b` = the backup's journal bytes (already checked against
     its manifest), `j_v` = the live volume journal bytes (None = absent), `dest_results` =
     `DestResult`s, `required_dests` = every destination id that must answer for a proof (configured
     in the staged DB, on this host, or named by any attested head), `known_attested` = {dest id: n}
-    merged from every source. Raises ErasureConflict on divergent authentic journals."""
-    known = dict(known_attested or {})
+    merged from every source, `live` = `Live` of the live database (read BEFORE `j_v`).
+    Raises ErasureConflict on divergent authentic journals.
+
+    H1: the live committed head (number + MAC) is the threshold: J_v proves only when it holds
+    it (a shorter journal, a damaged committed entry or a fork never does; bytes after the head
+    are a crash tail, as at boot), and when no source reaches it there is no proof at all.
+    M1: a destination proves only with an authentic head (an empty listing never does) that
+    reaches max(its known head, the threshold) — at stage at least n = 1; when proving later
+    (`mode="prove"`) only a threshold known at the restore counts (our own uploads made after the
+    restore prove nothing)."""
+    live = live if live is not None else Live("none")
+    known = merge_known(known_attested, live.attested if live.state == "same" else None)
+    t = live.head if live.state == "same" else EMPTY_HEAD
     cands = []
     pb = None
     if j_b is not None:
@@ -934,13 +1068,14 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     if j_v is not None:
         try:
             pv = parse(j_v, k_erase, inst)
-            # coada neautentică după ultimul element (crash în pasul 1) nu anulează prefixul
+            # prefixul autentic e un candidat (mai multe tombstone-uri = niciodată mai puţină ştergere);
+            # dovadă e doar dacă atinge pragul (mai jos)
             cands.append(("volume", pv))
         except JournalError:
             pv = None                              # alt jurnal (alt installation id) / stricat: nu e J_v
-    rolled, unreachable = [], []
-    answered = set()
+    rolled, unreachable, observed, by_id = [], [], {}, {}
     for r in dest_results:
+        by_id[r.id] = r
         if not r.ok:
             unreachable.append(r.id)
             continue
@@ -948,8 +1083,8 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
         if n < known.get(r.id, 0):
             rolled.append(r.id)                    # mai vechi decât ce ştie o sursă: nu e dovadă
             continue
-        answered.add(r.id)
         if r.parsed is not None:
+            observed[r.id] = n
             cands.append(("destination " + r.id, r.parsed))
     best = _on_one_chain(cands) if cands else None
     star = best[1] if best else None
@@ -963,24 +1098,50 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     # obligatorii: destinaţiile configurate (DB-ul staged + acest host) şi orice destinaţie care,
     # după ce ştie o sursă, ţine un cap MAI NOU decât J* (acolo pot fi ştergeri pe care nu le avem)
     req = set(required_dests) | {d for d, n in known.items() if n > head.n}
-    # un J_v cu o intrare neautentică în interior nu e dovadă (doar o coadă parţială, crash în pasul 1)
-    if pv is not None and pv.bad in ("", "partial"):
+    met = live.state != "bad" and reaches(star, t)
+    floor = 1 if mode == "stage" else 0
+
+    def dest_ok(d):
+        r = by_id.get(d)
+        if r is None or not r.ok or r.parsed is None or d in rolled:
+            return False
+        need = max(known.get(d, 0), t.n, floor)
+        return need >= 1 and r.parsed.n >= need and reaches(r.parsed, t)
+    if not met:
+        proof = "none"
+    elif live.state == "same" and pv is not None and reaches(pv, t):
         proof = "volume"
-    elif req and req <= answered:
+    elif req and all(dest_ok(d) for d in req):
         proof = "destinations"
     else:
         proof = "none"
-    tracked_any = tracked or head.n > 0 or bool(known) or pv is not None
-    if not tracked_any:
-        return Decision("not-tracked", proof, None, head, rolled, unreachable)
-    return Decision("proven" if proof != "none" else "unproven", proof, star_bytes, head, rolled,
-                    unreachable)
+    tracked_any = tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0
+    state = "not-tracked" if not tracked_any else ("proven" if proof != "none" else "unproven")
+    return Decision(state, proof, star_bytes if tracked_any else None, head, rolled, unreachable,
+                    t, merge_known(known, observed), not met)
 
 
-def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, stage_summary=None):
+def journal_reaches(raw, k_erase, inst, t):
+    """`reaches` for journal bytes (None / unparsable = nothing)."""
+    if raw is None:
+        return t.n == 0
+    try:
+        return reaches(parse(raw, k_erase, inst), t)
+    except JournalError:
+        return t.n == 0
+
+
+def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, stage_summary=None,
+                    threshold=EMPTY_HEAD, live_ok=False):
     """The same reconciliation again under the boot lock, immediately before apply: the staged J*
     and the live journal must lie on one chain; the longer one is published. Returns (journal bytes
-    to publish or None, proven, head)."""
+    to publish or None, proven, head).
+
+    Proof at apply (H1/M1) is the VOLUME only, re-checked now: `live_ok` = the live database is of
+    the same installation and readable, `threshold` = the highest committed head known (the stage's
+    and the live database's now); J_v must hold it and so must the journal published. A proof by
+    destinations at stage is not re-verifiable here: it never lifts the quarantine (the janitor's
+    `try_prove` re-fetches them)."""
     cands = []
     if staged_journal is not None:
         ps = parse(staged_journal, k_erase, inst)
@@ -1003,29 +1164,66 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
         out = bytes(raw[:prefix_len(best[1].n)])
         if pv is not None and best[0] == "volume" and best[1].n == pv.n and not pv.bad:
             out = None                             # jurnalul de pe volum e deja cel mai lung
-    stage = (stage_summary or {}).get("proof", "none")
-    proven = pv is not None or (stage == "destinations")
-    if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0:
-        proven = True
+    final = best[1] if best is not None else None
+    proven = live_ok and pv is not None and reaches(pv, threshold) and reaches(final, threshold)
+    if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0 and threshold.n == 0:
+        proven = True                              # nimic urmărit nicăieri: nimic de dovedit
     return out, proven, head
 
 
-def mark_unproven_sync(db_path, since, n, now=None):
-    """Restore without proof (apply, after the DB copy): every restored recording quarantined with
-    reason `continuity`, and the marker the janitor needs to lift it. Idempotent."""
+def _plain_cohort(transcripts_dir):
+    """(sid, kind) of every 3.7-named plaintext file under `transcripts/` and `arhiva/` (names only,
+    no link followed; a directory that cannot be listed adds nothing — the rows still count)."""
+    out = set()
+    if transcripts_dir is None:
+        return out
+    for d in (str(transcripts_dir), os.path.join(str(transcripts_dir), "arhiva")):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            m = _PLAIN_NAME.match(n)
+            if m:
+                out.add((m.group(1), m.group(2)))
+    return out
+
+
+def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=None, transcripts_dir=None):
+    """Restore without proof (apply, after the DB copy): the WHOLE cohort quarantined with reason
+    `continuity` (H2): every readable descriptor (→ `quarantined`), and every (sid, kind) still in
+    plaintext — a migration row that owns a file, or a 3.7-named file under `transcripts_dir` with
+    or without a row — gets its `tx_quarantine` row, so the pending-plaintext reader, the migration
+    (the converted descriptor stays quarantined) and the writer start refuse it until the janitor
+    proves continuity or an Owner recovers it. Then the marker the janitor needs (`threshold` and
+    `known` kept: what a later proof must reach). Idempotent."""
     now = time.time() if now is None else now
+    cohort = _plain_cohort(transcripts_dir)
     con = sqlite3.connect(str(db_path), isolation_level=None)
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
             _ensure_quarantine_table(con)
             rows = con.execute("SELECT sid, kind FROM tx_descriptors WHERE status IN ('ok','recovery')").fetchall()
-            for sid, kind in rows:
+            keys_ = {(sid, kind) for sid, kind in rows}
+            try:
+                keys_ |= {(r[0], r[1]) for r in con.execute(
+                    "SELECT sid, kind FROM tx_migration WHERE state IN ('pending','orphan','failed','converted') "
+                    "AND kind IN ('out','cast')").fetchall()}
+            except sqlite3.OperationalError:
+                pass                               # DB mai vechi decât tabela: doar fişierele
+            keys_ |= cohort
+            for sid, kind in sorted(keys_):
                 con.execute("INSERT INTO tx_quarantine(sid, kind, reason, since) VALUES(?,?,?,?) "
                             "ON CONFLICT(sid, kind) DO UPDATE SET reason=excluded.reason",
                             (sid, kind, "continuity", now))
             con.execute("UPDATE tx_descriptors SET status='quarantined' WHERE status IN ('ok','recovery')")
-            _set_json(con, "continuity", {"state": "unproven", "since": int(since or 0), "n": int(n)})
+            mark = {"state": "unproven", "since": int(since or 0), "n": int(n)}
+            if threshold is not None:
+                mark["threshold"] = threshold.to_json()
+            if known is not None:
+                mark["known"] = known_from_json(known)
+            _set_json(con, "continuity", mark)
             con.execute("COMMIT")
         except BaseException:
             con.execute("ROLLBACK")
@@ -1134,54 +1332,116 @@ def check_member(member, man, k_erase, inst, db_head):
 # ── proof later: the janitor lifts the continuity quarantine ─────────────────
 
 
+def _marker_terms(cont):
+    """(threshold Head, known {dest: n}, n at the restore) of a continuity marker, or None when the
+    marker cannot be read (fail closed: no proof)."""
+    try:
+        t = Head.from_json(cont["threshold"]) if "threshold" in cont else EMPTY_HEAD
+        known = known_from_json(cont.get("known", {}))
+        r_n = cont.get("n", 0)
+        if type(r_n) is not int or r_n < 0:
+            return None
+        return t, known, r_n
+    except (JournalError, TypeError, KeyError):
+        return None
+
+
 async def try_prove(st=None):
-    """With every destination answering an authentic, non-rolled-back head on our chain: apply the
-    tombstones the volume does not have and lift the continuity quarantine."""
+    """With every required destination answering an authentic, non-rolled-back head on our chain
+    that reaches what was known at the restore (the marker's threshold and per-destination heads):
+    apply the tombstones the volume does not have and lift the continuity quarantine.
+
+    H3: the decision is taken again UNDER the barrier against the journal as it is now (CAS on the
+    file and on `s.parsed`): an erasure appended while we fetched is on the volume journal, and a
+    destination chain that does not extend it is a fork → nothing adopted, quarantine kept. The
+    adoption (journal replace + in-memory tombstones) and ONE transaction (destroy every new sid,
+    advance the DB head monotonically, lift) run in the same critical section as erase's append."""
     s = _s
     st = st or s.store
-    if st is None or s.diag or s.parsed is None or not s.continuity:
+    if st is None or s.diag or s.uncertain or s.parsed is None or not s.continuity:
         return False
+    cont = s.continuity
+    terms = _marker_terms(cont)
+    if terms is None:
+        return False
+    t, known, r_n = terms
     dests = await destinations()
     if not dests:
         return False
     k = s.journal.k
-    results = await fetch_all(dests, k, st.inst)
-    known = {i: int(v.get("n", 0)) for i, v in s.attested.items() if isinstance(v, dict)}
-    dec = decide_restore(k_erase=k, inst=st.inst, j_b=None, tracked=True, j_v=None,
-                         dest_results=results, required_dests=[d.id for d in dests], known_attested=known)
-    s.rolled_back = set(dec.rolled_back)
-    if dec.proof != "destinations":
+    results = await fetch_all(dests, k, st.inst, check_from=r_n)
+    forks = [r.id for r in results if r.error == "conflict"]
+    if forks:
+        s.conflict = "erasure journals at %s diverge" % forks[0][:120]
+        st.alarm("transcript.erasureConflict", s.conflict)
         return False
-    cur = s.parsed
-    star = parse(dec.journal, k, st.inst) if dec.journal else cur
     try:
-        _on_one_chain([("volume", cur), ("destinations", star)])
+        dec = decide_restore(k_erase=k, inst=st.inst, j_b=None, tracked=True, j_v=None,
+                             dest_results=results, required_dests=[d.id for d in dests],
+                             known_attested=known, live=Live("same", t, {}), mode="prove")
     except ErasureConflict as e:
         s.conflict = str(e)
         st.alarm("transcript.erasureConflict", str(e))
         return False
-    if star.n > cur.n:
-        async with st.barrier:
+    s.rolled_back = set(dec.rolled_back)
+    if dec.proof != "destinations":
+        return False
+    star = parse(dec.journal, k, st.inst) if dec.journal else None
+    gens = []
+    async with st.barrier:
+        if s.diag or s.uncertain or s.parsed is None or s.continuity is not cont:
+            return False
+        cur = s.parsed
+        # CAS: fişierul e exact jurnalul pe care îl ştim (nicio adăugare / înlocuire nevăzută)
+        raw = await st.io(s.journal.read_bytes)
+        if raw is None or len(raw) != prefix_len(cur.n):
+            return False
+        now_p = parse(raw, k, st.inst)
+        if now_p.n != cur.n or now_p.bad or not hmac.compare_digest(now_p.head.mac, cur.head.mac):
+            return False
+        cands = [("volume", cur)] + ([("destinations", star)] if star is not None else [])
+        try:
+            _on_one_chain(cands)
+        except ErasureConflict as e:
+            # o ştergere locală (după restore sau concurentă) şi o ramură a destinaţiei: oprim
+            s.conflict = str(e)
+            st.alarm("transcript.erasureConflict", str(e))
+            return False
+        final = star if star is not None and star.n > cur.n else cur
+        if not reaches(final, t):
+            return False
+        new = list(star.entries[cur.n:]) if final is star else []
+        if new:
             await st.io(s.journal.replace, dec.journal)
             s.parsed = star
-            for e in star.entries[cur.n:]:
+            for e in new:
                 st.tombstone(e.sid_hex)
-        for e in star.entries[cur.n:]:
-            gens = await st.txn(lambda c, e=e: _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac)))
-            for hexid, kind in gens:
-                await st.retire(e.sid_hex, kind, hexid)
-        s.head_db = star.head
+                st.drop_key(e.sid_hex)
 
-    def lift(c):
-        rows = c.execute("SELECT sid, kind FROM tx_quarantine WHERE reason='continuity'").fetchall()
-        for sid, kind in rows:
-            c.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=? AND kind=? AND "
-                      "status IN ('quarantined','recovery')", (sid, kind))
-        c.execute("DELETE FROM tx_quarantine WHERE reason='continuity'")
-        c.execute("DELETE FROM tx_state WHERE key='continuity'")
-        return len(rows)
-    await st.txn(lift)
-    s.continuity = None
+        def fn(c):
+            out = []
+            for e in new:
+                out += [(e.sid_hex, kind, hexid) for hexid, kind in
+                        _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac))]
+            rows = c.execute("SELECT sid, kind FROM tx_quarantine WHERE reason='continuity'").fetchall()
+            for sid, kind in rows:
+                c.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=? AND kind=? AND "
+                          "status IN ('quarantined','recovery')", (sid, kind))
+            c.execute("DELETE FROM tx_quarantine WHERE reason='continuity'")
+            c.execute("DELETE FROM tx_state WHERE key='continuity'")
+            return out
+        try:
+            gens = await st.io(st._run_txn, fn)
+        except txstore.Uncertain:
+            # jurnalul e deja adoptat (durabil); boot-ul re-aplică paşii 2–3 şi carantina rămâne
+            # până la un nou try_prove
+            s.uncertain = "commit-uncertain"
+            return False
+        if new and s.head_db.n < star.head.n:
+            s.head_db = star.head
+        s.continuity = None
+    for sid, kind, hexid in gens:
+        await st.retire(sid, kind, hexid)
     st.bump(None)
     return True
 
@@ -1194,7 +1454,12 @@ async def list_quarantined(st):
         return c.execute(
             "SELECT d.sid, d.kind, d.status, q.reason, q.since FROM tx_descriptors d "
             "LEFT JOIN tx_quarantine q ON q.sid=d.sid AND q.kind=d.kind "
-            "WHERE d.status IN ('quarantined','recovery') ORDER BY d.sid, d.kind").fetchall()
+            "WHERE d.status IN ('quarantined','recovery') "
+            # H2: cohorta restore-ului fără descriptor (text clar încă nemigrat): listată, dar
+            # recuperabilă abia după migrare (descriptorul convertit rămâne în carantină)
+            "UNION ALL SELECT q.sid, q.kind, 'plaintext', q.reason, q.since FROM tx_quarantine q "
+            "WHERE NOT EXISTS (SELECT 1 FROM tx_descriptors d WHERE d.sid=q.sid AND d.kind=q.kind) "
+            "ORDER BY 1, 2").fetchall()
     rows = await st.read(load)
     by = collections.OrderedDict()
     for sid, kind, status, reason, since in rows:
@@ -1236,7 +1501,9 @@ async def _set_status(st, sid, frm, to, *, need_reason=True):
                                            "can be recovered", 409)
                 c.execute("UPDATE tx_descriptors SET status=? WHERE sid=? AND status=?", (to, sid, frm))
                 if to == "ok":
-                    c.execute("DELETE FROM tx_quarantine WHERE sid=?", (sid,))
+                    # doar kind-urile eliberate: un kind încă în clar (cohorta H2) rămâne în carantină
+                    for kind, _st, _r in rows:
+                        c.execute("DELETE FROM tx_quarantine WHERE sid=? AND kind=?", (sid, kind))
                 return [r[0] for r in rows]
             return await st.txn(fn)
 
@@ -1337,8 +1604,8 @@ def health():
         # Q2: fără destinaţie off-host, ştergerea supravieţuieşte restore-urilor doar pe volumul ăsta
         out.append(("info", "erasure_local_only", {"n": head}))
     for did in sorted(s.dest_ids or ()):
-        if head > s.attested.get(did, {}).get("n", 0):
-            info = s.dests.get(did) or {}
+        info = s.dests.get(did) or {}
+        if head > s.attested.get(did, {}).get("n", 0) or info.get("state") == "missing":
             since = info.get("since")
             out.append(("warning", "erasure_unattested",
                         {"n": head, "destination": did[:120],

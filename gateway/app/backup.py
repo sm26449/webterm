@@ -641,7 +641,7 @@ CONTENT_MANIFEST = "wts-manifest.json"
 CONTENT_MANIFEST_MAX = 4 * 1024 * 1024
 RESTORE_MANIFEST = "restore.json"
 RESTORE_MANIFEST_MAX = CONTENT_MANIFEST_MAX + 64 * 1024
-FLAG_MAX = 4096
+FLAG_MAX = 64 * 1024
 MAX_MEMBERS = 200_000
 SIGNING_MAX = 64 * 1024
 STAGE_LOCK = ".restore.lock"
@@ -1609,12 +1609,17 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
             con.execute("VACUUM INTO ?", (dbcopy,))
         finally:
             con.close()
-        # PR6c: un volum cu înregistrări criptate (sau jurnalul lor) nu se arhivează pe calea 3.7 —
-        # ar pierde generaţiile şi jurnalul în tăcere (ex. un container `hostops` fără flag)
-        # (rândurile din DB şi jurnalul decid; numele rezervate sub transcripts/ le filtrează deja
-        # _add_transcripts, iar o rădăcină-alias e refuzată acolo)
-        found = [f for f in txstore.inventory(config.DATA_DIR, dbcopy) if not f.startswith("transcripts:")]
+        # PR6c/M4: un volum cu înregistrări criptate (sau jurnalul lor) nu se arhivează pe calea 3.7 —
+        # ar pierde generaţiile şi jurnalul în tăcere (ex. un container `hostops` fără flag). Aceeaşi
+        # decizie ca boot-ul flag-off (txhub.boot): ORICE intrare a inventarului comun, inclusiv
+        # fişiere WTX fără rânduri în registru (orfane), raportate separat.
+        found = txstore.inventory(config.DATA_DIR, dbcopy)
         if found:
+            files = [f for f in found if f.startswith("transcripts:")]
+            if files and len(files) == len(found):
+                raise ValueError("this volume holds encrypted-recording files without ledger rows (orphans: %s); "
+                                 "the gateway refuses to boot on it too — back it up with %s=1 — refused"
+                                 % (files[0][:80], txstore.ENV_FLAG))
             raise ValueError("this volume holds encrypted recordings (%s); back it up with %s=1 — refused"
                              % (found[0][:80], txstore.ENV_FLAG))
         t = _TarOut(w)
@@ -2210,7 +2215,8 @@ def _read_flag():
         return ValueError("the restore flag is malformed — refused")
     doc = _strict_json(raw, err)
     if (type(doc) is not dict or not {"format", "manifest", "state", "set"} <= set(doc)
-            or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine", "erasure_proven"}
+            or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine", "erasure_proven",
+                                "erasure_threshold", "erasure_known"}
             or doc["format"] != _FLAG_FORMAT or doc["state"] not in _FLAG_STATES
             or type(doc["manifest"]) is not str or not _SHA_HEX.match(doc["manifest"])
             or type(doc["set"]) is not str or not _GEN_HEX.match(doc["set"])
@@ -2220,6 +2226,13 @@ def _read_flag():
     # R-M1: decizia de carantină se ia o dată (la `applying`) şi se reia din flag, nu se recalculează
     if doc["state"] != "staged" and type(doc.get("quarantine")) is not bool:
         raise err()
+    try:
+        if "erasure_threshold" in doc:
+            erasure.Head.from_json(doc["erasure_threshold"])
+        if "erasure_known" in doc:
+            erasure.known_from_json(doc["erasure_known"])
+    except erasure.JournalError:
+        raise err() from None
     return doc
 
 
@@ -2313,7 +2326,7 @@ def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasu
         try:
             info, inner = _verify_wts(fileobj, hk, td, mk, prefer)
             content = info.pop("_content", None)
-            summary = _erasure_stage(td, content, inner, erasure_fetch)
+            summary = _erasure_stage(td, content, inner, erasure_fetch, live_inst=hk.ring.installation_id)
             if summary is not None:
                 info["erasure"] = summary["state"]
                 info["erasure_proof"] = summary["proof"]
@@ -2335,7 +2348,7 @@ def _live_journal():
         return None                              # necitibil = nu e J_v (deci nici dovadă)
 
 
-def _erasure_stage(td: str, content, inner: kr.Keyring, fetch):
+def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
     """§12.11.4 "Continuity at restore", at stage. Flag off: an archive with erasure state is
     refused (this build cannot honour it), anything else is the PR5 / 3.7 path (None). Flag on:
     the backup's journal checked against its manifest and its DB, every staged descriptor listed
@@ -2368,9 +2381,16 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch):
         raise erasure.ErasureConflict("the backup's database records erasures but the archive has no "
                                       "erasure journal — refused")
     results, ids = fetch(k, inst) if fetch is not None else ([], [])
+    # H1/M1: capul comis al DB-ului VIU (număr + MAC) şi capetele lui atestate, citite ÎNAINTE de
+    # jurnalul viu (o ştergere scrie jurnalul înainte de capul din DB: jurnalul citit după nu poate
+    # rămâne în urmă), sub lacătul de restore; pragul intră în rezumat şi apoi în flag
+    live = erasure.live_state(config.DB_PATH, live_inst, inst)
     dec = erasure.decide_restore(k_erase=k, inst=inst, j_b=jb, tracked=content is not None,
                                  j_v=_live_journal(), dest_results=results,
-                                 required_dests=set(cfg_ids) | set(ids), known_attested=known)
+                                 required_dests=set(cfg_ids) | set(ids), known_attested=known, live=live)
+    if dec.short:
+        log.warning("restore: no source reaches the live erasure head n=%d — the restored recordings "
+                    "will be quarantined", dec.threshold.n)
     if dec.journal is not None and dec.journal != jb:
         if os.path.lexists(jp):
             os.unlink(jp)
@@ -2604,11 +2624,18 @@ def _validate_staging(rd, digest: str, mk: bytes, gen=None):
     if type(doc) is not dict or not want <= set(doc) <= want | {"erasure"} or doc["format"] != "wt-restore-1":
         raise err()
     er = doc.get("erasure")
-    if "erasure" in doc and (type(er) is not dict or set(er) != {"state", "proof", "since", "n"}
+    base = {"state", "proof", "since", "n"}
+    if "erasure" in doc and (type(er) is not dict or set(er) not in (base, base | {"threshold", "known"})
                              or er["state"] not in ("not-tracked", "proven", "unproven")
                              or er["proof"] not in ("volume", "destinations", "none")
                              or type(er["since"]) is not int or type(er["n"]) is not int):
         raise err()
+    if "erasure" in doc and "threshold" in er:
+        try:
+            erasure.Head.from_json(er["threshold"])
+            erasure.known_from_json(er["known"])
+        except erasure.JournalError:
+            raise err() from None
     if gen is not None and doc["generation"] != gen:
         raise ValueError("the restore staging is not the generation its flag names — refused")
     listed = _file_list(doc["files"], err)
@@ -2799,7 +2826,7 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
         has_tx = "transcripts" in doc["dirs"] or any(n.startswith("transcripts/") for n in listed)
         # 3.8 PR6a (§12.11.4): sursele de ştergeri reconciliate DIN NOU, sub lacăt, înainte de orice
         # mutaţie a apply-ului; un conflict lasă volumul neatins
-        er_plan = _erasure_apply_plan(rd, doc, staged, keys.mk, listed)
+        er_plan = _erasure_apply_plan(rd, doc, staged, keys.mk, listed, flag, hk)
         if flag["state"] == "staged":
             other = doc["installation_id"] != hk.ring.installation_id.hex()
             name = ""
@@ -2816,8 +2843,12 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             flag = dict(flag, state="applying", safety=name, quarantine=bool(other and not has_tx))
             if er_plan is not None:
                 # PR6a: dovada se decide O DATĂ (ca şi carantina R-M1); la reluare jurnalul publicat
-                # de noi nu mai e „J_v" şi n-are voie să devină dovadă
+                # de noi nu mai e „J_v" şi n-are voie să devină dovadă. H1: pragul (capul comis al
+                # DB-ului viu ÎNAINTE de a-l înlocui) şi capetele cunoscute rămân în flag: la reluare
+                # DB-ul viu poate fi deja cel restaurat
                 flag["erasure_proven"] = bool(er_plan["proven"])
+                flag["erasure_threshold"] = er_plan["threshold"].to_json()
+                flag["erasure_known"] = er_plan["known"]
             _write_flag(flag)
             _step("apply:applying")
         if current != staged:
@@ -2849,10 +2880,14 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             txstore.rebind_restored_sync(config.DB_PATH, config.TRANSCRIPT_DIR)
         _step("apply:rebind")
         if er_plan is not None:
-            if flag.get("erasure_proven", False):
+            # H1: la reluare pragul se re-verifică pe jurnalul care rămâne pe volum; o dovadă din
+            # flag care nu-l mai atinge nu ridică nimic (fail closed)
+            if flag.get("erasure_proven", False) and er_plan["reach"]:
                 erasure.clear_unproven_sync(config.DB_PATH)
             else:
-                erasure.mark_unproven_sync(config.DB_PATH, er_plan["since"], er_plan["n"])
+                erasure.mark_unproven_sync(config.DB_PATH, er_plan["since"], er_plan["n"],
+                                           threshold=er_plan["threshold"], known=er_plan["known"],
+                                           transcripts_dir=config.TRANSCRIPT_DIR)
                 log.warning("RESTORE without proof of erasure continuity: every restored recording "
                             "is quarantined until the erasures after the backup can be proven")
         _step("apply:erasure-quarantine")
@@ -2865,9 +2900,14 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
         return True
 
 
-def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set):
+def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, flag=None, hk=None):
     """None = nothing of the erasure contract here (PR5 / 3.7 path). Otherwise the journal to
-    publish and whether the continuity is proven, decided again now (stage → apply window)."""
+    publish and whether the continuity is proven, decided again now (stage → apply window).
+
+    H1: on a first apply (`staged`) the threshold is the highest of the stage's and the LIVE
+    database's committed head now (same installation; read before the live journal), the known
+    heads are merged; on a resumed apply both come from the flag (the live DB may already be the
+    restored one). `reach` = the journal left on the volume holds the threshold."""
     er = doc.get("erasure")
     if er is None and JOURNAL_MEMBER not in listed:
         return None
@@ -2876,19 +2916,41 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set):
                                          "recordings on — refused")
     ring = _open_ring(staged, mk, "staged keys.wtk")
     k = erasure.k_erase_of(ring.kwk)
+    inst = ring.installation_id
+    er = er or {}
+    try:
+        t = erasure.Head.from_json(er["threshold"]) if "threshold" in er else erasure.EMPTY_HEAD
+        known = erasure.known_from_json(er.get("known", {}))
+    except erasure.JournalError:
+        raise erasure.ErasureConflict("the restore staging's erasure threshold is malformed — refused") from None
+    live_ok = False
+    if flag is None or flag.get("state") == "staged":
+        live = erasure.live_state(config.DB_PATH, hk.ring.installation_id if hk is not None else None, inst)
+        if live.state == "same":
+            if live.head.n >= t.n:
+                t = live.head
+            known = erasure.merge_known(known, live.attested)
+        live_ok = live.state == "same"
+    else:
+        if "erasure_threshold" in flag:
+            t = erasure.Head.from_json(flag["erasure_threshold"])
+        if "erasure_known" in flag:
+            known = erasure.known_from_json(flag["erasure_known"])
     sj = _read_small(os.path.join(str(rd), JOURNAL_MEMBER), erasure.MAX_FILE) if JOURNAL_MEMBER in listed else None
-    live = _live_journal()
+    live_j = _live_journal()
     foreign = False
-    if live is not None:
+    if live_j is not None:
         try:
-            erasure.parse(live, k, ring.installation_id)
+            erasure.parse(live_j, k, inst)
         except erasure.JournalError as e:
             foreign = e.reason == "foreign"
-    publish, proven, head = erasure.reconcile_apply(k_erase=k, inst=ring.installation_id, staged_journal=sj,
-                                                    live_journal=None if foreign else live,
-                                                    stage_summary=er)
+    publish, proven, head = erasure.reconcile_apply(k_erase=k, inst=inst, staged_journal=sj,
+                                                    live_journal=None if foreign else live_j,
+                                                    stage_summary=er, threshold=t, live_ok=live_ok)
+    final = publish if publish is not None else (None if foreign else live_j)
     return {"publish": publish, "proven": proven, "n": head.n, "foreign": foreign,
-            "since": int((er or {}).get("since", 0))}
+            "since": int(er.get("since", 0)), "threshold": t, "known": known,
+            "reach": erasure.journal_reaches(final, k, inst, t)}
 
 
 def _erasure_publish(plan: dict, gen: str) -> None:

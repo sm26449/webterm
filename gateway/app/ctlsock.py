@@ -22,7 +22,9 @@ the host backup is refused (hostops), never a direct read.
 * **Limits**: 2 connections, one snapshot in flight per process (txstore's slot, shared with the
   in-app and scheduled backups); first request ≤ 10 s, then ≤ 60 s between requests; each frame
   written within 30 s; `snapshot.start` answers within 15 min; a ready spool lives ≤ 15 min and
-  ≤ 60 s without a read; free space ≥ estimate + 10 %.
+  ≤ 60 s without a read; free space ≥ estimate + 10 %; at most 2 ready spools, and the ready
+  spools plus the new estimate ≤ half the filesystem. The in-flight slot is taken synchronously
+  before the first await and released only when the worker has really finished.
 * **Disconnect**: the worker owns a submitted snapshot (cancel flag, unlinks its spool on exit); the
   connection's ready spools are unlinked with it. Nothing is kept for a later connection.
 """
@@ -57,6 +59,8 @@ START_SECS = 900.0
 SPOOL_LIFE_SECS = 900.0
 SPOOL_IDLE_SECS = 60.0
 SPACE_SLACK = 1.10
+MAX_SPOOLS = 2                    # spool-uri gata ţinute deodată (toate conexiunile)
+SPOOL_SHARE = 0.5                 # spool-urile gata + cel nou ≤ jumătate din sistemul de fişiere
 VERSION = 1
 OPS = {
     "snapshot.start": frozenset({"profile", "recordings"}),
@@ -429,30 +433,56 @@ async def _op_start(req, reader, writer, conn, peer):
     if req["profile"] != "portable" or req["recordings"] not in ("all", "none"):
         await _send(writer, {"ok": False, "id": rid, "error": "protocol"})
         return False
-    if _s.inflight is not None or any(sp.conn is conn for sp in _s.spools.values()):
+    if (_s.inflight is not None or any(sp.conn is conn for sp in _s.spools.values())
+            or len(_s.spools) >= MAX_SPOOLS):
         await _audit(peer, "snapshot.start", 409, "busy")
         await _send(writer, {"ok": False, "id": rid, "code": "backup.busy"})
         return True
-    try:
-        free = os.fstatvfs(_s.spool_fd)
-        need = await asyncio.to_thread(_estimate)
-        if free.f_bavail * free.f_frsize < need * SPACE_SLACK:
-            await _audit(peer, "snapshot.start", 507, "no space")
-            await _send(writer, {"ok": False, "id": rid, "code": "backup.noSpace"})
-            return True
-    except OSError:
-        pass
-    name = secrets.token_hex(16)
-    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                 dir_fd=_s.spool_fd)
+    # M3: slotul se ia SINCRON, înainte de primul await (estimarea de spaţiu): două conexiuni nu
+    # pot trece amândouă de verificarea de mai sus. Se eliberează pe orice cale, şi doar după ce
+    # worker-ul s-a terminat efectiv (callback pe viitorul lui), nu când pleacă peer-ul.
     cancel = threading.Event()
     _s.inflight = cancel
-    loop = asyncio.get_running_loop()
-    # de aici worker-ul e proprietarul spool-ului (îl şterge el la eşec / anulare)
-    fut = loop.run_in_executor(None, _worker, fd, name, req["recordings"] == "all", cancel, _s.spool_fd)
+    fut = None
+    try:
+        try:
+            vfs = os.fstatvfs(_s.spool_fd)
+            need = await asyncio.to_thread(_estimate)
+            held = sum(sp.size for sp in _s.spools.values())
+            total = vfs.f_blocks * vfs.f_frsize
+            # spaţiu liber ≥ estimare + 10 %, iar spool-urile gata + acesta ≤ SPOOL_SHARE din disc
+            # (discul e comun cu restul sistemului)
+            if (vfs.f_bavail * vfs.f_frsize < need * SPACE_SLACK
+                    or held + need * SPACE_SLACK > total * SPOOL_SHARE):
+                await _audit(peer, "snapshot.start", 507, "no space")
+                await _send(writer, {"ok": False, "id": rid, "code": "backup.noSpace"})
+                return True
+        except OSError:
+            await _audit(peer, "snapshot.start", 507, "space unknown")
+            await _send(writer, {"ok": False, "id": rid, "code": "backup.noSpace"})
+            return True
+        if cancel.is_set():                     # stop() între timp
+            return False
+        name = secrets.token_hex(16)
+        fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                     dir_fd=_s.spool_fd)
+        loop = asyncio.get_running_loop()
+        # de aici worker-ul e proprietarul spool-ului (îl şterge el la eşec / anulare)
+        fut = loop.run_in_executor(None, _worker, fd, name, req["recordings"] == "all", cancel, _s.spool_fd)
+        fut.add_done_callback(_clear_inflight(cancel, unless_ready=True))
+    finally:
+        if fut is None:
+            _clear_inflight(cancel)(None)
     watch = asyncio.ensure_future(reader.read(1))
     try:
         done, _p = await asyncio.wait({fut, watch}, timeout=START_SECS, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        # task-ul conexiunii anulat (oprire): worker-ul e oprit, slotul îl eliberează callback-ul lui
+        cancel.set()
+        fut.add_done_callback(_orphaned(fd, name))
+        if fut.done():                          # callback-ul „unless_ready" a trecut deja
+            _clear_inflight(cancel)(None)
+        raise
     finally:
         if not watch.done():
             watch.cancel()
@@ -463,15 +493,15 @@ async def _op_start(req, reader, writer, conn, peer):
     if fut not in done:
         # deconectare (sau octeţi neaşteptaţi) în timpul snapshot-ului, ori bugetul de 15 min depăşit
         cancel.set()
-        fut.add_done_callback(_clear_inflight(cancel))
         fut.add_done_callback(_orphaned(fd, name))
+        if fut.done():                          # gata, dar peer-ul a încălcat protocolul: slotul liber
+            _clear_inflight(cancel)(None)
         why = "timeout" if not done else "peer gone"
         await _audit(peer, "snapshot.start", 408, why)
         if not done:
             with contextlib.suppress(Exception):
                 await _send(writer, {"ok": False, "id": rid, "code": "backup.busy"})
         return False
-    _clear_inflight(cancel)(fut)
     try:
         size, sha = fut.result()
     except backup.SnapshotBusy:
@@ -485,6 +515,8 @@ async def _op_start(req, reader, writer, conn, peer):
         return True
     sp = _Spool(name, fd, size, sha, conn, created=_s.clock(), last_read=_s.clock())
     _s.spools[name] = sp
+    # slotul trece la spool-ul gata în acelaşi pas sincron (bugetul de spool-uri îl vede imediat)
+    _clear_inflight(cancel)(None)
     await _audit(peer, "snapshot.start", 200, "size=%d" % size)
     await _send(writer, {"ok": True, "id": rid, "snap": name, "size": size, "sha256": sha})
     return True
@@ -500,8 +532,14 @@ def _orphaned(fd, name):
     return done
 
 
-def _clear_inflight(cancel):
-    def done(_f):
+def _clear_inflight(cancel, unless_ready=False):
+    """`unless_ready`: a worker that produced a spool for a connection still waiting for it leaves
+    the slot to that connection, which releases it only once the spool is registered (no window
+    in which neither the slot nor the spool counts)."""
+    def done(f):
+        if (unless_ready and f is not None and not f.cancelled() and f.exception() is None
+                and not cancel.is_set()):
+            return
         if _s.inflight is cancel:
             _s.inflight = None
     return done

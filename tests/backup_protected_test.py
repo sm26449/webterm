@@ -584,9 +584,36 @@ def h3_tests():
           refused(lambda: backup.run_scheduled_backup(include_transcripts=True, keys=hk))
           and refused(lambda: backup.make_encrypted(PASS, include_transcripts=True, keys=hk))
           and set(os.listdir(config.DATA_DIR / "backups")) == before)
+    # M4 (PR6): aceeaşi decizie ca boot-ul flag-off — alias-ul face vizibile nume din spaţiul
+    # înregistrărilor criptate (boot-ul ar refuza volumul), deci şi backup-ul FĂRĂ transcripturi
+    check("M4: alias transcripts/ → DATA_DIR: backup fără transcripturi refuzat ca la boot (orfane raportate)",
+          refused(lambda: backup.make_encrypted(PASS, include_transcripts=False, keys=hk)))
+    os.unlink(T)
+    os.rename(str(T) + ".real", T)
     out = backup.make_encrypted(PASS, include_transcripts=False, keys=hk)
     check("H3: fără transcripturi backup-ul merge şi nu conţine cheia",
           K["secret"] not in plain_of(out, K["mk"]) and not any(n.startswith("transcripts") for n in tar_names(plain_of(out, K["mk"]))))
+
+
+def m4_orphan_tests():
+    """M4 (PR6): flag off, a volume holding only WTX generation files (no ledger rows, no journal):
+    the backup takes the SAME decision as the flag-off boot (refused), the orphans named."""
+    from app import txstore
+    hk, _K = volume("M4orphan")
+    sid = "ab" * 16
+    gen = txstore.gen_name(sid, "out", "cd" * 16)
+    (config.TRANSCRIPT_DIR / gen).write_bytes(b"WTX1 leftover")
+    inv = txstore.inventory(config.DATA_DIR, config.DB_PATH)
+    try:
+        backup.make_encrypted(PASS, include_transcripts=False, keys=hk)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("M4: flag off, WTX files without ledger rows → backup refused like the boot (orphans reported)",
+          inv and all(x.startswith("transcripts:") for x in inv) and "orphans" in msg, (inv, msg))
+    (config.TRANSCRIPT_DIR / gen).unlink()
+    check("M4: …the same volume without them → backup goes on",
+          backup.make_encrypted(PASS, include_transcripts=False, keys=hk) is not None)
 
 
 def m1_tests():
@@ -1373,6 +1400,7 @@ def review_tests():
     h1_tests()
     h2_tests()
     h3_tests()
+    m4_orphan_tests()
     m1_tests()
     m2_tests()
     m4_tests()

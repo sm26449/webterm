@@ -1116,7 +1116,8 @@ async def _owner_fresh_factor(user, sid: str, body) -> None:
 async def erase_recording(sid: str, body: EraseIn, request: Request,
                           user=Depends(authz.perm('backups.manage'))):
     """Erase a closed session's recording for good (survives restores; §12.11.4). Owner, fresh factor,
-    typed confirmation. `attested: false` = done on this volume, not yet proven off-host (Q2)."""
+    typed confirmation. `attested: false` = done on this volume, not yet proven off-host (Q2);
+    `state: journalled` = durable in the journal, the database step completes at the next boot."""
     if not core.valid_sid(sid):
         raise ApiError(404, "session.missing", "no such session")
     st = _erasure_store()
@@ -1133,7 +1134,7 @@ async def erase_recording(sid: str, body: EraseIn, request: Request,
     hub = core.hubs.get(sid)
     if hub is not None:
         await hub.revoke_shares()             # invitaţii unui share (dacă mai există hub-ul) afară
-    audit.detail(request, "recording erased (journal n=%d, attested=%s)" % (res["n"], res["attested"]))
+    audit.detail(request, "recording erased (journal n=%d, %s, attested=%s)" % (res["n"], res["state"], res["attested"]))
     email_alerts.notify_security_change("a recording was erased (session %s)" % sid[:8],
                                         security.client_ip(request), user["email"], fleet=True,
                                         user_id=user["id"])
@@ -1324,7 +1325,8 @@ async def discard_failed_migration(sid: str, body: EraseIn, request: Request,
         raise _erasure_error(e) from None
     except txstore.TxStoreError as e:
         raise ApiError(409, "transcript.retryFailed", "the plaintext could not be re-checked: %s" % e.reason) from None
-    audit.detail(request, "owner: failed plaintext of recording %s discarded (journal n=%d)" % (sid[:8], res["n"]))
+    audit.detail(request, "owner: failed plaintext of recording %s discarded (journal n=%d, %s, plaintext %s)" % (
+        sid[:8], res["n"], res["state"], ", ".join("%s=%s" % kv for kv in sorted(res["plaintext"].items()))))
     email_alerts.notify_security_change("a recording's unmigrated plaintext was discarded (session %s)" % sid[:8],
                                         security.client_ip(request), user["email"], fleet=True,
                                         user_id=user["id"])

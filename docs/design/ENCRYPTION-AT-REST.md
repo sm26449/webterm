@@ -2905,6 +2905,54 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   converting it. A v2 backup restores its `legacy` plaintext with the migration rows rebound to the
   copied inodes.
 
+**PR6 review fixes** (`.audit/2026-11-25-encryption-pr6-codex.md`):
+
+- **Restore against the live committed head (H1).** Stage and apply read the LIVE database's
+  `erasure_head` (n + MAC) and `attested_heads` before the live journal (an erasure appends the
+  journal before it commits the head, so the journal read after is never behind), same
+  installation only. J_v proves continuity only when it holds that head; a shorter journal, a
+  damaged committed entry or a fork never does, bytes after the head are a crash tail as at boot.
+  When no source reaches the head the restore is unproven. Apply re-reads the live head under the
+  boot lock (an erasure between stage and apply raises the threshold), then keeps the threshold
+  and the merged known heads in the restore flag (`erasure_threshold`, `erasure_known`): a resumed
+  apply decides from the flag (the live DB may already be the restored one) and re-checks that the
+  journal left on the volume holds the threshold; a journal the apply itself published is never
+  J_v. The continuity marker carries `threshold` and `known`.
+- **The whole cohort is quarantined (H2).** Without proof, `tx_quarantine` (reason `continuity`)
+  gets every readable descriptor and every (sid, kind) still in plaintext: migration rows that own
+  a file and 3.7-named files under `transcripts/` / `arhiva/`, with or without a row. The pending
+  plaintext reader, the writer start (after its start-of-writer conversion) and the migration
+  respect it: a converted descriptor of a cohort member is born `quarantined`. Recovery is the
+  normal Owner flow on the converted descriptor; release lifts only the kinds it releases.
+- **Destinations (M1, H3).** A destination proves only with an authentic head (an empty listing
+  never does) that reaches max(its known head, the threshold), at stage at least n = 1. Apply never
+  lifts a quarantine on a stage proof by destinations (it cannot re-fetch them at boot): it writes
+  the marker and the janitor's `try_prove` re-fetches live. `try_prove` uses only what the marker
+  knew at the restore (our own later uploads prove nothing: a destination nobody knew to hold a
+  head cannot prove), reads every object above the restore's n (≤ 64) and refuses a fork among
+  them, then re-checks UNDER the barrier with a CAS on the journal file: adoption, tombstones, one
+  transaction (destroy, monotonic DB head, lift) in the same critical section as erase's append; a
+  destination chain that does not extend the current journal is a conflict (nothing adopted,
+  quarantine kept). Attested objects are re-listed hourly; a vanished one is uploaded again.
+- **Global format flag (M2).** `recordings_format = wtx1` also needs a residual inventory under the
+  Store barrier with no plaintext name and no unexplained `.wt-del-*` name (`format_block` in
+  System health says why it waits). `_absent` tells "verified absent" (no private name at all:
+  `unlinked`, error `absent`) from a conflict (a private name holding another file: `failed`). The
+  identity check assumes no other process with write access to `transcripts/` races the gateway; an
+  unlink never removes copies made elsewhere (backups, filesystem snapshots).
+- **Control socket budgets (M3).** The in-flight slot is taken synchronously before the first
+  await and released by the worker's completion callback on every path; at most 2 ready spools,
+  and ready spools + the new estimate ≤ half the filesystem; an unknown free space refuses.
+- **Flag off (M4).** A flag-off backup takes the boot's decision: any shared-inventory entry
+  refuses, generation files without ledger rows included (reported as orphans). Other flag-off
+  differences, by design: restore refuses a v2 archive or any encrypted-recording artefact in the
+  staging (`backup.erasureUnsupported`); `hostops backup --live` uses the socket whenever it exists
+  or the inventory finds an artefact (so a flag-off host with a socket left still never reads the
+  volume directly); a clean legacy volume keeps the 3.7 writer and retention.
+- **Answers.** Erase and discard say `state: destroyed` (DB step committed) or `journalled`
+  (durable in the journal, completed at the next boot); discard adds `plaintext: {kind: unlinked |
+  absent | kept | failed}`, the physical outcome of the plaintext.
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
