@@ -644,6 +644,7 @@ async def g_real_volume():
         r3 = await c.get(f"/api/sessions/{keep}/transcript?format=cast")
         check("after the migration the download serves the same bytes (out, cast), plaintext gone",
               r2.status_code == 200 and r2.content == out and r3.content == cast and plain_present(keep) == [])
+        await g_owner_resolution(st, c, host_id, keep)
         await txhub.shutdown()
         st = await txhub.boot(FakeRing(), env={"WEBTERM_TX_RECORDINGS": "1"})
         await er.stop()
@@ -660,6 +661,75 @@ async def g_real_volume():
         mg.start = orig_start
         await txhub.shutdown()
         await c.aclose()
+
+
+async def fail_rows(sid, why="changed since the inventory"):
+    """Both kinds of `sid` → `failed` with an identity that no longer matches (as the migration
+    leaves them after a change); the plaintext stays on disk."""
+    for k in ("out", "cast"):
+        await db.execute("INSERT OR REPLACE INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state, "
+                         "error) VALUES(?,?,?,?,?,?,?,?,'failed',?)", sid, k, "transcripts", "%s.%s" % (sid, k),
+                         1, 1, 1, 1, why)
+
+
+async def g_owner_resolution(st, c, host_id, migrated):
+    print("== failed migration: System health lists it; Owner retry / discard ==")
+    uid = (await db.fetchone("SELECT id FROM users LIMIT 1"))["id"]
+    grant = security.issue_stepup_grant
+    f1, f2 = sid_new(), sid_new()
+    out1, cast1 = pair(TD, f1, 2000)
+    pair(TD, f2, 900)
+    await add_session(f1, "closed", host_id)
+    await add_session(f2, "closed", host_id)
+    await fail_rows(f1)
+    await fail_rows(f2)
+    res = await syshealth.c_crypto_migration()
+    check("System health lists the sessions with failed rows (first 8 characters)",
+          res.severity == "warning" and f1[:8] in res.params.get("sessions", "") and f2[:8] in res.params["sessions"],
+          res)
+    check("…their writer is refused while failed (transcript.migrationPending)",
+          await araises(mg.at_writer_start(f1), ts.TxStoreError, "migrationPending"))
+    r = await c.post(f"/api/recordings/migration/{f1}/retry", json={})
+    check("retry without a fresh factor → 403", r.status_code == 403, r.text)
+    r = await c.post(f"/api/recordings/migration/{f1}/retry", json={"stepup_grant": grant(uid, host_id)})
+    check("Owner retry (fresh factor): re-inventoried from the file now there, converted, plaintext gone",
+          r.status_code == 200 and r.json()["kinds"] == {"out": "unlinked", "cast": "unlinked"}
+          and plain_present(f1) == [] and await read_all(st, f1) == out1 and await read_all(st, f1, "cast") == cast1,
+          r.text)
+    await mg.at_writer_start(f1)
+    check("…after the retry the session's writer may start", True)
+    r = await c.post(f"/api/recordings/migration/{f1}/retry", json={"stepup_grant": grant(uid, host_id)})
+    check("retry of a session without failed rows → 409 transcript.notFailed",
+          r.status_code == 409 and r.json().get("code") == "transcript.notFailed", r.text)
+    # o sesiune cu înregistrare criptată + text clar eşuat: retry refuzat (doar discard)
+    with open(os.path.join(TD, migrated + ".out"), "wb") as f:
+        f.write(b"stale plaintext")
+    await db.execute("UPDATE tx_migration SET state='failed', error='x' WHERE sid=? AND kind='out'", migrated)
+    r = await c.post(f"/api/recordings/migration/{migrated}/retry", json={"stepup_grant": grant(uid, host_id)})
+    check("retry when the session already has an encrypted recording → 409 transcript.retryEncrypted",
+          r.status_code == 409 and r.json().get("code") == "transcript.retryEncrypted", r.text)
+    os.remove(os.path.join(TD, migrated + ".out"))
+    await db.execute("UPDATE tx_migration SET state='unlinked', error=NULL WHERE sid=? AND kind='out'", migrated)
+    # discard
+    r = await c.post(f"/api/recordings/migration/{f2}/discard", json={"confirm": "nope", "stepup_grant": grant(uid, host_id)})
+    check("discard without the typed confirmation → 400", r.status_code == 400, r.text)
+    await db.execute("UPDATE sessions SET state='live' WHERE id=?", f2)
+    r = await c.post(f"/api/recordings/migration/{f2}/discard", json={"confirm": f2[:8], "stepup_grant": grant(uid, host_id)})
+    check("discard of a live session → 409 session.live", r.status_code == 409, r.text)
+    await db.execute("UPDATE sessions SET state='closed' WHERE id=?", f2)
+    n0 = er._s.parsed.n
+    r = await c.post(f"/api/recordings/migration/{f2}/discard", json={"confirm": f2[:8], "stepup_grant": grant(uid, host_id)})
+    check("Owner discard: plaintext deleted (identity-checked), sid tombstoned in the journal, rows unlinked",
+          r.status_code == 200 and r.json()["n"] == n0 + 1 and plain_present(f2) == [] and f2 in st.tombstoned
+          and await state(f2, "out") == "unlinked" and await state(f2, "cast") == "unlinked", r.text)
+    await mg.at_writer_start(f2)
+    check("…after the discard nothing blocks the session's writer", True)
+    audit = await db.fetchall("SELECT detail FROM audit_log WHERE path LIKE '/api/recordings/migration/%' "
+                              "AND status=200")
+    check("both Owner actions audited", len(audit) >= 2 and any("discarded" in (a["detail"] or "") for a in audit),
+          [a["detail"] for a in audit])
+    res = await syshealth.c_crypto_migration()
+    check("System health no longer lists them", res.key != "migration_failed", res)
 
 
 async def main():

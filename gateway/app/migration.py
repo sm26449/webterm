@@ -55,6 +55,8 @@ _PLAIN_RE = re.compile(r"^([0-9a-f]{32})\.(out|cast)$")
 # = core.CAP_TMP_SUFFIX (core importă txhub → txhub importă migration: nu importăm core)
 CAP_TMP_SUFFIX = ".cap-tmp"
 RETRY_SECS = 3600.0               # §12.11.5: o eroare lasă textul clar pe loc, reîncercare peste 1 h
+PINNED_RETRY_SECS = 60.0          # unlink amânat cât un backup copiază textul clar (PR6c)
+FAILED_LIST_MAX = 20              # System health: câte sesiuni cu rânduri eşuate se numesc
 INTERVAL = 60.0
 LIVE_CONCURRENCY = 2              # conversii simultane la pornirea writer-elor (reconcile la boot)
 WORK_STATES = ("pending", "orphan", "converted")
@@ -230,6 +232,11 @@ def _hash_fd_sync(fd, size):
 async def _unlink_step(st, sid, kind, dirn, name, ident, pin_fd, *, ok_error=None):
     """Step 6 for one kind, the plaintext pinned by `pin_fd`. Returns the row's new state."""
     pin_st = os.fstat(pin_fd)
+    if getattr(st, "plain_pinned", None) is not None and st.plain_pinned(dirn, name):
+        # PR6c (§12.11.3): un backup copiază acum textul ăsta (DB-ul lui copiat îl ţine `pending`):
+        # unlink-ul se amână, rândul rămâne `converted`, janitorul îl reia după backup
+        _s.backoff[sid] = time.time() + PINNED_RETRY_SECS
+        return "kept"
     try:
         priv = await st.io(st.rename_private_sync, dirn, name)
     except FileNotFoundError:
@@ -429,6 +436,83 @@ async def before_erase(st, sid):
         await process(st, sid)
 
 
+# ── Owner resolution of failed rows (PR6c) ───────────────────────────────────
+
+
+def _repin_sync(st, dirn, name):
+    """The plaintext under its row's name NOW, through its dir fd (O_NOFOLLOW): regular and one
+    link, or TxStoreError. → (dev, ino, size, mtime_ns); None when it is absent."""
+    try:
+        dfd, own = st.plain_dir_fd(dirn)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise txstore.TxStoreError("changed", "%s/%s: %s" % (dirn, name, e.strerror)) from None
+    finally:
+        if own:
+            os.close(dfd)
+    try:
+        fs = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if not stat.S_ISREG(fs.st_mode) or fs.st_nlink != 1:
+        raise txstore.TxStoreError("changed", "%s/%s: not a plain single-link file" % (dirn, name))
+    return (fs.st_dev, fs.st_ino, fs.st_size, fs.st_mtime_ns)
+
+
+async def failed_rows(st, sid):
+    """The sid's `failed` rows that name a recording (`<sid>.<kind>`), not a stray path."""
+    return [r for r in await _rows(st, sid)
+            if r["state"] == "failed" and r["kind"] in txstore.KINDS and r["dir"] in ("transcripts", "arhiva")
+            and r["name"] == "%s.%s" % (sid, r["kind"])]
+
+
+async def rebind_failed(st, sid, rows, *, state):
+    """Caller holds the sid's lease. Each failed row is re-inventoried from the file now under its
+    name (the Owner vouches for it): identity refreshed, hash cleared, → `state`; a file that is
+    gone → `missing` (nothing left to protect, the writer may start)."""
+    for r in rows:
+        ident = await st.io(_repin_sync, st, r["dir"], r["name"])
+        if ident is None:
+            await _set_row(st, sid, r["kind"], "missing", "absent when the Owner resolved it", expect=("failed",))
+            continue
+
+        def fn(c, r=r, ident=ident):
+            c.execute("UPDATE tx_migration SET state=?, error=NULL, sha256=NULL, dev=?, ino=?, size=?, "
+                      "mtime_ns=? WHERE sid=? AND kind=? AND state='failed'", (state, *ident, sid, r["kind"]))
+        await st.txn(fn)
+
+
+async def retry(st, sid, *, live=False):
+    """Owner retry (`POST /api/recordings/migration/{sid}/retry`): the failed rows → `pending` with
+    the current file's identity, then one conversion pass. Refused when the sid already has an
+    encrypted recording (the plaintext cannot be merged into it; discard is the way out). Returns
+    {kind: state} after the pass."""
+    if not active() or _s.store is not st:
+        raise txstore.TxStoreError("disabled", "the migration is not active")
+    async with st.lease(sid):
+        rows = await failed_rows(st, sid)
+        if not rows:
+            raise txstore.TxStoreError("notFailed", "no failed migration for this session")
+        if await _has_encrypted(st, sid):
+            raise txstore.TxStoreError("encrypted", "this session already has an encrypted recording; "
+                                       "its failed plaintext can only be discarded")
+        await rebind_failed(st, sid, rows, state="pending")
+    _s.backoff.pop(sid, None)
+    return await process(st, sid, live=live)
+
+
+async def failed_sessions(st, limit=FAILED_LIST_MAX):
+    return await st.read(lambda c: [r[0] for r in c.execute(
+        "SELECT DISTINCT sid FROM tx_migration WHERE state='failed' AND kind IN ('out','cast') "
+        "ORDER BY sid LIMIT ?", (limit,)).fetchall()])
+
+
 # ── boot ─────────────────────────────────────────────────────────────────────
 
 
@@ -598,4 +682,5 @@ async def status():
         "stray": len(_s.stray),
         "leftovers": len(_s.leftovers),
         "error": (err[0] if err else "") or _s.last_error,
+        "failed_sids": await failed_sessions(st),
     }

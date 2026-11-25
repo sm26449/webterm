@@ -592,21 +592,67 @@ async def boot(st, data_dir=None, clock=time.time):
 # ── erase (§12.11.4 "Order of erase(sid)") ───────────────────────────────────
 
 
+async def _journal_and_destroy(st, sid, kinds, env, clock):
+    """Erasure steps 1–2 for `sid` (caller holds its lease AND the barrier): one journal entry
+    (fsync within APPEND_BUDGET), the in-memory tombstone, then `_destroy_sync` in one transaction.
+    → (n, generations to retire). Shared by `erase` and the Owner's discard of a failed migration."""
+    s = _s
+    if s.parsed.n >= CAP:
+        raise ErasureError("transcript.erasureJournalFull",
+                           "the erasure journal is full; erasure is refused until compaction", 507)
+    prev = s.parsed.head
+    n = prev.n + 1
+    t_ms = int(clock() * 1000)
+    rk_hash = keyring.envelope_hash(bytes(env[0])) if env is not None else b"\x00" * 32
+    entry = encode_entry(s.journal.k, st.inst, prev.mac, n, t_ms, bytes.fromhex(sid),
+                         kinds_bits(kinds), rk_hash)
+    fut = asyncio.ensure_future(st.io(s.journal.append, entry, prefix_len(prev.n), st._fault))
+    try:
+        await asyncio.wait_for(asyncio.shield(fut), APPEND_BUDGET)
+    except asyncio.TimeoutError:
+        # rezultatul se decide din fişier la boot; până atunci sid-ul nu mai e servit
+        s.uncertain = "append-timeout"
+        st.tombstone(sid)
+        st.alarm("transcript.erasureUncertain", f"{sid}: journal fsync over budget")
+        raise ErasureError("transcript.erasureUncertain",
+                           "the erasure journal did not answer in time; restart the gateway", 503)
+    except BaseException as e:
+        s.uncertain = "append-failed"
+        st.tombstone(sid)
+        st.alarm("transcript.erasureUncertain", f"{sid}: journal append failed: {type(e).__name__}")
+        if isinstance(e, Exception):
+            raise ErasureError("transcript.erasureUncertain",
+                               "the erasure journal could not be written; restart the gateway",
+                               503) from None
+        raise
+    # durabil: în ACEEAŞI secţiune sincronă, înainte de a elibera bariera
+    e = Entry(n, t_ms, bytes.fromhex(sid), kinds_bits(kinds), rk_hash, entry[-MAC_LEN:])
+    s.parsed = Parsed(s.parsed.inst, s.parsed.entries + [e], prefix_len(n), prefix_len(n))
+    st.tombstone(sid)
+    st._fault("erase-appended")
+    try:
+        gens = await st.io(st._run_txn, lambda c: _destroy_sync(c, sid, Head(n, t_ms, e.mac)))
+    except txstore.Uncertain:
+        gens = None
+    except Exception as x:
+        # tombstone-ul e durabil, pasul 2 nu: boot-ul îl re-aplică; până atunci, refuz
+        s.uncertain = "commit-failed"
+        st.alarm("transcript.erasureUncertain", f"{sid}: step 2 failed: {type(x).__name__}")
+        raise ErasureError("transcript.erasureUncertain",
+                           "the erasure was journalled but not completed; restart the gateway",
+                           503) from None
+    if gens is None:
+        gens = []
+        s.uncertain = "commit-uncertain"
+    else:
+        s.head_db = Head(n, t_ms, e.mac)
+    st._fault("erase-committed")
+    return n, gens
+
+
 async def erase(st, sid, *, clock=time.time):
     """Steps 1–3; step 4 (attestation) is the janitor's. Returns {erased, n, attested}."""
-    s = _s
-    if not s.booted or s.store is not st:
-        raise ErasureError("transcript.erasureUnavailable", "the erasure journal is not ready", 503)
-    if s.diag or s.parsed is None:
-        raise ErasureError("transcript.erasureJournalBroken",
-                           "the erasure journal is damaged (%s); erasure is refused" % (s.diag or "?"), 503)
-    if s.uncertain:
-        raise ErasureError("transcript.erasureUncertain",
-                           "an earlier erasure did not finish; restart the gateway first", 503)
-    txstore._sid_bytes(sid)
-    rec = st.recorders.get(sid)
-    if sid in st._starting or (rec is not None and rec.state not in ("closed", "lost", "replaced")):
-        raise ErasureError("session.live", "the session is live; close it first", 409)
+    _ready_or_raise(st, sid)
     # PR6b (§12.11.5): o înregistrare încă în clar se migrează întâi (textul clar dispare prin
     # unlink-ul verificat), apoi ştergerea normală distruge RK-ul. Ce nu se poate migra rămâne
     # refuzat mai jos (transcript.erasePlaintext): niciodată „şters" cu textul clar pe disc.
@@ -629,60 +675,60 @@ async def erase(st, sid, *, clock=time.time):
                                    "this recording is not migrated yet; it cannot be erased", 409)
             if env is None and not kinds:
                 raise ErasureError("transcript.missing", "no recording for this session", 404)
-            if s.parsed.n >= CAP:
-                raise ErasureError("transcript.erasureJournalFull",
-                                   "the erasure journal is full; erasure is refused until compaction", 507)
-            prev = s.parsed.head
-            n = prev.n + 1
-            t_ms = int(clock() * 1000)
-            rk_hash = keyring.envelope_hash(bytes(env[0])) if env is not None else b"\x00" * 32
-            entry = encode_entry(s.journal.k, st.inst, prev.mac, n, t_ms, bytes.fromhex(sid),
-                                 kinds_bits(kinds), rk_hash)
-            fut = asyncio.ensure_future(st.io(s.journal.append, entry, prefix_len(prev.n), st._fault))
-            try:
-                await asyncio.wait_for(asyncio.shield(fut), APPEND_BUDGET)
-            except asyncio.TimeoutError:
-                # rezultatul se decide din fişier la boot; până atunci sid-ul nu mai e servit
-                s.uncertain = "append-timeout"
-                st.tombstone(sid)
-                st.alarm("transcript.erasureUncertain", f"{sid}: journal fsync over budget")
-                raise ErasureError("transcript.erasureUncertain",
-                                   "the erasure journal did not answer in time; restart the gateway", 503)
-            except BaseException as e:
-                s.uncertain = "append-failed"
-                st.tombstone(sid)
-                st.alarm("transcript.erasureUncertain", f"{sid}: journal append failed: {type(e).__name__}")
-                if isinstance(e, Exception):
-                    raise ErasureError("transcript.erasureUncertain",
-                                       "the erasure journal could not be written; restart the gateway",
-                                       503) from None
-                raise
-            # durabil: în ACEEAŞI secţiune sincronă, înainte de a elibera bariera
-            e = Entry(n, t_ms, bytes.fromhex(sid), kinds_bits(kinds), rk_hash, entry[-MAC_LEN:])
-            s.parsed = Parsed(s.parsed.inst, s.parsed.entries + [e], prefix_len(n), prefix_len(n))
-            st.tombstone(sid)
-            st._fault("erase-appended")
-            try:
-                gens = await st.io(st._run_txn, lambda c: _destroy_sync(c, sid, Head(n, t_ms, e.mac)))
-            except txstore.Uncertain:
-                gens = None
-            except Exception as x:
-                # tombstone-ul e durabil, pasul 2 nu: boot-ul îl re-aplică; până atunci, refuz
-                s.uncertain = "commit-failed"
-                st.alarm("transcript.erasureUncertain", f"{sid}: step 2 failed: {type(x).__name__}")
-                raise ErasureError("transcript.erasureUncertain",
-                                   "the erasure was journalled but not completed; restart the gateway",
-                                   503) from None
-            if gens is None:
-                gens = []
-                s.uncertain = "commit-uncertain"
-            else:
-                s.head_db = Head(n, t_ms, e.mac)
-            st._fault("erase-committed")
+            n, gens = await _journal_and_destroy(st, sid, kinds, env, clock)
         for hexid, kind in gens:
             await st.retire(sid, kind, hexid)
     _kick()
     return {"erased": True, "n": n, "attested": await attested_everywhere(n)}
+
+
+def _ready_or_raise(st, sid):
+    s = _s
+    if not s.booted or s.store is not st:
+        raise ErasureError("transcript.erasureUnavailable", "the erasure journal is not ready", 503)
+    if s.diag or s.parsed is None:
+        raise ErasureError("transcript.erasureJournalBroken",
+                           "the erasure journal is damaged (%s); erasure is refused" % (s.diag or "?"), 503)
+    if s.uncertain:
+        raise ErasureError("transcript.erasureUncertain",
+                           "an earlier erasure did not finish; restart the gateway first", 503)
+    txstore._sid_bytes(sid)
+    rec = st.recorders.get(sid)
+    if sid in st._starting or (rec is not None and rec.state not in ("closed", "lost", "replaced")):
+        raise ErasureError("session.live", "the session is live; close it first", 409)
+
+
+async def discard_failed(st, sid, *, clock=time.time):
+    """Owner discard of a failed plaintext migration (PR6c, owner decision): the failed rows are
+    re-inventoried from the files now under their names (→ `pending`, so the boot's crash rule
+    drops them if we die after the journal entry), ONE journal entry tombstones the sid (any kind
+    it already has encrypted goes with it: a discard is an erasure), then the plaintext goes
+    through the migration's identity-checked unlink (row → `unlinked`, error `erased`). The session
+    must be closed: a tombstoned sid cannot record again. Returns {discarded, n, attested, kinds}."""
+    _ready_or_raise(st, sid)
+    async with st.lease(sid):
+        rows = await migration.failed_rows(st, sid)
+        if not rows:
+            raise ErasureError("transcript.notFailed", "no failed migration for this session", 409)
+        if sid in st.tombstoned:
+            raise ErasureError("transcript.missing", "no recording for this session", 404)
+        await migration.rebind_failed(st, sid, rows, state="pending")
+        async with st.barrier:
+            def load(c):
+                return (c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone(),
+                        [r[0] for r in c.execute("SELECT kind FROM tx_descriptors WHERE sid=?",
+                                                 (sid,)).fetchall()])
+            env, kinds = await st.read(load)
+            kinds = sorted(set(kinds) | {r["kind"] for r in rows})
+            n, gens = await _journal_and_destroy(st, sid, kinds, env, clock)
+        for hexid, kind in gens:
+            await st.retire(sid, kind, hexid)
+        left = {}
+        for r in await migration._rows(st, sid):
+            if r["state"] in migration.WORK_STATES:
+                left[r["kind"]] = await migration._drop_erased(st, r)
+    _kick()
+    return {"discarded": True, "n": n, "attested": await attested_everywhere(n), "kinds": left}
 
 
 async def attested_everywhere(n):

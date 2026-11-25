@@ -145,6 +145,12 @@ def install(st) -> None:
     global _store
     _store = st
     st.on_readopt = _on_readopt
+    # PR6c (§12.11.3): fiecare backup din proces (download, programat, cloud, socket) ia copia şi
+    # pin-urile sub bariera ACESTUI Store, pe loop-ul lui
+    try:
+        txstore.set_backup_source(st, asyncio.get_running_loop())
+    except RuntimeError:
+        pass
     _wrap_alarm(st)
     if _on_authz_bump not in authz.epoch_listeners:
         authz.epoch_listeners.append(_on_authz_bump)
@@ -186,6 +192,7 @@ async def shutdown() -> None:
 
 def uninstall() -> None:
     global _store, _poll_task
+    txstore.clear_backup_source(_store)
     _store = None
     erasure.reset()
     migration.reset()
@@ -530,6 +537,25 @@ async def archive(sid) -> None:
         await st.txn(lambda c: c.execute(
             "UPDATE tx_descriptors SET archived_at=? WHERE sid=? AND archived_at IS NULL", (now, sid)))
     bump(sid)
+
+
+async def purge_archived(now=None) -> int:
+    """Retention (§12.11.4 "purge"): recordings archived more than ARCHIVE_RETENTION_DAYS ago are
+    deleted by `archived_at` (descriptors, RK, files through the ledger), with NO tombstone (owner
+    Q1). The 3.7 `core.purge_archive` stays the path when encrypted recordings are off."""
+    st = _store
+    if st is None:
+        return 0
+    cutoff = (time.time() if now is None else now) - config.ARCHIVE_RETENTION_DAYS * 86400
+    sids = await st.read(lambda c: [r[0] for r in c.execute(
+        "SELECT sid FROM tx_descriptors GROUP BY sid HAVING COUNT(archived_at) = COUNT(*) "
+        "AND MAX(archived_at) < ?", (cutoff,)).fetchall()])
+    n = 0
+    for sid in sids:
+        if await st.purge(sid, cutoff):
+            bump(sid)
+            n += 1
+    return n
 
 
 # ── the hub adapter ──────────────────────────────────────────────────────────

@@ -657,6 +657,7 @@ _TX_DEPTH = 4
 # H3: inventarul transcripturilor e o listă de PERMISIUNI, nu de excluderi: doar înregistrările
 # pe care le scrie core.py (`<sid>.out`, `<sid>.cast`), la rădăcină şi în `arhiva/`.
 _TX_FILE = re.compile(r"^[A-Za-z0-9_-]{1,128}\.(out|cast)$")
+_TX_GEN = re.compile(r"^([0-9a-f]{32})\.(out|cast)\.([0-9a-f]{32})\.wtx$")
 _TX_ARCHIVE = "arhiva"
 _TX_DIRS = frozenset({"transcripts", "transcripts/" + _TX_ARCHIVE})
 _LEGACY_IMPORT_FILES = frozenset({"webterm.db", *_SIGNING})
@@ -981,6 +982,8 @@ def _is_tx_file(name: str) -> bool:
     parts = name.split("/")
     if parts[0] != "transcripts":
         return False
+    if len(parts) == 2 and _TX_GEN.match(parts[1]):
+        return True                              # PR6c: o generaţie WTX1 (doar direct sub transcripts/)
     if len(parts) == 2:
         base = parts[1]
     elif len(parts) == 3 and parts[1] == _TX_ARCHIVE:
@@ -1586,11 +1589,17 @@ def _check_staged_signing(td: str) -> None:
 
 
 def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
-               portable: bool, safety: bool = False) -> None:
+               portable: bool, safety: bool = False, cancel=None) -> None:
     """Streams a WTS1 container to `out`: tar.gz {webterm.db (VACUUM INTO), keys.wtk, fleet
     signing key, [transcripts], wts-manifest.json (last)}. Never `secret`, never the MK."""
     ring = hk.ring
     signing = _signing_pair_live()              # R-H2: înainte de writer — un refuz nu lasă nimic
+    if txstore.enabled():
+        # PR6c (§12.11.3): copia DB-ului, înregistrările WTX1 şi textul clar al migrării printr-un
+        # SINGUR snapshot (bariera Store-ului viu, sau lacătul de boot fără el)
+        _write_wts_tx(out, hk, keys_blob, include_transcripts, local, portable, safety, signing, cancel)
+        return
+    # flag oprit: exact calea PR5 (boot-ul a refuzat deja un volum cu artefacte criptate)
     w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
                    snk=ring.snk if local else None, mk=hk.mk if portable else None)
     with tempfile.TemporaryDirectory() as td:
@@ -1600,6 +1609,14 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
             con.execute("VACUUM INTO ?", (dbcopy,))
         finally:
             con.close()
+        # PR6c: un volum cu înregistrări criptate (sau jurnalul lor) nu se arhivează pe calea 3.7 —
+        # ar pierde generaţiile şi jurnalul în tăcere (ex. un container `hostops` fără flag)
+        # (rândurile din DB şi jurnalul decid; numele rezervate sub transcripts/ le filtrează deja
+        # _add_transcripts, iar o rădăcină-alias e refuzată acolo)
+        found = [f for f in txstore.inventory(config.DATA_DIR, dbcopy) if not f.startswith("transcripts:")]
+        if found:
+            raise ValueError("this volume holds encrypted recordings (%s); back it up with %s=1 — refused"
+                             % (found[0][:80], txstore.ENV_FLAG))
         t = _TarOut(w)
         size = os.path.getsize(dbcopy)
         with open(dbcopy, "rb") as f:
@@ -1609,19 +1626,77 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
             t.add_bytes(name, b)
         if include_transcripts:
             _add_transcripts(t, td)
-        # flag oprit: exact calea PR5 (boot-ul a refuzat deja un volum cu artefacte criptate)
-        extra = _erasure_member(t, dbcopy, ring, include_transcripts, safety) if txstore.enabled() else None
-        if extra is None:
-            t.finish()
-        else:
-            t.finish(extra)
+        t.finish()
     w.close()
 
 
-def _erasure_member(t, dbcopy: str, ring, include_transcripts: bool, safety: bool = False):
-    """§12.11.3: the erasure journal cut at the DB copy's committed head, and the v2 manifest
-    fields. None = this dataset never had a journal (the manifest stays v1). A journal that does
-    not match the DB fails the whole backup (journal error ≠ corruption, step 4)."""
+class SnapshotBusy(ValueError):
+    """The recording snapshot could not be taken now (another backup in flight, the barrier or a
+    budget ran out, cancelled): nothing was written (`backup.busy`)."""
+
+
+def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
+                  portable: bool, safety: bool, signing: dict, cancel=None) -> None:
+    """§12.11.3 with encrypted recordings on: `txstore.backup_snapshot()` (VACUUM INTO + pins
+    under the barrier), then per recording pair a verify pass and an emit pass. A pair that fails
+    authentication is excluded as a unit (listed with its reason, alarm, the backup goes on); a
+    pair whose bytes change between the passes abandons the container, which is rebuilt ONCE
+    (new Writer = new content key) without it; a second change fails the backup. `out` must be
+    seekable (a temp file or the export buffer)."""
+    ring = hk.ring
+    dropped = {}
+    for attempt in (0, 1):
+        with tempfile.TemporaryDirectory() as td:
+            dbcopy = os.path.join(td, "webterm.db")
+            try:
+                snap = txstore.backup_snapshot(dbcopy, kwk=ring.kwk, inst=ring.installation_id,
+                                               recordings=include_transcripts, cancel=cancel)
+            except txstore.BackupBusy as e:
+                raise SnapshotBusy("the backup could not take its snapshot now (%s) — try again in a "
+                                   "moment" % e.detail) from None
+            try:
+                w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
+                               snk=ring.snk if local else None, mk=hk.mk if portable else None)
+                t = _TarOut(w)
+                size = os.path.getsize(dbcopy)
+                with open(dbcopy, "rb") as f:
+                    t.add_stream("webterm.db", size, _file_chunks(f, size))
+                t.add_bytes(KEYS_NAME, keys_blob)
+                for name, b in signing.items():
+                    t.add_bytes(name, b)
+                extra = _erasure_member(t, dbcopy, ring, include_transcripts, safety, snap=snap,
+                                        dropped=dropped)
+                if extra is None:
+                    if include_transcripts:
+                        # fără jurnal (copie de siguranţă de diagnostic, set de date neurmărit): v1,
+                        # doar textul clar 3.7 — o generaţie WTX1 nu are voie într-un manifest v1
+                        _add_transcripts(t, td)
+                    t.finish()
+                else:
+                    t.finish(extra)
+                w.close()
+                return
+            except txstore.BackupChanged as e:
+                snap.alarm("transcript.backupExcluded", "%s: changed while it was copied" % e.sid)
+                if attempt:
+                    raise ValueError("a recording changed while it was copied, twice — backup refused") from None
+                log.warning("backup: recording %s changed while copied; rebuilding the archive without it",
+                            e.sid[:8])
+                dropped[e.sid] = "changed-while-copied"
+                out.seek(0)
+                out.truncate()
+            except txstore.BackupBusy as e:
+                raise SnapshotBusy("the backup snapshot was stopped (%s) — nothing was written" % e.detail) from None
+            finally:
+                snap.release()
+
+
+def _erasure_member(t, dbcopy: str, ring, include_transcripts: bool, safety: bool = False, snap=None,
+                    dropped=None):
+    """§12.11.3: the erasure journal cut at the DB copy's committed head, the recordings of the
+    snapshot (verified, emitted or excluded) and the v2 manifest fields. None = this dataset never
+    had a journal (the manifest stays v1). A journal that does not match the DB fails the whole
+    backup (journal error ≠ corruption, step 4)."""
     try:
         m = erasure.backup_member(dbcopy, config.DATA_DIR, ring.kwk, ring.installation_id)
     except erasure.JournalError as e:
@@ -1643,21 +1718,53 @@ def _erasure_member(t, dbcopy: str, ring, include_transcripts: bool, safety: boo
     if m is None:
         return None
     t.add_bytes(JOURNAL_MEMBER, m["bytes"])
-    con = sqlite3.connect("file:%s?mode=ro" % dbcopy, uri=True)
-    try:
-        rows = con.execute("SELECT sid, kind FROM tx_descriptors ORDER BY sid, kind").fetchall()
-    finally:
-        con.close()
-    # generaţiile WTX1 nu intră încă în arhivă (backup_snapshot, PR ulterior): fiecare înregistrare
-    # e listată, ca restore-ul s-o marcheze „absent" şi să nu o citească drept pierdută
-    recs = [{"sid": sid, "kind": kind, "state": "excluded" if include_transcripts else "not-requested",
-             **({"reason": "wtx-not-archived"} if include_transcripts else {})} for sid, kind in rows]
+    recs = _emit_recordings(t, snap, dropped or {}) if snap is not None else []
     head = m["head"]
     return {"created": int(time.time()), "erasure": "tracked", "recordings": recs,
             "erasure_journal": {"member": JOURNAL_MEMBER, "length": len(m["bytes"]),
                                 "sha256": hashlib.sha256(m["bytes"]).hexdigest(),
                                 "head": {"n": head.n, "mac": head.mac.hex()},
                                 "attested": m["attested"]}}
+
+
+def _emit_recordings(t, snap, dropped: dict) -> list:
+    """The manifest's `recordings` (§12.11.3): every descriptor of the copy (+ `one-kind` for the
+    kind a sid never had), and, with recordings requested, each pair verified then emitted as
+    `transcripts/<sid>.<k>.<gen>.wtx` (exactly phys_len bytes), or excluded as a unit with its
+    reason and an alarm (owner Q3); the migration's plaintext copied from the file whose identity
+    the copied row names (`legacy`), or excluded when it changed. `.idx` is never archived."""
+    recs = [{"sid": sid, "kind": kind, "state": state, **({"reason": why} if why else {})}
+            for sid, kind, state, why in snap.listing]
+    if snap.pairs or snap.legacy:
+        t.add_dir("transcripts")
+    for p in snap.pairs:
+        why = dropped.get(p.sid) or snap.verify_pair(p)
+        if why:
+            if why != "absent":
+                # `absent` = restaurat fără generaţii (deja „nu e în acest backup"): nu e o alarmă nouă
+                snap.alarm("transcript.backupExcluded", "%s: %s" % (p.sid, why))
+            log.warning("backup: recording %s excluded (%s)", p.sid[:8], why)
+            recs.extend({"sid": p.sid, "kind": k, "state": "excluded", "reason": why[:64]} for k in p.kinds)
+            continue
+        for bg in p.gens:
+            t.add_stream("transcripts/" + txstore.gen_name(p.sid, bg.kind, bg.g.gen_id.hex()),
+                         bg.g.phys_len, snap.gen_chunks(p, bg))
+        recs.extend({"sid": p.sid, "kind": k, "state": "included"} for k in p.kinds)
+    if any(lg.dirn == "arhiva" for lg in snap.legacy):
+        t.add_dir("transcripts/" + _TX_ARCHIVE)
+    for lg in snap.legacy:
+        fd = snap.legacy_open(lg)
+        if fd is None:
+            snap.alarm("transcript.backupExcluded", "%s.%s: plaintext changed since its inventory" % (lg.sid, lg.kind))
+            recs.append({"sid": lg.sid, "kind": lg.kind, "state": "excluded", "reason": "legacy-changed"})
+            continue
+        try:
+            rel = "transcripts/" + (_TX_ARCHIVE + "/" if lg.dirn == "arhiva" else "") + lg.name
+            t.add_stream(rel, lg.ident[2], snap.legacy_chunks(fd, lg.ident[2]))
+        finally:
+            os.close(fd)
+        recs.append({"sid": lg.sid, "kind": lg.kind, "state": "legacy"})
+    return recs
 
 
 def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=False,
@@ -1712,6 +1819,35 @@ class _ExportBuf(io.BytesIO):
             raise wts.SnapshotTooLarge("export", "larger than the %d MiB restore upload limit; keep it as a "
                                        "stored snapshot or leave transcripts out" % (UPLOAD_MAX >> 20))
         return super().write(b)
+
+
+def spool_live_snapshot(f, include_transcripts: bool, cancel=None, keys=None) -> None:
+    """Control socket (§12.11.3, `hostops backup --live`): the WTS1 of the in-app download (local +
+    portable envelopes) written into the gateway's private spool `f`, through the same snapshot
+    (barrier, pins, verify and emit passes). Capped like the download (UPLOAD_MAX), then fsynced."""
+    if not is_protected():
+        raise ValueError("the live backup socket serves protected volumes only")
+    hk, blob = _host(keys)
+    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, cancel=cancel)
+    f.flush()
+    if f.tell() + _WTBK_OVERHEAD > UPLOAD_MAX:
+        raise wts.SnapshotTooLarge("export", "larger than the %d MiB restore upload limit" % (UPLOAD_MAX >> 20))
+    _fsync(f.fileno())
+
+
+def verify_spool(f, keys=None) -> tuple:
+    """The full archive check of a spooled WTS1 (portable route, database included) BEFORE anything
+    of it is offered; → (size, SHA-256 hex) of exactly the verified bytes."""
+    hk, _ = _host(keys)
+    f.seek(0)
+    _verify_wts(f, hk, None, prefer="portable")
+    f.seek(0)
+    h = hashlib.sha256()
+    size = 0
+    for b in iter(lambda: f.read(1 << 20), b""):
+        h.update(b)
+        size += len(b)
+    return size, h.hexdigest()
 
 
 def make_portable_bytes(include_transcripts: bool = False, keys=None) -> bytes:
@@ -2225,7 +2361,9 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch):
         erasure.check_member(jb, content["erasure_journal"], k, inst, head_db)
         for a in content["erasure_journal"]["attested"]:
             known[a["destination"]] = max(known.get(a["destination"], 0), a["n"])
-        _mark_absent(dbp, content["recordings"])
+        _stage_recordings(td, dbp, content["recordings"], inner)
+    elif _staged_generations(td):
+        raise erasure.ErasureConflict("recording generations in an archive without a v2 manifest — refused")
     elif head_db is not None and head_db.n > 0:
         raise erasure.ErasureConflict("the backup's database records erasures but the archive has no "
                                       "erasure journal — refused")
@@ -2242,25 +2380,92 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch):
     return dec.summary(content["created"] if content is not None else 0)
 
 
-def _mark_absent(dbp: str, recs) -> None:
-    """Every staged descriptor must be named by the manifest; one the backup did not carry
-    (`excluded` / `not-requested` / `one-kind`) is restored as `absent` ("not in this backup")."""
+def _staged_generations(td: str) -> list:
+    d = os.path.join(td, "transcripts")
+    return sorted(n for n in os.listdir(d) if _TX_GEN.match(n)) if os.path.isdir(d) else []
+
+
+def _staged_plaintext(td: str) -> dict:
+    """{(sid, kind): "transcripts" | "arhiva"} of the staged 3.7-named plaintext files."""
+    out = {}
+    for sub, dirn in (("transcripts", "transcripts"), ("transcripts/" + _TX_ARCHIVE, "arhiva")):
+        d = os.path.join(td, sub)
+        if not os.path.isdir(d):
+            continue
+        for n in os.listdir(d):
+            full = os.path.join(d, n)
+            if os.path.isdir(full) or (dirn == "transcripts" and _TX_GEN.match(n)):
+                continue
+            m = re.match(r"^([0-9a-f]{32})\.(out|cast)$", n)
+            if not m:
+                # un manifest v2 numeşte fiecare text clar printr-o intrare `legacy` (sid.kind)
+                raise erasure.ErasureConflict("a plaintext member outside the manifest's recordings — refused")
+            if os.path.isfile(full):
+                if (m.group(1), m.group(2)) in out:
+                    raise erasure.ErasureConflict("the same recording twice in the archive (transcripts/ and "
+                                                  "arhiva/) — refused")
+                out[(m.group(1), m.group(2))] = dirn
+    return out
+
+
+def _stage_recordings(td: str, dbp: str, recs, inner: kr.Keyring) -> None:
+    """§12.11.3 "Restore of recordings", at stage. Every staged descriptor is named by the
+    manifest; an `included` one is decoded with the STAGED keyring and RK envelope and every one
+    of its generations is a member of exactly `phys_len` bytes that passes the full check; one the
+    backup did not carry (`excluded` / `not-requested` / `one-kind`) → `absent`. Every `.wtx`
+    member is named by an included descriptor, every `legacy` entry by exactly one plaintext
+    member and no other plaintext member exists. Anything else → refused."""
     listed = {(r["sid"], r["kind"]): r["state"] for r in recs}
-    con = sqlite3.connect(dbp, isolation_level=None)
     try:
-        try:
-            rows = con.execute("SELECT sid, kind FROM tx_descriptors").fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        for sid, kind in rows:
+        pairs = txstore.staged_pairs(dbp, inner.kwk, inner.installation_id,
+                                     decode=lambda sid, kind: listed.get((sid, kind)) == "included")
+    except txstore.GenCorrupt as e:
+        raise erasure.ErasureConflict("a recording descriptor of the backup does not authenticate (%s) — "
+                                      "refused" % e.detail[:80]) from None
+    expected = set()
+    absent = []
+    tdir = os.path.join(td, "transcripts")
+    for sid, (rk, gens, statuses) in pairs.items():
+        for kind in statuses:
             state = listed.get((sid, kind))
             if state is None:
                 raise erasure.ErasureConflict("a recording of the backup's database is not in its manifest — refused")
             if state in ("excluded", "not-requested", "one-kind"):
-                con.execute("UPDATE tx_descriptors SET status='absent' WHERE sid=? AND kind=?", (sid, kind))
-            elif state == "included":
-                # generaţiile WTX1 nu sunt încă membri permişi: un `included` nu are ce să numească
-                raise erasure.ErasureConflict("the backup lists recording generations this build cannot restore — refused")
+                absent.append((sid, kind))
+            elif state != "included":
+                raise erasure.ErasureConflict("a recording with a descriptor is listed as %s — refused" % state)
+        for kind, g in gens:
+            if listed.get((sid, kind)) != "included":
+                continue
+            name = txstore.gen_name(sid, kind, g.gen_id.hex())
+            expected.add(name)
+            try:
+                fd = os.open(os.path.join(tdir, name), _FILE_RO)
+            except FileNotFoundError:
+                raise erasure.ErasureConflict("an included recording generation is missing from the archive — "
+                                              "refused") from None
+            try:
+                txstore.verify_generation_fd(fd, sid, kind, g, rk, exact_size=True)
+            except txstore.GenCorrupt as e:
+                raise erasure.ErasureConflict("a recording generation of the backup fails its check (%s.%s: %s) "
+                                              "— refused" % (sid[:8], kind, e.detail[:40])) from None
+            finally:
+                os.close(fd)
+    for (sid, kind), state in listed.items():
+        if state == "included" and kind not in (pairs.get(sid, (None, None, {}))[2]):
+            raise erasure.ErasureConflict("the manifest includes a recording the backup's database does not "
+                                          "describe — refused")
+    if set(_staged_generations(td)) != expected:
+        raise erasure.ErasureConflict("the archive holds recording generations no included descriptor names — "
+                                      "refused")
+    plain = _staged_plaintext(td)
+    legacy = {k for k, v in listed.items() if v == "legacy"}
+    if set(plain) != legacy:
+        raise erasure.ErasureConflict("the archive's plaintext recordings do not match its manifest — refused")
+    con = sqlite3.connect(dbp, isolation_level=None)
+    try:
+        for sid, kind in absent:
+            con.execute("UPDATE tx_descriptors SET status='absent' WHERE sid=? AND kind=?", (sid, kind))
     finally:
         con.close()
 
@@ -2638,6 +2843,11 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                 os.unlink(p)
         _fsync_dir(config.DATA_DIR)
         _step("apply:db")
+        if has_tx and txstore.enabled():
+            # PR6c (§12.11.3 Apply): registrul şi rândurile migrării restaurate numesc inode-urile
+            # volumului înlocuit; le legăm de fişierele tocmai copiate (verificate la stage)
+            txstore.rebind_restored_sync(config.DB_PATH, config.TRANSCRIPT_DIR)
+        _step("apply:rebind")
         if er_plan is not None:
             if flag.get("erasure_proven", False):
                 erasure.clear_unproven_sync(config.DB_PATH)

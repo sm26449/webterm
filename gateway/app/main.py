@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .errors import ApiError
-from . import (api, audit, authz, backup_api, bootkeys, certmon, config, conntypes, core, db, edgeguard, edgelists, edgemtls,
+from . import (api, audit, authz, backup_api, bootkeys, certmon, config, conntypes, core, ctlsock, db, edgeguard, edgelists, edgemtls,
                deploy_keys_api, docker_api, email_alerts, files_api, forward_api, fwddomain, health,
                hosts_api, idlesess, oidc_api, scim, security, services_api, share_api, signing, ssomap, syshealth, txhub,
                webauthn_api)
@@ -97,7 +97,10 @@ async def _janitor_once() -> list:
             return None
 
     archived = await step("archive", core.archive_closed_transcripts)
-    removed = await step("purge", lambda: asyncio.to_thread(core.purge_archive))
+    # 3.8 PR6c: cu înregistrările criptate active, retenţia e pe `archived_at` (txhub, fără
+    # tombstone); altfel calea 3.7, neschimbată
+    removed = await step("purge", lambda: txhub.purge_archived() if txhub.active()
+                         else asyncio.to_thread(core.purge_archive))
     await step("audit", audit.prune)             # aceeași fereastră de retenție ca arhiva
     await step("signing", _warn_if_signing_locked)
     await step("forwards", _warn_if_insecure_forwards)
@@ -254,6 +257,10 @@ async def lifespan(app: FastAPI):
         log.critical("boot refused: %s", e)
         await db.close()
         raise RuntimeError("boot refused (see the line above)") from None
+    if txhub.active():
+        # PR6c (§12.11.3): socket-ul de control pentru `hostops backup --live`, după crash recovery,
+        # înainte ca rutele să servească. Indisponibil → alarmă; backup-ul live al hostului e refuzat
+        await ctlsock.start()
     # Instalare NOUĂ → cheie proprie din prima secundă. Sursa publică a agentului are încorporată
     # cheia MENTAINERULUI; fără o cheie de deployment, fiecare instalare din lume ar împărţi
     # aceeaşi ancoră de încredere pentru update-uri, iar o scurgere a acelei chei ar însemna cod
@@ -325,6 +332,7 @@ async def lifespan(app: FastAPI):
     await edgemtls.startup()      # CA + secret + fişier ÎNAINTE să acceptăm agenţi
     mtlst = asyncio.create_task(edgemtls.loop())
     yield
+    await ctlsock.stop()
     await txhub.shutdown()        # no-op când înregistrările criptate sunt oprite
     listst.cancel()
     mtlst.cancel()

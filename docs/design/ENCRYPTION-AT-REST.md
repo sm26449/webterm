@@ -2746,9 +2746,9 @@ refused at boot because the Store opens only test-fixture volumes until PR6b bri
 - **Backup.** With the flag on, `_write_wts` writes `wts-content-2` whenever the dataset is tracked:
   the journal member cut at the DB copy's head (taken from the VACUUM copy, so a later erasure is
   simply not in it), the attested heads, `created`, and one `recordings` entry per descriptor of the
-  copy. **WTX1 generations are still not archived** (`backup_snapshot()` and its barrier are a later
-  PR): every recording is listed `excluded` (`wtx-not-archived`) or `not-requested`, and the restore
-  marks it `absent`. An `included` entry is refused by this build. A tracked dataset whose journal is
+  copy. **WTX1 generations were not archived in PR6a** (every recording listed `excluded` /
+  `wtx-not-archived` or `not-requested`); PR6c archives them through `backup_snapshot()`
+  (§12.11.13). A tracked dataset whose journal is
   missing or does not match fails the backup, except the pre-restore safety copy, which is then
   written without the journal (v1; its own staging refuses it later: a diagnostic copy). Flag off:
   the PR5 path byte for byte (v1, no journal).
@@ -2809,8 +2809,7 @@ on; a test-volume marker still needs a test gate. Where the code had to choose, 
   `orphan` rows is converted first (at most 2 at once, `list_epoch` = 1); the writer is **refused**
   (`transcript.migrationPending`, the hub does not attach) while a kind of the sid is still
   `pending`, `orphan` or `failed`. A failed row therefore blocks that session's terminal until an
-  Owner resolves it; there is no route for that yet (`migration.process` after a manual fix of the
-  row; open item).
+  Owner resolves it (PR6c: the retry / discard routes, §12.11.13).
 - **Unlink.** `renameat2` through libc or the raw syscall (x86_64, aarch64); unavailable, or a
   filesystem refusing `RENAME_NOREPLACE` → nothing is deleted, the row stays `converted` with the
   error, retried after the backoff (each retry re-verifies against the published descriptor).
@@ -2829,11 +2828,82 @@ on; a test-volume marker still needs a test gate. Where the code had to choose, 
   plaintext (a crash between the journal append and the migration, or a restore) is removed by the
   same identity-checked unlink without conversion, row `unlinked` with `error = erased`.
 - **Retention.** With the flag on, `core.purge_archive` no longer touches `arhiva/` (the migration
-  owns those files); purging converted recordings by `archived_at` is not implemented yet.
+  owns those files); the purge by `archived_at` is PR6c's (§12.11.13).
 - **Inventory of artefacts.** `txstore.TX_STATE_KEYS` now includes `recordings_format` and
   `migration_inventory`, so a flag-off build refuses a volume that went through the migration.
 - **System health:** `crypto.migration` (info while migrating, warning on failed rows, stray
   plaintext or leftover private names, ok once the flag is published). Never critical.
+
+#### 12.11.13 Implementation notes (PR6c, backups, control socket, retention, failed migrations)
+
+PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECORDINGS` (off = the
+3.7 / PR5 paths byte for byte). Where the code had to choose, it chose:
+
+- **One snapshot function.** `txstore.backup_snapshot()` is called from a backup THREAD by every
+  protected writer (`backup._write_wts` → scheduled `.wts`, download, cloud / SFTP / FTPS upload,
+  pre-restore safety copy, `hostops backup`, the control socket). With a live Store
+  (`txstore.set_backup_source`, registered by `txhub.install`) step 1 runs on the Store's loop
+  under its barrier (`run_coroutine_threadsafe`): `VACUUM INTO` with a 120 s progress-handler
+  budget, the recordings listed from the copy only, gen_ids pinned. Without one (restore apply at
+  boot, `hostops backup` with the app stopped) the boot lock stands in for the barrier. One
+  snapshot per process (`_BACKUP_SLOT`, non-blocking: a second one → `backup.busy`).
+- **fds per pair, not at step 1.** The pins are taken at step 1; each generation is opened when its
+  pair is verified / emitted and checked against the ledger inode of the copy. A pinned name is
+  never unlinked and generation files are never renamed or rewritten, so these are the same bytes
+  with bounded fds (opening every generation at once could exceed `RLIMIT_NOFILE` on a large volume
+  and fail the backup).
+- **Legacy plaintext pinned by name.** `tx_migration` rows `pending` / `orphan` / `failed` of the
+  copy are pinned by `(dir, name)`; the migration's identity-checked unlink defers while pinned (the
+  row stays `converted`, the janitor retries after 60 s). The bytes come from a fd whose identity
+  equals the copied row; a changed file → `excluded` (`legacy-changed`). Rows keyed by a path (names
+  outside the allowlist) are not archived.
+- **Verify, then emit.** Verify pass = `txstore.verify_generation_fd` (header, hdr_mac, every
+  record, counts, the SEAL of a sealed generation and nothing after it), hashing exactly
+  `phys_len` bytes. The emit pass re-hashes while copying; a difference → `BackupChanged`: the
+  container is abandoned (`out` truncated) and rebuilt once with a new content key without that
+  pair; a second one fails the backup. Exclusion reasons: `generation:<diag>`,
+  `missing-generation`, `descriptor:<diag>`, `key` (an RK envelope that does not unwrap excludes its
+  pair and the backup goes on: failing every backup on one bad row would leave no backup at all),
+  `damaged`, `absent` (no new alarm for `absent`). Hold budget: pins at most 10 min, then
+  `backup.busy`.
+- **Restore.** Members `transcripts/<sid>.<k>.<gen>.wtx` are allowed directly under `transcripts/`
+  only. At stage (`backup._stage_recordings`), `included` descriptors are decoded with the STAGED
+  keyring and every generation must be a member of exactly `phys_len` bytes that passes the full
+  check; descriptors not included are only listed (a pair excluded because its descriptor is
+  damaged must not block the restore) → `absent`. The `.wtx` members must equal the included
+  generations and the plaintext members must equal the `legacy` entries; a v1 archive with `.wtx`
+  members is refused. At apply, after the DB copy, `txstore.rebind_restored_sync` binds the restored
+  ledger and migration rows to the inodes the apply has just copied (otherwise `retire` and the
+  migration's unlink would refuse them as not ours). `Store.recover` now skips `absent` descriptors
+  (it used to mark them `damaged`).
+- **Control socket** (`ctlsock.py`), as the protocol above. The socket is bound through
+  `/proc/self/fd/<.ctl fd>/backup.sock`. `profile` accepts `portable` only (the WTS1 of the in-app
+  download; hostops adds the WTBK1 passphrase layer itself, so no passphrase crosses the socket).
+  The spool is capped like the download (a 512 MiB WTBK1). The SO_PEERCRED refusal is tested
+  through `ctlsock.peer_ok` (the suite runs as root, which the rule admits). `hostops backup --live`
+  uses the socket whenever the flag is set, the socket exists or the shared inventory finds any
+  encrypted-recording artefact; no answer → exit 3, and `backup.sh` prints the refusal. System
+  health: `crypto.backup_socket`.
+- **Retention.** `txhub.purge_archived()` (the janitor's purge step when active, instead of
+  `core.purge_archive`): every sid whose kinds were all archived before `now −
+  ARCHIVE_RETENTION_DAYS`, with no writer, nothing in `recovery` and no migration row still owning
+  plaintext → `Store.purge`: one transaction (ledger `published → retired`; RK, descriptors, gaps
+  and quarantine rows deleted), then `retire` (deferred while pinned). No tombstone (Q1).
+- **Failed migrations.** System health names up to 20 sessions with `failed` rows.
+  `POST /api/recordings/migration/{sid}/retry` and `/discard`: `backups.manage` + Owner @ all + a real
+  fresh factor + audit (+ a security e-mail for discard). Retry re-inventories the failed rows from
+  the file now under their name (regular, one link; gone → `missing`) and converts; it is refused
+  (`transcript.retryEncrypted`) when the sid already has an encrypted recording (the plaintext cannot
+  be merged into it). Discard needs a closed session and the typed sid prefix (a tombstoned sid can
+  never record again): rows → `pending` with the current identity (a crash after the journal entry
+  is then finished by the boot's erased-sid rule), one journal entry (kinds = failed ∪ encrypted;
+  an encrypted kind goes with it), then the identity-checked unlink.
+- **A 3.7 archive restored onto a migrated volume** is converted, not refused: the restored 3.7
+  database has no `migration_inventory`, so the next boot inventories the restored plaintext
+  (`pending`) and the migration converts it; a sid erased on this volume is tombstoned again by
+  `erasure.boot` before the migration, whose erased-sid rule deletes its plaintext without
+  converting it. A v2 backup restores its `legacy` plaintext with the migration rows rebound to the
+  copied inodes.
 
 ## Appendix: Test vectors (v1)
 

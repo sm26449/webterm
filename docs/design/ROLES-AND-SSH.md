@@ -1877,6 +1877,8 @@ describe the pre-3.6 state this design started from.
 | `/api/sessions/{sid}/recovery/release` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor; one `recovery` recording → normal access |
 | `/api/sessions/{sid}/recovery/requarantine` (3.8) | POST | `backups.manage` | G | | | Owner @ all only; `recovery` → quarantined again (reduces access) |
 | `/api/sessions/{sid}/recovery/transcript` (3.8) | GET | `backups.manage` | G | | | Owner @ all only; audited read of a `recovery` recording through the Owner-recovery access (no share, no replay link, no search) |
+| `/api/recordings/migration/{sid}/retry` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor; a session's `failed` plaintext migration re-inventoried from the file now under its name and converted again; refused when the session already has an encrypted recording (ENCRYPTION-AT-REST.md §12.11.12) |
+| `/api/recordings/migration/{sid}/discard` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor, typed confirmation, closed session; the `failed` plaintext deleted through the identity-checked unlink and the session tombstoned in the erasure journal (an erasure) |
 | `/api/sessions/{sid}/replay-links` | POST | `share.replay` | H(sid) | su | | |
 | `/api/replay-links/{link_id}` | DELETE | `share.replay` (own) / `shares.manage` | H(link) | su | | |
 | `/ws/sessions/{sid}` | WS | `session.open` → rw; `session.watch` → ro; `recording.view` → closed replay | H(sid) | window (passive) + lock | | 60-second revalidation re-runs authz (§A.6.4) |

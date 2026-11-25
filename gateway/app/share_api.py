@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .errors import ApiError
 from . import (audit, authz, backup, cloudbackup, cmdguard, config, conntypes, core, db, email_alerts,
-               erasure, replay, security, sessctl, shares, signing, stepup, txhub, txstore, watermark)
+               erasure, migration, replay, security, sessctl, shares, signing, stepup, txhub, txstore, watermark)
 
 log = logging.getLogger("webterm")
 # Aceeaşi gardă ca api.router (fail-closed): o rută fără permisiune declarată → 500 authz.undeclared.
@@ -1083,6 +1083,8 @@ def _erasure_error(e) -> ApiError:
         return ApiError(409, "transcript.recoveryState", msg)
     if c == "transcript.notRecoverable":
         return ApiError(409, "transcript.notRecoverable", msg)
+    if c == "transcript.notFailed":
+        return ApiError(409, "transcript.notFailed", msg)
     return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
 
 
@@ -1257,3 +1259,73 @@ async def recovery_transcript(sid: str, request: Request, format: str = "out",
                              headers={"Cache-Control": "no-store", "Content-Length": str(snap.length),
                                       "Content-Disposition": 'attachment; filename="%s.%s"' % (sid[:8], kind),
                                       "X-Recording-Recovery": "unproven"})
+
+
+# ── [replay] 3.8 PR6c: Owner resolution of a failed plaintext migration (§12.11.12) ──
+# Un rând `failed` blochează writer-ul sesiunii (textul clar nu se poate converti). Owner-ul (acelaşi
+# contract ca ştergerea: backups.manage + Owner @ all + factor real proaspăt + audit) alege: retry
+# (fişierul de acum, re-inventariat, convertit) sau discard (textul clar şters verificat + tombstone
+# în jurnal: o ştergere). După oricare, writer-ul sesiunii poate porni.
+
+
+def _migration_store():
+    st = txhub.store()
+    if st is None or not migration.active():
+        raise ApiError(503, "transcript.migrationUnavailable", "the recording migration is not active")
+    return st
+
+
+@router.post("/api/recordings/migration/{sid}/retry")
+async def retry_failed_migration(sid: str, body: RecoveryIn, request: Request,
+                                 user=Depends(authz.perm('backups.manage'))):
+    """Owner: convert a session's failed plaintext again, from the file now under its name."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _migration_store()
+    await _owner_fresh_factor(user, sid, body)
+    srow = await db.fetchone("SELECT state FROM sessions WHERE id=?", sid)
+    live = srow is not None and srow["state"] in ("creating", "live")
+    try:
+        states = await migration.retry(st, sid, live=live)
+    except txstore.TxStoreError as e:
+        if e.reason == "notFailed":
+            raise ApiError(409, "transcript.notFailed", "no failed migration for this session") from None
+        if e.reason == "encrypted":
+            raise ApiError(409, "transcript.retryEncrypted", str(e)) from None
+        if e.reason == "disabled":
+            raise ApiError(503, "transcript.migrationUnavailable", "the recording migration is not active") from None
+        raise ApiError(409, "transcript.retryFailed", "the migration failed again: %s" % e.reason) from None
+    audit.detail(request, "owner: migration of recording %s retried → %s" % (
+        sid[:8], ", ".join("%s=%s" % kv for kv in sorted(states.items()))))
+    if any(v in ("failed", "pending", "orphan") for v in states.values()):
+        raise ApiError(409, "transcript.retryFailed", "the migration did not complete; see System health")
+    return {"ok": True, "kinds": states}
+
+
+@router.post("/api/recordings/migration/{sid}/discard")
+async def discard_failed_migration(sid: str, body: EraseIn, request: Request,
+                                   user=Depends(authz.perm('backups.manage'))):
+    """Owner: delete a session's failed plaintext (identity-checked) and tombstone the session in the
+    erasure journal (an erasure: it survives restores). The session must be closed; typed
+    confirmation = the first 8 characters of the session id."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    _migration_store()
+    if body.confirm.strip() != sid[:8]:
+        raise ApiError(400, "transcript.eraseConfirm", "type the first 8 characters of the session id to confirm")
+    row = await db.fetchone("SELECT state FROM sessions WHERE id=?", sid)
+    if row is not None and row["state"] in ("creating", "live"):
+        raise ApiError(409, "session.live", "the session is live; close it first")
+    await _owner_fresh_factor(user, sid, body)
+    try:
+        res = await erasure.discard_failed(st, sid)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    except txstore.TxStoreError as e:
+        raise ApiError(409, "transcript.retryFailed", "the plaintext could not be re-checked: %s" % e.reason) from None
+    audit.detail(request, "owner: failed plaintext of recording %s discarded (journal n=%d)" % (sid[:8], res["n"]))
+    email_alerts.notify_security_change("a recording's unmigrated plaintext was discarded (session %s)" % sid[:8],
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        user_id=user["id"])
+    return res

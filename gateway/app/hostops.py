@@ -9,6 +9,10 @@ gateway), never with a shell `tar` or a hand-written swap (PR4 review, H2/H3/M5)
           fds, inode/nlink filters, signing-pair checks, self-verification). `--live`: run inside
           the running app (`docker exec`); the gateway holds `.lock`, so the capture takes the
           shared `.maint.lock` instead (never during a boot's restore / migration phase).
+          With encrypted recordings (the flag, the socket or any of their artefacts), `--live`
+          never reads the volume: the gateway takes the snapshot through its local control socket
+          `DATA_DIR/.ctl/backup.sock` (ctlsock.py, §12.11.3) and streams the verified WTS1 back;
+          no answer → refused (exit 3).
           Without `--live` the data directory's `.lock` must be free (the app is stopped).
     python3 -m app.hostops verify --sha256 HEX [--legacy-import]          (archive on stdin)
         → the gateway's full restore check (strict extractor, keyring, database) in a private
@@ -35,6 +39,7 @@ legacy volume; the staging proves the exact published pair again. Messages never
 INV-14 (docs/design/INVARIANTS.md): the key decides before anything is written.
 """
 import argparse
+import contextlib
 import hashlib
 import os
 import secrets
@@ -44,7 +49,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import backup, config
+from . import backup, config, ctlsock, txstore
 from . import keyring as kr
 from . import keys
 
@@ -216,7 +221,13 @@ def cmd_backup(args):
             # un restore pus în staging se aplică la boot: o captură acum ar salva starea de dinainte
             _say("note: a restore is staged on this volume and is applied at the next start of the app")
         hk, resolved = _open_keys(view, inv)
-        blob = backup.make_encrypted(passphrase, include_transcripts=not args.no_transcripts, keys=hk)
+        if lock is None and _needs_socket():
+            # PR6c (§12.11.3): gateway-ul rulează şi ţine înregistrări criptate → snapshot-ul îl ia
+            # EL (barieră, pin-uri), prin socket-ul local; fără răspuns → refuz, niciodată o citire
+            # directă a volumului viu
+            blob = _live_via_socket(hk, passphrase, not args.no_transcripts)
+        else:
+            blob = backup.make_encrypted(passphrase, include_transcripts=not args.no_transcripts, keys=hk)
     except (ValueError, OSError) as e:
         raise Refused("the backup was not written: %s" % _refusal(e)) from None
     finally:
@@ -229,6 +240,48 @@ def cmd_backup(args):
     _say("kind: %s" % ("reduced" if resolved.source == "volume" else "protected"))
     _say("sha256: %s" % hashlib.sha256(blob).hexdigest())
     return EXIT_OK
+
+
+def _needs_socket():
+    """The live volume may hold encrypted recordings (flag on, the socket exists, or any artefact
+    of the inventory): then only the running gateway may snapshot it."""
+    if txstore.enabled() or os.path.lexists(ctlsock.socket_path()):
+        return True
+    try:
+        return bool(txstore.inventory(config.DATA_DIR, config.DB_PATH))
+    except Exception:                       # noqa: BLE001 — necitibil = nu dovedeşte absenţa
+        return True
+
+
+def _live_via_socket(hk, passphrase, include):
+    """`hostops backup --live` through the gateway's control socket: the WTS1 lands in a private
+    temp file, its length and SHA-256 must be the gateway's answer and its structure must pass the
+    restore check before the passphrase layer is added; a partial file is deleted, never reused."""
+    try:
+        client = ctlsock.Client(ctlsock.socket_path())
+    except (ctlsock.ClientError, OSError) as e:
+        raise Refused("the running gateway did not answer on its backup control socket (%s): a live "
+                      "volume with encrypted recordings is never read directly — refused. System health "
+                      "shows why the socket is missing; or stop the app and back up again" % e) from None
+    fd, tmp = tempfile.mkstemp(prefix="wt-live-", suffix=".wts")
+    try:
+        with os.fdopen(fd, "w+b") as f:
+            try:
+                size, _sha = client.snapshot(f, recordings=include)
+            except (ctlsock.ClientError, OSError) as e:
+                raise Refused("the live backup through the gateway failed: %s — refused" % e) from None
+            f.flush()
+            if f.tell() != size:
+                raise Refused("the live backup is not the size the gateway announced — refused")
+            f.seek(0)
+            backup._verify_wts(f, hk, None, prefer="portable")
+            f.seek(0)
+            data = f.read()
+    finally:
+        client.close()
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    return backup.encrypt(data, passphrase)
 
 
 # ── verify ───────────────────────────────────────────────────────────────────

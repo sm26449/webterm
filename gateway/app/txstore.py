@@ -33,6 +33,7 @@ Nothing else in the gateway opens a generation, decodes a descriptor or unwraps 
 """
 import asyncio
 import collections
+import concurrent.futures
 import contextlib
 import ctypes
 import errno
@@ -339,6 +340,7 @@ class TxStoreError(Exception):
     def __init__(self, reason, detail=""):
         super().__init__(f"{reason}: {detail}" if detail else reason)
         self.reason = reason
+        self.detail = detail
 
     @property
     def code(self):
@@ -647,6 +649,7 @@ class Store:
         self.tombstoned = set()
         self._rk_cache = collections.OrderedDict()
         self._pins = collections.Counter()
+        self._plain_pins = collections.Counter()   # (dir, name) → backups copying that plaintext
         self._deferred = {}               # gen hex → (name, dev, ino)
         self._gen_fds = 0
         self._sem = None
@@ -943,18 +946,42 @@ class Store:
     @contextlib.contextmanager
     def pinned(self, hexids):
         hexids = list(hexids)
-        for h in hexids:
-            self._pins[h] += 1
+        self.pin_gens(hexids)
         try:
             yield
         finally:
-            for h in hexids:
-                self._pins[h] -= 1
-                if self._pins[h] <= 0:
-                    del self._pins[h]
-                    later = self._deferred.pop(h, None)
-                    if later is not None:
-                        asyncio.get_running_loop().create_task(self.retire(later[0], later[1], h))
+            self.unpin_gens(hexids)
+
+    def pin_gens(self, hexids):
+        """Loop only. A pinned generation is never unlinked (`retire` defers it)."""
+        for h in hexids:
+            self._pins[h] += 1
+
+    def unpin_gens(self, hexids):
+        """Loop only. The last unpin runs the retire that was deferred meanwhile."""
+        for h in hexids:
+            self._pins[h] -= 1
+            if self._pins[h] <= 0:
+                del self._pins[h]
+                later = self._deferred.pop(h, None)
+                if later is not None:
+                    asyncio.get_running_loop().create_task(self.retire(later[0], later[1], h))
+
+    # PR6c (§12.11.3): textul clar al unui rând `tx_migration` copiat de un backup e fixat pe nume
+    # (dir, name): unlink-ul verificat al migrării se amână cât timp e fixat (rândul rămâne
+    # `converted`, janitorul reîncearcă), deci arhiva şi DB-ul ei copiat rămân coerente.
+    def pin_plain(self, keys_):
+        for k in keys_:
+            self._plain_pins[k] += 1
+
+    def unpin_plain(self, keys_):
+        for k in keys_:
+            self._plain_pins[k] -= 1
+            if self._plain_pins[k] <= 0:
+                del self._plain_pins[k]
+
+    def plain_pinned(self, dirn, name):
+        return self._plain_pins[(dirn, name)] > 0
 
     async def reserve_and_create(self, sid, kind):
         """Reservation → O_EXCL create → ledger `created` with the inode. Caller holds the lease.
@@ -1081,7 +1108,9 @@ class Store:
                 self.alarm("transcript.integrity", f"{name}: published but not listed")
         # Descriptori: fişiere lipsă/scurte → damaged; un `live` → `recovered` la contoarele lui.
         for (s, k), (d, blob, status) in descs.items():
-            if status == "damaged":
+            # `absent` = restaurat fără generaţii („nu e în acest backup", §12.11.3): fişierele lipsesc
+            # prin definiţie, nu e o defecţiune de marcat `damaged`
+            if status in ("damaged", "absent"):
                 continue
             bad = None
             for g in d.generations:
@@ -1134,6 +1163,42 @@ class Store:
         for o in rep.orphans:
             self.alarm("transcript.orphan", o)
         return rep
+
+    async def purge(self, sid, cutoff):
+        """Retention purge of one archived recording (§12.11.4 "purge"): descriptors, RK, gaps and
+        quarantine rows deleted, generations → retired then unlinked (deferred while pinned). NO
+        tombstone (owner Q1: a purge is not an erasure). Re-checked inside the transaction: every
+        kind archived before `cutoff`, no writer, nothing in Owner recovery, no plaintext the
+        migration still owns. Returns True when purged."""
+        rec = self.recorders.get(sid)
+        if sid in self._starting or (rec is not None and rec.state == "running") or sid in self.tombstoned:
+            return False
+        async with self.lease(sid):
+            def fn(c):
+                rows = c.execute("SELECT archived_at, status FROM tx_descriptors WHERE sid=?", (sid,)).fetchall()
+                if not rows or any(a is None or a >= cutoff for a, _s in rows):
+                    return None
+                if any(s == "recovery" for _a, s in rows):
+                    return None
+                if c.execute("SELECT 1 FROM tx_migration WHERE sid=? AND state IN "
+                             "('pending','orphan','failed','converted')", (sid,)).fetchone():
+                    return None
+                gens = c.execute("SELECT gen_id, kind FROM tx_files WHERE sid=? AND state='published'",
+                                 (sid,)).fetchall()
+                c.execute("UPDATE tx_files SET state='retired' WHERE sid=? AND state='published'", (sid,))
+                c.execute("DELETE FROM session_keys WHERE sid=?", (sid,))
+                c.execute("DELETE FROM tx_descriptors WHERE sid=?", (sid,))
+                c.execute("DELETE FROM tx_gaps WHERE sid=?", (sid,))
+                c.execute("DELETE FROM tx_quarantine WHERE sid=?", (sid,))
+                return [(g[0], g[1]) for g in gens]
+            gens = await self.txn(fn)
+            if gens is None:
+                return False
+            self._bump(sid)
+            self.drop_key(sid)
+            for hexid, kind in gens:
+                await self.retire(sid, kind, hexid)
+        return True
 
     async def compact_ledger(self, now=None):
         cutoff = (self.clock() if now is None else now) - LEDGER_KEEP_SECS
@@ -3974,3 +4039,550 @@ def _check_compaction(old, new, prefix):
         raise Refused("cas", "committed list no longer starts with P")
     if tuple(new.generations[1:]) != tuple(old.generations[len(prefix):]):
         raise Refused("cas", "tail L not preserved")
+
+
+# ── backup snapshot (§12.11.3, PR6c) ─────────────────────────────────────────
+#
+# `backup_snapshot()` e SINGURA cale prin care un backup citeşte înregistrări. Pasul 1 (VACUUM INTO,
+# lista din copie, pin-urile) rulează sub bariera Store-ului viu, pe loop-ul lui, chemat dintr-un
+# thread de backup; fără Store viu (restore la boot, `hostops backup` cu app-ul oprit) exclusivitatea
+# o dă lacătul de boot al procesului (§12.2), deci acelaşi pas rulează direct. Paşii 2–4 sunt ai
+# thread-ului de backup (proprietarul pin-urilor de la „submit": doar `release()` le eliberează).
+
+BACKUP_VACUUM_SECS = 120.0       # bugetul VACUUM INTO (sub barieră)
+BACKUP_HOLD_SECS = 600.0         # pin-urile unui snapshot: cel mult 10 min în total
+BACKUP_START_WAIT = 900.0        # aşteptarea barierei + pasul 1, din thread-ul de backup
+_BACKUP_SLOT = threading.Lock()  # UN snapshot în zbor per proces (in-app, programat, socket)
+_backup_source = None            # (Store, loop) cât timp gateway-ul serveşte înregistrări criptate
+
+
+class BackupBusy(TxStoreError):
+    """Another snapshot is in flight, the barrier or a budget ran out, or the snapshot was
+    cancelled: nothing was published (`backup.busy`)."""
+
+
+class BackupChanged(TxStoreError):
+    """The emit pass read bytes that differ from the verify pass (media changed under a pin): the
+    container is abandoned and rebuilt once without that pair (§12.11.3 step 3)."""
+
+    def __init__(self, sid, detail=""):
+        super().__init__("changed", detail or sid)
+        self.sid = sid
+
+
+class GenCorrupt(TxStoreError):
+    """A generation failed its authentication / structure check (corruption, never an I/O fault)."""
+
+
+def set_backup_source(store, loop):
+    """txhub.install: the live Store whose barrier and pins every in-process backup uses."""
+    global _backup_source
+    _backup_source = (store, loop)
+
+
+def clear_backup_source(store=None):
+    global _backup_source
+    if store is None or (_backup_source is not None and _backup_source[0] is store):
+        _backup_source = None
+
+
+def backup_source():
+    return _backup_source
+
+
+class _HashPRead(_PRead):
+    """_PRead that hashes every byte the parse consumes and checks a cancel hook per read."""
+
+    def __init__(self, fd, limit, check=None):
+        super().__init__(fd, 0, limit=limit)
+        self.h = hashlib.sha256()
+        self.check = check
+
+    def read(self, n):
+        if self.check is not None:
+            self.check()
+        b = super().read(n)
+        self.h.update(b)
+        return b
+
+
+def verify_generation_fd(fd, sid, kind, g, rk, *, exact_size=False, check=None):
+    """Full check of one committed generation on `fd`, reading exactly its `phys_len` bytes:
+    header and hdr_mac, every record, counts, the SEAL of a sealed one (nothing after it).
+    Returns the SHA-256 of those bytes. `exact_size` (restore staging): the file must be exactly
+    `phys_len` long. Raises GenCorrupt (the recording) — an OSError stays an OSError (a fault)."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise GenCorrupt("corrupt", "not a regular file")
+    if st.st_size < g.phys_len or (exact_size and st.st_size != g.phys_len):
+        raise GenCorrupt("corrupt", "size %d, committed %d" % (st.st_size, g.phys_len))
+    kb = KINDS[kind]
+    fp = _HashPRead(fd, g.phys_len, check)
+    try:
+        hdr = txformat.verify_header(fp.read(txformat.PREFIX_LEN), txformat.generation_keys(
+            rk, kb, g.gen_id), kind=kb, sid=_sid_bytes(sid), gen_id=g.gen_id)
+        if not hmac.compare_digest(hdr.hdr_mac, g.hdr_mac):
+            raise GenCorrupt("corrupt", "hdr-mac-mismatch")
+        cur = txformat.RecordCursor(fp, rk, kind=kb, gen_id=g.gen_id, hdr_mac=g.hdr_mac,
+                                    data_count=g.data_count)
+        while cur.next() is not None:
+            pass
+        if cur.logical_offset != g.plain_len:
+            raise GenCorrupt("corrupt", "plain-len-mismatch")
+        if g.state == txdesc.STATE_SEALED:
+            info = cur.seal()
+            if info.phys_len != g.phys_len:
+                raise GenCorrupt("corrupt", "phys-len-mismatch")
+            if os.pread(fd, 1, g.phys_len):
+                raise GenCorrupt("corrupt", "trailing-bytes")
+    except txformat.TxFormatError as e:
+        raise GenCorrupt("corrupt", e.reason) from None
+    if fp.pos != g.phys_len:
+        raise GenCorrupt("corrupt", "phys-len-mismatch")
+    return fp.h.digest()
+
+
+@dataclass
+class BkGen:
+    kind: str
+    g: object                      # txdesc.Generation
+    ledger: tuple = None           # (dev, ino) din registrul copiei, când există
+    sha: bytes = None              # din trecerea de verificare
+
+
+@dataclass
+class BkPair:
+    """Every generation of both kinds of one sid (verified and emitted as a unit, owner Q3)."""
+    sid: str
+    kinds: list                    # kind-urile cu descriptor
+    rk: bytes = None
+    gens: list = field(default_factory=list)
+    reason: str = ""               # deja exclusă din pasul 1 (descriptor / cheie / stare)
+
+
+@dataclass
+class BkLegacy:
+    """A 3.7 plaintext still owned by the migration (`tx_migration` pending / orphan / failed)."""
+    sid: str
+    kind: str
+    dirn: str
+    name: str
+    ident: tuple
+    reason: str = ""
+
+
+class BackupSnapshot:
+    """Step 1's result: the VACUUM copy, the recordings listed by it, the pins. Owned by the
+    backup thread from `backup_snapshot()`'s return; `release()` (idempotent) drops the pins and
+    the slot. Generation fds are opened per pair while their gen_id is pinned (a pinned name is
+    never unlinked and generation files are never renamed or rewritten), so the open fds stay
+    bounded whatever the number of recordings."""
+
+    def __init__(self, *, db_copy, tdir, kwk, inst, store=None, loop=None, recordings=True,
+                 hold_secs=BACKUP_HOLD_SECS, cancel=None):
+        self.db_copy = db_copy
+        self.tdir = tdir
+        self.kwk = kwk
+        self.inst = inst
+        self.store = store
+        self.loop = loop
+        self.recordings = recordings
+        self.pairs = []
+        self.legacy = []
+        self.listing = []              # (sid, kind, state, reason) pentru `not-requested` / `one-kind`
+        self.pinned = []
+        self.plain_pinned = []
+        self.started = time.monotonic()
+        self.hold_secs = hold_secs
+        self.cancel = cancel           # threading.Event (socket: deconectare)
+        self.alarms = []
+        self._released = False
+        self._slot = False
+        self._own_tdir = None          # fd-ul directorului deschis de noi (fără Store viu)
+        self._holds_pins = False       # pin-urile chiar luate pe Store (niciodată „eliberate" altfel)
+
+    # -- budgets / cancel --
+    def check(self):
+        if self.cancel is not None and self.cancel.is_set():
+            raise BackupBusy("busy", "the backup was cancelled")
+        if time.monotonic() - self.started > self.hold_secs:
+            raise BackupBusy("busy", "the snapshot held its pins over the %d s budget" % self.hold_secs)
+
+    def alarm(self, code, detail):
+        self.alarms.append((code, detail))
+        src = self.store
+        if src is not None and self.loop is not None:
+            with contextlib.suppress(RuntimeError):
+                self.loop.call_soon_threadsafe(src.alarm, code, detail)
+
+    # -- files --
+    def _open_gen(self, sid, bg):
+        fd = os.open(gen_name(sid, bg.kind, bg.g.gen_id.hex()), _RDONLY, dir_fd=self.tdir)
+        try:
+            st = os.fstat(fd)
+            if bg.ledger is not None and (st.st_dev, st.st_ino) != tuple(bg.ledger):
+                raise GenCorrupt("corrupt", "not the inode the ledger recorded")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def verify_pair(self, p):
+        """Verify pass (nothing emitted). '' = every generation authentic, else the reason the
+        pair is excluded. I/O errors propagate (they fail the backup, step 4)."""
+        if p.reason:
+            return p.reason
+        for bg in p.gens:
+            self.check()
+            try:
+                fd = self._open_gen(p.sid, bg)
+            except FileNotFoundError:
+                return "missing-generation"
+            except GenCorrupt as e:
+                return "generation:" + e.detail[:40]
+            try:
+                bg.sha = verify_generation_fd(fd, p.sid, bg.kind, bg.g, p.rk, check=self.check)
+            except GenCorrupt as e:
+                return ("generation:" + e.detail)[:64]
+            finally:
+                os.close(fd)
+        return ""
+
+    def gen_chunks(self, p, bg):
+        """Emit pass: exactly `phys_len` bytes, re-hashed while copying; a difference with the
+        verify pass → BackupChanged (the container cannot be withdrawn: rebuilt without it)."""
+        fd = self._open_gen(p.sid, bg)
+        try:
+            h = hashlib.sha256()
+            pos, end = 0, bg.g.phys_len
+            while pos < end:
+                self.check()
+                b = os.pread(fd, min(CAP_CHUNK, end - pos), pos)
+                if not b:
+                    raise BackupChanged(p.sid, "generation shrank while copied")
+                h.update(b)
+                pos += len(b)
+                if pos == end and not hmac.compare_digest(h.digest(), bg.sha):
+                    raise BackupChanged(p.sid, "generation changed between verify and copy")
+                yield b
+        finally:
+            os.close(fd)
+
+    def legacy_open(self, lg):
+        """The plaintext through its dir fd (O_NOFOLLOW), identity = the copied row's. None when it
+        is absent or changed (then listed `excluded`)."""
+        try:
+            dfd = self.tdir if lg.dirn == "transcripts" else os.open(
+                "arhiva", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.tdir)
+        except FileNotFoundError:
+            return None
+        try:
+            try:
+                fd = os.open(lg.name, _RDONLY | os.O_NONBLOCK, dir_fd=dfd)
+            except (FileNotFoundError, OSError):
+                return None
+        finally:
+            if dfd != self.tdir:
+                os.close(dfd)
+        try:
+            _same_plain(os.fstat(fd), lg.ident, lg.name)
+        except TxStoreError:
+            os.close(fd)
+            return None
+        return fd
+
+    def legacy_chunks(self, fd, size):
+        pos = 0
+        while pos < size:
+            self.check()
+            b = os.pread(fd, min(CAP_CHUNK, size - pos), pos)
+            if not b:
+                raise OSError("plaintext shrank while copied")
+            pos += len(b)
+            yield b
+
+    # -- release --
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        gens, plain = self.pinned, self.plain_pinned
+        self.pinned, self.plain_pinned = [], []
+        st, loop = self.store, self.loop
+        if self._holds_pins and st is not None and loop is not None and (gens or plain):
+            self._holds_pins = False
+            def unpin():
+                st.unpin_gens(gens)
+                st.unpin_plain(plain)
+            try:
+                loop.call_soon_threadsafe(unpin)
+            except RuntimeError:
+                pass                               # loop-ul s-a închis: Store-ul nu mai există
+        if self._own_tdir is not None:
+            fd, self._own_tdir = self._own_tdir, None
+            os.close(fd)
+        if self._slot:
+            self._slot = False
+            _BACKUP_SLOT.release()
+
+
+def _vacuum_into(db_path, dest, budget):
+    """VACUUM INTO with a hard time budget (sqlite3 interrupt beyond it → BackupBusy)."""
+    con = sqlite3.connect(str(db_path))
+    deadline = time.monotonic() + budget
+    con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
+    try:
+        con.execute("VACUUM INTO ?", (dest,))
+    except sqlite3.OperationalError as e:
+        if time.monotonic() > deadline or "interrupt" in str(e).lower():
+            with contextlib.suppress(OSError):
+                os.unlink(dest)
+            raise BackupBusy("busy", "VACUUM INTO over its %d s budget" % budget) from None
+        raise
+    finally:
+        con.close()
+
+
+def _list_from_copy(snap):
+    """Step 1, on the VACUUM copy only: pairs (descriptors decoded with the copy's RK envelopes),
+    the ledger inodes, the plaintext the migration still owns, the `one-kind` entries."""
+    con = sqlite3.connect("file:%s?mode=ro" % snap.db_copy, uri=True)
+    try:
+        try:
+            drows = con.execute("SELECT sid, kind, blob, version, status FROM tx_descriptors "
+                                "ORDER BY sid, kind").fetchall()
+            envs = dict(con.execute("SELECT sid, envelope FROM session_keys").fetchall())
+            ledger = {r[0]: (r[1], r[2]) for r in con.execute(
+                "SELECT gen_id, dev, ino FROM tx_files WHERE state='published' AND dev IS NOT NULL").fetchall()}
+            mig = con.execute("SELECT sid, kind, dir, name, dev, ino, size, mtime_ns FROM tx_migration "
+                              "WHERE state IN ('pending','orphan','failed') ORDER BY sid, kind").fetchall()
+        except sqlite3.OperationalError:
+            drows, envs, ledger, mig = [], {}, {}, []
+    finally:
+        con.close()
+    by_sid = collections.OrderedDict()
+    for sid, kind, blob, version, status in drows:
+        by_sid.setdefault(sid, []).append((kind, blob, version, status))
+    described = set()
+    for sid, rows in by_sid.items():
+        kinds = [r[0] for r in rows]
+        described.update((sid, k) for k in kinds)
+        for other in KIND_NAMES:
+            if other not in kinds:
+                snap.listing.append((sid, other, "one-kind", ""))
+        if not snap.recordings:
+            snap.listing.extend((sid, k, "not-requested", "") for k in kinds)
+            continue
+        p = BkPair(sid, kinds)
+        snap.pairs.append(p)
+        bad = [s for _k, _b, _v, s in rows if s in ("damaged", "absent")]
+        if bad:
+            p.reason = bad[0]
+            continue
+        env = envs.get(sid)
+        if env is None or not _SID_RE.match(sid) or any(k not in KINDS for k in kinds):
+            p.reason = "no-key" if env is None else "bad-row"
+            continue
+        try:
+            p.rk = keyring.unwrap_under_kwk(snap.kwk, bytes(env), keyring.KT_RK)
+        except keyring.KeyringError:
+            p.reason = "key"
+            continue
+        for kind, blob, version, _status in rows:
+            try:
+                d = txdesc.decode_descriptor(bytes(blob), snap.kwk, installation_id=snap.inst,
+                                             sid=_sid_bytes(sid), kind=KINDS[kind], rk_envelope=bytes(env))
+            except txdesc.DescriptorError as e:
+                p.reason = ("descriptor:" + e.reason)[:64]
+                break
+            if d.version != version:
+                p.reason = "descriptor:version"
+                break
+            for g in d.generations:
+                p.gens.append(BkGen(kind, g, ledger.get(g.gen_id.hex())))
+    if snap.recordings:
+        for sid, kind, dirn, name, dev, ino, size, mtime_ns in mig:
+            # un rând cu cheie de cale (nume în afara allowlist-ului) sau lângă un descriptor nu e o
+            # înregistrare `legacy` listabilă: nu intră în arhivă (rămâne în DB-ul copiat, cu starea lui)
+            if (not _SID_RE.match(sid) or kind not in KINDS or dirn not in ("transcripts", "arhiva")
+                    or name != "%s.%s" % (sid, kind) or (sid, kind) in described
+                    or None in (dev, ino, size, mtime_ns)):
+                continue
+            snap.legacy.append(BkLegacy(sid, kind, dirn, name, (dev, ino, size, mtime_ns)))
+    snap.pinned = sorted({bg.g.gen_id.hex() for p in snap.pairs for bg in p.gens})
+    snap.plain_pinned = sorted({(lg.dirn, lg.name) for lg in snap.legacy})
+
+
+def _step1_sync(snap, db_path, budget):
+    _vacuum_into(db_path, snap.db_copy, budget)
+    _list_from_copy(snap)
+
+
+async def _step1_on_loop(snap, db_path, budget):
+    st = snap.store
+    async with st.barrier:
+        # sub barieră: nicio publicare / retragere nu se intercalează între copia DB-ului şi pin-uri
+        await st.io(_step1_sync, snap, db_path, budget)
+        st.pin_gens(snap.pinned)
+        st.pin_plain(snap.plain_pinned)
+        # sincron cu pin-urile: o anulare înainte de linia asta nu are ce elibera
+        snap._holds_pins = True
+    return snap
+
+
+def backup_snapshot(db_copy, *, kwk, inst, recordings=True, db_path=None, transcripts_dir=None,
+                    vacuum_secs=BACKUP_VACUUM_SECS, hold_secs=BACKUP_HOLD_SECS, cancel=None,
+                    start_wait=BACKUP_START_WAIT):
+    """Step 1 of §12.11.3 from a backup THREAD (never the loop). Returns a BackupSnapshot that the
+    caller owns and must `release()`. The slot (one snapshot per process) is taken here; busy →
+    BackupBusy. With a live Store the copy and the pins are taken under its barrier on its loop;
+    without one the caller's process exclusivity (boot lock) stands in for the barrier."""
+    if not _BACKUP_SLOT.acquire(blocking=False):
+        raise BackupBusy("busy", "another backup snapshot is in progress")
+    db_path = str(db_path or config.DB_PATH)
+    tdir = None
+    snap = None
+    try:
+        src = _backup_source
+        tpath = str(transcripts_dir or config.TRANSCRIPT_DIR)
+        if src is not None:
+            st, loop = src
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                raise RuntimeError("backup_snapshot() called on the loop thread (it would deadlock)")
+            snap = BackupSnapshot(db_copy=db_copy, tdir=st.dir_fd, kwk=kwk, inst=inst, store=st, loop=loop,
+                                  recordings=recordings, hold_secs=hold_secs, cancel=cancel)
+            fut = asyncio.run_coroutine_threadsafe(_step1_on_loop(snap, db_path, vacuum_secs), loop)
+            try:
+                fut.result(timeout=start_wait)
+            except BaseException:
+                # anulat înainte de „submit": coroutina eliberează (n-a apucat să fixeze) sau a
+                # terminat între timp — atunci pin-urile sunt ale noastre şi le eliberăm aici
+                if not fut.cancel() and fut.done() and fut.exception() is None:
+                    snap.release()
+                    snap = None
+                raise
+        else:
+            try:
+                tdir = os.open(tpath, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except FileNotFoundError:
+                tdir = None
+            snap = BackupSnapshot(db_copy=db_copy, tdir=tdir, kwk=kwk, inst=inst, recordings=recordings,
+                                  hold_secs=hold_secs, cancel=cancel)
+            _step1_sync(snap, db_path, vacuum_secs)
+            if tdir is None and (snap.pairs or snap.legacy):
+                # descriptori fără director de transcripturi: fiecare pereche lipseşte (exclusă)
+                for p in snap.pairs:
+                    p.reason = p.reason or "missing-generation"
+                snap.legacy = []
+            snap._own_tdir = tdir
+            tdir = None
+    except BaseException as e:
+        if tdir is not None:
+            os.close(tdir)
+        if snap is not None and not snap._released:
+            snap._slot = True
+            snap.release()
+        else:
+            _BACKUP_SLOT.release()
+        if isinstance(e, (asyncio.TimeoutError, concurrent.futures.TimeoutError)):
+            raise BackupBusy("busy", "the recording store did not admit the backup in time") from None
+        raise
+    snap._slot = True
+    return snap
+
+
+# ── restore staging / apply helpers (§12.11.3 "Restore of recordings") ──────
+
+
+def staged_pairs(db_path, kwk, inst, decode=None):
+    """Every staged descriptor: {sid: (rk, [(kind, Generation)], {kind: status})}. Those for which
+    `decode(sid, kind)` is true (the restore: `included`) are decoded with the STAGED keyring and
+    RK envelope; one that does not authenticate raises GenCorrupt. The others are only listed (a
+    recording the backup excluded may be excluded precisely because its descriptor is damaged)."""
+    con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
+    try:
+        try:
+            drows = con.execute("SELECT sid, kind, blob, version, status FROM tx_descriptors").fetchall()
+            envs = dict(con.execute("SELECT sid, envelope FROM session_keys").fetchall())
+        except sqlite3.OperationalError:
+            return {}
+    finally:
+        con.close()
+    out = {}
+    for sid, kind, blob, version, status in drows:
+        if not _SID_RE.match(str(sid)) or kind not in KINDS:
+            raise GenCorrupt("corrupt", "staged descriptor key")
+        ent = out.setdefault(sid, [None, [], {}])
+        ent[2][kind] = status
+        if decode is not None and not decode(sid, kind):
+            continue
+        env = envs.get(sid)
+        if env is None:
+            raise GenCorrupt("corrupt", "%s: descriptor without RK" % sid[:8])
+        try:
+            if ent[0] is None:
+                ent[0] = keyring.unwrap_under_kwk(kwk, bytes(env), keyring.KT_RK)
+            d = txdesc.decode_descriptor(bytes(blob), kwk, installation_id=inst, sid=_sid_bytes(sid),
+                                         kind=KINDS[kind], rk_envelope=bytes(env))
+        except (keyring.KeyringError, txdesc.DescriptorError) as e:
+            raise GenCorrupt("corrupt", "%s.%s: %s" % (sid[:8], kind, getattr(e, "reason", "?"))) from None
+        if d.version != version:
+            raise GenCorrupt("corrupt", "%s.%s: version column" % (sid[:8], kind))
+        ent[1].extend((kind, g) for g in d.generations)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def rebind_restored_sync(db_path, transcripts_dir):
+    """Restore apply, after the DB and the transcripts are in place (under the boot lock): the
+    restored ledger and the migration rows name the inodes of the REPLACED volume; they are bound
+    to the files the apply has just copied (verified at stage), so `retire` and the migration's
+    identity-checked unlink act on them. Idempotent. Rows whose file is absent are left as they
+    are (an `absent` recording; a migration row that then fails as missing)."""
+    try:
+        tdir = os.open(str(transcripts_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return 0
+    con = sqlite3.connect(str(db_path), isolation_level=None)
+    n = 0
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            rows = con.execute("SELECT gen_id, sid, kind FROM tx_files WHERE state='published'").fetchall()
+            mig = con.execute("SELECT sid, kind, dir, name FROM tx_migration WHERE state IN "
+                              "('pending','orphan','failed')").fetchall()
+        except sqlite3.OperationalError:
+            rows, mig = [], []
+        for hexid, sid, kind in rows:
+            try:
+                st = os.stat(gen_name(sid, kind, hexid), dir_fd=tdir, follow_symlinks=False)
+            except (FileNotFoundError, TxStoreError, KeyError, ValueError):
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+                con.execute("UPDATE tx_files SET dev=?, ino=? WHERE gen_id=?", (st.st_dev, st.st_ino, hexid))
+                n += 1
+        for sid, kind, dirn, name in mig:
+            if dirn not in ("transcripts", "arhiva") or "/" in str(name):
+                continue
+            try:
+                st = os.stat((name if dirn == "transcripts" else "arhiva/" + name), dir_fd=tdir,
+                             follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+                con.execute("UPDATE tx_migration SET dev=?, ino=?, size=?, mtime_ns=?, sha256=NULL "
+                            "WHERE sid=? AND kind=?", (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                                                       sid, kind))
+                n += 1
+        con.execute("COMMIT")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+        os.close(tdir)
+    return n

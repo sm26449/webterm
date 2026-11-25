@@ -220,6 +220,10 @@ VOLKIND=$(printf '%s\n' "$BK_RUN" | sed -n 's/^kind: //p')
 # WTS1 portabil sub WTBK1 cu parola de mai jos. Cu app-ul pornit rulează ÎN el (`docker exec`,
 # sub `.maint.lock` partajat); oprit, într-un container nou care ia `.lock`. Arhiva se scrie într-un
 # temporar, se verifică cu codul restore-ului şi abia apoi se publică (rename atomic).
+# 3.8 PR6c: cu înregistrările criptate active, `--live` cere snapshot-ul gateway-ului prin socket-ul
+# lui de control (`/data/.ctl/backup.sock`; peer-ul trebuie să fie uid-ul serviciului, de aici
+# `-u $OWNER`). Dacă socket-ul nu răspunde, backup-ul e REFUZAT (exit ≠ 0, cu motivul), niciodată
+# citit direct de pe volumul viu.
 find_app() {   # → APP_CID ("" = none); 1 when Docker cannot tell
   local ids id m svc
   APP_CID="${WEBTERM_APP_CONTAINER:-}"
@@ -246,7 +250,7 @@ find_app() {   # → APP_CID ("" = none); 1 when Docker cannot tell
 # read-only a directorului ei. O cheie dată ca valoare (WEBTERM_MASTER_KEY) nu se copiază.
 APP_IMG="" KEY_ARGS=()
 app_run_args() {
-  local envs kf kv want mounts typ name src dst found=""
+  local envs kf kv tx want mounts typ name src dst found=""
   APP_IMG=$(docker inspect --format '{{.Image}}' "$APP_CID") || { APP_ERR="cannot inspect $APP_CID"; return 1; }
   envs=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$APP_CID") \
     || { APP_ERR="cannot inspect $APP_CID"; return 1; }
@@ -257,6 +261,10 @@ app_run_args() {
   kf=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_MASTER_KEY_FILE=//p' | head -n1)
   kv=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_KEY_IN_VOLUME=//p' | head -n1)
   KEY_ARGS=(-e "WEBTERM_MASTER_KEY_FILE=$kf" -e "WEBTERM_KEY_IN_VOLUME=$kv")
+  # 3.8 PR6c: acelaşi flag de înregistrări criptate ca app-ul, ca backup-ul offline să le includă
+  # (fără el, codul refuză un volum care le are, în loc să le piardă în tăcere)
+  tx=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_TX_RECORDINGS=//p' | head -n1)
+  KEY_ARGS+=(-e "WEBTERM_TX_RECORDINGS=$tx")
   want="${kf:-/run/secrets/webterm_master_key}"
   if [ -z "$kf" ] && [ "$kv" = 1 ]; then want=""; fi
   [ -n "$want" ] || return 0

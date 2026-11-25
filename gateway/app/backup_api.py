@@ -45,7 +45,7 @@ def _backup_value_error(e: Exception) -> ApiError:
         return ApiError(400, "backup.wrongKeys", msg)
     if isinstance(e, wts.SnapshotTooLarge):
         return ApiError(400, "backup.limitExceeded", msg)
-    if msg == backup._BUSY:
+    if msg == backup._BUSY or isinstance(e, backup.SnapshotBusy):
         return ApiError(409, "backup.busy", msg)
     if msg == backup._IN_PROGRESS:
         return ApiError(409, "backup.restoreInProgress", msg)
@@ -198,8 +198,8 @@ async def backup_download(body: BackupIn, user=Depends(authz.perm('backups.manag
         raise ApiError(400, "backup.passphraseTooShort", "the encryption passphrase must be at least 8 characters")
     try:
         blob = await asyncio.to_thread(backup.make_encrypted, body.passphrase, body.include_transcripts)
-    except wts.SnapshotTooLarge as e:
-        raise _backup_value_error(e)           # R-M2: peste limita de upload a restore-ului
+    except (wts.SnapshotTooLarge, backup.SnapshotBusy) as e:
+        raise _backup_value_error(e)           # R-M2: peste limita de upload; PR6c: snapshot ocupat
     except Exception as e:
         log.exception("backup failed")
         raise ApiError(500, "backup.failed", "backup failed: %s" % e)
