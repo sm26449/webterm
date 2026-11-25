@@ -1871,6 +1871,12 @@ describe the pre-3.6 state this design started from.
 | `/api/sessions/{sid}/share` | DELETE | `share.live` | H(sid) | su | | |
 | `/api/sessions/{sid}/transcript` | GET | `recording.view` | H(sid) | ssu | | audited read |
 | `/api/sessions/{sid}/preview` | GET | `recording.view` | H(sid) | ssu | | |
+| `/api/sessions/{sid}/erase` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor, typed confirmation; journalled erasure of a closed session's encrypted recording (ENCRYPTION-AT-REST.md §12.11.4); 503 unless encrypted recordings are active |
+| `/api/recordings/quarantine` (3.8) | GET | `backups.manage` | G | | | Owner @ all only; recordings not served pending proof, with the reason (metadata only) |
+| `/api/sessions/{sid}/recovery` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor, typed backup date; one recording quarantined for missing erasure proof → `recovery` |
+| `/api/sessions/{sid}/recovery/release` (3.8) | POST | `backups.manage` | G | ff | | Owner @ all only, real fresh factor; one `recovery` recording → normal access |
+| `/api/sessions/{sid}/recovery/requarantine` (3.8) | POST | `backups.manage` | G | | | Owner @ all only; `recovery` → quarantined again (reduces access) |
+| `/api/sessions/{sid}/recovery/transcript` (3.8) | GET | `backups.manage` | G | | | Owner @ all only; audited read of a `recovery` recording through the Owner-recovery access (no share, no replay link, no search) |
 | `/api/sessions/{sid}/replay-links` | POST | `share.replay` | H(sid) | su | | |
 | `/api/replay-links/{link_id}` | DELETE | `share.replay` (own) / `shares.manage` | H(link) | su | | |
 | `/ws/sessions/{sid}` | WS | `session.open` → rw; `session.watch` → ro; `recording.view` → closed replay | H(sid) | window (passive) + lock | | 60-second revalidation re-runs authz (§A.6.4) |

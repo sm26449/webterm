@@ -2703,6 +2703,82 @@ Recorded from the PR5a implementation and revised after its review (2026-11-24):
     principal string, and `BrowserClient.send_bytes` accepts an optional `gate` (unused when the
     flag is off); the WebSocket routes build their decision closures without calling them.
 
+#### 12.11.11 Implementation notes (PR6a, erasure journal)
+
+PR6a ships `gateway/app/erasure.py` (journal, erasure, boot pass, attestation, freshness, restore
+reconciliation, continuity quarantine, Owner recovery) behind the same flag; a real volume is still
+refused at boot because the Store opens only test-fixture volumes until PR6b brings the migration
+(`migration.ready()`). Where the code had to choose, it chose the stricter reading:
+
+- **Journal.** As §12.11.4. `boot` runs after the Store opens and before `Store.recover()` and any
+  reader: missing (head > 0), rollback, fork, a non-authentic entry at or before the head, another
+  installation's journal or an unreadable one → `tx_descriptors.status = quarantined` for every
+  readable recording, with the reason in the new table `tx_quarantine` (`journal:<diag>`), System
+  health critical, erasure refused; terminals and new recordings keep working. A tail beyond the head
+  is cut and kept as `erasures.wtj.tail-<ms>`. Journal ahead of the DB → step 2 re-applied per entry;
+  a tombstoned sid that has an RK again is destroyed again. A journal fsync over its 5 s budget (or a
+  failed append) tombstones the sid in memory, answers 503 `transcript.erasureUncertain` and refuses
+  further erasures until the next boot decides from the file. The journal is created header-only at
+  the first flag-on boot, so a tracked volume always has one.
+- **Erase.** `POST /api/sessions/{sid}/erase`: permission `backups.manage` (Owner-only already; no new
+  permission was added) **and** Owner @ all (`authz.is_owner_user`; a custom Owner-level copy is
+  refused), a real fresh factor (`stepup.require_fresh_factor(..., real_factor=True)`: a passkey /
+  TOTP / SSO ceremony within its 120 s window, never the password alone), the first 8 characters of
+  the sid typed. Live session → 409. Step 2 is one transaction on the Store connection: live-share
+  token and replay links of the sid revoked, `session_keys`, both descriptors, `tx_gaps` and
+  `tx_quarantine` rows deleted, ledger `published → retired`, `erasure_head` advanced. A recording
+  still in the plaintext migration inventory (`tx_migration` pending / failed) is refused
+  (`transcript.erasePlaintext`): its plaintext is PR6b's to remove. Per-host erasure is not in PR6a.
+- **Attestation.** Destinations come from the configured off-host backup target (`cloudbackup.
+  attest_destinations`): SFTP writes with `O_EXCL` (refuses overwrites); FTPS cannot, so each upload
+  has a fresh name (`<inst>.erasures.<n>.<nonce>.wtj`); Google Drive and Dropbox have no read-back yet
+  and are **never attested** (System health warning; a restore without the volume journal stays in
+  quarantine). Retention touches only `webterm-*.wtbk`. Backoff 60 s … 30 min per destination.
+  `tx_state.attested_heads` is updated monotonically; the route answers `attested` = every configured
+  destination holds a head ≥ n (no destination → false, and System health says "survives restores
+  on this volume only").
+- **Freshness.** Required for a destination proof: every destination configured in the staged DB and
+  on this host, plus any destination some source records with a head **newer than J\*** (a removed
+  destination whose known head J\* already covers is not required, otherwise proof would become
+  impossible after any change of destination). A J_v counts as proof only when its authentic prefix
+  ends cleanly or with a partial tail (a bad entry inside is no proof).
+- **Backup.** With the flag on, `_write_wts` writes `wts-content-2` whenever the dataset is tracked:
+  the journal member cut at the DB copy's head (taken from the VACUUM copy, so a later erasure is
+  simply not in it), the attested heads, `created`, and one `recordings` entry per descriptor of the
+  copy. **WTX1 generations are still not archived** (`backup_snapshot()` and its barrier are a later
+  PR): every recording is listed `excluded` (`wtx-not-archived`) or `not-requested`, and the restore
+  marks it `absent`. An `included` entry is refused by this build. A tracked dataset whose journal is
+  missing or does not match fails the backup, except the pre-restore safety copy, which is then
+  written without the journal (v1; its own staging refuses it later: a diagnostic copy). Flag off:
+  the PR5 path byte for byte (v1, no journal).
+- **Restore.** Flag off: an archive with a v2 manifest or any tx artefact in its staged DB
+  (`txstore.inventory`) is refused (`backup.erasureUnsupported`). Flag on, at stage: member vs
+  manifest vs staged `erasure_head`, every staged descriptor named by the manifest, sources
+  reconciled (`backup.erasureConflict` on divergence), J\* written into the staging, the decision in
+  `restore.json` (`erasure: {state, proof, since, n}`). Destination journals are fetched by the
+  restore route on the gateway's loop (`erasure.sync_fetcher`); the host CLI has none. At apply,
+  under the restore lock and before any mutation: reconciled again against the live journal (a
+  divergence refuses the apply with nothing changed). The proof is decided **once**, when the flag
+  moves to `applying` (`erasure_proven` in the flag; on a resume the journal we published is not a
+  J_v). Then J\* (the longest) becomes the volume journal, another installation's journal is moved
+  to `backups/quarantine-<restore id>-erasures.wtj`, and without proof every readable restored
+  recording is quarantined (`continuity`) with `tx_state.continuity = {unproven, since, n}`.
+- **Lifting.** The janitor (`erasure.start`) retries attestation every 30 s and, while the continuity
+  marker is set, every 10 min asks every destination for its head; with a destination proof it
+  adopts a longer chain (tombstones applied), lifts only the `continuity` quarantine and clears the
+  marker. A volume/destination divergence is a critical System health item, nothing lifted.
+- **Owner recovery.** `GET /api/recordings/quarantine`, `POST /api/sessions/{sid}/recovery` (typed
+  backup date + real fresh factor; only `continuity`, never `journal:*` or an unknown reason, never
+  a tombstone), `…/recovery/release` (fresh factor), `…/recovery/requarantine`, and the audited read
+  `GET /api/sessions/{sid}/recovery/transcript` through an `Access` for `OWNER_RECOVERY_ROUTE`
+  (`txhub.recovery_authorizer`, re-checking the cookie and Owner status on every re-authorization).
+  Every mutation is audited and sends a security e-mail. No UI yet.
+- **Inventory.** `txstore.inventory(data_dir, db_path)` is the one list of encrypted-recording
+  artefacts (non-empty `session_keys`, `tx_descriptors`, `tx_files`, `tx_gaps`, `tx_migration`,
+  `tx_quarantine`; the `erasure_head` / `attested_heads` / `continuity` keys; `erasures.wtj*` at the
+  top; generation files under `transcripts/`), used by the flag-off boot refusal, the tracked-backup
+  check and the restore staging.
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
@@ -2727,6 +2803,8 @@ KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
 | K_mw | `09f2a4c3196240724b7d9582a2b26e088c0db5320a2d2000eff8d46627b9c19b` |
 | K_desc (from KWK) | `804e4639edacf6eb3b2d9f2316c4c8745bebc186c47e44ef3ab62a2881b9f3f5` |
 | K_erase (from KWK) | `ee47abe8074d9cf1b1afcd0bb95415e16a0efd293e5a9c78b2ba9cb1e0687774` |
+| `WTJ1` entry 1 (installation id and sid above, time = created, kinds 3, rk_hash = SHA-256 of the RK envelope below; asserted in `tests/erasure_test.py`) | `010000000000000000748d00a201000000112233445566778899aabbccddeeff038e48527f10ac19ed28318060b2fc672da8c3966d74d969c5fb053a4c6894f22b02a1a58372b92c4ad2b929a00304c3ebbcc67cfab8459a59c37de170e31c05c2` |
+| `WTJ1` journal SHA-256 (header ‖ entry 1 ‖ entry 2: time + 1000 ms, sid `000102…0f`, kinds 1, rk_hash zero) | `7e6ae2e4e0a2ec1ada1a61563cf79f5899f42611a0513b17efe0aaba1ff6ee6a` |
 | envelope KWK under K_mw | `01017614b7d76f52d1a0fbd2299ee87b3ac54000d93a0b9a73b07151fcca76e53d94d458583c1e9e012ba35c38d5023aae6a2fab369e007273298558513fd30cb7cb57ef2ffe18e7931c53f120c4b223d2b4526b` |
 | envelope FK under KWK | `0104f11f697470f59679fa2294223bae52cd4000a7d79b9971b751f4048a96b74ae41e2f5d2ca92750ef2b3b732c1714d705a675d7a0f10283ffd3a95a45dad3768582c67283c799ae55b9fd8d5684bcb35bb8b8` |
 | envelope RK under KWK | `0106f11f697470f59679fa2294223bae52cd40009cab90a76f09514cc0cbc9713a516f12470584239e7c0702a63c4de1adfe146bfc0413330f3b724ade21506857c85af97be734dee47f2e1f1b5c8bf75baf5c53` |

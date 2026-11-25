@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import backup, backup_dest, config, db, email_alerts, security
+from . import backup, backup_dest, config, db, email_alerts, erasure, security
 
 log = logging.getLogger("webterm")
 
@@ -649,3 +649,61 @@ async def upload_scheduled(local_name: str) -> str:
         except Exception:                   # noqa: BLE001 — alerta nu rupe programarea
             log.exception("backup-failure alert could not be sent")
         return "%s: %s" % (c["provider"], str(e)[:300])
+
+
+# ── 3.8 PR6a: destinaţia off-host ca loc de ATESTARE a jurnalului de ştergeri (§12.11.4) ────────
+# Un obiect mic per cap (`<installation>.erasures.<n>.wtj`), scris o singură dată şi citit înapoi.
+# Retenţia (`_prune_remote*`) atinge doar `webterm-*.wtbk`, deci obiectele astea nu sunt şterse.
+ATTEST_MAX = 128 * 1024 * 1024
+
+
+class _AttestDest:
+    """SFTP (refuză suprascrierea: O_EXCL) sau FTPS (nu poate: un nume nou per încărcare)."""
+
+    def __init__(self, did: str, kind: str, cfg: dict):
+        self.id = did
+        self._kind = kind
+        self._cfg = cfg
+        self.refuses_overwrite = kind == "sftp"
+
+    async def put_new(self, name: str, data: bytes) -> None:
+        try:
+            await backup_dest.put_new(self._kind, self._cfg, name, data)
+        except backup_dest.Exists:
+            raise erasure.DestExists(name) from None
+
+    async def list(self) -> list:
+        return [f["name"] for f in await backup_dest.list_backups(self._kind, self._cfg)]
+
+    async def get(self, name: str) -> bytes:
+        return await backup_dest.get(self._kind, self._cfg, name, ATTEST_MAX)
+
+
+class _UnsupportedDest:
+    """Drive / Dropbox: nicio citire înapoi implementată încă → niciodată atestat (fail closed:
+    System health spune „not attested", un restore fără J_v rămâne în carantină)."""
+
+    refuses_overwrite = True
+
+    def __init__(self, did: str):
+        self.id = did
+
+    async def _no(self, *_a):
+        raise CloudError("this destination cannot hold erasure attestations yet (SFTP or FTPS can)")
+
+    put_new = list = get = _no
+
+
+async def attest_destinations() -> list:
+    """The configured off-host destination as an attestation target ([] = none configured)."""
+    c = await get_config()
+    if not c["provider"]:
+        return []
+    did = erasure.dest_id_from_settings({
+        "cloud_provider": c["provider"], "cloud_host": c["host"], "cloud_port": c["port"],
+        "cloud_user": c["user"], "cloud_path": c["path"], "cloud_folder": c["folder"]})
+    if _is_direct(c["provider"]):
+        if not (c["host"] and c["user"] and (c["ssh_key"] or c["password"])):
+            return [_UnsupportedDest(did)]
+        return [_AttestDest(did, c["provider"], await _direct_cfg(c))]
+    return [_UnsupportedDest(did)]

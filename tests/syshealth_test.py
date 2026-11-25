@@ -1084,7 +1084,7 @@ async def test_routes(owner_uid):
     check("…the declared set (host.backup via fail_sev, certs.* via _CERT_SEV)", {
         "host.backup", "host.cloudflare", "gateway.disk", "alerts.delivery", "signing.state", "oidc.sso",
         "config.forwards_http", "certs.main", "certs.forward", "certs.authentik", "clock.gateway",
-        "agents.python", "roles.permanent_owner", "agents.mtls"} == flagged, flagged)
+        "agents.python", "roles.permanent_owner", "agents.mtls", "crypto.erasure"} == flagged, flagged)
 
     print("── the health terminal")
     hid = await U.add_host(owner, "gw-host")

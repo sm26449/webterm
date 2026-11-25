@@ -140,6 +140,81 @@ def create_test_volume(db_path, transcripts_dir=None, env=None):
         con.close()
 
 
+# ── inventory of encrypted-recording artefacts (boot, backup, restore: ONE definition) ──
+
+# Tabelele care, nevide, înseamnă „înregistrări criptate pe volum" (PR6a: + migrare + carantină).
+TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps", "tx_migration", "tx_quarantine")
+# Chei tx_state care există doar după jurnalul de ştergeri / un restore urmărit (§12.11.4).
+TX_STATE_KEYS = ("erasure_head", "attested_heads", "continuity")
+# La rădăcina DATA_DIR: jurnalul WTJ1, temp-ul lui şi cozile tăiate la boot.
+TX_TOP_PREFIX = "erasures.wtj"
+
+
+def recording_files_present(data_dir=None) -> str:
+    """'' when no file of the encrypted-recording namespace is under `transcripts/`; otherwise the
+    first one (`keys.find_reserved`: `transcripts/` and one level of subdirectories such as
+    `arhiva/`, symlinks never followed below the root, a supported `transcripts` symlink followed
+    once; an unreadable directory = found)."""
+    root = str(config.DATA_DIR if data_dir is None else data_dir)
+    try:
+        dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        return "DATA_DIR (unreadable: %s)" % e.strerror
+    try:
+        if keys.is_link(dfd, keys.RESERVED_DIR):
+            return keys.find_reserved_through_link(dfd) or ""
+        # doar subarborele transcripts/: nivelul de sus (keys.wtk & co.) nu e o înregistrare
+        try:
+            top = os.listdir(dfd)
+        except OSError:
+            return "DATA_DIR (unreadable)"
+        return keys.find_reserved(dfd, exempt=frozenset(top)) or ""
+    finally:
+        os.close(dfd)
+
+
+def inventory(data_dir=None, db_path=None) -> list:
+    """Every encrypted-recording artefact of a dataset (the live volume, a backup's DB copy or a
+    restore staging): non-empty tx tables (keys, descriptors, ledger, gaps, migration rows,
+    quarantine), the erasure-journal state keys, the journal files at the top of the data dir and
+    the generation files under `transcripts/`. [] = none. A table that cannot be read, or a
+    directory that cannot be listed, is reported as found (never read as absent)."""
+    root = str(config.DATA_DIR if data_dir is None else data_dir)
+    dbp = str(db_path) if db_path is not None else os.path.join(root, "webterm.db")
+    found = []
+    if os.path.exists(dbp):
+        try:
+            con = sqlite3.connect(pathlib.Path(os.path.abspath(dbp)).as_uri() + "?mode=ro", uri=True)
+        except sqlite3.Error as e:
+            return ["webterm.db (unreadable: %s)" % type(e).__name__]
+        try:
+            names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for t in TX_TABLES:
+                if t in names and con.execute("SELECT 1 FROM %s LIMIT 1" % t).fetchone():
+                    found.append(t)
+            if "tx_state" in names:
+                marks = ",".join("?" * len(TX_STATE_KEYS))
+                found += ["tx_state." + r[0] for r in con.execute(
+                    "SELECT key FROM tx_state WHERE key IN (%s) ORDER BY key" % marks, TX_STATE_KEYS)]
+        except sqlite3.Error as e:
+            found.append("webterm.db (unreadable: %s)" % type(e).__name__)
+        finally:
+            con.close()
+    try:
+        top = sorted(n for n in os.listdir(root) if n.startswith(TX_TOP_PREFIX))
+    except FileNotFoundError:
+        top = []
+    except OSError:
+        top = ["DATA_DIR (unreadable)"]
+    found += top
+    f = recording_files_present(root)
+    if f:
+        found.append("transcripts: " + f)
+    return found
+
+
 # ── constants ────────────────────────────────────────────────────────────────
 
 KINDS = {"out": txformat.KIND_OUT, "cast": txformat.KIND_CAST}

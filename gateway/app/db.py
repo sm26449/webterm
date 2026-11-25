@@ -551,6 +551,16 @@ CREATE TABLE IF NOT EXISTS tx_gaps (
     published_at REAL,
     PRIMARY KEY (sid, gap_id)
 );
+-- tx_quarantine: DE CE e o înregistrare în carantină (§12.11.4, PR6a). `status` din tx_descriptors
+-- nu-şi codifică motivul; Owner recovery deschide doar reason='continuity' (restore fără dovada
+-- continuităţii ştergerilor), niciodată un jurnal stricat (`journal:<diag>`) sau un motiv absent.
+CREATE TABLE IF NOT EXISTS tx_quarantine (
+    sid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL,                       -- continuity | journal:<diag>
+    since REAL NOT NULL,
+    PRIMARY KEY (sid, kind)
+);
 """
 
 # additive migrations for DBs created by an older version

@@ -334,6 +334,94 @@ async def ftps_delete(cfg: dict, name: str) -> None:
     await asyncio.to_thread(_ftps_op, cfg, _del)
 
 
+# ── obiecte mici imuabile (3.8 PR6a: atestarea jurnalului de ştergeri, §12.11.4) ─────────────
+
+class Exists(DestError):
+    """Obiectul cu numele ăsta există deja (o scriere imuabilă nu-l înlocuieşte)."""
+
+
+async def sftp_put_new(cfg: dict, name: str, data: bytes) -> None:
+    """Scriere care NU suprascrie: open cu O_CREAT|O_EXCL pe server (SFTP v3 FXF_EXCL)."""
+    conn = await _sftp_connect(cfg)
+    sftp = None
+    try:
+        sftp = await _t(conn.start_sftp_client(), "open sftp")
+        path = (cfg.get("path") or ".").rstrip("/")
+        final = "%s/%s" % (path, name)
+        try:
+            await _t(sftp.stat(final), "stat")
+            raise Exists("the object already exists")
+        except asyncssh.SFTPNoSuchFile:
+            pass
+        flags = asyncssh.FXF_WRITE | asyncssh.FXF_CREAT | asyncssh.FXF_EXCL
+        f = await _t(sftp.open(final, flags), "open")
+        try:
+            for off in range(0, len(data), WRITE_CHUNK):
+                await _t(f.write(data[off:off + WRITE_CHUNK]), "write")
+        finally:
+            try:
+                await asyncio.wait_for(f.close(), OP_TIMEOUT)
+            except Exception:                       # noqa: BLE001
+                pass
+    except asyncssh.SFTPError as e:
+        raise DestError("SFTP: scrierea a eşuat: %s" % e)
+    finally:
+        await _close(conn, sftp)
+
+
+async def sftp_get(cfg: dict, name: str, max_len: int) -> bytes:
+    conn = await _sftp_connect(cfg)
+    sftp = None
+    try:
+        sftp = await _t(conn.start_sftp_client(), "open sftp")
+        path = (cfg.get("path") or ".").rstrip("/")
+        f = await _t(sftp.open("%s/%s" % (path, name), "rb"), "open")
+        try:
+            out = bytearray()
+            while True:
+                b = await _t(f.read(WRITE_CHUNK), "read")
+                if not b:
+                    break
+                out += b
+                if len(out) > max_len:
+                    raise DestError("SFTP: the object is larger than expected")
+            return bytes(out)
+        finally:
+            try:
+                await asyncio.wait_for(f.close(), OP_TIMEOUT)
+            except Exception:                       # noqa: BLE001
+                pass
+    except asyncssh.SFTPError as e:
+        raise DestError("SFTP: citirea a eşuat: %s" % e)
+    finally:
+        await _close(conn, sftp)
+
+
+async def ftps_get(cfg: dict, name: str, max_len: int) -> bytes:
+    def _get(ftps):
+        out = bytearray()
+
+        def sink(b):
+            out.extend(b)
+            if len(out) > max_len:
+                raise DestError("FTPS: the object is larger than expected")
+        ftps.retrbinary("RETR " + name, sink)
+        return bytes(out)
+    return await asyncio.to_thread(_ftps_op, cfg, _get)
+
+
+async def put_new(kind: str, cfg: dict, name: str, data: bytes) -> None:
+    """SFTP refuză suprascrierea; FTPS nu poate (apelantul foloseşte un nume nou per încărcare)."""
+    if kind == "sftp":
+        await sftp_put_new(cfg, name, data)
+    else:
+        await ftps_upload(cfg, name, data)
+
+
+async def get(kind: str, cfg: dict, name: str, max_len: int) -> bytes:
+    return await (sftp_get if kind == "sftp" else ftps_get)(cfg, name, max_len)
+
+
 # ── dispecer comun ───────────────────────────────────────────────────────────────
 
 async def upload(kind: str, cfg: dict, name: str, data: bytes) -> None:

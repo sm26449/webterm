@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .errors import ApiError
 from . import (audit, authz, backup, cloudbackup, cmdguard, config, conntypes, core, db, email_alerts,
-               replay, security, sessctl, shares, signing, stepup, txhub, txstore, watermark)
+               erasure, replay, security, sessctl, shares, signing, stepup, txhub, txstore, watermark)
 
 log = logging.getLogger("webterm")
 # Aceeaşi gardă ca api.router (fail-closed): o rută fără permisiune declarată → 500 authz.undeclared.
@@ -1040,3 +1040,220 @@ async def _tx_replay_text(request: Request, row):
     await _replay_opened(request, row, "read as text")
     return StreamingResponse(txhub.emit_chunks(grant, body), media_type="text/plain; charset=utf-8",
                              headers={**_REPLAY_HEADERS, "Content-Length": str(len(body))})
+
+
+# ── [replay] 3.8 PR6a: erasure and Owner recovery (ENCRYPTION-AT-REST.md §12.11.4, §12.11.8 Q1/Q2/Q4) ──
+# Ştergerea (erasure) e o acţiune EXPLICITĂ de Owner cu factor proaspăt (Q1): tombstone în jurnalul
+# WTJ1, cheia RK distrusă, fişierele retrase; supravieţuieşte restore-urilor. Owner recovery deschide
+# doar carantina de CONTINUITATE (restore fără dovada ştergerilor), câte o înregistrare, fiecare
+# citire auditată, fără share / link de replay / căutare pentru altcineva (Q4).
+
+
+class EraseIn(BaseModel):
+    confirm: str = ""             # tastat: primele 8 caractere ale sesiunii (nu un clic din greşeală)
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+class RecoveryIn(BaseModel):
+    confirm: str = ""             # recover: data backup-ului (YYYY-MM-DD), tastată
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+def _erasure_error(e) -> ApiError:
+    """erasure.ErasureError → the route's error (codes as literals: tests/i18n_catalog_test.py)."""
+    c = getattr(e, "code", "")
+    msg = str(e)
+    if c == "session.live":
+        return ApiError(409, "session.live", "the session is live; close it first")
+    if c == "transcript.missing":
+        return ApiError(404, "transcript.missing", "no transcript for this session")
+    if c == "transcript.erasePlaintext":
+        return ApiError(409, "transcript.erasePlaintext", msg)
+    if c == "transcript.erasureJournalFull":
+        return ApiError(507, "transcript.erasureJournalFull", msg)
+    if c == "transcript.erasureJournalBroken":
+        return ApiError(503, "transcript.erasureJournalBroken", msg)
+    if c == "transcript.erasureUncertain":
+        return ApiError(503, "transcript.erasureUncertain", msg)
+    if c == "transcript.recoveryState":
+        return ApiError(409, "transcript.recoveryState", msg)
+    if c == "transcript.notRecoverable":
+        return ApiError(409, "transcript.notRecoverable", msg)
+    return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
+
+
+def _erasure_store():
+    st = txhub.store()
+    if st is None or not erasure.active():
+        raise ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
+    return st
+
+
+async def _require_owner(user) -> None:
+    """Owner @ all (not a custom copy, not a token): the erasure and recovery contract is the
+    instance owner's (§12.11.8 Q1/Q4). The route's permission (`backups.manage`) is checked too."""
+    if isinstance(user, dict) and user.get("is_token"):
+        raise ApiError(403, "transcript.ownerOnly", "only an Owner can do this")
+    if not await authz.is_owner_user(user["id"]):
+        raise ApiError(403, "transcript.ownerOnly", "only an Owner can do this")
+
+
+async def _owner_fresh_factor(user, sid: str, body) -> None:
+    await _require_owner(user)
+    srow = await db.fetchone("SELECT host_id FROM sessions WHERE id=?", sid)
+    # factor REAL proaspăt (passkey / TOTP / SSO), nu o fereastră veche şi nu parola singură
+    await stepup.require_fresh_factor(srow["host_id"] if srow else 0, user, body.stepup_grant,
+                                      body.stepup_password, body.stepup_totp, real_factor=True)
+
+
+@router.post("/api/sessions/{sid}/erase")
+async def erase_recording(sid: str, body: EraseIn, request: Request,
+                          user=Depends(authz.perm('backups.manage'))):
+    """Erase a closed session's recording for good (survives restores; §12.11.4). Owner, fresh factor,
+    typed confirmation. `attested: false` = done on this volume, not yet proven off-host (Q2)."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    if body.confirm.strip() != sid[:8]:
+        raise ApiError(400, "transcript.eraseConfirm", "type the first 8 characters of the session id to confirm")
+    row = await db.fetchone("SELECT state FROM sessions WHERE id=?", sid)
+    if row is not None and row["state"] in ("creating", "live"):
+        raise ApiError(409, "session.live", "the session is live; close it first")
+    await _owner_fresh_factor(user, sid, body)
+    try:
+        res = await erasure.erase(st, sid)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    hub = core.hubs.get(sid)
+    if hub is not None:
+        await hub.revoke_shares()             # invitaţii unui share (dacă mai există hub-ul) afară
+    audit.detail(request, "recording erased (journal n=%d, attested=%s)" % (res["n"], res["attested"]))
+    email_alerts.notify_security_change("a recording was erased (session %s)" % sid[:8],
+                                        security.client_ip(request), user["email"], fleet=True,
+                                        user_id=user["id"])
+    return res
+
+
+@router.get("/api/recordings/quarantine")
+async def list_quarantined_recordings(user=Depends(authz.perm('backups.manage'))):
+    """Recordings not served pending proof, with why (Owner only; metadata, no content)."""
+    await _require_owner(user)
+    st = _erasure_store()
+    return await erasure.list_quarantined(st)
+
+
+@router.post("/api/sessions/{sid}/recovery")
+async def recover_recording(sid: str, body: RecoveryIn, request: Request,
+                            user=Depends(authz.perm('backups.manage'))):
+    """Owner recovery mode for ONE recording quarantined for missing erasure proof: → `recovery`
+    (readable by Owners only, through the recovery route). Typed confirmation = the backup date."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    cont = erasure.continuity()
+    date = time.strftime("%Y-%m-%d", time.gmtime((cont or {}).get("since") or 0))
+    if cont is None or body.confirm.strip() != date:
+        raise ApiError(400, "transcript.recoveryConfirm",
+                       "type the backup date to confirm that erasures after it cannot be re-applied")
+    await _owner_fresh_factor(user, sid, body)
+    try:
+        kinds = await erasure.recover(st, sid)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    audit.detail(request, "owner recovery: recording %s opened without erasure proof (backup of %s)"
+                 % (sid[:8], date))
+    email_alerts.notify_security_change("a recording was recovered without erasure proof (session %s)"
+                                        % sid[:8], security.client_ip(request), user["email"],
+                                        fleet=True, user_id=user["id"])
+    return {"ok": True, "status": "recovery", "kinds": kinds}
+
+
+@router.post("/api/sessions/{sid}/recovery/release")
+async def release_recording(sid: str, body: RecoveryIn, request: Request,
+                            user=Depends(authz.perm('backups.manage'))):
+    """recovery → normal access, one recording, an explicit Owner action with a fresh factor."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    await _owner_fresh_factor(user, sid, body)
+    try:
+        kinds = await erasure.release(st, sid)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    audit.detail(request, "owner recovery: recording %s released to normal access" % sid[:8])
+    email_alerts.notify_security_change("a recovered recording was released to normal access (session %s)"
+                                        % sid[:8], security.client_ip(request), user["email"],
+                                        fleet=True, user_id=user["id"])
+    return {"ok": True, "status": "ok", "kinds": kinds}
+
+
+@router.post("/api/sessions/{sid}/recovery/requarantine")
+async def requarantine_recording(sid: str, request: Request,
+                                 user=Depends(authz.perm('backups.manage'))):
+    """recovery → quarantined again (reduces access: no fresh factor needed)."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    await _require_owner(user)
+    try:
+        kinds = await erasure.requarantine(st, sid)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    audit.detail(request, "owner recovery: recording %s quarantined again" % sid[:8])
+    return {"ok": True, "status": "quarantined", "kinds": kinds}
+
+
+async def _recovery_decide(request: Request, uid_expected: int):
+    """The recovery read's own decision, re-run at every re-authorization: the same cookie, still
+    an Owner with `backups.manage`; the deadline = the web session's limits."""
+    tok = request.cookies.get(security.COOKIE_NAME)
+    user = await security.user_for_token(tok)
+    if not user or user["id"] != uid_expected:
+        raise txstore.Revoked("revoked", "web session ended")
+    g = await authz.grants_for_user(user["id"])
+    if "backups.manage" not in g.global_perms or not await authz.is_owner_user(user["id"]):
+        raise txstore.Revoked("revoked", "no longer an Owner")
+    return txhub.earliest(await txhub.web_session_limits(tok, g))
+
+
+@router.get("/api/sessions/{sid}/recovery/transcript")
+async def recovery_transcript(sid: str, request: Request, format: str = "out",
+                              user=Depends(authz.perm('backups.manage'))):
+    """Owner recovery read of a `recovery` recording (audited read, every time; streamed)."""
+    if not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    st = _erasure_store()
+    await _require_owner(user)
+    kind = "cast" if format == "cast" else "out"
+    if (await erasure.status_of(st, sid)).get(kind) != "recovery":
+        raise ApiError(409, "transcript.recoveryState", "this recording is not in recovery")
+    uid = user["id"]
+
+    async def decide():
+        return await _recovery_decide(request, uid)
+    grant = txhub.Grant(txhub.recovery_authorizer(sid, "owner:%d" % uid, decide))
+    try:
+        snap = await st.open(sid, kind, access=await grant.authorize(), reauthorize=grant.authorize)
+    except (txstore.TxStoreError, ApiError) as e:
+        raise _tx_api_error(e) from None
+    audit.detail(request, "owner recovery read: recording %s.%s without erasure proof" % (sid[:8], kind))
+    it = snap.iter(0, snap.length, reauthorize=grant.authorize)
+
+    async def body():
+        try:
+            async for piece in it:
+                yield piece
+        except Exception as e:
+            log.warning("recovery stream %s aborted: %s", sid[:8], getattr(e, "reason", type(e).__name__))
+            raise
+        finally:
+            await it.aclose()
+            snap.close()
+    return StreamingResponse(body(), media_type="application/octet-stream",
+                             headers={"Cache-Control": "no-store", "Content-Length": str(snap.length),
+                                      "Content-Disposition": 'attachment; filename="%s.%s"' % (sid[:8], kind),
+                                      "X-Recording-Recovery": "unproven"})

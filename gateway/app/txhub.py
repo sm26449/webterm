@@ -34,7 +34,7 @@ import logging
 import os
 import time
 
-from . import authz, config, db, keys, security, txstore
+from . import authz, cloudbackup, config, db, erasure, security, txstore
 
 log = logging.getLogger("webterm.txhub")
 
@@ -70,44 +70,16 @@ def store():
 # ── boot / shutdown ──────────────────────────────────────────────────────────
 
 
-TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps")
-
-
-def recording_files_present(data_dir=None) -> str:
-    """'' when no file of the encrypted-recording namespace is under `transcripts/`; otherwise the
-    first one. The ONE inventory definition shared with backup / restore (`keys.find_reserved`:
-    `transcripts/` and one level of subdirectories such as `arhiva/`, symlinks never followed below
-    the root, a supported `transcripts` symlink followed once; an unreadable directory = found)."""
-    root = str(config.DATA_DIR if data_dir is None else data_dir)
-    try:
-        dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    except FileNotFoundError:
-        return ""
-    except OSError as e:
-        return "DATA_DIR (unreadable: %s)" % e.strerror
-    try:
-        if keys.is_link(dfd, keys.RESERVED_DIR):
-            return keys.find_reserved_through_link(dfd) or ""
-        # doar subarborele transcripts/: nivelul de sus (keys.wtk & co.) nu e o înregistrare
-        try:
-            top = os.listdir(dfd)
-        except OSError:
-            return "DATA_DIR (unreadable)"
-        return keys.find_reserved(dfd, exempt=frozenset(top)) or ""
-    finally:
-        os.close(dfd)
+TX_TABLES = txstore.TX_TABLES
+# Inventarul e UNA singură definiţie (txstore.inventory), comună boot-ului, backup-ului şi restore-ului.
+recording_files_present = txstore.recording_files_present
 
 
 async def encrypted_recordings_present() -> str:
-    """'' when the volume holds no encrypted recording; otherwise what was found (a table or a file)."""
-    for table in TX_TABLES:
-        try:
-            if await db.fetchone("SELECT 1 FROM %s LIMIT 1" % table):
-                return table
-        except Exception as e:                       # noqa: BLE001 — necitibil ≠ absent
-            return "%s (unreadable: %s)" % (table, type(e).__name__)
-    found = await asyncio.to_thread(recording_files_present)
-    return found and ("transcripts: " + found)
+    """'' when the volume holds no encrypted-recording artefact; otherwise the first one found (a
+    table, a tx_state key, the erasure journal, a generation file)."""
+    found = await asyncio.to_thread(txstore.inventory, config.DATA_DIR, config.DB_PATH)
+    return found[0] if found else ""
 
 
 async def boot(ring, env=None):
@@ -136,11 +108,22 @@ async def boot(ring, env=None):
                           "journal and the quarantine of a later build; remove the flag)"
                           % (txstore.ENV_FLAG, e)) from None
     try:
+        # PR6a (§12.11.4 "Every boot"): jurnalul de ştergeri verificat faţă de capul comis şi
+        # tombstone-urile re-aplicate ÎNAINTE de recovery şi de orice cititor
+        await erasure.boot(st)
+        if not (erasure.journal_ready() and erasure.quarantine_ready()):
+            raise BootRefused("%s=1 refused: the erasure journal or the quarantine pass is not ready"
+                              % txstore.ENV_FLAG)
+        # migration.ready() vine în PR6b: până atunci Store-ul refuză orice volum real (mai sus),
+        # deci aici ajunge doar un volum de test sub o poartă de test.
         await st.recover()
     except BaseException:
+        erasure.reset()
         st.close()
         raise
     install(st)
+    erasure.set_destinations(cloudbackup.attest_destinations)
+    erasure.start(st)
     # M3: baseline-ul lui access_gen se citeşte ÎNAINTE de a servi şi înainte de bucla de poll; o
     # mutaţie CLI comisă după el se vede ca bump. Necitibil → `have` fals → primul poll face bump.
     await poll_once(baseline=True)
@@ -178,6 +161,7 @@ async def shutdown() -> None:
     if _poll_task is not None:
         _poll_task.cancel()
         _poll_task = None
+    await erasure.stop()
     if st is None:
         return
     for r in list(_recordings.values()):
@@ -194,6 +178,7 @@ async def shutdown() -> None:
 def uninstall() -> None:
     global _store, _poll_task
     _store = None
+    erasure.reset()
     if _poll_task is not None:
         _poll_task.cancel()
         _poll_task = None
@@ -362,6 +347,25 @@ def authorizer(sid, principal, route, decide):
             acc = access_since(snap, sid, principal, route, not_after=not_after)
             if acc is not None:
                 return acc
+        raise txstore.Revoked("revoked", "access changed during the authorization")
+    return authorize
+
+
+def recovery_authorizer(sid, principal, decide):
+    """`authorizer` for the Owner recovery read (§12.11.4): the same counters-first discipline, and
+    an `Access` for `txstore.OWNER_RECOVERY_ROUTE` — the only route the Store lets open a
+    `recovery` recording. `decide()` re-checks the Owner (never a parameter of the request)."""
+    async def authorize():
+        for _attempt in (0, 1):
+            snap = snapshot()
+            st = _store
+            if snap is None or st is None:
+                raise txstore.Revoked("revoked", "encrypted recordings inactive")
+            not_after = await decide()
+            if st.sid_epoch[sid] != snap[0].get(sid, 0) or st.access_epoch != snap[1]:
+                continue
+            return st.access(sid, principal, txstore.OWNER_RECOVERY_ROUTE, not_after=not_after,
+                             owner_recovery=True)
         raise txstore.Revoked("revoked", "access changed during the authorization")
     return authorize
 

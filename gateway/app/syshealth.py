@@ -41,7 +41,8 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 # INV-10 (docs/design/INVARIANTS.md): gateway-ul nu capătă puteri noi pe host: detectează, anunță, recomandă comanda.
-from . import agentca, alert_history, backup, bootkeys, config, conntypes, db, edgeguard, edgemtls, fwddomain, healthcmd, hoststatus, owners
+from . import (agentca, alert_history, backup, bootkeys, config, conntypes, db, edgeguard, edgemtls, erasure,
+               fwddomain, healthcmd, hoststatus, owners)
 
 log = logging.getLogger("webterm")
 
@@ -236,6 +237,16 @@ MESSAGES = {
     "crypto_protected": "Encryption at rest is on (master key: {source})",
     "crypto_raw_copies": "{count} backup file(s) still contain the old vault key in clear",
     "crypto_raw_copies_ok": "No stored backup contains the old vault key",
+    "erasure_ok": "Erased recordings are journalled and attested off-host",
+    "erasure_journal_broken": "The erasure journal is damaged ({diag}): every recording is quarantined",
+    "erasure_uncertain": "An erasure did not finish ({diag}): erasure is refused until the gateway restarts",
+    "erasure_journal_full": "The erasure journal is full ({n} of {cap}): new erasures are refused",
+    "erasure_journal_near_cap": "The erasure journal is nearly full ({n} of {cap})",
+    "erasure_unproven": "Erasures after the backup of {date} cannot be proven: restored recordings stay quarantined",
+    "erasure_conflict": "Two erasure journals disagree: the quarantine cannot be lifted",
+    "erasure_local_only": "Erasures survive restores on this volume only: no off-host destination is configured",
+    "erasure_unattested": "Erasure {n} is not attested on {destination} (since {since})",
+    "erasure_rolled_back": "The erasure attestations on {destination} are older than recorded (rolled back)",
 }
 WHY = {
     "host.helper": "Host timers (backup, certificate check, Docker cleanup) and the Cloudflare token are only visible to EverShell through this helper.",
@@ -275,6 +286,7 @@ WHY = {
     "forward.dns": "Port-forward links open on *.<domain>; without a wildcard DNS record they do not resolve.",
     "crypto.protection": "Backups and snapshots of a protected volume cannot be read without the master key held apart from the data.",
     "crypto.legacy_copies": "A backup made before the migration holds the old vault key in clear: whoever has the file can read the credentials it protected.",
+    "crypto.erasure": "An erased recording must stay erased after a restore; that needs the erasure journal intact and a copy of its head off this machine.",
 }
 RECS = {
     "install_helper": "Install it on the gateway host: it adds an hourly systemd timer and changes nothing else.",
@@ -1029,6 +1041,18 @@ async def c_crypto_protection() -> Optional[Result]:
     return Result("ok", "crypto_protected", {"source": st.get("source") or "?"})
 
 
+async def c_crypto_erasure() -> Optional[Result]:
+    """3.8 PR6a (§12.11.4, Q2): the erasure journal, its off-host attestation and the continuity
+    quarantine. Only while encrypted recordings are active; the most severe item is shown."""
+    if not erasure.active():
+        return None
+    items = erasure.health()
+    if not items:
+        return Result("ok", "erasure_ok")
+    sev, key, params = max(items, key=lambda i: RANK[i[0]])
+    return Result(sev, key, {k: str(v) for k, v in params.items()}, doc="encryption")
+
+
 async def c_crypto_legacy_copies() -> Optional[Result]:
     """3.8 wiring item 5: on a migrated volume, 3.7 snapshots (`*.wtsnap`) and pre-restore copies
     (`*.wtsnap.keep`) still hold the raw 3.7 vault key. Counted, never opened."""
@@ -1177,6 +1201,7 @@ CHECKS: list = [
     # 3.8: encryption at rest (state set at boot; the copies change only with backups / deletes)
     Check("crypto.protection", "config", c_crypto_protection, alert="none"),
     Check("crypto.legacy_copies", "config", c_crypto_legacy_copies),
+    Check("crypto.erasure", "fast", c_crypto_erasure, critical=True),
     Check("certs.main", "fast", _cert_check("main"), alert="none", critical=True),  # certmon alerts
     Check("certs.forward", "fast", _cert_check("forward"), alert="none", critical=True),
     Check("certs.authentik", "fast", _cert_check("authentik"), alert="none", critical=True),

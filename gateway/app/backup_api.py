@@ -16,7 +16,8 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
 from .errors import ApiError
-from . import audit, authz, backup, bgtasks, cloudbackup, config, db, email_alerts, security, stepup, syshealth
+from . import (audit, authz, backup, bgtasks, cloudbackup, config, db, email_alerts, erasure, security, stepup,
+               syshealth, txhub)
 from . import snapshot as wts
 
 log = logging.getLogger("webterm")
@@ -33,6 +34,10 @@ def _backup_value_error(e: Exception) -> ApiError:
     „altă operaţie de restore în curs”; detaliile de parsare nu ajung în cod."""
     msg = str(e) or "invalid backup"
     low = msg.lower()
+    if isinstance(e, erasure.ErasureConflict):
+        return ApiError(400, "backup.erasureConflict", msg)
+    if isinstance(e, erasure.ErasureUnsupported):
+        return ApiError(400, "backup.erasureUnsupported", msg)
     if isinstance(e, wts.SnapshotWrongKey):
         mk_id = getattr(e, "mk_id", None)
         if mk_id:
@@ -233,7 +238,11 @@ async def backup_restore(request: Request, user=Depends(authz.perm('backups.mana
     if not data:
         raise ApiError(400, "backup.emptyFile", "empty file")
     try:
-        info = await asyncio.to_thread(backup.stage_restore, data, passphrase)
+        fetch = None
+        if txhub.active():
+            # 3.8 PR6a: dovada continuităţii ştergerilor vine şi de la destinaţiile off-host (§12.11.4)
+            fetch = erasure.sync_fetcher(asyncio.get_running_loop(), await erasure.destinations())
+        info = await asyncio.to_thread(backup.stage_restore, data, passphrase, erasure_fetch=fetch)
     except ValueError as e:
         raise _backup_value_error(e)           # parolă greșită / fișier corupt / DB invalid
     except Exception as e:

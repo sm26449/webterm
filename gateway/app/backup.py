@@ -51,10 +51,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from . import config
+from . import erasure
 from . import keyring as kr
 from . import keys as keystore
 from . import legacyvault
 from . import snapshot as wts
+from . import txstore
 
 log = logging.getLogger("webterm")
 
@@ -436,6 +438,7 @@ def verify_stored(name: str, keys=None) -> dict:
                     info, _inner = _verify_wts(f, hk, td)
             finally:
                 shutil.rmtree(td, ignore_errors=True)
+        info.pop("_content", None)
         return info
     # un `.wtsnap` 3.7 rămas pe un volum protejat rămâne verificabil (§12.10); un volum ambiguu nu (H2)
     volume_kind()
@@ -454,7 +457,7 @@ def verify_stored(name: str, keys=None) -> dict:
 
 
 def stage_restore(blob: bytes, passphrase: str, keys=None, mk=None, legacy_import: bool = False,
-                  prefer: str = "local", progress=None) -> dict:
+                  prefer: str = "local", progress=None, erasure_fetch=None) -> dict:
     """Decriptează + validează + extrage în restore-pending/ + scrie markerul. Aplicarea
     reală se face la următorul boot (apply_pending_restore), după un restart.
     Volum protejat: un WTS1 (verificat complet înainte de staging; `mk` = MK-ul operatorului
@@ -462,13 +465,15 @@ def stage_restore(blob: bytes, passphrase: str, keys=None, mk=None, legacy_impor
     alege plicul portabil înaintea celui local) sau, cu `legacy_import=True`, un backup
     pre-3.8 importat explicit (cheia lui dovedită pe DB-ul lui, R-H2). Volum legacy: un WTS1 e
     refuzat; un backup 3.7 e verificat ca în 3.7 plus proba cheii pe DB-ul lui, apoi publicat
-    durabil (set complet, flag atomic, R-M1). `progress` (StageProgress): cât s-a ajuns."""
+    durabil (set complet, flag atomic, R-M1). `progress` (StageProgress): cât s-a ajuns.
+    `erasure_fetch(k_erase, inst)` (3.8 PR6a, doar cu înregistrările criptate active): jurnalele de
+    ştergeri ale destinaţiilor off-host, pentru dovada continuităţii (§12.11.4)."""
     progress = progress if progress is not None else StageProgress()
     raw = decrypt(blob, passphrase)
     _invalidate_kind()
     route = restore_route(raw, is_protected(), legacy_import)     # RC-M1: aceeaşi rută ca verify
     if route == "wts":
-        return _stage_wts(io.BytesIO(raw), keys, mk, prefer, progress)
+        return _stage_wts(io.BytesIO(raw), keys, mk, prefer, progress, erasure_fetch)
     if route == "legacy-import":
         return _stage_legacy_import(raw, keys, progress)
     return _stage_legacy_volume(raw, progress)
@@ -642,7 +647,11 @@ SIGNING_MAX = 64 * 1024
 STAGE_LOCK = ".restore.lock"
 VERIFY_PREFIX = ".restore-verify-"
 _SIGNING = ("agent-signing.key", "agent-signing.pub")
-_TOP_FILES = frozenset({"webterm.db", KEYS_NAME, *_SIGNING})
+# 3.8 PR6a: jurnalul de ştergeri (WTJ1) e membru doar al unui manifest `wts-content-2` (§12.11.3)
+JOURNAL_MEMBER = erasure.JOURNAL_NAME
+_TOP_FILES = frozenset({"webterm.db", KEYS_NAME, *_SIGNING, JOURNAL_MEMBER})
+_REC_STATES = frozenset({"included", "legacy", "excluded", "not-requested", "one-kind"})
+_SID_HEX = re.compile(r"^[0-9a-f]{32}$")
 _NAME_PART = re.compile(r"^[A-Za-z0-9_@+=-][A-Za-z0-9._@+=-]{0,254}$")
 _TX_DEPTH = 4
 # H3: inventarul transcripturilor e o listă de PERMISIUNI, nu de excluderi: doar înregistrările
@@ -1261,12 +1270,54 @@ def _file_list(files, err) -> dict:
 
 
 def _parse_content_manifest(raw: bytes) -> dict:
+    return _parse_content_doc(raw)[0]
+
+
+def _parse_content_doc(raw: bytes) -> tuple:
+    """(files, v2 extras | None). v1 = {format, files}; v2 (§12.11.3) adds `created`, `erasure`
+    ("tracked"), `erasure_journal` (the WTJ1 member, its length, SHA-256, head, attested heads) and
+    `recordings` (one entry per descriptor of the DB copy)."""
     def err():
         return wts.SnapshotError("bad-content-manifest")
     doc = _strict_json(raw, err)
-    if type(doc) is not dict or set(doc) != {"format", "files"} or doc["format"] != "wts-content-1":
+    if type(doc) is not dict:
         raise err()
-    return _file_list(doc["files"], err)
+    if doc.get("format") == "wts-content-1" and set(doc) == {"format", "files"}:
+        files = _file_list(doc["files"], err)
+        if JOURNAL_MEMBER in files:
+            raise err()                          # un jurnal e membru doar al unui manifest v2
+        return files, None
+    if doc.get("format") != "wts-content-2" or set(doc) != {"format", "files", "created", "erasure",
+                                                            "erasure_journal", "recordings"}:
+        raise err()
+    files = _file_list(doc["files"], err)
+    ej, recs = doc["erasure_journal"], doc["recordings"]
+    if doc["erasure"] != "tracked" or type(doc["created"]) is not int or type(ej) is not dict \
+            or set(ej) != {"member", "length", "sha256", "head", "attested"} or ej["member"] != JOURNAL_MEMBER \
+            or type(ej["length"]) is not int or ej["length"] < erasure.HDR_LEN \
+            or type(ej["sha256"]) is not str or not _SHA_HEX.match(ej["sha256"]) \
+            or type(ej["head"]) is not dict or set(ej["head"]) != {"n", "mac"} \
+            or type(ej["head"]["n"]) is not int or ej["head"]["n"] < 0 \
+            or ej["length"] != erasure.prefix_len(ej["head"]["n"]) \
+            or type(ej["head"]["mac"]) is not str or not _SHA_HEX.match(ej["head"]["mac"]) \
+            or type(ej["attested"]) is not list or type(recs) is not list or len(recs) > MAX_MEMBERS:
+        raise err()
+    for a in ej["attested"]:
+        if type(a) is not dict or set(a) != {"destination", "n", "time"} or type(a["destination"]) is not str \
+                or not 0 < len(a["destination"]) <= 512 or type(a["n"]) is not int or a["n"] < 0 \
+                or type(a["time"]) is not int:
+            raise err()
+    seen = set()
+    for r in recs:
+        if type(r) is not dict or not {"sid", "kind", "state"} <= set(r) <= {"sid", "kind", "state", "reason"} \
+                or type(r["sid"]) is not str or not _SID_HEX.match(r["sid"]) or r["kind"] not in ("out", "cast") \
+                or r["state"] not in _REC_STATES or (r["sid"], r["kind"]) in seen \
+                or ("reason" in r and (type(r["reason"]) is not str or len(r["reason"]) > 64)):
+            raise err()
+        seen.add((r["sid"], r["kind"]))
+    if files.get(JOURNAL_MEMBER) != (ej["length"], ej["sha256"]):
+        raise err()
+    return files, {k: doc[k] for k in ("created", "erasure", "erasure_journal", "recordings")}
 
 
 # ---------------------------------------------------------------- writing WTS1
@@ -1340,8 +1391,11 @@ class _TarOut:
     def add_bytes(self, name, data):
         self.add_stream(name, len(data), [data])
 
-    def finish(self):
-        man = _canon({"format": "wts-content-1", "files": self.entries})
+    def finish(self, extra=None):
+        doc = {"format": "wts-content-1", "files": self.entries}
+        if extra is not None:
+            doc = dict(extra, format="wts-content-2", files=self.entries)
+        man = _canon(doc)
         if len(man) > CONTENT_MANIFEST_MAX:
             raise wts.SnapshotTooLarge("manifest")
         ti = self._info(CONTENT_MANIFEST, len(man))
@@ -1532,7 +1586,7 @@ def _check_staged_signing(td: str) -> None:
 
 
 def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
-               portable: bool) -> None:
+               portable: bool, safety: bool = False) -> None:
     """Streams a WTS1 container to `out`: tar.gz {webterm.db (VACUUM INTO), keys.wtk, fleet
     signing key, [transcripts], wts-manifest.json (last)}. Never `secret`, never the MK."""
     ring = hk.ring
@@ -1555,12 +1609,59 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
             t.add_bytes(name, b)
         if include_transcripts:
             _add_transcripts(t, td)
-        t.finish()
+        # flag oprit: exact calea PR5 (boot-ul a refuzat deja un volum cu artefacte criptate)
+        extra = _erasure_member(t, dbcopy, ring, include_transcripts, safety) if txstore.enabled() else None
+        if extra is None:
+            t.finish()
+        else:
+            t.finish(extra)
     w.close()
 
 
+def _erasure_member(t, dbcopy: str, ring, include_transcripts: bool, safety: bool = False):
+    """§12.11.3: the erasure journal cut at the DB copy's committed head, and the v2 manifest
+    fields. None = this dataset never had a journal (the manifest stays v1). A journal that does
+    not match the DB fails the whole backup (journal error ≠ corruption, step 4)."""
+    try:
+        m = erasure.backup_member(dbcopy, config.DATA_DIR, ring.kwk, ring.installation_id)
+    except erasure.JournalError as e:
+        if safety:
+            # copia de siguranţă dinaintea unui restore: volumul înlocuit are jurnalul pierdut /
+            # stricat (exact cazul pe care restore-ul îl repară). Copia rămâne, fără jurnal (v1);
+            # restaurată, staging-ul ei o refuză (DB cu ştergeri, fără jurnal) — e o copie de diagnostic
+            log.warning("pre-restore safety copy WITHOUT the erasure journal (%s)", e.reason)
+            return None
+        raise ValueError("the erasure journal cannot be backed up (%s) — backup refused" % e.reason) from None
+    if m is None and not safety:
+        # fără jurnal şi fără cap: un set de date care n-a avut niciodată ştergeri urmărite. Dacă
+        # inventarul comun găseşte totuşi înregistrări criptate, jurnalul s-a pierdut → refuz
+        found = txstore.inventory(config.DATA_DIR, dbcopy)
+        if found:
+            raise ValueError("encrypted recordings without their erasure journal (%s) — backup refused"
+                             % found[0][:80])
+        return None
+    if m is None:
+        return None
+    t.add_bytes(JOURNAL_MEMBER, m["bytes"])
+    con = sqlite3.connect("file:%s?mode=ro" % dbcopy, uri=True)
+    try:
+        rows = con.execute("SELECT sid, kind FROM tx_descriptors ORDER BY sid, kind").fetchall()
+    finally:
+        con.close()
+    # generaţiile WTX1 nu intră încă în arhivă (backup_snapshot, PR ulterior): fiecare înregistrare
+    # e listată, ca restore-ul s-o marcheze „absent" şi să nu o citească drept pierdută
+    recs = [{"sid": sid, "kind": kind, "state": "excluded" if include_transcripts else "not-requested",
+             **({"reason": "wtx-not-archived"} if include_transcripts else {})} for sid, kind in rows]
+    head = m["head"]
+    return {"created": int(time.time()), "erasure": "tracked", "recordings": recs,
+            "erasure_journal": {"member": JOURNAL_MEMBER, "length": len(m["bytes"]),
+                                "sha256": hashlib.sha256(m["bytes"]).hexdigest(),
+                                "head": {"n": head.n, "mac": head.mac.hex()},
+                                "attested": m["attested"]}}
+
+
 def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=False,
-                 exclusive: bool = False) -> None:
+                 exclusive: bool = False, safety: bool = False) -> None:
     """Writes a WTS1 file all-or-nothing (tmp in the same dir, fsync, read back and verified as
     restorable, replace, dir fsync). A failed attempt leaves no file; a retry is a new Writer
     (new CK). `exclusive` (R-L1): published with link(2), which never replaces an existing file."""
@@ -1573,7 +1674,7 @@ def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=
             pass
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "wb") as f:
-            _write_wts(f, hk, keys_blob, include_transcripts, local, portable)
+            _write_wts(f, hk, keys_blob, include_transcripts, local, portable, safety)
             f.flush()
             _fsync(f.fileno())
         # M2: succes doar pentru o arhivă pe care restore-ul o acceptă (bugete, manifest, keyring)
@@ -1688,13 +1789,15 @@ def _unpack_verified(reader, dest, db_dest=None) -> tuple:
         raise wts.SnapshotError("conflicting-members") from None
     if CONTENT_MANIFEST not in arc.mem:
         raise wts.SnapshotError("no-content-manifest")
-    if _parse_content_manifest(arc.mem[CONTENT_MANIFEST]) != arc.seen:
+    files, extras = _parse_content_doc(arc.mem[CONTENT_MANIFEST])
+    if files != arc.seen:
         raise wts.SnapshotError("content-manifest-mismatch")
     if "webterm.db" not in arc.seen or KEYS_NAME not in arc.seen:
         raise wts.SnapshotError("incomplete", "webterm.db and keys.wtk are required")
     _check_signing_pair(arc.mem.get(_SIGNING[0]), arc.mem.get(_SIGNING[1]))
     info = {"has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
-            "has_signing_key": "agent-signing.key" in arc.seen}
+            "has_signing_key": "agent-signing.key" in arc.seen,
+            "erasure": "tracked" if extras is not None else "not-tracked", "_content": extras}
     return info, arc.mem[KEYS_NAME]
 
 
@@ -1878,6 +1981,7 @@ def _verify_wts_bytes(raw: bytes, keys=None, mk=None, prefer="local") -> dict:
             info, _inner = _verify_wts(io.BytesIO(raw), hk, td, mk, prefer)
         finally:
             shutil.rmtree(td, ignore_errors=True)
+    info.pop("_content", None)
     return info
 
 
@@ -1970,11 +2074,12 @@ def _read_flag():
         return ValueError("the restore flag is malformed — refused")
     doc = _strict_json(raw, err)
     if (type(doc) is not dict or not {"format", "manifest", "state", "set"} <= set(doc)
-            or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine"}
+            or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine", "erasure_proven"}
             or doc["format"] != _FLAG_FORMAT or doc["state"] not in _FLAG_STATES
             or type(doc["manifest"]) is not str or not _SHA_HEX.match(doc["manifest"])
             or type(doc["set"]) is not str or not _GEN_HEX.match(doc["set"])
-            or type(doc.get("safety", "")) is not str):
+            or type(doc.get("safety", "")) is not str
+            or type(doc.get("erasure_proven", False)) is not bool):
         raise err()
     # R-M1: decizia de carantină se ia o dată (la `applying`) şi se reia din flag, nu se recalculează
     if doc["state"] != "staged" and type(doc.get("quarantine")) is not bool:
@@ -2010,7 +2115,7 @@ def _drop_unflagged_sets(keep) -> None:
     shutil.rmtree(trash, ignore_errors=True)
 
 
-def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None) -> None:
+def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None, erasure_summary=None) -> None:
     """H1/R-H1: publishes a fully verified tree as ONE durable staged set. Every file and
     directory fsynced, then `restore.json` (generation, files with sizes + SHA-256, keyring
     identity), one rename to `restore-pending.<generation>`, and the flag LAST, atomically,
@@ -2033,6 +2138,8 @@ def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None) -> Non
     doc = {"format": "wt-restore-1", "generation": secrets.token_hex(16), "created": int(time.time()),
            "installation_id": ring.installation_id.hex(), "epoch": ring.epoch, "mk_id": ring.mk_id.hex(),
            "files": entries, "dirs": sorted(dirs)}
+    if erasure_summary is not None:
+        doc["erasure"] = erasure_summary
     raw = _canon(doc)
     if len(raw) > RESTORE_MANIFEST_MAX:
         raise wts.SnapshotTooLarge("restore-manifest")
@@ -2059,7 +2166,7 @@ def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None) -> Non
     log.warning("RESTORE staged — it is applied on the next restart")
 
 
-def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None) -> dict:
+def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasure_fetch=None) -> dict:
     """Protected restore of a WTS1: everything verified in a private dir BEFORE restore-pending/
     is touched; the staged keys.wtk is the snapshot's keyring re-wrapped under the host MK; the
     verified files are exactly the ones published (no second extraction)."""
@@ -2069,15 +2176,93 @@ def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None) -> di
         td = _private_tmpdir()
         try:
             info, inner = _verify_wts(fileobj, hk, td, mk, prefer)
+            content = info.pop("_content", None)
+            summary = _erasure_stage(td, content, inner, erasure_fetch)
+            if summary is not None:
+                info["erasure"] = summary["state"]
+                info["erasure_proof"] = summary["proof"]
             staged = _manifest_for_host(inner, hk)
             kp = os.path.join(td, KEYS_NAME)
             os.unlink(kp)
             _write_new(kp, staged)
-            _stage_publish(td, staged, hk.mk, progress)
+            _stage_publish(td, staged, hk.mk, progress, summary)
         except BaseException:
             shutil.rmtree(td, ignore_errors=True)
             raise
     return _missing_data_note(info)
+
+
+def _live_journal():
+    try:
+        return erasure.Journal(config.DATA_DIR, b"", b"\0" * 16).read_bytes()
+    except (erasure.JournalError, OSError):
+        return None                              # necitibil = nu e J_v (deci nici dovadă)
+
+
+def _erasure_stage(td: str, content, inner: kr.Keyring, fetch):
+    """§12.11.4 "Continuity at restore", at stage. Flag off: an archive with erasure state is
+    refused (this build cannot honour it), anything else is the PR5 / 3.7 path (None). Flag on:
+    the backup's journal checked against its manifest and its DB, every staged descriptor listed
+    (absent when the backup did not carry it), the sources reconciled (divergence refused); J*
+    is written into the staging. Returns the summary kept in restore.json."""
+    dbp = os.path.join(td, "webterm.db")
+    if not txstore.enabled():
+        if content is not None or txstore.inventory(td, dbp):
+            raise erasure.ErasureUnsupported("this backup holds encrypted recordings or an erasure journal; "
+                                             "this build restores it only with encrypted recordings on — refused")
+        return None
+    k = erasure.k_erase_of(inner.kwk)
+    inst = inner.installation_id
+    try:
+        head_db, att_b, cfg_ids = erasure.staged_state(dbp)
+    except erasure.JournalError:
+        raise erasure.ErasureConflict("the backup's erasure state is unreadable — refused") from None
+    jp = os.path.join(td, JOURNAL_MEMBER)
+    jb = None
+    known = {d: int(v.get("n", 0)) for d, v in att_b.items() if isinstance(v, dict)}
+    if content is not None:
+        jb = _read_small(jp, erasure.MAX_FILE)
+        erasure.check_member(jb, content["erasure_journal"], k, inst, head_db)
+        for a in content["erasure_journal"]["attested"]:
+            known[a["destination"]] = max(known.get(a["destination"], 0), a["n"])
+        _mark_absent(dbp, content["recordings"])
+    elif head_db is not None and head_db.n > 0:
+        raise erasure.ErasureConflict("the backup's database records erasures but the archive has no "
+                                      "erasure journal — refused")
+    results, ids = fetch(k, inst) if fetch is not None else ([], [])
+    dec = erasure.decide_restore(k_erase=k, inst=inst, j_b=jb, tracked=content is not None,
+                                 j_v=_live_journal(), dest_results=results,
+                                 required_dests=set(cfg_ids) | set(ids), known_attested=known)
+    if dec.journal is not None and dec.journal != jb:
+        if os.path.lexists(jp):
+            os.unlink(jp)
+        _write_new(jp, dec.journal)
+    for r in dec.rolled_back:
+        log.warning("restore: erasure attestations on %s are older than recorded (rolled back)", r[:120])
+    return dec.summary(content["created"] if content is not None else 0)
+
+
+def _mark_absent(dbp: str, recs) -> None:
+    """Every staged descriptor must be named by the manifest; one the backup did not carry
+    (`excluded` / `not-requested` / `one-kind`) is restored as `absent` ("not in this backup")."""
+    listed = {(r["sid"], r["kind"]): r["state"] for r in recs}
+    con = sqlite3.connect(dbp, isolation_level=None)
+    try:
+        try:
+            rows = con.execute("SELECT sid, kind FROM tx_descriptors").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for sid, kind in rows:
+            state = listed.get((sid, kind))
+            if state is None:
+                raise erasure.ErasureConflict("a recording of the backup's database is not in its manifest — refused")
+            if state in ("excluded", "not-requested", "one-kind"):
+                con.execute("UPDATE tx_descriptors SET status='absent' WHERE sid=? AND kind=?", (sid, kind))
+            elif state == "included":
+                # generaţiile WTX1 nu sunt încă membri permişi: un `included` nu are ce să numească
+                raise erasure.ErasureConflict("the backup lists recording generations this build cannot restore — refused")
+    finally:
+        con.close()
 
 
 def _missing_data_note(info: dict) -> dict:
@@ -2211,7 +2396,13 @@ def _validate_staging(rd, digest: str, mk: bytes, gen=None):
         return ValueError("the restore manifest is malformed — refused")
     doc = _strict_json(raw, err)
     want = {"format", "generation", "created", "installation_id", "epoch", "mk_id", "files", "dirs"}
-    if type(doc) is not dict or set(doc) != want or doc["format"] != "wt-restore-1":
+    if type(doc) is not dict or not want <= set(doc) <= want | {"erasure"} or doc["format"] != "wt-restore-1":
+        raise err()
+    er = doc.get("erasure")
+    if "erasure" in doc and (type(er) is not dict or set(er) != {"state", "proof", "since", "n"}
+                             or er["state"] not in ("not-tracked", "proven", "unproven")
+                             or er["proof"] not in ("volume", "destinations", "none")
+                             or type(er["since"]) is not int or type(er["n"]) is not int):
         raise err()
     if gen is not None and doc["generation"] != gen:
         raise ValueError("the restore staging is not the generation its flag names — refused")
@@ -2333,7 +2524,8 @@ def _safety_copy(hk: HostKeys, current: bytes, gen: str, include_transcripts: bo
     an existing copy. R-M1: with the live transcripts when the apply will replace them."""
     keep = _backup_dir() / ("pre-restore-%d-%s-%s%s.keep" % (int(time.time()), gen[:12],
                                                              secrets.token_hex(4), WTS_EXT))
-    _wts_to_file(keep, hk, current, include_transcripts, local=True, portable=True, exclusive=True)
+    _wts_to_file(keep, hk, current, include_transcripts, local=True, portable=True, exclusive=True,
+                 safety=True)
     return keep.name
 
 
@@ -2400,6 +2592,9 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
         doc, staged = _validate_staging(rd, flag["manifest"], keys.mk, gen)
         listed = {e["name"] for e in doc["files"]}
         has_tx = "transcripts" in doc["dirs"] or any(n.startswith("transcripts/") for n in listed)
+        # 3.8 PR6a (§12.11.4): sursele de ştergeri reconciliate DIN NOU, sub lacăt, înainte de orice
+        # mutaţie a apply-ului; un conflict lasă volumul neatins
+        er_plan = _erasure_apply_plan(rd, doc, staged, keys.mk, listed)
         if flag["state"] == "staged":
             other = doc["installation_id"] != hk.ring.installation_id.hex()
             name = ""
@@ -2414,6 +2609,10 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                 log.warning("the pre-restore safety copy failed, applying WITHOUT it (forced): %s", e)
             _step("apply:safety")
             flag = dict(flag, state="applying", safety=name, quarantine=bool(other and not has_tx))
+            if er_plan is not None:
+                # PR6a: dovada se decide O DATĂ (ca şi carantina R-M1); la reluare jurnalul publicat
+                # de noi nu mai e „J_v" şi n-are voie să devină dovadă
+                flag["erasure_proven"] = bool(er_plan["proven"])
             _write_flag(flag)
             _step("apply:applying")
         if current != staged:
@@ -2429,6 +2628,9 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             _quarantine_transcripts(gen)
         else:
             log.warning("the backup has no transcripts: the live transcripts are kept")
+        if er_plan is not None:
+            _erasure_publish(er_plan, gen)
+        _step("apply:erasure-journal")
         _copy_durable(os.path.join(rd, "webterm.db"), config.DB_PATH)
         for ext in ("-wal", "-shm"):
             p = config.DATA_DIR / ("webterm.db" + ext)
@@ -2436,6 +2638,14 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                 os.unlink(p)
         _fsync_dir(config.DATA_DIR)
         _step("apply:db")
+        if er_plan is not None:
+            if flag.get("erasure_proven", False):
+                erasure.clear_unproven_sync(config.DB_PATH)
+            else:
+                erasure.mark_unproven_sync(config.DB_PATH, er_plan["since"], er_plan["n"])
+                log.warning("RESTORE without proof of erasure continuity: every restored recording "
+                            "is quarantined until the erasures after the backup can be proven")
+        _step("apply:erasure-quarantine")
         _write_flag(dict(flag, state="committed"))
         _step("apply:committed")
         _finish_restore(rd)
@@ -2443,6 +2653,44 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
         log.warning("RESTORE applied from an encrypted backup (DB + keys.wtk%s)",
                     " + transcripts" if has_tx else "")
         return True
+
+
+def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set):
+    """None = nothing of the erasure contract here (PR5 / 3.7 path). Otherwise the journal to
+    publish and whether the continuity is proven, decided again now (stage → apply window)."""
+    er = doc.get("erasure")
+    if er is None and JOURNAL_MEMBER not in listed:
+        return None
+    if not txstore.enabled():
+        raise erasure.ErasureUnsupported("a restore staging with an erasure journal needs encrypted "
+                                         "recordings on — refused")
+    ring = _open_ring(staged, mk, "staged keys.wtk")
+    k = erasure.k_erase_of(ring.kwk)
+    sj = _read_small(os.path.join(str(rd), JOURNAL_MEMBER), erasure.MAX_FILE) if JOURNAL_MEMBER in listed else None
+    live = _live_journal()
+    foreign = False
+    if live is not None:
+        try:
+            erasure.parse(live, k, ring.installation_id)
+        except erasure.JournalError as e:
+            foreign = e.reason == "foreign"
+    publish, proven, head = erasure.reconcile_apply(k_erase=k, inst=ring.installation_id, staged_journal=sj,
+                                                    live_journal=None if foreign else live,
+                                                    stage_summary=er)
+    return {"publish": publish, "proven": proven, "n": head.n, "foreign": foreign,
+            "since": int((er or {}).get("since", 0))}
+
+
+def _erasure_publish(plan: dict, gen: str) -> None:
+    """J* becomes the volume journal (never a shorter one: reconcile_apply chose the longest); the
+    journal of ANOTHER installation is moved aside with the quarantined transcripts."""
+    if plan["foreign"]:
+        q = _backup_dir() / ("quarantine-%s-erasures.wtj" % gen)
+        if not os.path.lexists(q):
+            os.rename(str(config.DATA_DIR / JOURNAL_MEMBER), str(q))
+            _fsync_dir(config.DATA_DIR)
+    if plan["publish"] is not None:
+        erasure.Journal(config.DATA_DIR, b"", b"\0" * 16).replace(plan["publish"])
 
 
 def _open_stored_wts(name: str):
