@@ -534,6 +534,7 @@ class _State:
     continuity: dict = None        # {state: unproven, since, n} | None
     damaged: Parsed = None         # R2-H1: prefixul autentic citit la un boot cu jurnal stricat (sau None)
     head_known: bool = True        # R2-H1: capul comis s-a putut citi din DB la boot
+    cancelled: set = field(default_factory=set)       # R3-M1: sid-uri cu intenţia anulată în zbor
     booted: bool = False
     quarantine_pass: bool = False
     task: object = None
@@ -673,7 +674,8 @@ def intents_in(db_path):
         try:
             rows = con.execute("SELECT sid, kinds FROM tx_erase_intents").fetchall()
         except sqlite3.OperationalError as e:
-            if "no such table" in str(e):
+            # doar tabela lipsă (un DB mai vechi) = nicio intenţie; orice altă eroare → refuz
+            if str(e) == "no such table: tx_erase_intents":
                 return {}
             raise
     finally:
@@ -864,11 +866,24 @@ async def boot(st, data_dir=None, clock=time.time):
 # ── erase (§12.11.4 "Order of erase(sid)") ───────────────────────────────────
 
 
-async def _journal_and_destroy(st, sid, kinds, env, clock):
+async def _journal_and_destroy(st, sid, kinds, env, clock, *, resuming=False):
     """Erasure steps 1–2 for `sid` (caller holds its lease AND the barrier): one journal entry
     (fsync within APPEND_BUDGET), the in-memory tombstone, then `_destroy_sync` in one transaction.
-    → (n, generations to retire). Shared by `erase` and the Owner's discard of a failed migration."""
+    → (n, generations to retire). Shared by `erase`, the Owner's discard of a failed migration, the
+    boot's intents and `resume_intents` (`resuming`: the uncertain state it is resolving)."""
     s = _s
+    # R-M1 (recheck): starea se reverifică SUB barieră; două cereri pot trece de _ready_or_raise
+    # înainte ca prima să lase o stare incertă sau un prag nou
+    if s.diag or s.parsed is None:
+        raise ErasureError("transcript.erasureJournalBroken",
+                           "the erasure journal is damaged (%s); erasure is refused" % (s.diag or "?"), 503)
+    if s.uncertain and not resuming:
+        raise ErasureError("transcript.erasureUncertain",
+                           "an earlier erasure did not finish; restart the gateway first", 503)
+    if _behind():
+        raise ErasureError("transcript.erasureBehind",
+                           "erasures committed before the last restore are not on this volume yet; "
+                           "erasure is refused until they are proven", 409)
     if s.parsed.n >= CAP:
         raise ErasureError("transcript.erasureJournalFull",
                            "the erasure journal is full; erasure is refused until compaction", 507)
@@ -879,18 +894,34 @@ async def _journal_and_destroy(st, sid, kinds, env, clock):
     entry = encode_entry(s.journal.k, st.inst, prev.mac, n, t_ms, bytes.fromhex(sid),
                          kinds_bits(kinds), rk_hash)
     # R2-H1: intenţia durabilă ÎNAINTE de pasul 1 (o tranzacţie proprie, comisă): de aici un jurnal
-    # pierdut nu mai poate ascunde ştergerea, boot-ul o completează din intenţie
+    # pierdut nu mai poate ascunde ştergerea, boot-ul o completează din intenţie.
+    # R3-M1: refuzul în memorie se pune ÎNAINTE ca intenţia să ajungă la writer-ul SQLite: o anulare
+    # a cererii după COMMIT (Store.io aşteaptă firul, apoi propagă CancelledError) nu mai lasă
+    # sid-ul citibil; se ridică doar după un ROLLBACK confirmat
+    was = sid in st.tombstoned
+    st.tombstone(sid)
     try:
         await st.io(st._run_txn, lambda c: _put_intent_sync(c, sid, kinds, clock()))
     except txstore.Uncertain:
         # poate fi comisă: sid-ul nu mai e servit, boot-ul decide (o intenţie comisă se completează)
         s.uncertain = "intent-uncertain"
-        st.tombstone(sid)
         st.alarm("transcript.erasureUncertain", f"{sid}: erase intent commit uncertain")
         raise ErasureError("transcript.erasureUncertain",
                            "the erasure could not be recorded; restart the gateway", 503) from None
+    except asyncio.CancelledError:
+        # tranzacţia s-a terminat (comisă sau nu); intenţia, dacă e în DB, conduce ştergerea:
+        # janitorul (resume_intents) o duce la capăt imediat, altfel boot-ul. Până atunci: refuz.
+        if not resuming:
+            s.uncertain = "intent-cancelled"
+        if not was:
+            s.cancelled.add(sid)
+        st.alarm("transcript.erasureUncertain", f"{sid}: erase request cancelled at the intent commit")
+        _kick()
+        raise
     except Exception as x:
-        # ROLLBACK: nimic scris, nimic jurnalizat
+        # ROLLBACK confirmat: nimic scris, nimic jurnalizat; refuzul din memorie se ridică
+        if not was:
+            st.tombstoned.discard(sid)
         log.warning("erasure %s: intent not written: %s", sid[:8], type(x).__name__)
         raise ErasureError("transcript.erasureUnavailable", "the erasure could not be recorded", 503) from None
     st._fault("intent-committed")
@@ -922,6 +953,14 @@ async def _journal_and_destroy(st, sid, kinds, env, clock):
         gens = await st.io(st._run_txn, lambda c: _destroy_sync(c, sid, Head(n, t_ms, e.mac)))
     except txstore.Uncertain:
         gens = None
+    except asyncio.CancelledError:
+        # R3-M1: intrarea e durabilă, pasul 2 comis sau nu; janitorul îl re-aplică din jurnal
+        # (idempotent) şi recitește capul DB, apoi ridică starea incertă
+        s.uncertain = "commit-cancelled"
+        s.cancelled.add(sid)
+        st.alarm("transcript.erasureUncertain", f"{sid}: erase request cancelled at step 2")
+        _kick()
+        raise
     except Exception as x:
         # tombstone-ul e durabil, pasul 2 nu: boot-ul îl re-aplică; până atunci, refuz
         s.uncertain = "commit-failed"
@@ -972,6 +1011,63 @@ async def erase(st, sid, *, clock=time.time):
     _kick()
     return {"erased": True, "n": n, "state": "destroyed" if confirmed else "journalled",
             "attested": await attested_everywhere(n)}
+
+
+_RESUMABLE = ("intent-cancelled", "commit-cancelled")
+
+
+async def resume_intents(st=None, *, clock=time.time):
+    """R3-M1: finish what a cancelled erase request left (the janitor runs this as soon as it is
+    woken; the boot does the same from the intents if the process dies first). For every sid whose
+    request was cancelled at the intent or at step 2, decided from the database now that its
+    transaction is over: an intent whose sid the journal holds → step 2 again (idempotent); an
+    intent without an entry → steps 1–2; no intent and no entry → the transaction rolled back, the
+    sid is served again. The DB head is re-read, and the uncertain state lifted only when every sid
+    is settled. → True when lifted."""
+    s = _s
+    st = st or s.store
+    if st is None or s.uncertain not in _RESUMABLE or s.diag or s.parsed is None:
+        return False
+    for sid in sorted(s.cancelled):
+        # aceeaşi ordine ca erase (lease, apoi bariera): niciun deadlock cu o cerere în aşteptare
+        async with st.lease(sid):
+            async with st.barrier:
+                if s.uncertain not in _RESUMABLE or s.diag or s.parsed is None:
+                    return False
+
+                def load(c, sid=sid):
+                    try:
+                        intent = c.execute("SELECT kinds FROM tx_erase_intents WHERE sid=?", (sid,)).fetchone()
+                    except sqlite3.OperationalError as e:
+                        if "no such table" not in str(e):
+                            raise
+                        intent = None
+                    return intent, c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone()
+                intent, env = await st.read(load)
+                entry = next((e for e in s.parsed.entries if e.sid_hex == sid), None)
+                if entry is not None:
+                    if intent is not None:
+                        await st.io(st._run_txn, lambda c, sid=sid, e=entry:
+                                    _destroy_sync(c, sid, Head(e.n, e.time_ms, e.mac)))
+                elif intent is not None:
+                    kinds = [k for k in (intent[0] or "").split(",") if k in ("out", "cast")]
+                    _n, _gens, confirmed = await _journal_and_destroy(
+                        st, sid, kinds or ["out", "cast"], env, clock, resuming=True)
+                    if not confirmed:
+                        return False                   # COMMIT incert: rămâne pentru boot
+                else:
+                    # ROLLBACK confirmat (niciun rând, nicio intrare): ştergerea n-a avut loc
+                    st.tombstoned.discard(sid)
+                s.cancelled.discard(sid)
+    async with st.barrier:
+        if s.uncertain not in _RESUMABLE or s.cancelled:
+            return False
+        doc = await st.read(lambda c: _get_json(c, "erasure_head"))
+        head = Head.from_json(doc) if doc is not None else EMPTY_HEAD
+        if head.n > s.head_db.n:
+            s.head_db = head
+        s.uncertain = ""
+    return True
 
 
 def _ready_or_raise(st, sid):
@@ -1879,13 +1975,14 @@ async def recover_journal(st, sid, diag):
     if not key:
         raise ErasureError("transcript.recoveryNoKey",
                            "this recording's key was destroyed; it cannot be recovered", 409)
-    head0, dmg0 = s.head_db, s.damaged
+    head0, dmg0, cont0 = s.head_db, s.damaged, s.continuity
     # R2-H1: dovada se ia ÎN AFARA barierei (I/O off-host), apoi se re-verifică sub ea
     await _journal_recovery_proof(st, sid)
     want = "journal:" + diag
 
     def guard(c):
-        if journal_diag() != diag or s.head_db is not head0 or s.damaged is not dmg0 or sid in st.tombstoned:
+        if (journal_diag() != diag or s.head_db is not head0 or s.damaged is not dmg0
+                or s.continuity is not cont0 or sid in st.tombstoned):
             raise ErasureError("transcript.recoveryState", "the erasure journal state changed; try again", 409)
         if _has_intent(c, sid):
             raise ErasureError("transcript.recoveryErasePending",
@@ -1922,45 +2019,100 @@ def _known_top():
     return top
 
 
+def _recovery_heads():
+    """R3-H2: the committed heads (n AND MAC) a `journal:*` recovery proof must reach: the DB head
+    and, while a restore is unproven, the continuity marker's threshold. None = the marker cannot be
+    read or its known heads overflowed (fail closed: nothing proves)."""
+    s = _s
+    heads = [s.head_db]
+    if s.continuity and s.continuity.get("state") == "unproven":
+        terms = _marker_terms(s.continuity)
+        if terms is None or terms.overflow:
+            return None
+        heads.append(terms.threshold)
+    return [h for h in heads if h.n]
+
+
+def _required_dest_ids():
+    """The destinations a restore made mandatory (the continuity marker), even if gone since."""
+    s = _s
+    if s.continuity and s.continuity.get("state") == "unproven":
+        terms = _marker_terms(s.continuity)
+        if terms is not None:
+            return set(terms.required)
+    return set()
+
+
 async def _journal_recovery_proof(st, sid):
-    """R2-H1 (b)+(c): before a `journal:*` recovery, every reachable destination journal is read.
-    An authentic tombstone of `sid` in any of them → refused; destination journals that diverge →
-    refused and signalled; and the gap between the readable local prefix and the highest known head
-    must be covered by a source that holds the committed head (local, else a destination), or the
-    recovery is refused until it is."""
+    """R2-H1 / R3-H1 / R3-H2: before a `journal:*` recovery, an AUTHENTIC OFF-HOST proof, on every
+    path (also when nothing was ever committed, or when the local prefix looks complete: neither
+    authenticates a history whose journal is damaged). In this order:
+
+    * no destination configured (nor required by a restore) → `recoveryNoDestination`;
+    * the configuration or any configured / required destination cannot be read →
+      `recoveryUnreachable` (it may hold the tombstone);
+    * the authentic journals read (every destination's, the readable local prefix) must lie on ONE
+      chain, and none may hold a different MAC at a required head's n (the DB head, the marker's
+      threshold) → `recoveryConflict` (signalled), never a numeric choice;
+    * an authentic tombstone of `sid` in any of them → `recoveryTombstoned`;
+    * no destination holds an authentic journal → `recoveryNoJournal` (an empty journal proves
+      nothing);
+    * at least one destination's authentic chain must reach every required head (n + MAC) and the
+      highest head known anywhere (attested, marker's known heads) → else `recoveryGap`. A marker
+      that cannot be read, or whose known heads overflowed, is a gap too."""
     s = _s
     top = _known_top()
+    heads = _recovery_heads()
+    if top is None or heads is None:
+        raise ErasureError("transcript.recoveryGap",
+                           "the committed erasure head cannot be read; recovery is refused", 409)
     k = s.journal.k
-    dests = await destinations()
-    results = await fetch_all(dests, k, st.inst, check_from=top or 0) if dests else []
+    try:
+        dests = list(await _dest_provider()) if _dest_provider is not None else []
+    except Exception as e:                       # noqa: BLE001 — configurare ilizibilă ≠ „nicio destinaţie"
+        log.warning("erasure: destinations unavailable: %s", type(e).__name__)
+        raise ErasureError("transcript.recoveryUnreachable",
+                           "the backup destinations cannot be read; recovery is refused", 409) from None
+    missing = _required_dest_ids() - {d.id for d in dests}
+    if not dests and not missing:
+        raise ErasureError("transcript.recoveryNoDestination",
+                           "no backup destination holds an off-host erasure journal; a recording "
+                           "quarantined for a damaged journal cannot be recovered without one", 409)
+    results = await fetch_all(dests, k, st.inst, check_from=top) if dests else []
     forks = [r.id for r in results if r.error == "conflict"]
     good = [r for r in results if r.ok and r.parsed is not None]
+    local = s.damaged
     try:
         if forks:
             raise ErasureConflict("erasure journals at %s diverge" % forks[0][:120])
-        _on_one_chain([(r.id, r.parsed) for r in good])
+        # R3-H2: sursele off-host se compară şi cu prefixul local lizibil, nu doar între ele
+        _on_one_chain([(r.id, r.parsed) for r in good]
+                      + ([("volume", local)] if local is not None and local.n else []))
+        for r in good:
+            for h in heads:
+                if r.parsed.n >= h.n and not hmac.compare_digest(r.parsed.entries[h.n - 1].mac, h.mac):
+                    raise ErasureConflict("the erasure journal at %s holds another entry n=%d than the "
+                                          "committed one" % (r.id[:120], h.n))
     except ErasureConflict as e:
         s.conflict = str(e)
         st.alarm("transcript.erasureConflict", str(e))
         raise ErasureError("transcript.recoveryConflict",
-                           "the destinations' erasure journals diverge; recovery is refused", 409) from None
+                           "the erasure journals diverge; recovery is refused", 409) from None
     b = bytes.fromhex(sid)
     if any(e.sid == b for r in good for e in r.parsed.entries):
         raise ErasureError("transcript.recoveryTombstoned",
                            "an off-host erasure journal erases this recording; it is never recovered", 409)
-    if top is None:
-        raise ErasureError("transcript.recoveryGap",
-                           "the committed erasure head cannot be read; recovery is refused", 409)
-    if top == 0:
-        return                                     # nimic comis sau atestat nicăieri: niciun gol
-    head = s.head_db
-    local = s.damaged
-    if local is not None and reaches(local, head) and local.n >= top:
-        return
-    if any(reaches(r.parsed, head) and r.parsed.n >= top for r in good):
+    down = sorted(missing) + [r.id for r in results if not r.ok]
+    if down:
+        raise ErasureError("transcript.recoveryUnreachable",
+                           "the backup destination %s cannot be read; recovery is refused" % down[0][:120], 409)
+    if not good:
+        raise ErasureError("transcript.recoveryNoJournal",
+                           "no backup destination holds an authentic erasure journal; recovery is refused", 409)
+    if any(all(reaches(r.parsed, h) for h in heads) and r.parsed.n >= top for r in good):
         return
     raise ErasureError("transcript.recoveryGap",
-                       "erasures up to n=%d are not readable here or on any reachable destination; "
+                       "erasures up to n=%d are not readable on any reachable destination; "
                        "recovery is refused until they are" % top, 409)
 
 
@@ -2022,7 +2174,7 @@ def _audit_sync(c, row):
                row.get("actor_id"), (row.get("via") or "")[:64]))
 
 
-async def retire_destination(st, dest_id, *, audit_row=None):
+async def retire_destination(st, dest_id, *, audit_row):
     """Remove `dest_id` from the continuity marker's `required` set (R-M2), an audited Owner
     override for a destination that no longer exists. The quarantine stays; its known head stays
     too (a proof must still reach the highest head that destination was known to hold, so retiring
@@ -2032,7 +2184,10 @@ async def retire_destination(st, dest_id, *, audit_row=None):
 
     R2-M1: the configuration is checked again inside the marker's transaction, and `audit_row`
     (the route's actor / ip / path) is written to `audit_log` in that SAME transaction, with the
-    destination's known head: a retirement is never durable without its audit trail."""
+    destination's known head: a retirement is never durable without its audit trail. The audit row
+    is mandatory (recheck 6678938): a caller without one is refused before anything changes."""
+    if not isinstance(audit_row, dict) or not audit_row.get("ts"):
+        raise ValueError("retire_destination needs the audit row of the Owner's request")
     s = _s
     cont = s.continuity
     terms = _marker_terms(cont) if cont and cont.get("state") == "unproven" else None
@@ -2063,10 +2218,9 @@ async def retire_destination(st, dest_id, *, audit_row=None):
                                    "this destination is still configured; remove it from the backup "
                                    "settings first", 409)
             _set_json(c, "continuity", new)
-            if audit_row is not None:
-                _audit_sync(c, dict(audit_row, detail="owner override: erasure destination %s retired from "
-                                    "the continuity proof (known head %d, threshold n=%d; durable record)"
-                                    % (dest_id[:120], known_head, terms.threshold.n)))
+            _audit_sync(c, dict(audit_row, detail="owner override: erasure destination %s retired from "
+                                "the continuity proof (known head %d, threshold n=%d; durable record)"
+                                % (dest_id[:120], known_head, terms.threshold.n)))
         try:
             await st.io(st._run_txn, fn)
         except txstore.Uncertain:
@@ -2113,6 +2267,8 @@ async def _loop(st):
     last_prove = 0.0
     while True:
         try:
+            if _s.uncertain in _RESUMABLE:
+                await resume_intents(st)               # R3-M1: imediat, nu la următorul boot
             await attest_once(st)
             if _s.continuity and time.time() - last_prove > PROVE_INTERVAL:
                 last_prove = time.time()

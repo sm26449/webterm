@@ -2048,7 +2048,15 @@ committed head is never repaired: it is the quarantine case below.
 0. Lease → barrier: the **erase intent** (R2-H1): one row `tx_erase_intents(sid, kinds, since)`
    committed in its own transaction (the Store's connection runs `synchronous=FULL`), before
    anything is appended. It is deleted only inside step 2's transaction. A crash before it commits
-   leaves nothing (not erased); an uncertain COMMIT is the `erasureUncertain` case below.
+   leaves nothing (not erased); an uncertain COMMIT is the `erasureUncertain` case below. The sid
+   is tombstoned in memory **before** the intent reaches the database writer and stays so unless a
+   ROLLBACK is confirmed (recheck 6678938, R3-M1). A request cancelled while that transaction (or
+   step 2's) runs leaves the state `intent-cancelled` / `commit-cancelled`: further erasures are
+   refused, and the janitor, woken at once, settles it from the database (`resume_intents`: intent
+   + entry → step 2 again; intent without entry → steps 1–2; neither → rolled back, the sid is
+   served again), re-reads the committed head and lifts the state; if the process dies first, the
+   boot completes the intent. The journal state (damaged, uncertain, behind) is re-checked under
+   the barrier before step 0, not only on entry.
 1. Same barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
    with its own time budget, 5 s, beyond → the route answers 503 and the boot decides from the
    file). In the same synchronous section, before releasing the barrier: add the sid to the
@@ -2091,7 +2099,8 @@ RK destroyed in the database only, the intent kept for a later boot). On a damag
 every intent sid is destroyed in the database and the intent is kept (nothing can be appended). So
 a journal entry lost between its fsync and step 2's COMMIT can no longer leave a readable recording.
 A restore carries the live volume's outstanding intents into the restored database (kept in the
-restore flag across a resumed apply).
+restore flag across a resumed apply), also when the live erasure state is unreadable (`Live("bad")`);
+a restore over a database of the same installation whose intents cannot be inventoried is refused.
 
 **Freshness (H3).** A MAC chain proves authenticity and order, not freshness: an authentic but old
 head (delayed upload, destination rolled back to an older version) is still authentic. Rules:
@@ -2133,16 +2142,24 @@ for them. A known tombstone, a recording whose RK is gone, a corrupt or damaged 
 absent one and a keyring-epoch quarantine are **never** opened by recovery mode. A `journal:<diag>`
 quarantine (a damaged journal at boot) is opened only on the strict terms of §12.11.8 (decision
 2026-11-26) and is never released to normal access. On top of those terms (R2-H1): a sid with an
-outstanding erase intent is refused (`409 transcript.recoveryErasePending`); every reachable
-destination journal is read first (outside the barrier) and an authentic tombstone of the sid in
-any of them refuses (`409 transcript.recoveryTombstoned`), destination journals that diverge refuse
-and are signalled (`409 transcript.recoveryConflict`); and the gap between the readable local
-prefix and the highest known head (the database head, every attested head, the continuity
-marker's threshold and known heads) must be covered by a source that holds the committed head and
-reaches that number — the local prefix, else a destination — or the recovery is refused until it
-is (`409 transcript.recoveryGap`; an unreadable database head counts as a gap). The diagnosis, the
-committed head, the tombstone set and the intent are re-checked under the barrier in the
-transaction that changes the status. Releasing to normal access is one recording at a
+outstanding erase intent is refused (`409 transcript.recoveryErasePending`). Then an **authentic
+off-host proof is required on every path** (recheck 6678938, R3-H1: also when nothing was ever
+committed, and when the local prefix looks complete; neither authenticates the history of a damaged
+journal), read outside the barrier: no destination configured or required by a restore →
+`409 transcript.recoveryNoDestination`; the configuration or any configured / required destination
+unreadable → `409 transcript.recoveryUnreachable` (it may hold the tombstone); the authentic
+journals read (every destination's and the readable local prefix) must lie on one chain, and none
+may hold another MAC at the n of a required head (the database head, the continuity marker's
+threshold) → else `409 transcript.recoveryConflict`, signalled (R3-H2: a number is never enough); an
+authentic tombstone of the sid anywhere → `409 transcript.recoveryTombstoned`; no destination with
+an authentic journal → `409 transcript.recoveryNoJournal`; finally at least one destination's chain
+must reach every required head (n and MAC) and the highest head known anywhere (attested heads, the
+marker's known heads) → else `409 transcript.recoveryGap` (an unreadable database head or marker,
+or a marker whose known heads overflowed, counts as a gap). The cost is accepted for the RC: on an
+installation without a reachable destination holding an authentic journal, a `journal:*`
+quarantine cannot be recovered. The diagnosis, the committed head, the continuity marker, the
+tombstone set and the intent are re-checked under the barrier in the transaction that changes the
+status. Releasing to normal access is one recording at a
 time (no "release all"), each release a separate Owner action with a fresh factor, audited, with a
 security e-mail; re-quarantine is allowed. The permission is bound to the recovery route's own
 authorization (`access`, §12.11.2), not to a parameter.
@@ -3070,6 +3087,21 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   audit row in that transaction. *R2-M2:* `decide_restore` (volume proof) and `reconcile_apply`
   (`known=`) require J_v, and the journal published, to reach max(threshold, every kept known
   head); the apply plan's `reach` (resume) checks the same.
+- **Recheck (6678938) fixes.** *R3-H1/R3-H2:* `_journal_recovery_proof` reads the provider strictly
+  (an error is `recoveryUnreachable`, never "no destination"), requires every configured destination
+  and every destination the marker still requires to answer, puts the readable local prefix
+  (`_s.damaged`) in the one-chain check, compares the MAC at every required head
+  (`_recovery_heads`: DB head, marker threshold; overflow → none), and succeeds only on an
+  authentic destination chain that reaches all of them and the known top. New codes
+  `transcript.recoveryNoDestination`, `recoveryUnreachable`, `recoveryNoJournal` (409).
+  *R3-M1:* `_journal_and_destroy` tombstones before the intent transaction, lifts it only on a
+  confirmed ROLLBACK, and on `CancelledError` (intent or step 2) records the sid in
+  `_s.cancelled`, sets `intent-cancelled` / `commit-cancelled` and wakes the janitor, whose
+  `resume_intents` settles each sid under lease → barrier; it also re-checks diag / uncertain /
+  behind under the barrier (R-M1). *Restore:* `_erasure_apply_plan` also inventories the intents
+  for `Live("bad")` (unreadable → `ErasureConflict`); `intents_in` treats only the missing table as
+  "none". *R2-M1:* `retire_destination` requires `audit_row` (a caller without one is refused
+  before anything changes).
 
 ## Appendix: Test vectors (v1)
 

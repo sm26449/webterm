@@ -1107,6 +1107,12 @@ def _erasure_error(e) -> ApiError:
         return ApiError(409, "transcript.recoveryGap", msg)
     if c == "transcript.recoveryConflict":
         return ApiError(409, "transcript.recoveryConflict", msg)
+    if c == "transcript.recoveryNoDestination":
+        return ApiError(409, "transcript.recoveryNoDestination", msg)
+    if c == "transcript.recoveryUnreachable":
+        return ApiError(409, "transcript.recoveryUnreachable", msg)
+    if c == "transcript.recoveryNoJournal":
+        return ApiError(409, "transcript.recoveryNoJournal", msg)
     return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
 
 

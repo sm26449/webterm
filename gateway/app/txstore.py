@@ -788,6 +788,8 @@ class Store:
                     await asyncio.wait([fut])
                 except asyncio.CancelledError:
                     continue
+            if not fut.cancelled():
+                fut.exception()          # rezultatul firului e consumat (anularea are prioritate)
             raise
 
     def _run_txn(self, fn):

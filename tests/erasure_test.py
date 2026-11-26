@@ -514,6 +514,119 @@ async def g_intents(st, host_id):
     return st
 
 
+async def _cancel_erase(st, sid, point=None, rollback=False):
+    """R3-M1: the erase request is cancelled while a transaction runs on the writer thread; the
+    thread then COMMITs (`point` = that COMMIT's fault point) or, `rollback`, fails inside the
+    intent's transaction (→ ROLLBACK). → True when the request ended with CancelledError."""
+    loop = asyncio.get_running_loop()
+    box = {}
+
+    def cancel_now():
+        loop.call_soon_threadsafe(box["task"].cancel)
+        time.sleep(0.1)                  # anularea ajunge cât firul e încă în tranzacţie
+    orig = er._put_intent_sync
+    if rollback:
+        def put(c, *a):
+            cancel_now()
+            raise sqlite3.OperationalError("disk I/O error (test)")
+        er._put_intent_sync = put
+    else:
+        hook = fault_at(point)
+
+        def fault(p):
+            try:
+                hook(p)
+            except Crash:
+                cancel_now()             # nu e o cădere: COMMIT-ul continuă după anulare
+        st.fault = fault
+    try:
+        box["task"] = task = asyncio.ensure_future(er.erase(st, sid))
+        try:
+            await task
+        except asyncio.CancelledError:
+            return True
+        return False
+    finally:
+        st.fault = None
+        er._put_intent_sync = orig
+
+
+async def g_cancel(st, host_id):
+    print("== R3-M1: the erase request cancelled right after the intent COMMIT ==")
+    sid, data = await make_rec(st, host_id)
+    other, _ = await make_rec(st, host_id)
+    n0 = er.parse(journal_path().read_bytes(), K, INST).n
+    snap = await st.open(sid, "out", access=st.access(sid, "t", "test"))
+    cancelled = await _cancel_erase(st, sid, "pre-commit#1")
+    intent = await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", sid)
+    check("cancelled after the intent COMMIT: intent durable, journal not appended, sid refused in memory, "
+          "state intent-cancelled", cancelled and intent is not None and sid in st.tombstoned
+          and er.parse(journal_path().read_bytes(), K, INST).n == n0 and er._s.uncertain == "intent-cancelled",
+          (cancelled, intent, er._s.uncertain))
+    check("…a reader opened before is cut off", await _refused(snap.read(0, snap.length)))
+    snap.close()
+    check("…a new read is refused", await _refused(read_all(st, sid)))
+    check("…another erasure is refused until it is settled (re-checked under the barrier)",
+          await _erasure_code(er.erase(st, other)) == "transcript.erasureUncertain")
+    ok = await er.resume_intents(st)
+    p = er.parse(journal_path().read_bytes(), K, INST)
+    check("the janitor completes it from the intent: entry appended, RK destroyed, intent cleared, head "
+          "advanced (DB and memory), state lifted",
+          ok and p.n == n0 + 1 and p.entries[-1].sid_hex == sid and not er._s.uncertain
+          and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is None
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None
+          and (await head_db())["n"] == n0 + 1 and er._s.head_db.n == n0 + 1 and sid in st.tombstoned,
+          (ok, p.n, n0, er._s.uncertain))
+    check("…erasures accepted again", (await er.erase(st, other)).get("state") == "destroyed")
+    # ROLLBACK confirmat: nimic durabil, înregistrarea se serveşte din nou
+    sid2, data2 = await make_rec(st, host_id)
+    n1 = er.parse(journal_path().read_bytes(), K, INST).n
+    cancelled = await _cancel_erase(st, sid2, rollback=True)
+    check("cancelled while the intent transaction rolls back: no intent, sid refused until settled",
+          cancelled and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None and sid2 in st.tombstoned
+          and await _refused(read_all(st, sid2)))
+    ok = await er.resume_intents(st)
+    check("…the janitor sees the rollback: nothing journalled, the recording is served again",
+          ok and sid2 not in st.tombstoned and await read_all(st, sid2) == data2 and not er._s.uncertain
+          and er.parse(journal_path().read_bytes(), K, INST).n == n1)
+    # anulare la pasul 2 (intrarea durabilă, COMMIT-ul DB terminat după anulare)
+    sid3, _ = await make_rec(st, host_id)
+    cancelled = await _cancel_erase(st, sid3, "pre-commit#2")
+    check("cancelled at step 2's COMMIT: journalled, refused, state commit-cancelled",
+          cancelled and sid3 in st.tombstoned and er._s.uncertain == "commit-cancelled"
+          and er.parse(journal_path().read_bytes(), K, INST).entries[-1].sid_hex == sid3)
+    ok = await er.resume_intents(st)
+    check("…settled: RK gone, intent cleared, the in-memory head re-read from the database",
+          ok and not er._s.uncertain and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid3) is None
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None
+          and er._s.head_db.n == (await head_db())["n"] == n1 + 1)
+    # janitorul o face singur, imediat (trezit de anulare, nu la următorul interval)
+    sid4, _ = await make_rec(st, host_id)
+    er.start(st)
+    try:
+        await asyncio.sleep(0.05)
+        cancelled = await _cancel_erase(st, sid4, "pre-commit#1")
+        for _ in range(100):
+            if not er._s.uncertain:
+                break
+            await asyncio.sleep(0.02)
+        p = er.parse(journal_path().read_bytes(), K, INST)
+        check("the running janitor completes the cancelled erasure promptly",
+              cancelled and not er._s.uncertain and p.entries[-1].sid_hex == sid4
+              and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid4) is None, er._s.uncertain)
+    finally:
+        await er.stop()
+    # o cădere înainte ca janitorul să ajungă: boot-ul o completează din intenţie (ca R2-H1)
+    sid5, _ = await make_rec(st, host_id)
+    cancelled = await _cancel_erase(st, sid5, "pre-commit#1")
+    st = await reboot()
+    p = er.parse(journal_path().read_bytes(), K, INST)
+    check("…or, process gone first, the boot completes it from the intent",
+          cancelled and p.entries[-1].sid_hex == sid5 and sid5 in st.tombstoned and not er._s.uncertain
+          and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid5) is None)
+    return st
+
+
 async def _erasure_code(coro):
     try:
         await coro
@@ -1278,6 +1391,52 @@ def g_r2m2_restore():
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
 
+def g_live_bad_restore():
+    print("== recheck 6678938: a restore over an unreadable live erasure state keeps the live intents ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-livebad")
+        j1 = build([(6100, sids(1)[0], 3, bytes(32))])
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1)
+        jp.write_bytes(j1)
+        old = backup.make_encrypted(PASS, keys=hk)
+        pending = "d5" * 16
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?, 'cast', 5)", (pending,))
+        # starea de ştergere vie ilizibilă (marker stricat) → Live("bad")
+        con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('continuity', '{bad')")
+        con.commit()
+        con.close()
+        check("baseline: the live erasure state reads as `bad`",
+              er.live_state(config.DB_PATH, INST, INST).state == "bad")
+        backup.stage_restore(old, PASS, keys=hk)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        con = sqlite3.connect(str(config.DB_PATH))
+        row = con.execute("SELECT kinds FROM tx_erase_intents WHERE sid=?", (pending,)).fetchone()
+        con.close()
+        check("Live(bad): the live erase intent is still carried into the restored database", row == ("cast",), row)
+        # intenţiile nu se pot inventaria (DB-ul viu nu e o bază SQLite): restore-ul se refuză
+        old2 = backup.make_encrypted(PASS, keys=hk)
+        backup.stage_restore(old2, PASS, keys=hk)
+        live = config.DB_PATH.read_bytes()
+        config.DB_PATH.write_bytes(b"not a database" * 100)
+        err = None
+        try:
+            # şi fără copia de siguranţă (care oricum nu s-ar putea face): refuzul e al intenţiilor
+            backup.apply_pending_restore(keys=hk, force_without_safety_copy=True)
+        except Exception as e:                   # noqa: BLE001
+            err = e
+        check("Live(bad) and the intents cannot be inventoried → the restore is refused (even forced past the "
+              "safety copy), the live DB untouched",
+              isinstance(err, er.ErasureConflict) and "intents" in str(err)
+              and config.DB_PATH.read_bytes() == b"not a database" * 100, repr(err))
+        config.DB_PATH.write_bytes(live)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
 # ── 9. Owner recovery ────────────────────────────────────────────────────────
 
 
@@ -1602,16 +1761,90 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
         r = await c.post(url, json={"confirm": ok_sid[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
         return r.status_code, r.json().get("code")
     DESTS[:] = []
-    check("unexplained gap (local n-1 < committed head n, no destination) → 409 transcript.recoveryGap",
-          await code_now() == (409, "transcript.recoveryGap")
+    check("R3-H1: no destination configured → 409 transcript.recoveryNoDestination (never a success)",
+          await code_now() == (409, "transcript.recoveryNoDestination")
           and (await statuses())[(ok_sid, "out")] == "quarantined")
     d = FakeDest("sftp:u@h:22/jr")
     d.objs[er.object_name(INST, n)] = good
     d.fail = True
     DESTS[:] = [d]
-    check("…the destination that would cover it unreachable → still recoveryGap",
-          await code_now() == (409, "transcript.recoveryGap"))
+    check("R3-H1: the destination that would cover it unreachable → 409 transcript.recoveryUnreachable",
+          await code_now() == (409, "transcript.recoveryUnreachable"))
     d.fail = False
+    d.objs = {}
+    check("R3-H1: the destination answers with no journal at all → 409 transcript.recoveryNoJournal",
+          await code_now() == (409, "transcript.recoveryNoJournal"))
+    saved_provider = er._dest_provider
+
+    async def broken():
+        raise OSError("settings unreadable")
+    er.set_destinations(broken)
+    check("R3-H1: the destination configuration cannot be read → recoveryUnreachable (not \"none configured\")",
+          await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryUnreachable")
+    er.set_destinations(saved_provider)
+    d2 = FakeDest("ftps:u@h:21/jr2")
+    d2.objs[er.object_name(INST, n)] = good
+    d.objs = {er.object_name(INST, n): good}
+    d2.fail = True
+    DESTS[:] = [d, d2]
+    check("R3-H1: one destination proves, another configured one is down (it may hold the tombstone) → "
+          "recoveryUnreachable", await code_now() == (409, "transcript.recoveryUnreachable"))
+    DESTS[:] = [d]
+    # R3-H1: ramurile care înainte reuşeau fără nicio dovadă off-host
+    s0 = er._s
+    saved = (s0.head_db, s0.attested, s0.damaged, s0.continuity)
+    try:
+        s0.head_db, s0.attested = s0.damaged.head, {}
+        DESTS[:] = []
+        check("R3-H1: the readable local prefix covers the committed head, but no destination → still "
+              "refused (recoveryNoDestination)", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
+              == "transcript.recoveryNoDestination")
+        s0.head_db, s0.damaged = er.EMPTY_HEAD, None
+        check("R3-H1: nothing committed or attested anywhere (n=0), no destination → refused",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryNoDestination")
+        DESTS[:] = [FakeDest("sftp:u@h:22/empty")]
+        check("R3-H1: n=0 and an empty destination → refused (recoveryNoJournal)",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryNoJournal")
+        # R3-H2: o ramură autentică a destinaţiei care se desparte de prefixul local lizibil
+        s0.damaged = er.parse(good[:er.prefix_len(n - 1)], K, INST)
+        other = build([(9000 + i, bytes([0x90 + i] * 16), 3, bytes(32)) for i in range(n)])
+        df = FakeDest("sftp:u@h:22/fork")
+        df.objs[er.object_name(INST, n)] = other
+        DESTS[:] = [df]
+        check("R3-H2: the only destination's chain diverges from the readable local prefix (head n=0) → "
+              "recoveryConflict, signalled", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
+              == "transcript.recoveryConflict" and er.health_has("erasure_conflict"))
+        er._s.conflict = ""
+        # R3-H2: capul DB n, pragul markerului n+1 cu MAC A (ramura care ŞTERGE ok_sid, nevăzută aici);
+        # singura destinaţie extinde n cu o intrare n+1 diferită (MAC B), fără ok_sid
+        s0.head_db = er.parse(good, K, INST).head
+        branch_a = _extend(good, bytes.fromhex(ok_sid))
+        branch_b = _extend(good, bytes([0x31] * 16))
+        s0.continuity = {"state": "unproven", "since": 1, "n": n,
+                         "threshold": er.parse(branch_a, K, INST).head.to_json(), "known": {}}
+        db_ = FakeDest("sftp:u@h:22/branch-b")
+        db_.objs[er.object_name(INST, n + 1)] = branch_b
+        DESTS[:] = [db_]
+        check("R3-H2: a destination reaching the threshold's NUMBER with another MAC never proves → "
+              "recoveryConflict", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
+              == "transcript.recoveryConflict" and (await statuses())[(ok_sid, "out")] == "quarantined")
+        er._s.conflict = ""
+        db_.objs = {er.object_name(INST, n): good}
+        check("R3-H2: a destination below the marker's threshold → recoveryGap",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryGap")
+        s0.continuity = dict(s0.continuity, overflow=True)
+        db_.objs = {er.object_name(INST, n + 1): branch_a[:er.prefix_len(n)] + branch_b[er.prefix_len(n):]}
+        check("R3-H2: a marker whose known heads overflowed → no proof (recoveryGap)",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryGap")
+        s0.continuity = {"state": "unproven", "since": 1, "n": n, "threshold": s0.head_db.to_json(),
+                         "known": {}, "required": ["sftp:u@h:22/gone-required"]}
+        db_.objs = {er.object_name(INST, n): good}
+        check("R3-H1: a destination the restore made mandatory is not configured any more → recoveryUnreachable",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryUnreachable")
+    finally:
+        s0.head_db, s0.attested, s0.damaged, s0.continuity = saved
+        er._s.conflict = ""
+    DESTS[:] = [d]
     d.objs = {er.object_name(INST, n - 1): good[:er.prefix_len(n - 1)]}
     check("…a destination holding only n-1 → still recoveryGap", await code_now() == (409, "transcript.recoveryGap"))
     # (b) un tombstone autentic al sid-ului pe o destinaţie (o ştergere pe care jurnalul local a pierdut-o)
@@ -1733,6 +1966,14 @@ async def g_retire(st, c, uid, host_id):
     # R2-M1: o cădere / anulare după COMMIT (înainte de try_prove şi de auditul cererii) lasă urma
     await set_marker(st, dict(base, required=sorted([d.id, gone])))
     row = {"ts": time.time(), "actor": "o@x.co", "actor_id": uid, "ip": "127.0.0.1", "path": "/x/direct"}
+    refused = 0
+    for bad in (None, {}):
+        try:
+            await er.retire_destination(st, gone, audit_row=bad)
+        except ValueError:
+            refused += 1
+    check("recheck: a retirement without the request's audit row is refused before anything changes",
+          refused == 2 and gone in er.continuity().get("required", []))
     await er.retire_destination(st, gone, audit_row=row)
     a = await db.fetchone("SELECT detail FROM audit_log WHERE path='/x/direct'")
     check("R2-M1: the retirement and its audit row commit together (nothing after the COMMIT is needed)",
@@ -1766,6 +2007,7 @@ async def main():
     g_recheck_pure()
     g_rh1_consecutive()
     g_r2m2_restore()
+    g_live_bad_restore()
     config.ensure_dirs()
     security.init_crypto(config.load_secret())
     await db.connect()
@@ -1782,6 +2024,7 @@ async def main():
         st, _live = await g_boot_and_route(c, uid, host_id)
         st = await g_crash(st, host_id)
         st = await g_intents(st, host_id)
+        st = await g_cancel(st, host_id)
         st, keep = await g_diagnostics(st, host_id)
         await g_cap(st, host_id)
         await g_attest(st, host_id)

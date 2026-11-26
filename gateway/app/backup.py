@@ -2966,6 +2966,17 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
                 raise erasure.ErasureConflict("the live erase intents cannot be read — refused") from None
             if len(intents) > _INTENTS_MAX:
                 raise erasure.ErasureConflict("too many unfinished erasures on the live volume — refused")
+        elif live.state == "bad":
+            # Recheck 6678938: aceeaşi instalare, starea de ştergere ilizibilă (carantină, fără
+            # dovadă). Intenţiile ei se transferă totuşi; dacă nici ele nu se pot inventaria, un
+            # restore ar putea readuce RK-ul unei ştergeri cerute → refuz (fail closed)
+            try:
+                intents = erasure.intents_in(config.DB_PATH)
+            except sqlite3.Error:
+                raise erasure.ErasureConflict("the live database's erase intents cannot be read — "
+                                              "refused") from None
+            if len(intents) > _INTENTS_MAX:
+                raise erasure.ErasureConflict("too many unfinished erasures on the live volume — refused")
         live_ok = live.state == "same"
     else:
         intents = _intents_of_flag(flag.get("erasure_intents", {}))
