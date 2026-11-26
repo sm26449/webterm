@@ -367,6 +367,8 @@ const ro: Lang = {
     'err.transcript.recoveryConfirm': "Tastează data backupului ca să confirmi că ștergerile de după ea nu pot fi re-aplicate.",
     'err.transcript.recoveryState': "Această înregistrare nu e în starea de care are nevoie acțiunea.",
     'err.transcript.notRecoverable': "Doar o înregistrare pusă în carantină din lipsa dovezii ștergerilor poate fi recuperată.",
+    'err.transcript.erasureBehind': "Ștergerile făcute înainte de ultima restaurare nu sunt încă pe acest server. Ștergerea e refuzată până sunt dovedite.",
+    'err.transcript.releaseBehind': "Ștergerile făcute înainte de ultima restaurare nu sunt încă pe acest server. Înregistrarea rămâne în recuperare până sunt dovedite.",
     'err.transcript.ownerOnly': "Doar un Owner poate face asta.",
     'err.transcript.migrationUnavailable': "Migrarea înregistrărilor nu este activă pe acest volum.",
     'err.transcript.notFailed': "Această sesiune nu are o migrare de înregistrare eșuată.",

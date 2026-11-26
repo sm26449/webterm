@@ -2951,7 +2951,39 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   volume directly); a clean legacy volume keeps the 3.7 writer and retention.
 - **Answers.** Erase and discard say `state: destroyed` (DB step committed) or `journalled`
   (durable in the journal, completed at the next boot); discard adds `plaintext: {kind: unlinked |
-  absent | kept | failed}`, the physical outcome of the plaintext.
+  absent | kept | failed}`, the physical outcome of the plaintext. No frontend consumer reads
+  `erased` / `discarded` as "destroyed".
+
+**PR6 recheck fixes** (1560abf, same audit file, "Recheck"):
+
+- **The threshold survives every later restore (R-H1).** Stage and apply read the threshold from
+  three places and merge them: the live DB's committed head, the live DB's continuity marker (an
+  earlier restore without proof) and the continuity marker inside the backup's own DB (a dataset
+  exported while quarantined). The highest n wins; the same n with two MACs is a conflict and the
+  restore is refused (`erasure.merge_threshold`). The merged threshold, known heads and mandatory
+  destinations go into the flag and the new marker, so a second restore, a re-import or a backup of
+  a quarantined dataset never lowers it, and only a proof reaching it lifts the quarantine.
+- **Boot with an invalid journal quarantines the whole cohort (R-H2).** A missing, rolled-back,
+  forked, foreign or broken journal at boot quarantines the same cohort as a restore without proof
+  (`erasure._quarantine_cohort_sync`): readable descriptors, migration rows that still own
+  plaintext and 3.7-named files (listed through the Store's directory fd), with reason
+  `journal:<diag>`. That reason is never replaced by `continuity`, survives the conversion (the
+  descriptor is born `quarantined`; the hash-only re-check still lets the verified plaintext be
+  unlinked) and is never Owner-recoverable. The writer start refuses any sid with a quarantine
+  row, whatever the reason. A later clean boot does not lift it.
+- **No new branch under an unreached threshold (R-M1).** While the continuity marker's threshold
+  (or a destination head it knew) is beyond the local journal, `erase` and the discard of a failed
+  migration answer `409 transcript.erasureBehind`: a new local entry would be a second entry n+1
+  next to a committed one we cannot see.
+- **Mandatory destinations are kept (R-M2).** The marker keeps `required` (every destination that
+  was mandatory at the restore); `try_prove` requires them on top of the configured ones, so
+  replacing an unanswering destination proves nothing. Dropping one needs a proof; there is no
+  Owner override yet (open). More known heads than `KNOWN_MAX` set `overflow`, which never proves.
+- **Quarantine instead of refusal, the conditions.** The threshold is durable (above), the cohort
+  covers every representation (descriptor, migration row, 3.7 file), and nothing automatic turns
+  missing proof into access: while the local journal is behind the threshold, `release` (back to
+  normal access) answers `409 transcript.releaseBehind`. The audited Owner recovery read stays the
+  only, exceptional, access.
 
 ## Appendix: Test vectors (v1)
 

@@ -369,6 +369,8 @@ const en: Lang = {
     'err.transcript.recoveryConfirm': "Type the backup date to confirm that erasures after it cannot be re-applied.",
     'err.transcript.recoveryState': "This recording is not in the state this action needs.",
     'err.transcript.notRecoverable': "Only a recording quarantined for missing erasure proof can be recovered.",
+    'err.transcript.erasureBehind': "Erasures made before the last restore are not on this server yet. Erasure is refused until they are proven.",
+    'err.transcript.releaseBehind': "Erasures made before the last restore are not on this server yet. The recording stays in recovery until they are proven.",
     'err.transcript.ownerOnly': "Only an Owner can do this.",
     'err.transcript.migrationUnavailable': "The recording migration is not active on this volume.",
     'err.transcript.notFailed': "This session has no failed recording migration.",

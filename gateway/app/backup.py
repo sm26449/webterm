@@ -2216,12 +2216,13 @@ def _read_flag():
     doc = _strict_json(raw, err)
     if (type(doc) is not dict or not {"format", "manifest", "state", "set"} <= set(doc)
             or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine", "erasure_proven",
-                                "erasure_threshold", "erasure_known"}
+                                "erasure_threshold", "erasure_known", "erasure_required", "erasure_overflow"}
             or doc["format"] != _FLAG_FORMAT or doc["state"] not in _FLAG_STATES
             or type(doc["manifest"]) is not str or not _SHA_HEX.match(doc["manifest"])
             or type(doc["set"]) is not str or not _GEN_HEX.match(doc["set"])
             or type(doc.get("safety", "")) is not str
-            or type(doc.get("erasure_proven", False)) is not bool):
+            or type(doc.get("erasure_proven", False)) is not bool
+            or type(doc.get("erasure_overflow", False)) is not bool):
         raise err()
     # R-M1: decizia de carantină se ia o dată (la `applying`) şi se reia din flag, nu se recalculează
     if doc["state"] != "staged" and type(doc.get("quarantine")) is not bool:
@@ -2231,6 +2232,8 @@ def _read_flag():
             erasure.Head.from_json(doc["erasure_threshold"])
         if "erasure_known" in doc:
             erasure.known_from_json(doc["erasure_known"])
+        if "erasure_required" in doc:
+            erasure.required_from_json(doc["erasure_required"])
     except erasure.JournalError:
         raise err() from None
     return doc
@@ -2364,6 +2367,9 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
     inst = inner.installation_id
     try:
         head_db, att_b, cfg_ids = erasure.staged_state(dbp)
+        # R-H1: un dataset salvat cât era în carantină îşi poartă pragul (markerul de continuitate
+        # din DB-ul lui): reimportul nu-l coboară niciodată
+        staged_terms = erasure.marker_terms_in(dbp)
     except erasure.JournalError:
         raise erasure.ErasureConflict("the backup's erasure state is unreadable — refused") from None
     jp = os.path.join(td, JOURNAL_MEMBER)
@@ -2387,7 +2393,8 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
     live = erasure.live_state(config.DB_PATH, live_inst, inst)
     dec = erasure.decide_restore(k_erase=k, inst=inst, j_b=jb, tracked=content is not None,
                                  j_v=_live_journal(), dest_results=results,
-                                 required_dests=set(cfg_ids) | set(ids), known_attested=known, live=live)
+                                 required_dests=set(cfg_ids) | set(ids), known_attested=known, live=live,
+                                 staged=staged_terms)
     if dec.short:
         log.warning("restore: no source reaches the live erasure head n=%d — the restored recordings "
                     "will be quarantined", dec.threshold.n)
@@ -2625,7 +2632,9 @@ def _validate_staging(rd, digest: str, mk: bytes, gen=None):
         raise err()
     er = doc.get("erasure")
     base = {"state", "proof", "since", "n"}
-    if "erasure" in doc and (type(er) is not dict or set(er) not in (base, base | {"threshold", "known"})
+    if "erasure" in doc and (type(er) is not dict
+                             or set(er) not in (base, base | {"threshold", "known"},
+                                                base | {"threshold", "known", "required", "overflow"})
                              or er["state"] not in ("not-tracked", "proven", "unproven")
                              or er["proof"] not in ("volume", "destinations", "none")
                              or type(er["since"]) is not int or type(er["n"]) is not int):
@@ -2634,6 +2643,10 @@ def _validate_staging(rd, digest: str, mk: bytes, gen=None):
         try:
             erasure.Head.from_json(er["threshold"])
             erasure.known_from_json(er["known"])
+            if "required" in er:
+                erasure.required_from_json(er["required"])
+                if type(er["overflow"]) is not bool:
+                    raise err()
         except erasure.JournalError:
             raise err() from None
     if gen is not None and doc["generation"] != gen:
@@ -2849,6 +2862,8 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                 flag["erasure_proven"] = bool(er_plan["proven"])
                 flag["erasure_threshold"] = er_plan["threshold"].to_json()
                 flag["erasure_known"] = er_plan["known"]
+                flag["erasure_required"] = er_plan["required"]
+                flag["erasure_overflow"] = er_plan["overflow"]
             _write_flag(flag)
             _step("apply:applying")
         if current != staged:
@@ -2887,7 +2902,8 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             else:
                 erasure.mark_unproven_sync(config.DB_PATH, er_plan["since"], er_plan["n"],
                                            threshold=er_plan["threshold"], known=er_plan["known"],
-                                           transcripts_dir=config.TRANSCRIPT_DIR)
+                                           transcripts_dir=config.TRANSCRIPT_DIR,
+                                           required=er_plan["required"], overflow=er_plan["overflow"])
                 log.warning("RESTORE without proof of erasure continuity: every restored recording "
                             "is quarantined until the erasures after the backup can be proven")
         _step("apply:erasure-quarantine")
@@ -2921,21 +2937,29 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
     try:
         t = erasure.Head.from_json(er["threshold"]) if "threshold" in er else erasure.EMPTY_HEAD
         known = erasure.known_from_json(er.get("known", {}))
+        required = erasure.required_from_json(er.get("required", []))
     except erasure.JournalError:
         raise erasure.ErasureConflict("the restore staging's erasure threshold is malformed — refused") from None
+    overflow = er.get("overflow", False) is True
     live_ok = False
     if flag is None or flag.get("state") == "staged":
         live = erasure.live_state(config.DB_PATH, hk.ring.installation_id if hk is not None else None, inst)
         if live.state == "same":
-            if live.head.n >= t.n:
-                t = live.head
+            # R-H1: pragul = max(al stage-ului, capul comis viu, markerul viu al unui restore
+            # anterior); acelaşi n cu alt MAC = conflict (ErasureConflict, volumul neatins)
+            t = erasure.merge_threshold(t, live.head)
+            overflow = overflow or live.overflow or erasure.known_overflow(known, live.attested)
             known = erasure.merge_known(known, live.attested)
+            required = sorted(set(required) | set(live.required))
         live_ok = live.state == "same"
     else:
         if "erasure_threshold" in flag:
             t = erasure.Head.from_json(flag["erasure_threshold"])
         if "erasure_known" in flag:
             known = erasure.known_from_json(flag["erasure_known"])
+        if "erasure_required" in flag:
+            required = erasure.required_from_json(flag["erasure_required"])
+        overflow = overflow or flag.get("erasure_overflow", False) is True
     sj = _read_small(os.path.join(str(rd), JOURNAL_MEMBER), erasure.MAX_FILE) if JOURNAL_MEMBER in listed else None
     live_j = _live_journal()
     foreign = False
@@ -2948,8 +2972,9 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
                                                     live_journal=None if foreign else live_j,
                                                     stage_summary=er, threshold=t, live_ok=live_ok)
     final = publish if publish is not None else (None if foreign else live_j)
-    return {"publish": publish, "proven": proven, "n": head.n, "foreign": foreign,
+    return {"publish": publish, "proven": proven and not overflow, "n": head.n, "foreign": foreign,
             "since": int(er.get("since", 0)), "threshold": t, "known": known,
+            "required": list(required), "overflow": bool(overflow),
             "reach": erasure.journal_reaches(final, k, inst, t)}
 
 

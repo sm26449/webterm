@@ -175,31 +175,126 @@ def merge_known(*sources):
     return out
 
 
+def known_overflow(*sources):
+    """R-M2: more destinations than KNOWN_MAX across the sources. `merge_known` keeps the highest
+    heads, but a dropped obligation must not let a proof through: the caller refuses the proof."""
+    ids = set()
+    for src in sources:
+        ids |= {d for d in (src or {}) if type(d) is str}
+    return len(ids) > KNOWN_MAX
+
+
+def required_from_json(doc):
+    """The destinations a restore without proof made mandatory (R-M2), as a sorted list."""
+    if type(doc) is not list or len(doc) > KNOWN_MAX:
+        raise JournalError("bad-required")
+    for d in doc:
+        if type(d) is not str or not 0 < len(d) <= 512:
+            raise JournalError("bad-required")
+    return sorted(set(doc))
+
+
+def merge_threshold(*heads):
+    """R-H1: the highest committed head of every source (live DB head, the continuity marker of
+    the live DB and of the backup's DB, the stage's). Two different MACs at the same n are two
+    histories, never a numeric choice → ErasureConflict."""
+    seen = {}
+    out = EMPTY_HEAD
+    for h in heads:
+        if h is None or h.n == 0:
+            continue
+        prev = seen.setdefault(h.n, h.mac)
+        if not hmac.compare_digest(prev, h.mac):
+            raise ErasureConflict("two erasure heads n=%d with different MACs — refused" % h.n)
+        if h.n > out.n:
+            out = h
+    return out
+
+
+@dataclass(frozen=True)
+class Terms:
+    """What a continuity marker obliges a later proof to reach (R-H1/R-M2): the committed
+    threshold, the known per-destination heads, the destinations mandatory at the restore, whether
+    the known heads overflowed KNOWN_MAX (then nothing proves), and n of the restore."""
+    threshold: Head = EMPTY_HEAD
+    known: dict = field(default_factory=dict)
+    required: tuple = ()
+    overflow: bool = False
+    n: int = 0
+
+
+def terms_of(cont):
+    """`Terms` of a continuity marker dict; JournalError when it cannot be read."""
+    if type(cont) is not dict:
+        raise JournalError("bad-state", "continuity")
+    t = Head.from_json(cont["threshold"]) if "threshold" in cont else EMPTY_HEAD
+    known = known_from_json(cont.get("known", {}))
+    req = tuple(required_from_json(cont.get("required", [])))
+    ovf = cont.get("overflow", False)
+    r_n = cont.get("n", 0)
+    if type(ovf) is not bool or type(r_n) is not int or r_n < 0:
+        raise JournalError("bad-state", "continuity")
+    return Terms(t, known, req, ovf, r_n)
+
+
+def marker_terms_in(db_path):
+    """`Terms` of the unproven continuity marker kept in the database at `db_path` (a live DB or a
+    backup's staged copy), None when there is none. A marker that cannot be read → JournalError
+    (the caller refuses / proves nothing): R-H1, the threshold of an earlier restore survives every
+    later restore, backup and re-import because each of them reads it here."""
+    con = sqlite3.connect(pathlib_uri(db_path), uri=True)
+    try:
+        try:
+            row = con.execute("SELECT value FROM tx_state WHERE key='continuity'").fetchone()
+        except sqlite3.OperationalError:
+            return None
+    finally:
+        con.close()
+    if row is None:
+        return None
+    try:
+        cont = json.loads(row[0])
+    except ValueError:
+        raise JournalError("bad-state", "continuity") from None
+    if type(cont) is not dict:
+        raise JournalError("bad-state", "continuity")
+    if cont.get("state") != "unproven":
+        return None
+    return terms_of(cont)
+
+
 @dataclass(frozen=True)
 class Live:
     """What the LIVE volume's database says about the dataset being restored (H1): `state` =
     same (same installation, erasure state readable) | foreign (another installation: nothing
-    of it applies) | none (no database) | bad (unreadable: no threshold known → no proof)."""
+    of it applies) | none (no database) | bad (unreadable: no threshold known → no proof).
+    R-H1: `head` is the merged threshold (the committed head AND the continuity marker's threshold
+    of an earlier restore without proof), `required` / `overflow` come from that marker."""
     state: str
     head: Head = EMPTY_HEAD
     attested: dict = field(default_factory=dict)
+    required: frozenset = frozenset()
+    overflow: bool = False
 
 
 def live_state(db_path, live_inst, inst):
     """`Live` of the database at `db_path` for installation `inst`, when the live keyring is
     `live_inst`. Read BEFORE the live journal: an erasure appends the journal before it commits
-    the head, so a journal read afterwards is never behind the head read here."""
+    the head, so a journal read afterwards is never behind the head read here. Two different
+    MACs at the same n (head vs marker) → ErasureConflict."""
     if live_inst is None or not hmac.compare_digest(bytes(live_inst), bytes(inst)):
         return Live("foreign")
     if not os.path.exists(str(db_path)):
         return Live("none")
     try:
         head, att, _ids = staged_state(db_path)
+        terms = marker_terms_in(db_path) or Terms()
     except (JournalError, sqlite3.Error, OSError):
         return Live("bad")
     known = {d: v["n"] for d, v in att.items()
              if type(d) is str and isinstance(v, dict) and type(v.get("n")) is int and v["n"] >= 0}
-    return Live("same", head or EMPTY_HEAD, merge_known(known))
+    return Live("same", merge_threshold(head, terms.threshold), merge_known(known, terms.known),
+                frozenset(terms.required), terms.overflow or known_overflow(known, terms.known))
 
 
 @dataclass
@@ -532,17 +627,6 @@ def _destroy_sync(c, sid, head=None):
     return [(g[0], g[1]) for g in gens]
 
 
-def _quarantine_all_sync(c, reason, now):
-    """Every recording that is readable now (ok / recovery) → quarantined, with its reason."""
-    rows = c.execute("SELECT sid, kind FROM tx_descriptors WHERE status IN ('ok','recovery')").fetchall()
-    for sid, kind in rows:
-        c.execute("INSERT INTO tx_quarantine(sid, kind, reason, since) VALUES(?,?,?,?) "
-                  "ON CONFLICT(sid, kind) DO UPDATE SET reason=excluded.reason, since=excluded.since",
-                  (sid, kind, reason, now))
-    c.execute("UPDATE tx_descriptors SET status='quarantined' WHERE status IN ('ok','recovery')")
-    return len(rows)
-
-
 async def _read_state(st):
     def load(c):
         return (_get_json(c, "erasure_head"), _get_json(c, "attested_heads"), _get_json(c, "continuity"))
@@ -620,7 +704,11 @@ async def boot(st, data_dir=None, clock=time.time):
         # fail closed: tot ce se poate autentifica rămâne şters; restul înregistrărilor în carantină
         if parsed is not None:
             st.tombstoned.update(e.sid_hex for e in parsed.entries)
-        rep.quarantined = await st.txn(lambda c: _quarantine_all_sync(c, "journal:" + rep.diag, now))
+        # R-H2: aceeaşi cohortă ca la restore (descriptori, rânduri de migrare care încă deţin text
+        # clar, fişiere cu nume 3.7), cu motivul `journal:*` (păstrat la conversie, niciodată
+        # recuperabil de Owner): textul clar pending nu trece de cititor
+        plain = await st.io(_plain_cohort_fd, st.dir_fd)
+        rep.quarantined = await st.txn(lambda c: _quarantine_cohort_sync(c, "journal:" + rep.diag, now, plain))
         st.bump(None)
         st.alarm("transcript.erasureJournal", f"erasure journal {rep.diag}: every recording quarantined")
         s.parsed = None
@@ -758,6 +846,12 @@ def _ready_or_raise(st, sid):
     if s.uncertain:
         raise ErasureError("transcript.erasureUncertain",
                            "an earlier erasure did not finish; restart the gateway first", 503)
+    if _behind():
+        # R-M1: o intrare nouă ar fi a doua intrare n+1 lângă una comisă pe care n-o vedem: un fork
+        # pe care nicio dovadă nu-l mai poate rezolva. Refuz până la dovada continuităţii.
+        raise ErasureError("transcript.erasureBehind",
+                           "erasures committed before the last restore are not on this volume yet; "
+                           "erasure is refused until they are proven", 409)
     txstore._sid_bytes(sid)
     rec = st.recorders.get(sid)
     if sid in st._starting or (rec is not None and rec.state not in ("closed", "lost", "replaced")):
@@ -1032,14 +1126,17 @@ class Decision:
     threshold: Head = EMPTY_HEAD    # capul comis al volumului viu (aceeaşi instalare): J* trebuie să-l atingă
     known: dict = field(default_factory=dict)       # destinaţie → cap cunoscut (toate sursele + ce s-a văzut)
     short: bool = False             # sursele NU ating pragul cunoscut (H1): fără dovadă
+    required: list = field(default_factory=list)    # R-M2: destinaţiile obligatorii, păstrate în marker
+    overflow: bool = False          # R-M2: prea multe capete cunoscute: nicio dovadă
 
     def summary(self, since):
         return {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n,
-                "threshold": self.threshold.to_json(), "known": dict(self.known)}
+                "threshold": self.threshold.to_json(), "known": dict(self.known),
+                "required": list(self.required), "overflow": bool(self.overflow)}
 
 
 def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_results=(),
-                   required_dests=(), known_attested=None, live=None, mode="stage"):
+                   required_dests=(), known_attested=None, live=None, mode="stage", staged=None):
     """The restore's erasure decision. `j_b` = the backup's journal bytes (already checked against
     its manifest), `j_v` = the live volume journal bytes (None = absent), `dest_results` =
     `DestResult`s, `required_dests` = every destination id that must answer for a proof (configured
@@ -1053,10 +1150,19 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     M1: a destination proves only with an authentic head (an empty listing never does) that
     reaches max(its known head, the threshold) — at stage at least n = 1; when proving later
     (`mode="prove"`) only a threshold known at the restore counts (our own uploads made after the
-    restore prove nothing)."""
+    restore prove nothing).
+    R-H1: `staged` = the `Terms` of the backup's own continuity marker (a dataset backed up while
+    in quarantine): its threshold, known heads and mandatory destinations are merged in, so a
+    re-import never lowers what an earlier restore must still reach. R-M2: the mandatory set is
+    kept (`required`), and an overflow of known heads proves nothing."""
     live = live if live is not None else Live("none")
-    known = merge_known(known_attested, live.attested if live.state == "same" else None)
-    t = live.head if live.state == "same" else EMPTY_HEAD
+    staged = staged if staged is not None else Terms()
+    same = live.state == "same"
+    known = merge_known(known_attested, live.attested if same else None, staged.known)
+    overflow = (staged.overflow or (same and live.overflow)
+                or known_overflow(known_attested, live.attested if same else None, staged.known))
+    t = merge_threshold(live.head if same else None, staged.threshold)
+    required_all = set(required_dests) | set(staged.required) | (set(live.required) if same else set())
     cands = []
     pb = None
     if j_b is not None:
@@ -1097,8 +1203,9 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     head = star.head if star is not None else EMPTY_HEAD
     # obligatorii: destinaţiile configurate (DB-ul staged + acest host) şi orice destinaţie care,
     # după ce ştie o sursă, ţine un cap MAI NOU decât J* (acolo pot fi ştergeri pe care nu le avem)
-    req = set(required_dests) | {d for d, n in known.items() if n > head.n}
-    met = live.state != "bad" and reaches(star, t)
+    req = required_all | {d for d, n in known.items() if n > head.n}
+    overflow = overflow or known_overflow(known, observed)
+    met = live.state != "bad" and reaches(star, t) and not overflow
     floor = 1 if mode == "stage" else 0
 
     def dest_ok(d):
@@ -1118,7 +1225,7 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     tracked_any = tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0
     state = "not-tracked" if not tracked_any else ("proven" if proof != "none" else "unproven")
     return Decision(state, proof, star_bytes if tracked_any else None, head, rolled, unreachable,
-                    t, merge_known(known, observed), not met)
+                    t, merge_known(known, observed), not met, sorted(required_all), overflow)
 
 
 def journal_reaches(raw, k_erase, inst, t):
@@ -1171,6 +1278,13 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
     return out, proven, head
 
 
+def _plain_names(names, out):
+    for n in names:
+        m = _PLAIN_NAME.match(n)
+        if m:
+            out.add((m.group(1), m.group(2)))
+
+
 def _plain_cohort(transcripts_dir):
     """(sid, kind) of every 3.7-named plaintext file under `transcripts/` and `arhiva/` (names only,
     no link followed; a directory that cannot be listed adds nothing — the rows still count)."""
@@ -1179,50 +1293,85 @@ def _plain_cohort(transcripts_dir):
         return out
     for d in (str(transcripts_dir), os.path.join(str(transcripts_dir), "arhiva")):
         try:
-            names = os.listdir(d)
+            _plain_names(os.listdir(d), out)
         except OSError:
             continue
-        for n in names:
-            m = _PLAIN_NAME.match(n)
-            if m:
-                out.add((m.group(1), m.group(2)))
     return out
 
 
-def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=None, transcripts_dir=None):
+def _plain_cohort_fd(dfd):
+    """`_plain_cohort` through the Store's directory fd (boot: the path is not re-resolved)."""
+    out = set()
+    if dfd is None:
+        return out
+    try:
+        _plain_names(os.listdir(dfd), out)
+    except OSError:
+        pass
+    try:
+        afd = os.open("arhiva", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        return out
+    try:
+        _plain_names(os.listdir(afd), out)
+    except OSError:
+        pass
+    finally:
+        os.close(afd)
+    return out
+
+
+def _quarantine_cohort_sync(c, reason, now, plain=()):
+    """The WHOLE cohort (H2 / R-H2) quarantined with `reason`, inside the caller's transaction:
+    every readable descriptor (→ `quarantined`) and every (sid, kind) still in plaintext — a
+    migration row that owns a file, or a 3.7-named file (`plain`) with or without a row — gets its
+    `tx_quarantine` row, so the pending-plaintext reader, the migration (a converted descriptor is
+    born `quarantined`) and the writer start refuse it. A `journal:*` reason is never replaced by
+    `continuity` (that one is Owner-recoverable, a broken journal never is). Returns the count."""
+    _ensure_quarantine_table(c)
+    rows = c.execute("SELECT sid, kind FROM tx_descriptors WHERE status IN ('ok','recovery')").fetchall()
+    keys_ = {(sid, kind) for sid, kind in rows}
+    try:
+        keys_ |= {(r[0], r[1]) for r in c.execute(
+            "SELECT sid, kind FROM tx_migration WHERE state IN ('pending','orphan','failed','converted') "
+            "AND kind IN ('out','cast')").fetchall()}
+    except sqlite3.OperationalError:
+        pass                                   # DB mai vechi decât tabela: doar fişierele
+    keys_ |= set(plain)
+    for sid, kind in sorted(keys_):
+        c.execute("INSERT INTO tx_quarantine(sid, kind, reason, since) VALUES(?,?,?,?) "
+                  "ON CONFLICT(sid, kind) DO UPDATE SET reason=CASE WHEN tx_quarantine.reason "
+                  "LIKE 'journal:%' THEN tx_quarantine.reason ELSE excluded.reason END",
+                  (sid, kind, reason, now))
+    c.execute("UPDATE tx_descriptors SET status='quarantined' WHERE status IN ('ok','recovery')")
+    return len(keys_)
+
+
+def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=None, transcripts_dir=None,
+                       required=None, overflow=False):
     """Restore without proof (apply, after the DB copy): the WHOLE cohort quarantined with reason
     `continuity` (H2): every readable descriptor (→ `quarantined`), and every (sid, kind) still in
     plaintext — a migration row that owns a file, or a 3.7-named file under `transcripts_dir` with
     or without a row — gets its `tx_quarantine` row, so the pending-plaintext reader, the migration
     (the converted descriptor stays quarantined) and the writer start refuse it until the janitor
-    proves continuity or an Owner recovers it. Then the marker the janitor needs (`threshold` and
-    `known` kept: what a later proof must reach). Idempotent."""
+    proves continuity or an Owner recovers it. Then the marker the janitor needs (`threshold`,
+    `known`, `required`, `overflow` kept: what a later proof must reach, R-H1/R-M2). Idempotent."""
     now = time.time() if now is None else now
     cohort = _plain_cohort(transcripts_dir)
     con = sqlite3.connect(str(db_path), isolation_level=None)
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
-            _ensure_quarantine_table(con)
-            rows = con.execute("SELECT sid, kind FROM tx_descriptors WHERE status IN ('ok','recovery')").fetchall()
-            keys_ = {(sid, kind) for sid, kind in rows}
-            try:
-                keys_ |= {(r[0], r[1]) for r in con.execute(
-                    "SELECT sid, kind FROM tx_migration WHERE state IN ('pending','orphan','failed','converted') "
-                    "AND kind IN ('out','cast')").fetchall()}
-            except sqlite3.OperationalError:
-                pass                               # DB mai vechi decât tabela: doar fişierele
-            keys_ |= cohort
-            for sid, kind in sorted(keys_):
-                con.execute("INSERT INTO tx_quarantine(sid, kind, reason, since) VALUES(?,?,?,?) "
-                            "ON CONFLICT(sid, kind) DO UPDATE SET reason=excluded.reason",
-                            (sid, kind, "continuity", now))
-            con.execute("UPDATE tx_descriptors SET status='quarantined' WHERE status IN ('ok','recovery')")
+            _quarantine_cohort_sync(con, "continuity", now, cohort)
             mark = {"state": "unproven", "since": int(since or 0), "n": int(n)}
             if threshold is not None:
                 mark["threshold"] = threshold.to_json()
             if known is not None:
                 mark["known"] = known_from_json(known)
+            if required:
+                mark["required"] = required_from_json(list(required))
+            if overflow:
+                mark["overflow"] = True
             _set_json(con, "continuity", mark)
             con.execute("COMMIT")
         except BaseException:
@@ -1333,17 +1482,26 @@ def check_member(member, man, k_erase, inst, db_head):
 
 
 def _marker_terms(cont):
-    """(threshold Head, known {dest: n}, n at the restore) of a continuity marker, or None when the
-    marker cannot be read (fail closed: no proof)."""
+    """`Terms` of a continuity marker, or None when it cannot be read (fail closed: no proof)."""
     try:
-        t = Head.from_json(cont["threshold"]) if "threshold" in cont else EMPTY_HEAD
-        known = known_from_json(cont.get("known", {}))
-        r_n = cont.get("n", 0)
-        if type(r_n) is not int or r_n < 0:
-            return None
-        return t, known, r_n
+        return terms_of(cont)
     except (JournalError, TypeError, KeyError):
         return None
+
+
+def _behind():
+    """R-M1: True while the local journal does not reach what the continuity marker says was
+    committed somewhere (its threshold, or a destination head known to be higher). A new local
+    entry then would be a second entry n+1 next to one we cannot see (a fork that no proof can
+    resolve later). An unreadable marker counts as behind (fail closed)."""
+    s = _s
+    if not s.continuity or s.continuity.get("state") != "unproven":
+        return False
+    terms = _marker_terms(s.continuity)
+    if terms is None or s.parsed is None:
+        return True
+    top = max([terms.threshold.n] + list(terms.known.values()))
+    return not reaches(s.parsed, terms.threshold) or s.parsed.n < top
 
 
 async def try_prove(st=None):
@@ -1362,9 +1520,9 @@ async def try_prove(st=None):
         return False
     cont = s.continuity
     terms = _marker_terms(cont)
-    if terms is None:
-        return False
-    t, known, r_n = terms
+    if terms is None or terms.overflow:
+        return False                               # R-M2: obligaţii pierdute = nicio dovadă
+    t, known, r_n = terms.threshold, terms.known, terms.n
     dests = await destinations()
     if not dests:
         return False
@@ -1377,7 +1535,10 @@ async def try_prove(st=None):
         return False
     try:
         dec = decide_restore(k_erase=k, inst=st.inst, j_b=None, tracked=True, j_v=None,
-                             dest_results=results, required_dests=[d.id for d in dests],
+                             # R-M2: destinaţiile obligatorii la restore rămân obligatorii chiar
+                             # dacă au dispărut din configurare (nu le putem citi → nicio dovadă)
+                             dest_results=results,
+                             required_dests=set(d.id for d in dests) | set(terms.required),
                              known_attested=known, live=Live("same", t, {}), mode="prove")
     except ErasureConflict as e:
         s.conflict = str(e)
@@ -1514,7 +1675,14 @@ async def recover(st, sid):
 
 
 async def release(st, sid):
-    """recovery → ok (one recording, an explicit Owner action)."""
+    """recovery → ok (one recording, an explicit Owner action). Refused while the local journal is
+    behind the restore's threshold (R-H1, "quarantine instead of refuse"): a committed erasure we
+    cannot see yet may name this recording, so it may not become normally readable; the audited
+    Owner recovery read (`recover`) stays the exceptional access."""
+    if _behind():
+        raise ErasureError("transcript.releaseBehind",
+                           "erasures committed before the last restore are not on this volume yet; "
+                           "the recording stays in recovery until they are proven", 409)
     return await _set_status(st, sid, "recovery", "ok")
 
 

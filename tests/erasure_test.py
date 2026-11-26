@@ -625,7 +625,8 @@ def g_freshness():
                           mode="prove")
     check("M1: …one known at the restore to hold n=3 that still does → proof", d.proof == "destinations")
     check("summary carries the threshold and the merged known heads",
-          set(d.summary(1)) == {"state", "proof", "since", "n", "threshold", "known"} and d.summary(1)["known"] == {"a": 3})
+          set(d.summary(1)) == {"state", "proof", "since", "n", "threshold", "known", "required", "overflow"}
+          and d.summary(1)["known"] == {"a": 3} and d.summary(1)["required"] == ["a"])
     d = er.decide_restore(k_erase=K, inst=INST, j_b=j3, tracked=True, dest_results=[dest("a", j2)],
                           required_dests={"a"}, known_attested={"a": 3})
     check("stale authentic head (n=2) where a source recorded 3 → rolled back, no proof; never overrides",
@@ -685,6 +686,43 @@ def g_freshness():
     check("apply: divergent J_v → conflict",
           raises(lambda: er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j3, live_journal=fork3,
                                             stage_summary={}), er.ErasureConflict))
+
+
+def g_recheck_pure():
+    print("== recheck (pure): merged thresholds, the backup's own marker, mandatory set, overflow ==")
+    ents = [(3000 + i, s, 3, bytes(32)) for i, s in enumerate(sids(3))]
+    j1, j2 = build(ents[:1]), build(ents[:2])
+    h2 = er.parse(j2, K, INST).head
+    other2 = er.Head(2, 1, bytes([5] * 32))
+    check("R-H1: merge_threshold keeps the highest head; equal heads merge",
+          er.merge_threshold(er.parse(j1, K, INST).head, h2, h2, None) == h2)
+    check("R-H1: the same n with another MAC is a conflict, never a numeric choice",
+          raises(lambda: er.merge_threshold(h2, other2), er.ErasureConflict))
+    staged = er.Terms(h2, {"a": 2}, ("a",), False, 1)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, j_v=j1,
+                          live=er.Live("same", er.parse(j1, K, INST).head), staged=staged)
+    check("R-H1: a backup carrying an unproven marker (threshold n=2) never proves by a journal at n=1",
+          d.proof == "none" and d.threshold == h2 and d.short and d.required == ["a"], d)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, live=er.Live("none"), staged=staged)
+    check("…not even on a fresh volume (no live DB): the threshold travels with the dataset",
+          d.proof == "none" and d.threshold.n == 2)
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j2,
+                          live=er.Live("same", h2), staged=staged)
+    check("…a journal holding it proves (volume)", d.proof == "volume")
+    many = {"d%03d" % i: 1 for i in range(er.KNOWN_MAX + 1)}
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, j_v=j2, live=er.Live("same", h2),
+                          known_attested=many)
+    check("R-M2: more known heads than KNOWN_MAX → overflow kept, no proof at all",
+          d.overflow and d.proof == "none" and d.summary(1)["overflow"] is True)
+    lv = er.Live("same", h2, {}, frozenset({"sftp:gone"}))
+    d = er.decide_restore(k_erase=K, inst=INST, j_b=j2, tracked=True, live=lv,
+                          dest_results=[er.DestResult("sftp:new", True, er.parse(j2, K, INST), j2)],
+                          required_dests={"sftp:new"})
+    check("R-M2: a destination mandatory at an earlier restore stays mandatory (replacing it proves nothing)",
+          d.proof == "none" and d.required == ["sftp:gone", "sftp:new"], d)
+    check("terms_of: a malformed marker is refused (fail closed)",
+          raises(lambda: er.terms_of({"state": "unproven", "required": "x"}), er.JournalError)
+          and raises(lambda: er.terms_of({"state": "unproven", "overflow": 1}), er.JournalError))
 
 
 # ── 8. backup / restore on a protected volume ────────────────────────────────
@@ -993,6 +1031,97 @@ def g_h1_restore():
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
 
+def _quarantine_of(dbp, sid):
+    con = sqlite3.connect(str(dbp))
+    try:
+        return (dict(con.execute("SELECT kind, status FROM tx_descriptors WHERE sid=?", (sid,)).fetchall()),
+                dict(con.execute("SELECT kind, reason FROM tx_quarantine WHERE sid=?", (sid,)).fetchall()))
+    finally:
+        con.close()
+
+
+def g_rh1_consecutive():
+    print("== R-H1: the threshold survives consecutive restores and a re-import ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-rh1")
+        victim = bytes([0x5a] * 16)
+        ents = [(4000, bytes([0x51] * 16), 3, bytes(32)), (4001, victim, 3, bytes(32))]
+        j1, j2 = build(ents[:1]), build(ents[:2])
+        h2 = er.parse(j2, K, INST).head
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1)
+        jp.write_bytes(j1)
+        # victima: o înregistrare 3.7 încă în clar (pending), inclusă în backup ca `legacy`
+        vp = config.TRANSCRIPT_DIR / (victim.hex() + ".out")
+        vp.write_bytes(b"victim-plaintext")
+        f = os.stat(vp)
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("INSERT INTO tx_migration(sid, kind, dir, name, dev, ino, size, mtime_ns, state) "
+                    "VALUES(?,?,?,?,?,?,?,?,'pending')", (victim.hex(), "out", "transcripts", vp.name,
+                                                          f.st_dev, f.st_ino, f.st_size, f.st_mtime_ns))
+        con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('migration_inventory', '1')")
+        con.commit()
+        con.close()
+        old = backup.make_encrypted(PASS, keys=hk)               # backup la n=1, cu victima servibilă
+        set_head(config.DB_PATH, j2)                              # ştergerea victimei, n=2, comisă
+        jp.write_bytes(j1)                                        # ... dar jurnalul o pierde
+        info = backup.stage_restore(old, PASS, keys=hk)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("restore A without proof: threshold n=2 (its MAC) kept, the victim quarantined",
+              info.get("erasure") == "unproven" and cont.get("threshold", {}).get("n") == 2
+              and cont["threshold"]["mac"] == h2.mac.hex()
+              and _quarantine_of(config.DB_PATH, victim.hex())[1] == {"out": "continuity"} and vp.exists(),
+              cont)
+        # export în carantină (DB cu markerul, jurnal n=1) înainte de al doilea restore
+        exported = backup.make_encrypted(PASS, keys=hk)
+        # restore B: acelaşi backup vechi; DB-ul viu are capul n=1 şi jurnalul n=1 (fără marker ar
+        # fi fost „dovedit de volum")
+        info = backup.stage_restore(old, PASS, keys=hk)
+        check("restore B from the older backup: stage reads the live marker → still unproven",
+              info.get("erasure") == "unproven" and info.get("erasure_proof") == "none", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        desc, q = _quarantine_of(config.DB_PATH, victim.hex())
+        check("…the threshold never goes down (n=2, same MAC), the erased recording stays unreadable",
+              cont.get("threshold", {}).get("n") == 2 and cont["threshold"]["mac"] == h2.mac.hex()
+              and vp.exists() and q == {"out": "continuity"}, (cont, desc, q))
+        # re-import pe un volum fără DB viu: pragul vine din markerul DB-ului din backup
+        os.unlink(config.DB_PATH)
+        jp.unlink()
+        info = backup.stage_restore(exported, PASS, keys=hk)
+        check("re-import of a dataset exported while quarantined (no live DB) → unproven",
+              info.get("erasure") == "unproven", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…its marker keeps threshold n=2 and the victim quarantined",
+              cont.get("threshold", {}).get("n") == 2
+              and _quarantine_of(config.DB_PATH, victim.hex())[1] == {"out": "continuity"} and vp.exists(),
+              cont)
+        # acelaşi n cu alt MAC în DB-ul viu faţă de marker: conflict, restore refuzat
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("UPDATE tx_state SET value=? WHERE key='erasure_head'",
+                    (json.dumps(er.Head(2, 1, bytes([9] * 32)).to_json()),))
+        con.commit()
+        con.close()
+        check("live head and live marker disagree at the same n → stage refused (conflict)",
+              raises(lambda: backup.stage_restore(old, PASS, keys=hk), er.ErasureConflict))
+        # cu jurnalul care atinge pragul: dovedit, markerul dispare
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        info = backup.stage_restore(old, PASS, keys=hk)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        check("a volume journal that reaches the kept threshold proves continuity (marker cleared)",
+              info.get("erasure_proof") == "volume" and tx_state("continuity") is None, info)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
 # ── 9. Owner recovery ────────────────────────────────────────────────────────
 
 
@@ -1054,7 +1183,7 @@ async def g_recovery(st, c, uid, host_id, keep):
           and (await c.get(f"/api/sessions/{rec}/transcript?format=out")).content == data, r.text)
     # janitorul ridică restul carantinei de continuitate când TOATE destinaţiile dovedesc capul
     other, _ = await make_rec(st, host_id)
-    await st.txn(lambda cur: er._quarantine_all_sync(cur, "continuity", time.time()))
+    await st.txn(lambda cur: er._quarantine_cohort_sync(cur, "continuity", time.time()))
     await db.execute("UPDATE tx_quarantine SET reason='journal:fork' WHERE sid=?", keep)
     d = FakeDest("sftp:u@h:22/p2")
     DESTS[:] = [d]
@@ -1072,6 +1201,100 @@ async def g_recovery(st, c, uid, host_id, keep):
           ok and er.continuity() is None and s[(other, "out")] == "ok" and s[(keep, "out")] == "quarantined"
           and not er.health_has("erasure_unproven"), (ok, s.get((other, "out")), s.get((keep, "out"))))
     DESTS[:] = []
+    return st
+
+
+async def g_behind(st, host_id):
+    print("== R-M1 / R-M2: no new branch under an unreached threshold; mandatory destinations ==")
+    cur = journal_path().read_bytes()
+    n = er.parse(cur, K, INST).n
+    head = er.parse(cur, K, INST).head
+    rec, data = await make_rec(st, host_id)
+    await st.txn(lambda c: er._quarantine_cohort_sync(c, "continuity", time.time()))
+    ahead = er.Head(n + 1, 1, os.urandom(32))
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": ahead.to_json()})
+    check("R-M1: erase refused while the local journal does not reach the kept threshold",
+          await _erasure_code(er.erase(st, rec)) == "transcript.erasureBehind"
+          and er.parse(journal_path().read_bytes(), K, INST).n == n)
+    check("R-M1: …and so is the discard of a failed migration",
+          await _erasure_code(er.discard_failed(st, rec)) == "transcript.erasureBehind")
+    await er.recover(st, rec)
+    check("the audited Owner recovery (exceptional access) still works", (await statuses())[(rec, "out")] == "recovery")
+    check("release (normal access) refused while behind the threshold",
+          await _erasure_code(er.release(st, rec)) == "transcript.releaseBehind"
+          and (await statuses())[(rec, "out")] == "recovery")
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "known": {"sftp:x": n + 2}})
+    check("R-M1: a destination known to hold a higher head also blocks a new local entry",
+          await _erasure_code(er.erase(st, rec)) == "transcript.erasureBehind")
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": "junk"})
+    check("an unreadable marker counts as behind (fail closed)",
+          await _erasure_code(er.erase(st, rec)) == "transcript.erasureBehind")
+    # R-M2: destinaţia obligatorie la restore nu mai e configurată
+    d = FakeDest("sftp:u@h:22/rm2")
+    d.objs[er.object_name(INST, n)] = cur
+    DESTS[:] = [d]
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": head.to_json(),
+                          "known": {d.id: n}, "required": ["sftp:u@h:22/gone"]})
+    check("R-M2: a mandatory destination replaced by another → no proof, quarantine kept",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": head.to_json(),
+                          "known": {d.id: n}, "overflow": True})
+    check("R-M2: a marker whose known heads overflowed never proves",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": head.to_json(),
+                          "known": {d.id: n}, "required": [d.id]})
+    check("…the same destination still mandatory and proving → release allowed before, lift after",
+          await er.release(st, rec) is not None and await er.try_prove(st) is True
+          and er.continuity() is None)
+    DESTS[:] = []
+    await unquarantine_all()
+
+
+async def g_rh2(st, host_id):
+    print("== R-H2: boot with an invalid journal quarantines pending plaintext too ==")
+    sid = os.urandom(16).hex()
+    stray = os.urandom(16).hex()
+    data = b"plain-" + sid.encode()
+    await db.execute("INSERT INTO sessions(id, host_id, title, state, created, rows, cols, closed_at) "
+                     "VALUES(?,?,?,?,?,?,?,?)", sid, host_id, "p", "closed", time.time(), 24, 80, time.time())
+    Path(config.TRANSCRIPT_DIR, sid + ".out").write_bytes(data)
+    await txhub.shutdown()
+    # inventarul de text clar se reface la boot (un volum în timpul migrării)
+    await db.execute("DELETE FROM tx_state WHERE key IN ('migration_inventory','recordings_format')")
+    st = await reboot()
+    m = await db.fetchone("SELECT state FROM tx_migration WHERE sid=? AND kind='out'", sid)
+    check("baseline: a pending plaintext recording is readable on a healthy journal",
+          m is not None and m["state"] == "pending" and await read_all(st, sid) == data, m)
+    Path(config.TRANSCRIPT_DIR, stray + ".cast").write_bytes(b"stray")
+    good = journal_path().read_bytes()
+    n = er.parse(good, K, INST).n
+    journal_path().write_bytes(good[:er.prefix_len(n - 1)])
+    st = await reboot()
+    q = await db.fetchone("SELECT reason FROM tx_quarantine WHERE sid=? AND kind='out'", sid)
+    qs = await db.fetchone("SELECT reason FROM tx_quarantine WHERE sid=? AND kind='cast'", stray)
+    check("invalid journal at boot → the pending plaintext is in the cohort (journal:rollback), and a "
+          "3.7-named file without a row too",
+          er._s.diag == "rollback" and q is not None and q["reason"] == "journal:rollback"
+          and qs is not None and qs["reason"] == "journal:rollback", (er._s.diag, q, qs))
+    check("…the pending plaintext is not served", await _refused(read_all(st, sid)))
+    check("…a writer does not reopen it", await _refused(st.start_recorder(sid, track_agent=False)))
+    out = await migration.process(st, sid)
+    s = await statuses()
+    q = await db.fetchone("SELECT reason FROM tx_quarantine WHERE sid=? AND kind='out'", sid)
+    check("migration converts it: the descriptor is born quarantined, the reason journal:* kept",
+          s.get((sid, "out")) == "quarantined" and q is not None and q["reason"] == "journal:rollback"
+          and out.get("out") in ("unlinked", "converted"), (out, s.get((sid, "out")), q))
+    check("…the plaintext is gone after the verified conversion (hash-only re-check allowed)",
+          not Path(config.TRANSCRIPT_DIR, sid + ".out").exists() and out.get("out") == "unlinked", out)
+    check("…still not served after migration", await _refused(read_all(st, sid)))
+    check("…and the Owner recovery never opens a journal quarantine",
+          await _erasure_code(er.recover(st, sid)) == "transcript.notRecoverable")
+    journal_path().write_bytes(good)
+    st = await reboot()
+    check("journal repaired: the journal quarantine stays (not lifted by a later clean boot)",
+          not er._s.diag and (await statuses()).get((sid, "out")) == "quarantined"
+          and await _refused(read_all(st, sid)))
+    os.unlink(os.path.join(config.TRANSCRIPT_DIR, stray + ".cast"))
     return st
 
 
@@ -1099,7 +1322,7 @@ async def g_prove_race(st, host_id):
     old = _extend(cur, x)                              # gazda veche a şters x după restore-ul nostru
     d.objs[er.object_name(INST, n0 + 1)] = old
     rec, _ = await make_rec(st, host_id)
-    await st.txn(lambda c: er._quarantine_all_sync(c, "continuity", time.time()))
+    await st.txn(lambda c: er._quarantine_cohort_sync(c, "continuity", time.time()))
     await set_marker(st, {"state": "unproven", "since": 1, "n": n0, "known": {d.id: n0 + 1}})
     async with st.barrier:
         task = asyncio.ensure_future(er.try_prove(st))
@@ -1115,8 +1338,10 @@ async def g_prove_race(st, host_id):
     y = bytes([0x43] * 16)
     d.objs[er.object_name(INST, n1 + 1)] = _extend(cur, y)
     victim, _ = await make_rec(st, host_id)
-    await st.txn(lambda c: er._quarantine_all_sync(c, "continuity", time.time()))
-    await set_marker(st, {"state": "unproven", "since": 1, "n": n1, "known": {d.id: n1 + 1}})
+    await st.txn(lambda c: er._quarantine_cohort_sync(c, "continuity", time.time()))
+    # R-M1: ce ştia restore-ul (n1) e atins local, deci ştergerea e permisă; ramura n1+1 a
+    # destinaţiei apare abia după (o ştergere a gazdei vechi)
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n1, "known": {d.id: n1}})
     async with st.barrier:
         erase_t = asyncio.ensure_future(er.erase(st, victim))
         e_wait = await _until_waiting(erase_t)
@@ -1163,6 +1388,8 @@ async def main():
     g_freshness()
     g_backup_restore()
     g_h1_restore()
+    g_recheck_pure()
+    g_rh1_consecutive()
     config.ensure_dirs()
     security.init_crypto(config.load_secret())
     await db.connect()
@@ -1184,6 +1411,8 @@ async def main():
         DESTS[:] = []
         st = await g_recovery(st, c, uid, host_id, keep)
         await g_prove_race(st, host_id)
+        await g_behind(st, host_id)
+        st = await g_rh2(st, host_id)
     finally:
         await txhub.shutdown()
         await db.close()

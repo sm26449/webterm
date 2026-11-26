@@ -1223,14 +1223,14 @@ class Store:
         try:
             if self.before_writer is not None:
                 await self.before_writer(sid)
-            # H2: un writer nu redeschide istoricul unei înregistrări din cohorta unui restore fără
-            # dovadă (orice kind în tx_quarantine cu motiv `continuity`): refuzat până la dovadă /
-            # recuperarea explicită, auditată, a Owner-ului. Verificat DUPĂ conversia de la pornire
-            # (care păstrează carantina pe descriptorul nou).
+            # H2 / R-H2: un writer nu redeschide istoricul unei înregistrări din cohorta unei
+            # carantine (orice kind în tx_quarantine: `continuity` după un restore fără dovadă,
+            # `journal:*` după un boot cu jurnal invalid): refuzat până la dovadă / recuperarea
+            # explicită, auditată, a Owner-ului. Verificat DUPĂ conversia de la pornire (care
+            # păstrează carantina pe descriptorul nou).
             if await self.read(lambda c: c.execute(
-                    "SELECT 1 FROM tx_quarantine WHERE sid=? AND reason='continuity' LIMIT 1",
-                    (sid,)).fetchone()) is not None:
-                raise TxStoreError("quarantined", f"{sid}: recording in the continuity quarantine")
+                    "SELECT 1 FROM tx_quarantine WHERE sid=? LIMIT 1", (sid,)).fetchone()) is not None:
+                raise TxStoreError("quarantined", f"{sid}: recording in quarantine")
             rec = Recorder(self, sid, track_agent=track_agent)
             await rec._start()
             self.recorders[sid] = rec
@@ -1674,10 +1674,11 @@ class Store:
         drow, krow, qrow = await self.read(load)
         if drow is None or krow is None:
             raise TxStoreError("notFound", f"{sid}.{kind}: no published conversion")
-        # H2: o conversie păstrată în carantina de CONTINUITATE se re-verifică totuşi (doar hash,
-        # nimic servit), ca textul clar să poată fi şters; orice altă stare / motiv: amânat
+        # H2 / R-H2: o conversie păstrată în carantina cohortei (continuitate sau jurnal) se
+        # re-verifică totuşi (doar hash, nimic servit), ca textul clar să poată fi şters; orice
+        # altă stare (fără rând de carantină): amânat
         if drow[2] != "ok" and not (drow[2] in ("quarantined", "recovery") and qrow is not None
-                                    and qrow[0] == "continuity"):
+                                    and (qrow[0] == "continuity" or qrow[0].startswith("journal:"))):
             raise TxStoreError("quarantined", f"{sid}.{kind}: {drow[2]}")
         env = bytes(krow[0])
         d = self.decode((drow[0], drow[1]), sid, kind, env)
