@@ -64,8 +64,10 @@ set_env() {
 PREV_FILE=.prev-image
 if [ ! -f "$PREV_FILE" ] || [ ! -s "$PREV_FILE" ]; then
   echo "✗ No $PREV_FILE — no previous deploy recorded to go back to."
-  echo "  Manual alternative: point WEBTERM_IMAGE in .env at a known-good tag or digest"
-  echo "  (docker images --digests | grep webterm), then: $COMPOSE -f $FILE up -d app"
+  # nu `compose up` de mână: ar sări garda 3.8 (volum migrat, planul /data, ID-ul imaginii)
+  echo "  Manual alternative: deploy a known-good tag or digest with the checked path:"
+  echo "    ./deploy.sh <vX.Y.Z | sha256:<digest>>   (docker images --digests | grep webterm)"
+  echo "  deploy.sh runs the same checks as this script; never start the app with docker compose up."
   exit 1
 fi
 PREV=$(head -1 "$PREV_FILE")

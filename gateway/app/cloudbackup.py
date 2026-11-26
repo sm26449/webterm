@@ -651,6 +651,31 @@ async def upload_scheduled(local_name: str) -> str:
         return "%s: %s" % (c["provider"], str(e)[:300])
 
 
+async def list_remote_archives() -> tuple:
+    """(label, [{name, ts}]) of the `webterm-*.wtbk` archives at the configured off-host
+    destination; ("", []) when none is configured or connected. Names only: nothing is
+    downloaded, nothing created (an OAuth destination without its folder lists nothing).
+    Raises CloudError when the destination does not answer."""
+    c = await get_config()
+    if not c["provider"]:
+        return "", []
+    label = ("%s %s" % (c["provider"], c["account"] or "")).strip()[:120]
+    if _is_direct(c["provider"]):
+        if not (c["host"] and (c["ssh_key"] or c["password"])):
+            return "", []
+        try:
+            files = await backup_dest.list_backups(c["provider"], await _direct_cfg(c))
+        except backup_dest.DestError as e:
+            raise CloudError(str(e)) from None
+    else:
+        if not c["refresh"] or not c["folder"] or c["provider"] not in PROVIDERS:
+            return "", []
+        p = PROVIDERS[c["provider"]]
+        token = await _access_token(c)
+        files = await _to_thread(p.list_files, token, c["folder"])
+    return label, [f for f in files if f["name"].startswith("webterm-") and f["name"].endswith(".wtbk")]
+
+
 # ── 3.8 PR6a: destinaţia off-host ca loc de ATESTARE a jurnalului de ştergeri (§12.11.4) ────────
 # Un obiect mic per cap (`<installation>.erasures.<n>.wtj`), scris o singură dată şi citit înapoi.
 # Retenţia (`_prune_remote*`) atinge doar `webterm-*.wtbk`, deci obiectele astea nu sunt şterse.

@@ -1306,6 +1306,59 @@ async def test_cadence():
     syshealth.reset_for_tests()
 
 
+async def test_legacy_offhost():
+    print("── crypto.legacy_copies: off-host archives made before the migration (listing only)")
+    from app import backup, bootkeys, cloudbackup
+    saved = (dict(bootkeys.STATE), backup.raw_key_copies, cloudbackup.list_remote_archives)
+    listing = {"files": [], "fail": False, "calls": 0}
+
+    async def fake_list():
+        listing["calls"] += 1
+        if listing["fail"]:
+            raise cloudbackup.CloudError("down")
+        return "sftp u@h", [{"name": n, "ts": 0} for n in listing["files"]]
+    copies = {"n": 0}
+    try:
+        backup.raw_key_copies = lambda: copies["n"]
+        cloudbackup.list_remote_archives = fake_list
+        bootkeys.STATE.update(mode="legacy")
+        r = await syshealth.c_crypto_legacy_copies()
+        check("legacy volume: no check, nothing listed", r is None and listing["calls"] == 0, r)
+        bootkeys.STATE.update(mode="protected")
+        await db.execute("DELETE FROM app_settings WHERE key=?", syshealth.K_PROTECTED_SINCE)
+        listing["files"] = ["webterm-20260101-000000.wtbk", "webterm-29990101-000000.wtbk", "other.wtbk"]
+        r = await syshealth.c_crypto_legacy_copies()
+        since = float(await syshealth._get(syshealth.K_PROTECTED_SINCE, "0"))
+        check("first check on a protected volume records when it was first seen protected",
+              abs(since - time.time()) < 60, since)
+        check("an off-host archive named before that → warning with the destination, the later one "
+              "and foreign names not counted",
+              r.severity == "warning" and r.key == "crypto_raw_copies_offhost"
+              and r.params == {"offhost": 1, "destination": "sftp u@h"} and r.rec == "raw_copies_offhost", r)
+        listing["files"].append("webterm-manual.wtbk")
+        r = await syshealth.c_crypto_legacy_copies()
+        check("an archive without a date in its name counts (it may predate the migration)",
+              r.params.get("offhost") == 2, r)
+        copies["n"] = 3
+        r = await syshealth.c_crypto_legacy_copies()
+        check("local raw-key copies and off-host ones → one warning naming both",
+              r.key == "crypto_raw_copies_both" and r.params == {"count": 3, "offhost": 2, "destination": "sftp u@h"}, r)
+        listing["fail"] = True
+        r = await syshealth.c_crypto_legacy_copies()
+        check("destination down → the local count only (no verdict on off-host copies)",
+              r.key == "crypto_raw_copies" and r.params == {"count": 3}, r)
+        copies["n"] = 0
+        listing["fail"] = False
+        listing["files"] = ["webterm-29990101-000000.wtbk"]
+        r = await syshealth.c_crypto_legacy_copies()
+        check("only archives made after → ok", r.severity == "ok" and r.key == "crypto_raw_copies_ok", r)
+    finally:
+        bootkeys.STATE.clear()
+        bootkeys.STATE.update(saved[0])
+        backup.raw_key_copies = saved[1]
+        cloudbackup.list_remote_archives = saved[2]
+
+
 async def amain():
     await U.boot()
     owner = await U.owner_client()
@@ -1317,6 +1370,7 @@ async def amain():
     await test_roles_checks(owner_uid)
     await test_alerting(owner_uid)
     await test_routes(owner_uid)
+    await test_legacy_offhost()
     await db.close()
 
 

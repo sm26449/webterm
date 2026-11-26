@@ -654,9 +654,10 @@ credentials, the agents' CA key) is then itself wrapped by that master key in `k
 backup or snapshot the gateway writes is an encrypted `WTS1` container that cannot be opened
 without it. A copy of the volume alone no longer gives the credentials away.
 
-Phase 1 limits, stated plainly: the SQLite database file and its WAL are not encrypted yet
-(metadata such as host names, users and the audit log stay readable in the volume), and session
-recordings are not encrypted yet. The rule this follows is
+Limits, stated plainly: the SQLite database file and its WAL are not encrypted yet (metadata
+such as host names, users and the audit log stay readable in the volume), and session recordings
+are encrypted only once you opt in ([Encrypting session recordings](#encrypting-session-recordings)).
+The rule this follows is
 [INV-14](design/INVARIANTS.md#inv-14); the design is in
 [design/ENCRYPTION-AT-REST.md](design/ENCRYPTION-AT-REST.md).
 
@@ -773,7 +774,9 @@ in `/etc/default/webterm-backup`, the units' `WorkingDirectory`) or re-run the i
 migrated volume only once you no longer need it. This path was rehearsed end to end on a
 throwaway copy: 3.7.1 → 3.8 legacy → opt-in → refused rollback → the four steps above. Older
 backups (`*.wtsnap`, `pre-restore-*.wtsnap.keep`, and any off-host copy made before the migration)
-still contain the old vault key in clear; System health counts them. Scheduled `.wtsnap` files
+still contain the old vault key in clear; System health counts them, and lists the off-host
+archives at the configured destination whose names date from before the migration (by name only,
+nothing is downloaded). Scheduled `.wtsnap` files
 expire after 7 days; delete the `.keep` files once you no longer need them.
 
 **When the gateway refuses to start**, the log has one line `boot refused: <reason> (<name>)`, with
@@ -793,6 +796,76 @@ passwd`, `promote`, `disable-2fa`…) still run with the gateway up, as before: 
 database rows and never touch the keys; only `vacuum` needs the gateway stopped
 ([RUNBOOK §5](RUNBOOK.md#5-locked-out-of-your-own-account)). Rotating the master key is not
 exposed as a command yet.
+
+### Encrypting session recordings
+
+Session recordings (the `.out` / `.cast` files under `/data/transcripts`) stay plaintext until you
+turn on `WEBTERM_TX_RECORDINGS=1`. With it, each recording is encrypted with its own key, the
+existing plaintext recordings are migrated in the background, and **Erase** removes a recording
+for good: the erasure is written to a journal (`/data/erasures.wtj`) whose head is copied to your
+off-host destination, so a later restore of an older backup cannot bring the recording back. It is
+an opt-in because it changes what a restore may give back, and because it needs the checks below.
+
+**Before you enable it** (all of them):
+
+1. **The volume is protected**: System health → *Encryption at rest is on* (the steps above). The
+   flag is refused on a legacy volume (`WEBTERM_TX_RECORDINGS=1 needs a protected volume`).
+2. **An SFTP or FTPS off-host destination** is configured in Settings → Backup → *Cloud copy
+   (off-host)*, and *Upload now* succeeds. The erasure journal is attested only there: Google Drive and Dropbox
+   cannot hold the attestation yet (System health then reports every erasure as *not attested*,
+   and an erasure survives restores on this volume only).
+3. **A fresh backup** taken right before, with the flag still off:
+   `cd /opt/webterm && sudo WEBTERM_BACKUP_PASSPHRASE=… scripts/backup.sh`. It is the way back if
+   you change your mind (restore it with the flag off).
+4. **Free disk** at least the size of the recordings, since the migration writes each encrypted copy
+   before it deletes the plaintext:
+   ```sh
+   V=$(sudo docker volume inspect webterm_webterm-data -f '{{.Mountpoint}}')
+   sudo du -sh "$V/transcripts"; df -h "$V"
+   ```
+
+**Enable:** add `WEBTERM_TX_RECORDINGS=1` to `.env` and run `cd /opt/webterm && sudo ./deploy.sh`
+(both compose files pass the variable through; empty means off). Never start the app with `docker
+compose up` by hand.
+
+**Verify:**
+
+- The log has no `WEBTERM_TX_RECORDINGS=1 refused: …` line (`sudo docker logs webterm-app-1 2>&1 |
+  grep -i recordings`); a refusal names the reason (no master key, the journal or the migration not
+  ready) and the app does not start until you fix it or remove the flag.
+- System health → **crypto.migration**: *Migrating recordings to encrypted storage: N of M done*,
+  then *Every recording is encrypted*. **crypto.erasure**: *Erased recordings are journalled and
+  attested off-host*; after the first erasure, a warning *Erasure n is not attested on …* means the
+  destination did not accept or read back the journal yet (it is retried with backoff).
+
+**Failed migrations.** A file that cannot be converted keeps its plaintext and is named (first 8
+characters of the session) in System health. An Owner, with a fresh second factor, can retry it
+(`POST /api/recordings/migration/<sid>/retry`) or delete the plaintext and erase the session
+(`POST /api/recordings/migration/<sid>/discard`, typed confirmation: the first 8 characters of the
+session id).
+
+**Erase, quarantine and recovery** (Owner only, fresh second factor, audited, a security e-mail):
+
+- `POST /api/sessions/<sid>/erase` (confirm = the first 8 characters of the session id) erases a
+  closed session's recording on this volume at once; the answer says whether the destination has
+  attested it yet.
+- After a restore that cannot prove which erasures happened since the backup, the restored
+  recordings are **quarantined** (System health: *Erasures after the backup of … cannot be
+  proven*). The janitor lifts the quarantine by itself once the destination proves the history.
+  Until then, `GET /api/recordings/quarantine` lists them, `POST /api/sessions/<sid>/recovery`
+  (confirm = the backup date) opens one for Owners only, and `…/recovery/release` or
+  `…/recovery/requarantine` close it.
+- If the destination holds an erasure journal that cannot be verified, or two journals disagree
+  (*Two erasure journals disagree*, critical), every recording stays quarantined until an Owner
+  resolves it: `POST /api/recordings/continuity/conflict/resolve` adopts the branch that holds every
+  erasure seen, or `POST /api/recordings/continuity/destinations/<id>/retire` drops a destination
+  that is gone for good (its erasures are kept). A second server of the same installation that
+  shares the destination (for example an old copy still running) picks up the newer server's
+  erasures on its next janitor pass.
+
+The design and the exact rules are in
+[design/ENCRYPTION-AT-REST.md §12.11](design/ENCRYPTION-AT-REST.md) and
+[INV-14](design/INVARIANTS.md#inv-14).
 
 ## Backup
 

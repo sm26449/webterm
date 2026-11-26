@@ -913,7 +913,10 @@ tested in isolation; these are not implemented and each needs its own change and
    forward-token key moves to FK with an explicit invalidation of live forward tokens.
 5. *Legacy raw-key copies:* System health `crypto.legacy_copies` counts `backups/*.wtsnap` and
    `*.wtsnap.keep` (by name, never opened; `backup.raw_key_copies`) on a protected or reduced
-   volume. Retention: unchanged (`.wtsnap` expire after 7 days, `.keep` never automatically).
+   volume, and the off-host `webterm-*.wtbk` archives named before the volume was first seen
+   protected (listed by name at the configured destination, never downloaded; §12.11.13).
+   Retention: unchanged (`.wtsnap` expire after 7 days, `.keep` never automatically, off-host
+   archives by the destination's own retention).
 6. *Backup/restore:* after the key check, `bootkeys.prepare()` registers the keyring provider and
    `backup.set_boot_protected(True)` (the inventory was taken under the lock), runs
    `apply_pending_restore(keys=…)` under the process lock (the `backups/.restore.lock` flock stays
@@ -1423,9 +1426,13 @@ path of this section with **recording encryption disabled by default**; PR6 ship
 (§12.11.5), the erasure journal (§12.11.4) and the continuity quarantine. Normative for a PR5
 build:
 
-- *The flag.* Recording encryption is switched on only by `WEBTERM_TX_RECORDINGS=1`. No compose
-  file, `.env` example, installer or documentation sets it; only the test gates do. Absent, empty
-  or any other value → off.
+- *The flag.* Recording encryption is switched on only by `WEBTERM_TX_RECORDINGS=1`. Absent, empty
+  or any other value → off. In PR5 nothing but the test gates set it. Since PR6 (migration,
+  erasure journal, quarantine: the readiness checks below report ready) it is an **operator
+  opt-in**: both compose files pass `WEBTERM_TX_RECORDINGS: ${WEBTERM_TX_RECORDINGS:-}` through
+  (empty = off), `.env.prod.example` shows it commented out, and docs/INSTALL.md *Encrypting session
+  recordings* lists the pre-checks (protected volume, an attested SFTP/FTPS destination, a fresh
+  backup, free disk). No installer, default or upgrade sets it.
 - *Off (the default), on any volume, legacy or protected.* Recordings are written, read, shared,
   searched, capped and backed up **exactly as in 3.7**: plaintext `.out`/`.cast`, the 3.7 recorder,
   the 3.7 readers, the v1 backup members. No `tx_descriptors`/`tx_files`/`session_keys` row is
@@ -1440,7 +1447,8 @@ build:
   volume created by the test fixture helper, which writes `tx_state.test_volume = 1` at creation;
   nothing else sets it, a restore refuses an archive whose DB carries it, and a gateway that finds
   it outside a test gate (`WEBTERM_TEST_GATE` unset) refuses to boot. Enabling on a real volume
-  therefore requires PR6.
+  therefore requires PR6; with PR6 the three checks report ready and the flag opens a protected
+  volume (it is still refused on a legacy one).
 - *Restore and backup in PR5.* No backup or restore report claims erasure continuity before the
   journal exists: a PR5 manifest records `erasure: not-tracked` and lists recordings as plaintext
   v1 members; restore reports "erasure history: not tracked by this version" and applies no
@@ -3204,6 +3212,31 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   skips the heads a resolution rejected. *R7-L1:* `_s.conflict` is cleared only together with the
   durable record (resolution, or the retire that closes it); System health and release read the
   record itself, so a restart keeps the diagnosis.
+- **End-to-end rehearsal follow-ups (owner decisions 2026-11-26).** *An old server behind its
+  destination:* a second server of the same installation (a parallel restore, a copy started by
+  mistake) used to learn the newer server's erasures only at its next restore, so a recording
+  erased there stayed readable here. `observe_destinations` runs on every janitor pass after
+  `attest_once`: per configured destination it lists the objects of this installation named at or
+  above the local head (not the one we attested, not one already checked: `_s.observed`, ≤ 256,
+  our own FTPS nonce names included before upload, a fixed SFTP name only after its read-back) and
+  reads them (≤ 64, else a gap). An authentic journal that extends ours (or the authentic prefix
+  of a damaged one) is adopted under the barrier with a CAS on the journal file
+  (`_adopt_locked`: journal replaced, tombstones, one transaction destroying the new sids and
+  advancing the committed head; no lift); a fork with ours is recorded through `_record_conflict`
+  (INV-14: its erasures applied at once) and not re-read every pass; an object strictly newer than
+  our head that cannot be authenticated (a damaged one, a lying name, more than 64) quarantines
+  the whole cohort (`_quarantine_ahead_locked`: the continuity marker created or extended with
+  `unverified` + `required` for that destination, so erase refuses as `behind` and `try_prove`
+  lifts it only when the destination answers an authentic journal reaching n) and System health
+  shows the critical `erasure_dest_ahead` while it lasts. A damaged variant at our own n is not a
+  gap (an interrupted FTPS upload of ours would otherwise quarantine a healthy server); an
+  unreachable destination concludes nothing and is listed again after the attestation backoff
+  (`_s.obs_retry`). *Legacy copies off-host:* `crypto.legacy_copies` also
+  lists (names only, `cloudbackup.list_remote_archives`, 15 s budget) the `webterm-*.wtbk` archives
+  at the configured destination and counts those named before the volume was first seen protected
+  (`app_settings.crypto_protected_since`, written at the first check on a protected volume: at or
+  after the real migration, so it errs towards warning) or with no date in the name; a destination
+  that does not answer adds nothing.
 
 ## Appendix: Test vectors (v1)
 

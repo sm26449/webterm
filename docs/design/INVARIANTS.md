@@ -300,8 +300,9 @@ main-push gate. **Tests**: `git_panel`, `pyruntime`.
 <a id="inv-14"></a>
 ## INV-14: a protected volume never opens without its own key, and never falls back to the old one (3.8)
 
-**Rule** (phase 1 of [ENCRYPTION-AT-REST.md](ENCRYPTION-AT-REST.md) §8; recordings are not
-encrypted yet, so this covers the keys, backups, snapshots and the boot).
+**Rule** (phase 1 of [ENCRYPTION-AT-REST.md](ENCRYPTION-AT-REST.md) §8: the keys, backups,
+snapshots and the boot; session recordings are encrypted only when the operator opts in with
+`WEBTERM_TX_RECORDINGS=1`, §12.11, and then the erasure bullet below applies).
 - Once a data volume has a key manifest (`keys.wtk`), every boot needs exactly the master key it
   was protected with. A missing, wrong or divergent key, an invalid envelope or a tampered manifest
   stops the boot **before** any clean-up, staged-restore apply, schema change or writer, and the
@@ -385,11 +386,15 @@ encrypted yet, so this covers the keys, backups, snapshots and the boot).
   restores. While the erasure history is unproven or forked, the affected recordings stay
   quarantined and nothing lifts that automatically; only a proof that reaches every known head, an
   audited Owner resolution that adopts a branch containing every seen erasure, or the audited
-  retirement of a destination (which keeps its erasures) can. Owner recovery reads are one at a
+  retirement of a destination (which keeps its erasures) can. A running server checks its
+  destinations on every janitor pass: a newer authentic journal there is adopted at once (an old
+  server sharing a destination with a newer one loses the erased recordings within one pass), a
+  fork is recorded as a conflict, and a newer object that cannot be authenticated quarantines
+  every recording with a critical System health alarm. Owner recovery reads are one at a
   time, audited, and never available for a recording whose key was destroyed.
 - Limits (stated, not hidden): until SQLCipher ships, the database file and its WAL are outside
   this rule; a rollback of the whole volume to a 3.7 copy is a genuine 3.7 volume; the forward-token
   HMAC keeps its key derived from `FK_legacy` until the re-encryption job exists.
 
-**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `verify_legacy_volume`, `restore_route`, `_extract_legacy_strict`, `StageProgress`; `hostops.py` `cmd_stage`, `_route`; `db.py` `connect_maintenance`, `_schema_of`, `_table_ddl`, `_conflicts`; the host scripts deploy.sh, rollback.sh and upgrade.sh (guard_pre38, render_checked, guard_recheck, up_checked: one identical block, shell, not scanned by the anchor test); `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`; `erasure.py` `_record_conflict`, `resolve_conflict`, `_release_check`, `_journal_recovery_proof`, `decide_restore`, `try_prove`, `boot`.
+**Enforced in**: `keys.py` `boot`, `classify`, `resolve_master_key`, `migrate_legacy`, `open_protected`, `acquire_lock`, `acquire_maint_lock`; `bootkeys.py` `prepare`, `check_legacy_staging`; `legacyvault.py` `prove_legacy_key`, `legacy_inventory`; `backup.py` `prove_legacy_secret`, `verify_legacy_import`, `verify_legacy_volume`, `restore_route`, `_extract_legacy_strict`, `StageProgress`; `hostops.py` `cmd_stage`, `_route`; `db.py` `connect_maintenance`, `_schema_of`, `_table_ddl`, `_conflicts`; the host scripts deploy.sh, rollback.sh and upgrade.sh (guard_pre38, render_checked, guard_recheck, up_checked: one identical block, shell, not scanned by the anchor test); `main.py` `lifespan`; `security.py` `init_crypto_keyring`, `decrypt_secret`; `backup.py` `set_boot_protected`, `volume_kind`, `raw_key_copies`; `admin.py` `NEEDS_LOCK`, `DB_ONLY`; `syshealth.py` `c_crypto_protection`, `c_crypto_legacy_copies`; `erasure.py` `_record_conflict`, `observe_destinations`, `_adopt_locked`, `_quarantine_ahead_locked`, `resolve_conflict`, `_release_check`, `_journal_recovery_proof`, `decide_restore`, `try_prove`, `boot`.
 **Tests**: `boot_keys`, `keys`, `backup_protected`, `snapshot`, `host_backup_script`, `deploy_script`, `upgrade_script`, `schema_history`, `erasure`.

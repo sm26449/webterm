@@ -33,9 +33,11 @@ terminal on the gateway host.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
@@ -236,6 +238,8 @@ MESSAGES = {
     "crypto_env": "The master key comes from WEBTERM_MASTER_KEY, visible in the container's metadata",
     "crypto_protected": "Encryption at rest is on (master key: {source})",
     "crypto_raw_copies": "{count} backup file(s) still contain the old vault key in clear",
+    "crypto_raw_copies_offhost": "{offhost} off-host backup(s) at {destination} were made before the migration and may still hold the old vault key",
+    "crypto_raw_copies_both": "{count} backup file(s) here still contain the old vault key in clear, and {offhost} off-host backup(s) at {destination} were made before the migration",
     "crypto_raw_copies_ok": "No stored backup contains the old vault key",
     "migration_done": "Every recording is encrypted ({converted} migrated from plaintext)",
     "migration_progress": "Migrating recordings to encrypted storage: {done} of {total} done, {mb} MB left ({one_kind} one-kind, {orphans} orphans)",
@@ -252,6 +256,7 @@ MESSAGES = {
     "erasure_local_only": "Erasures survive restores on this volume only: no off-host destination is configured",
     "erasure_unattested": "Erasure {n} is not attested on {destination} (since {since})",
     "erasure_rolled_back": "The erasure attestations on {destination} are older than recorded (rolled back)",
+    "erasure_dest_ahead": "{destination} holds an erasure journal newer than this server's (n={n}) that cannot be verified: every recording is quarantined",
 }
 WHY = {
     "host.helper": "Host timers (backup, certificate check, Docker cleanup) and the Cloudflare token are only visible to EverShell through this helper.",
@@ -340,6 +345,7 @@ RECS = {
     "key_in_volume": "WEBTERM_KEY_IN_VOLUME=1 keeps the key next to the data it protects: any copy of the volume includes it. New installations should use an external key file.",
     "key_file": "Put the key in a file (mode 0400, owned by the service user) and use WEBTERM_MASTER_KEY_FILE instead of WEBTERM_MASTER_KEY.",
     "raw_copies": "Settings → Backup lists them (.wtsnap and pre-restore .keep files). Scheduled .wtsnap files expire after 7 days; delete the .keep files once you no longer need them, and treat every off-host copy made before the migration as holding the old key.",
+    "raw_copies_offhost": "They are encrypted with your backup passphrase, but inside they hold the vault key from before the migration. Delete them at the destination once newer backups exist (the off-host retention removes them in time), and keep the passphrase as safe as the master key until then.",
 }
 
 
@@ -1094,12 +1100,67 @@ async def c_crypto_backup_socket() -> Optional[Result]:
     return Result("ok", "ctl_socket_ok") if ctlsock.active() else None
 
 
+K_PROTECTED_SINCE = "crypto_protected_since"
+OFFHOST_LIST_TIMEOUT = 15.0
+_ARCHIVE_TS = re.compile(r"^webterm-(\d{8}-\d{6})")
+
+
+def _archive_time(name: str) -> Optional[float]:
+    """UTC time in an archive name (`webterm-YYYYmmdd-HHMMSS…`), None when it has none."""
+    m = _ARCHIVE_TS.match(name or "")
+    if not m:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(m.group(1), "%Y%m%d-%H%M%S")))
+    except ValueError:
+        return None
+
+
+async def _offhost_pre_migration() -> tuple:
+    """(destination label, count) of off-host archives named before this volume was first seen
+    protected (or with no date in the name). Listing only, never downloaded or opened. A
+    destination that does not answer → ("", 0): nothing is claimed either way."""
+    from . import cloudbackup
+    try:
+        try:
+            since = float(await _get(K_PROTECTED_SINCE, "0") or 0)
+        except ValueError:
+            since = 0.0
+        if since <= 0:
+            # prima verificare pe volumul protejat: aproximarea migrării (cel mult mai târziu decât
+            # ea, deci se avertizează în plus, niciodată în minus)
+            since = time.time()
+            await _set(K_PROTECTED_SINCE, str(int(since)))
+        label, files = await asyncio.wait_for(cloudbackup.list_remote_archives(), OFFHOST_LIST_TIMEOUT)
+    except Exception as e:               # noqa: BLE001 — o destinaţie căzută nu e un verdict
+        log.info("legacy copies: off-host destination not listed: %s", type(e).__name__)
+        return "", 0
+    old = 0
+    for f in files:
+        name = f.get("name", "")
+        if not (name.startswith("webterm-") and name.endswith(".wtbk")):
+            continue                     # dosarul poate fi al userului: doar arhivele noastre
+        t = _archive_time(name)
+        if t is None or t < since:
+            old += 1
+    return label, old
+
+
 async def c_crypto_legacy_copies() -> Optional[Result]:
     """3.8 wiring item 5: on a migrated volume, 3.7 snapshots (`*.wtsnap`) and pre-restore copies
-    (`*.wtsnap.keep`) still hold the raw 3.7 vault key. Counted, never opened."""
+    (`*.wtsnap.keep`) still hold the raw 3.7 vault key. Counted, never opened. Off-host archives
+    (`webterm-*.wtbk`) named before the volume was first seen protected may hold it too (under the
+    backup passphrase): listed by name at the configured destination, never downloaded."""
     if bootkeys.STATE.get("mode") in ("", "legacy"):
         return None          # legacy: data/secret is in the volume anyway; nothing extra to say
     n = await asyncio.to_thread(backup.raw_key_copies)
+    dest, off = await _offhost_pre_migration()
+    if n and off:
+        return Result("warning", "crypto_raw_copies_both", {"count": n, "offhost": off, "destination": dest},
+                      rec="raw_copies", action="settings:backup", doc="encryption")
+    if off:
+        return Result("warning", "crypto_raw_copies_offhost", {"offhost": off, "destination": dest},
+                      rec="raw_copies_offhost", action="settings:backup", doc="encryption")
     if n:
         return Result("warning", "crypto_raw_copies", {"count": n}, rec="raw_copies",
                       action="settings:backup", doc="encryption")
@@ -1274,7 +1335,7 @@ _loaded = False
 # the key, the hosts, a recommendation or a command — and that still changes the signature.
 MEASUREMENT_PARAMS = frozenset((
     "age", "next", "pct", "free", "total", "free_pct", "size", "skew", "count", "days",
-    "behind", "minutes",
+    "behind", "minutes", "offhost",
 ))
 
 

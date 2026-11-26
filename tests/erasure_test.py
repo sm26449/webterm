@@ -189,6 +189,7 @@ class FakeDest:
         self.corrupt = False
         self.hide_above = None
         self.puts = 0
+        self.gets = 0
 
     async def put_new(self, name, data):
         if self.fail:
@@ -209,6 +210,7 @@ class FakeDest:
     async def get(self, name):
         if self.fail:
             raise OSError("down")
+        self.gets += 1
         b = self.objs[name]
         if self.corrupt:
             b = b[:-1] + bytes([b[-1] ^ 1])
@@ -2681,6 +2683,136 @@ async def g_retire(st, c, uid, host_id):
     await unquarantine_all()
 
 
+# ── 12. Owner decision 2026-11-26: an old server behind its destination ──────
+
+
+async def g_ahead(st, host_id):
+    print("== an old server behind the destination: the janitor applies the newer erasures ==")
+
+    async def rk(sid):
+        return await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is not None
+
+    cur = journal_path().read_bytes()
+    n = er.parse(cur, K, INST).n
+    keep, data = await make_rec(st, host_id)
+    victim, vdata = await make_rec(st, host_id)
+    check("baseline: the recording is readable on the old server", await read_all(st, victim) == vdata)
+    # serverul nou (aceeaşi instalare) a şters `victim` şi a atestat n+1 pe SFTP-ul comun
+    j2 = _extend(cur, bytes.fromhex(victim))
+    d = FakeDest("sftp:u@h:22/ahead")
+    d.objs = {er.object_name(INST, n): cur[:er.prefix_len(n)], er.object_name(INST, n + 1): j2}
+    DESTS[:] = [d]
+    out = await er.observe_destinations(st)
+    check("old server n, SFTP n+1 with an erasure → adopted within one janitor pass",
+          out == {d.id: "adopted"} and journal_path().read_bytes() == j2 and er._s.parsed.n == n + 1, out)
+    check("…the erased recording is unreadable here at once (tombstone, RK destroyed), the head committed",
+          victim in st.tombstoned and not await rk(victim) and await _refused(read_all(st, victim))
+          and (await head_db())["n"] == n + 1, await head_db())
+    check("…the other recordings stay readable, nothing quarantined, no System health alarm",
+          await read_all(st, keep) == data and er.continuity() is None
+          and not er.health_has("erasure_dest_ahead") and not er.health_has("erasure_conflict"))
+    gets = d.gets
+    out = await er.observe_destinations(st)
+    check("next pass: nothing newer → ok, no object read again", out == {d.id: "ok"} and d.gets == gets,
+          (out, d.gets, gets))
+    out = await er.attest_once(st)
+    check("…and our attestation of n+1 is the same object (read back equal)", out == {d.id: "ok"}, out)
+    st = await reboot()
+    check("after a restart the erasure holds (journal adopted, no RK)",
+          victim in st.tombstoned and not await rk(victim) and er._s.parsed.n == n + 1)
+
+    # bucla reală a janitorului: o a doua ştergere a serverului nou, văzută într-o trecere
+    victim2, _ = await make_rec(st, host_id)
+    j3 = _extend(j2, bytes.fromhex(victim2), 7100)
+    d.objs[er.object_name(INST, n + 2)] = j3
+    er.start(st)
+    try:
+        for _ in range(100):
+            if victim2 in st.tombstoned:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await er.stop()
+    check("the running janitor applies it within one pass (no restart, no restore)",
+          victim2 in st.tombstoned and not await rk(victim2) and journal_path().read_bytes() == j3)
+
+    # o ramură divergentă la destinaţie: conflict înregistrat, ştergerea ei aplicată
+    snap = await _conflict_snap()
+    mine, _ = await make_rec(st, host_id)
+    other, _ = await make_rec(st, host_id)
+    await er.erase(st, mine)                                # local: n+3 = mine
+    jf = _extend(j3, bytes.fromhex(other), 7200)            # destinaţia: n+3 = other (alt server)
+    d.objs[er.object_name(INST, n + 3, "f0f0f0f0")] = jf
+    out = await er.observe_destinations(st)
+    check("a fork at the destination → conflict recorded, its erasure applied (RK destroyed, intent)",
+          out == {d.id: "conflict"} and er.conflict_open() and other in st.tombstoned and not await rk(other)
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", other) is not None
+          and er.health_has("erasure_conflict"), out)
+    calls = d.gets
+    await er.observe_destinations(st)
+    check("…recorded once, not re-read every pass", d.gets == calls)
+    del d.objs[er.object_name(INST, n + 3, "f0f0f0f0")]
+    await _forget_conflict(st, snap)
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid=?", other)
+    await unquarantine_all()
+    er._s.dests.pop(d.id, None)
+    await er.attest_once(st)
+
+    # un obiect mai nou care nu se poate autentifica: carantină + System health critic
+    jl = journal_path().read_bytes()
+    nl = er.parse(jl, K, INST).n
+    z, _ = await make_rec(st, host_id)
+    jz = _extend(jl, bytes.fromhex(z), 7300)
+    bad = jz[:-1] + bytes([jz[-1] ^ 1])
+    d.objs[er.object_name(INST, nl + 1)] = bad
+    out = await er.observe_destinations(st)
+    check("an unverifiable newer object → every recording quarantined, System health critical",
+          out == {d.id: "unverifiable"} and er.continuity() is not None
+          and (await statuses())[(keep, "out")] == "quarantined" and await _refused(read_all(st, keep))
+          and any(i[0] == "critical" and i[1] == "erasure_dest_ahead" and i[2]["n"] == nl + 1
+                  for i in er.health()), out)
+    res = await c_health()
+    check("…System health check crypto.erasure is critical with the destination named",
+          res is not None and res.severity == "critical" and res.key == "erasure_dest_ahead"
+          and res.params.get("destination") == d.id, res)
+    mark = er.continuity()
+    check("…the gap is kept as an obligation (unverified + required), erasing here is refused (behind)",
+          (mark.get("unverified") or {}).get(d.id) == nl + 1 and d.id in (mark.get("required") or [])
+          and er._behind(), mark)
+    row = await db.fetchone("SELECT value FROM tx_state WHERE key='continuity'")
+    out = await er.observe_destinations(st)
+    row2 = await db.fetchone("SELECT value FROM tx_state WHERE key='continuity'")
+    check("…idempotent: the next pass keeps the same marker", out == {d.id: "unverifiable"}
+          and row is not None and row2["value"] == row["value"])
+    # destinaţia primeşte copia autentică: adoptată, alarma dispare, dovada ridică carantina
+    d.objs[er.object_name(INST, nl + 1)] = jz
+    d.objs[er.object_name(INST, nl + 1, "a1a1a1a1")] = jz
+    out = await er.observe_destinations(st)
+    check("the authentic copy arrives → adopted, the critical alarm clears (quarantine still on)",
+          out == {d.id: "adopted"} and z in st.tombstoned and not er.health_has("erasure_dest_ahead")
+          and er.continuity() is not None, out)
+    await er.attest_once(st)
+    ok = await er.try_prove(st)
+    check("…and the proof (the destination reaches the gap) lifts the quarantine",
+          ok is True and er.continuity() is None and (await statuses())[(keep, "out")] == "ok"
+          and await read_all(st, keep) == data, ok)
+    # destinaţie inaccesibilă: nimic concluzionat
+    d.fail = True
+    out = await er.observe_destinations(st)
+    check("an unreachable destination → nothing concluded, nothing quarantined",
+          out == {d.id: "unreachable"} and er.continuity() is None)
+    d.fail = False
+    gets = d.gets
+    out = await er.observe_destinations(st)
+    check("…and is retried after a backoff, not on every pass", out == {d.id: "unreachable"} and d.gets == gets, out)
+    er._s.obs_retry.clear()
+    out = await er.observe_destinations(st)
+    check("…after the backoff: listed again, ok", out == {d.id: "ok"}, out)
+    DESTS[:] = []
+    er._s.dests.clear()
+    return st
+
+
 async def main():
     g_codec()
     g_freshness()
@@ -2721,6 +2853,7 @@ async def main():
         await g_r5h1_prove(st)
         await g_r6h2_release(st, c, uid, host_id)
         st = await g_r7h1_conflict(st, c, uid, host_id)
+        st = await g_ahead(st, host_id)
         st = await g_rh2(st, c, uid, host_id)
     finally:
         await txhub.shutdown()

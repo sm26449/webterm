@@ -192,6 +192,10 @@ services:
       # you opt in. WEBTERM_KEY_IN_VOLUME=1 keeps the key inside the data volume (reduced).
       WEBTERM_MASTER_KEY_FILE: ${WEBTERM_MASTER_KEY_FILE:-}
       WEBTERM_KEY_IN_VOLUME: ${WEBTERM_KEY_IN_VOLUME:-}
+      # 3.8 encrypted session recordings: an operator opt-in (=1) once the volume is protected and an
+      # SFTP/FTPS destination is attested (docs/INSTALL.md → Encrypting session recordings).
+      # Empty = off: recordings stay as in 3.7.
+      WEBTERM_TX_RECORDINGS: ${WEBTERM_TX_RECORDINGS:-}
       # the per-browser-WS backlog cap before a forced resync
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
       # Secretele: valoarea din .env (fallback, gol = nesetat) SAU fişierul montat de `secrets:`.

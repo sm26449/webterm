@@ -22,12 +22,42 @@ back.
   configured boots exactly as before. Turning it on is one key file and one line in `.env`; the next
   start migrates the volume once, after proving the old key really decrypts the database, and
   applies a staged restore first if there is one (docs/INSTALL.md, *Encryption at rest*). Not covered
-  yet: the database file itself and session recordings (stated in System health and the docs).
+  yet: the database file itself (stated in System health and the docs).
+- **Encrypted session recordings (opt-in).** Recordings can hold everything typed and shown in a
+  terminal, and until now they sat in the volume and in every backup as plaintext. With
+  `WEBTERM_TX_RECORDINGS=1` on a protected volume each recording is encrypted under its own key,
+  existing plaintext recordings are migrated in the background (the plaintext is deleted only after
+  the encrypted copy is verified; a file that cannot be converted is kept and named in System health,
+  with Owner *retry* and *discard*), and backups carry the encrypted recordings. It is off by default
+  and never turned on by an upgrade: docs/INSTALL.md, *Encrypting session recordings*, lists the
+  checks to make first (protected volume, an SFTP/FTPS destination, a fresh backup, free disk).
+- **Erasing a recording is final, even across restores.** Deleting a file was never enough: a
+  restore of an older backup brought the recording back. An Owner erase now destroys the
+  recording's key and writes the erasure to a journal whose head is copied to the SFTP/FTPS
+  destination and read back. A restore applies every erasure it can see (in the backup, on the
+  volume, at the destination, on any branch of a disagreement), and a server that shares the
+  destination with a newer one picks up its erasures within a minute, so an erased recording does
+  not reappear on an old copy either.
+- **Quarantine instead of guessing after a restore.** When a restore cannot prove which erasures
+  happened since the backup (no destination, a destination that does not answer, a journal that
+  cannot be verified, two journals that disagree), the restored recordings are quarantined instead
+  of served. The quarantine lifts by itself once the destination proves the history; until then an
+  Owner can open one recording at a time (audited, never one whose key was destroyed), resolve a
+  disagreement by adopting the branch that holds every erasure, or retire a destination that is gone
+  for good. System health says which of these applies.
 - **System health shows the protection state** (*Encryption at rest*: protected / reduced / legacy,
   and a warning when the key comes from an environment variable) and **counts the older backups
-  that still hold the old vault key in clear**, so they can be deleted once no longer needed.
+  that still hold the old vault key in clear**, including the off-host archives whose names date
+  from before the migration (listed by name, never downloaded), so they can be deleted once no
+  longer needed.
 
 ### Changed
+- **A refused deploy leaves the installation as it was.** `deploy.sh <version>` used to write the
+  new image into `.env` and the rollback target into `.prev-image` before its checks; when the 3.8
+  guard then refused (for example a pre-3.8 image on a migrated volume), the next plain
+  `./deploy.sh` or `rollback.sh` worked from a target nobody had approved. Both are now written only
+  once the checks pass. `rollback.sh` with no recorded target now points to `./deploy.sh <version>`
+  instead of a hand-run `docker compose up`, which would skip those checks.
 - **`install.sh` starts the stack only through `./deploy.sh`.** The installer used to run
   `docker compose up` itself, for the first start and again after linking SSO, which skipped the
   checks a deploy makes before starting anything (the data volume, the exact image, no image older

@@ -327,6 +327,11 @@ def main():
         r, _ = run(d5, "rollback.sh")
         check("rollback.sh: acelaşi digest în .env şi .prev-image → nimic de făcut, exit 1",
               r.returncode != 0 and "same as the current one" in r.stdout, r.stdout[-200:])
+        (d5 / ".prev-image").unlink()
+        r, calls_np = run(d5, "rollback.sh")
+        check("rollback.sh fără .prev-image: alternativa manuală e ./deploy.sh <ref> (garda 3.8), nu compose up",
+              r.returncode != 0 and "./deploy.sh <vX.Y.Z" in r.stdout and "up -d app" not in r.stdout
+              and "up -d" not in calls_np, r.stdout[-400:])
 
         # ── 5. set_env (L1): valoarea cu `&`, `|`, `\` ajunge verbatim, fără proces extern ──
         # Extragem funcţia din fiecare script şi o rulăm pe un .env de jucărie: e EXACT codul
@@ -466,10 +471,26 @@ def pre38_checks(tmp):
           and env_of(d).get("WEBTERM_IMAGE") == NEW and calls.count("--no-build app") == 0, out[-700:])
     # deploy.sh ţintit direct spre o imagine < 3.8
     d = sandbox(tempfile.mkdtemp(dir=tmp))
+    (d / ".prev-image").write_text("ghcr.io/x/webterm:v0.9.0\n")
+    # pinul (WEBTERM_IMAGE / _TAG) şi ţinta de rollback; mutarea secretelor din .env în secrets/
+    # (normalizare idempotentă, nu o schimbare de ţintă) rulează înaintea gărzii, ca la orice deploy
+    def pin(dd):
+        e = env_of(dd)
+        return (e.get("WEBTERM_IMAGE"), e.get("WEBTERM_IMAGE_TAG"), (dd / ".prev-image").read_text(),
+                (dd / ".prev-image-tag").exists())
+    before = pin(d)
     r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.7.1", NEW_LABEL="v3.7.1", VOL_LS=MIGRATED)
     check("deploy.sh spre o imagine < 3.8 pe volum migrat → refuz înainte de `up`",
           r.returncode != 0 and "up -d" not in calls and "migrated to 3.8" in (r.stdout + r.stderr),
           (r.stdout + r.stderr)[-400:])
+    after = pin(d)
+    check("…refuzul nu schimbă .env (pinul) şi nici .prev-image / .prev-image-tag (ţinta de rollback)",
+          before == after, (before, after))
+    # acelaşi deploy, garda trece (ţintă 3.8): abia atunci se scriu pinul şi ţinta de rollback
+    r, calls = run(d, "deploy.sh", [NEW], IMG_LABEL="v3.7.1", NEW_LABEL="v3.8.0", VOL_LS=MIGRATED)
+    check("…cu garda trecută (ţintă 3.8) se scriu .env şi .prev-image",
+          r.returncode == 0 and env_of(d).get("WEBTERM_IMAGE") == NEW
+          and (d / ".prev-image").read_text().strip() != "ghcr.io/x/webterm:v0.9.0", (r.stdout + r.stderr)[-400:])
 
 
 def rh1_checks(tmp):

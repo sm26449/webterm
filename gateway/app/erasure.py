@@ -24,6 +24,10 @@ Pieces:
   missing entries; quarantine every recording on a missing / rolled-back / forked / broken journal.
 * **Attestation** (`attest_once`, janitor `start`): one immutable object per head and destination,
   read back and authenticated; `tx_state.attested_heads`.
+* **Observation** (`observe_destinations`, every janitor pass): a destination holding a newer
+  authentic journal of this installation (another server sharing it) is adopted at once, a fork
+  is recorded as a conflict, and a newer object that cannot be authenticated quarantines every
+  recording (System health critical `erasure_dest_ahead`).
 * **Freshness and restore** (`decide_restore`, `reconcile_apply`): the newest authentic head wins,
   a stale head never overrides, divergent authentic journals are a conflict, and without proof the
   restored recordings are quarantined (`mark_unproven`).
@@ -691,6 +695,9 @@ class _State:
     head_known: bool = True        # R2-H1: capul comis s-a putut citi din DB la boot
     cancelled: set = field(default_factory=set)       # R3-M1: sid-uri cu intenţia anulată în zbor
     cleanup: dict = field(default_factory=dict)       # R5-L1: sid → {tries, next}: curăţare fizică de reluat
+    ahead: dict = field(default_factory=dict)         # dest id → n al unui obiect mai nou neverificabil
+    observed: set = field(default_factory=set)        # (dest id, nume) verificate pe lanţul nostru
+    obs_retry: dict = field(default_factory=dict)     # dest id → (încercări, următoarea) după un eşec
     booted: bool = False
     quarantine_pass: bool = False
     task: object = None
@@ -1450,6 +1457,13 @@ async def attest_once(st=None, dests=None, clock=time.time):
                 if p.n != head.n or not hmac.compare_digest(p.head.mac, head.mac) or p.bad:
                     raise JournalError("mismatch")
             name = object_name(st.inst, head.n, None if d.refuses_overwrite else secrets.token_hex(4))
+            if not d.refuses_overwrite:
+                # nume nou, aleator: nimeni altcineva nu-l poate ţine; chiar defect (o încărcare
+                # întreruptă) e al nostru, deci observe_destinations nu-l mai citeşte. Un nume fix
+                # (SFTP) intră doar după read-back: acolo poate sta deja ramura altui server
+                if len(s.observed) > OBSERVED_MAX:
+                    s.observed.clear()
+                s.observed.add((d.id, name))
             try:
                 await d.put_new(name, data)
             except DestExists:
@@ -1462,6 +1476,7 @@ async def attest_once(st=None, dests=None, clock=time.time):
             if p.n < 1 or p.n != head.n or p.bad or not hmac.compare_digest(p.head.mac, head.mac):
                 raise JournalError("readback-unauthentic")
             s.attested = await _commit_attested(st, d.id, head, name, again=again)
+            s.observed.add((d.id, name))
             s.dests[d.id] = {"state": "ok", "since": None, "error": "", "next": 0, "tries": 0,
                              "verified": clock()}
             out[d.id] = "ok"
@@ -2286,6 +2301,227 @@ async def try_prove(st=None):
     return fork_gens is None
 
 
+# ── a destination ahead of this server (owner decision 2026-11-26) ───────────
+# Un server vechi (acelaşi installation id, alt volum: un restore paralel, o copie pornită din
+# greşeală) nu vede ştergerile făcute de serverul nou decât prin destinaţiile off-host comune. Fără
+# verificarea de mai jos, o înregistrare ştearsă pe serverul nou rămânea citibilă pe cel vechi până
+# la un restore. Janitorul citeşte deci la fiecare trecere capetele fiecărei destinaţii configurate.
+
+OBSERVED_MAX = 256
+
+
+def _obs_delay(tries):
+    return min(ATTEST_BACKOFF_MAX, ATTEST_INTERVAL * (2 ** min(tries, 6)))
+
+
+async def _adopt_locked(st, cur, star, data):
+    """Caller holds the barrier. `star` (authentic, extends `cur`, the journal we know) replaces
+    the volume journal (CAS on the file), its new entries are tombstoned and destroyed in ONE
+    transaction that advances the committed head. Returns the generations to retire, or None when
+    the volume changed under us (the next pass decides again)."""
+    s = _s
+    if s.diag or s.uncertain or s.parsed is not cur:
+        return None
+    raw = await st.io(s.journal.read_bytes)
+    if raw is None or len(raw) != prefix_len(cur.n):
+        return None
+    now_p = parse(raw, s.journal.k, st.inst)
+    if now_p.n != cur.n or now_p.bad or not hmac.compare_digest(now_p.head.mac, cur.head.mac):
+        return None
+    if len(data) != prefix_len(star.n):
+        return None
+    new = list(star.entries[cur.n:])
+    # jurnalul întâi (durabil): un crash înainte de COMMIT e re-aplicat de boot din jurnal
+    await st.io(s.journal.replace, data)
+    s.parsed = star
+    for e in new:
+        st.tombstone(e.sid_hex)                    # memoria întâi (fail closed)
+        st.drop_key(e.sid_hex)
+
+    def fn(c):
+        out = []
+        for e in new:
+            out += [(e.sid_hex, kind, hexid) for hexid, kind in
+                    _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac))]
+        return out
+    try:
+        gens = await st.io(st._run_txn, fn)
+    except txstore.Uncertain:
+        s.uncertain = "commit-uncertain"           # boot-ul re-aplică paşii 2–3 din jurnal
+        return []
+    if s.head_db.n < star.head.n:
+        s.head_db = star.head
+    return gens
+
+
+async def _quarantine_ahead_locked(st, gaps, clock=time.time):
+    """Caller holds the barrier. A destination lists a journal object newer than ours that cannot
+    be authenticated (`gaps` = {destination: n}): it may hold an erasure we cannot see, so the whole
+    cohort is quarantined (continuity marker created, or the gap folded into the existing one:
+    `unverified` + `required`, as a restore keeps it, R5-H1). `try_prove` lifts it once that
+    destination answers an authentic journal reaching n. Idempotent (no write when already kept)."""
+    s = _s
+    cont = s.continuity if s.continuity and s.continuity.get("state") == "unproven" else None
+    terms = _marker_terms(cont) if cont is not None else Terms()
+    if terms is None:
+        return                                    # marker ilizibil: deja nedovedit (fail closed)
+    if all(terms.unverified.get(d, 0) >= n and d in terms.required for d, n in gaps.items()):
+        return
+    now = clock()
+    new_cont = dict(cont) if cont is not None else {"state": "unproven", "since": int(now), "n": s.head_db.n}
+    if cont is None and s.head_db.n:
+        new_cont["threshold"] = s.head_db.to_json()
+    new_cont["unverified"] = merge_known(terms.unverified, gaps)
+    req = sorted(set(terms.required) | set(gaps))
+    if len(req) > KNOWN_MAX:
+        new_cont["overflow"] = True
+        req = req[:KNOWN_MAX]
+    new_cont["required"] = req
+    created = cont is None
+    plain = await st.io(_plain_cohort_fd, st.dir_fd) if created else ()
+
+    def fn(c):
+        if created:
+            _quarantine_cohort_sync(c, "continuity", now, plain)
+        _set_json(c, "continuity", new_cont)
+    try:
+        await st.io(st._run_txn, fn)
+    except txstore.Uncertain:
+        log.warning("erasure: the quarantine for an unverifiable destination did not commit (uncertain)")
+    s.continuity = new_cont                        # memoria ţine starea mai strictă oricum
+
+
+# INV-14 (docs/design/INVARIANTS.md): o ştergere văzută la o destinaţie (pe orice ramură autentică) se aplică
+# imediat şi pe un server rămas în urmă; un obiect mai nou neverificabil pune totul în carantină.
+async def observe_destinations(st=None, dests=None, clock=time.time):
+    """One janitor pass over every configured destination's journal objects named at or above our
+    head (the ones not already checked). Returns {destination id: outcome}:
+
+    * `ok` — nothing newer, or only objects on our chain;
+    * `adopted` — an authentic journal extending ours: adopted at once (journal replaced, the new
+      erasures tombstoned, their keys destroyed and the committed head advanced in one
+      transaction), so a recording erased on another server sharing the destination becomes
+      unreadable here within one pass;
+    * `conflict` — an authentic journal on another branch (or the authentic prefix of a damaged
+      one): recorded durably with every branch's erasures applied (`_record_conflict`, R7-H1);
+    * `unverifiable` — an object newer than our head that cannot be authenticated (damaged, a lying
+      name, too many to check): the whole cohort is quarantined (`continuity`, the gap kept as an
+      obligation) and System health shows a critical `erasure_dest_ahead`;
+    * `unreachable` — no answer: nothing concluded this pass (attestation reports it).
+
+    Objects strictly below our head are covered by the attestation and the restore checks; branch
+    heads an Owner resolution rejected are ignored (their erasures are intents already)."""
+    s = _s
+    st = st or s.store
+    if st is None or s.parsed is None or s.diag or s.uncertain or s.journal is None:
+        return {}
+    dests = await destinations() if dests is None else dests
+    k = s.journal.k
+    inst = bytes(st.inst)
+    cont = s.continuity if s.continuity and s.continuity.get("state") == "unproven" else None
+    terms = _marker_terms(cont) if cont is not None else Terms()
+    rejected = {(h.n, h.mac) for h in (terms.rejected if terms is not None else ())}
+    out = {}
+    for d in dests:
+        cur = s.parsed
+        if cur is None or s.diag or s.uncertain:
+            break
+        mine = (s.attested.get(d.id) or {}).get("name")
+        tries, nxt = s.obs_retry.get(d.id, (0, 0.0))
+        if nxt > clock():
+            out[d.id] = "unreachable"              # backoff: o destinaţie căzută nu ţine bucla pe loc
+            continue
+        try:
+            listed = await d.list()
+        except Exception as e:                   # noqa: BLE001 — inaccesibilă: nimic de concluzionat
+            log.debug("erasure: cannot list %s: %s", d.id, type(e).__name__)
+            s.obs_retry[d.id] = (tries + 1, clock() + _obs_delay(tries + 1))
+            out[d.id] = "unreachable"
+            continue
+        s.obs_retry.pop(d.id, None)
+        cand = []
+        for name in listed:
+            p = parse_object_name(name)
+            if p is None or p[0] != inst or p[1] < cur.n or name == mine or (d.id, name) in s.observed:
+                continue
+            cand.append((p[1], name))
+        cand.sort(reverse=True)
+        if not cand:
+            s.ahead.pop(d.id, None)
+            out[d.id] = "ok"
+            continue
+        gap = 0
+        if len(cand) > PROVE_MAX_OBJECTS:
+            gap = cand[0][0] if cand[0][0] > cur.n else 0   # prea multe de verificat = nicio dovadă
+            cand = cand[:PROVE_MAX_OBJECTS]
+        got, prefixes, seen_ok = [], [], []
+        try:
+            for n_, name in cand:
+                # doar un obiect STRICT mai nou decât capul nostru e un gol: o variantă defectă la
+                # acelaşi n (ex. o încărcare FTPS a noastră întreruptă) nu ascunde o ştergere nouă
+                try:
+                    raw = bytes(await d.get(name))
+                    p = parse(raw, k, inst)
+                except JournalError:
+                    gap = max(gap, n_ if n_ > cur.n else 0)
+                    continue
+                if p.bad or p.n != n_:
+                    gap = max(gap, n_ if n_ > cur.n else 0)   # neautentic / nume minţit: gol, nu dovadă
+                    if p.n:
+                        # intrările lui autentice se compară cu lanţul şi, dacă îl extind, ştergerile
+                        # lor se aplică (INV-14); obiectul rămâne un gol peste ele
+                        prefixes.append((name, p, raw[:p.valid_len]))
+                    continue
+                if p.n == 0 or (p.head.n, p.head.mac) in rejected:
+                    seen_ok.append(name)
+                    continue
+                got.append((name, p, raw[:p.valid_len]))
+        except Exception as e:                   # noqa: BLE001 — o citire căzută: data viitoare
+            log.debug("erasure: cannot read %s: %s", d.id, type(e).__name__)
+            s.obs_retry[d.id] = (1, clock() + _obs_delay(1))
+            out[d.id] = "unreachable"
+            continue
+        branches = [p for _name, p, _raw in got + prefixes]
+        try:
+            best = _on_one_chain([("volume", cur)] + [(name, p) for name, p, _raw in got + prefixes])
+        except ErasureConflict as e:
+            await _record_conflict(st, [cur] + branches, [d.id], {d.id: max(x[0] for x in cand)},
+                                   "erasure journals at %s diverge from this server's: %s" % (d.id[:120], e))
+            # înregistrat durabil (marker + intenţii): nu-l rescriem la fiecare trecere de 30 s
+            s.observed.update((d.id, name) for name, _p, _raw in got)
+            out[d.id] = "conflict"
+            continue
+        star = next(((p, raw) for name, p, raw in got + prefixes if name == best[0]), None)
+        result = "ok"
+        if star is not None and star[0].n > cur.n:
+            async with st.barrier:
+                gens = await _adopt_locked(st, cur, star[0], star[1])
+            if gens is None:
+                out[d.id] = "retry"                # jurnalul s-a schimbat între timp: trecerea următoare
+                continue
+            for sid, kind, hexid in gens:
+                await st.retire(sid, kind, hexid)
+            st.bump(None)
+            log.warning("erasure: adopted the newer journal at %s (n=%d → %d)", d.id, cur.n, star[0].n)
+            result = "adopted"
+        if gap and gap > s.parsed.n:               # sub capul adoptat: acoperit de el
+            s.ahead[d.id] = gap
+            st.alarm("transcript.erasureAhead", "%s holds an unverifiable erasure journal n=%d" % (d.id[:120], gap))
+            log.warning("erasure: %s holds an unverifiable journal object n=%d newer than ours (n=%d): "
+                        "every recording quarantined", d.id, gap, s.parsed.n)
+            async with st.barrier:
+                await _quarantine_ahead_locked(st, {d.id: gap}, clock)
+            st.bump(None)
+            out[d.id] = "unverifiable"
+            continue
+        s.ahead.pop(d.id, None)
+        if len(s.observed) > OBSERVED_MAX:
+            s.observed.clear()
+        s.observed.update((d.id, name) for name in seen_ok + [name for name, _p, _raw in got])
+        out[d.id] = result
+    return out
+
+
 # ── Owner recovery (§12.11.4 "Owner recovery mode", Q4) ──────────────────────
 
 
@@ -2950,6 +3186,8 @@ async def _loop(st):
             if _s.cleanup:
                 await run_cleanup(st)                  # R5-L1: curăţarea rămasă, cu backoff
             await attest_once(st)
+            # decizia owner-ului 2026-11-26: un server rămas în urmă află ştergerile celuilalt
+            await observe_destinations(st)
             if _s.continuity and time.time() - last_prove > PROVE_INTERVAL:
                 last_prove = time.time()
                 await try_prove(st)
@@ -3004,4 +3242,6 @@ def health():
                          "since": time.strftime("%Y-%m-%d %H:%M", time.gmtime(since)) if since else "-"}))
     for did in sorted(s.rolled_back):
         out.append(("critical", "erasure_rolled_back", {"destination": did[:120]}))
+    for did, n in sorted(s.ahead.items()):
+        out.append(("critical", "erasure_dest_ahead", {"destination": did[:120], "n": n}))
     return out

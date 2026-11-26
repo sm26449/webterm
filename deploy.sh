@@ -321,15 +321,23 @@ if [ -n "$VERSION" ]; then
     # the label only makes sense next to a digest; a tag deploy already IS its own label
     case "$NEW_IMAGE" in *@sha256:*) NEW_TAG="${NEW_IMAGE%%@*}:$TAG_HINT" ;; esac
   fi
-  set_env WEBTERM_IMAGE "$NEW_IMAGE"
-  set_env WEBTERM_IMAGE_TAG "$NEW_TAG"
+  # Doar exportat aici: compose preferă mediul shell-ului faţă de .env, deci pull-ul şi garda 3.8
+  # văd deja ţinta. `.env` şi `.prev-image` se scriu abia după ce garda a trecut (commit_target):
+  # un deploy refuzat (imagine < 3.8 pe volum migrat, plan divergent, pull eşuat) nu lasă în
+  # urmă un pin pe care următorul `./deploy.sh` fără argument sau rollback.sh l-ar porni.
   export WEBTERM_IMAGE="$NEW_IMAGE" WEBTERM_IMAGE_TAG="$NEW_TAG"
   echo "→ Targeted deploy: $NEW_IMAGE${NEW_TAG:+ ($NEW_TAG)} (previous: ${CUR_IMAGE:-<unset>})"
 fi
-if [ -n "$CUR_IMAGE" ] && [ "$CUR_IMAGE" != "${WEBTERM_IMAGE:-}" ]; then
-  printf '%s\n' "$CUR_IMAGE" > .prev-image
-  if [ -n "$CUR_TAG" ]; then printf '%s\n' "$CUR_TAG" > .prev-image-tag; else rm -f .prev-image-tag; fi
-fi
+commit_target() {   # după gardă, înainte de `up`: pinul nou în .env şi ţinta de rollback
+  if [ -n "$VERSION" ]; then
+    set_env WEBTERM_IMAGE "$NEW_IMAGE"
+    set_env WEBTERM_IMAGE_TAG "$NEW_TAG"
+  fi
+  if [ -n "$CUR_IMAGE" ] && [ "$CUR_IMAGE" != "${WEBTERM_IMAGE:-}" ]; then
+    printf '%s\n' "$CUR_IMAGE" > .prev-image
+    if [ -n "$CUR_TAG" ]; then printf '%s\n' "$CUR_TAG" > .prev-image-tag; else rm -f .prev-image-tag; fi
+  fi
+}
 
 # --- pull + up (replaces an older Caddy stack if present, keeps the data) ---
 # `pull` eşuat nu e fatal dacă imaginea E DEJA aici: o imagine construită local
@@ -776,6 +784,7 @@ else
   echo "✗ cannot tell which image would start (WEBTERM_IMAGE is empty and compose lists none) — refusing." >&2
   exit 1
 fi
+commit_target
 # RC2-H1: porneşte exact ID-ul verificat (fără pull/build); .env rămâne pe referinţa umană
 CHECKED_RUN="$PLAN_FILE"
 up_checked "$CHECKED_ID" "$CHECKED_LABEL" "$CHECKED_RUN" --remove-orphans || exit 1
