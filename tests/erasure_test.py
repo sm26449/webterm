@@ -645,6 +645,43 @@ async def g_cancel(st, host_id):
           and all(r["state"] == "gone" for r in rows)
           and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid6) is None,
           (ok, er._s.uncertain, gen_files(sid6), [r["state"] for r in rows]))
+    # R5-L1: o eroare de I/O la unlink nu pierde curăţarea: sid-ul rămâne de făcut, cu backoff
+    sid7, _ = await make_rec(st, host_id)
+    orig_unlink = st._unlink_if_ours_sync
+    fails = {"left": er.CLEANUP_ALARM_AFTER}
+
+    def unlink_eio(*a, **kw):
+        if fails["left"] > 0:
+            fails["left"] -= 1
+            raise OSError(5, "Input/output error (test)")
+        return orig_unlink(*a, **kw)
+    cancelled7 = await _cancel_erase(st, sid7, "pre-commit#1")
+    st._unlink_if_ours_sync = unlink_eio
+    now = {"t": 1000.0}
+    try:
+        ok = await er.resume_intents(st, clock=lambda: now["t"])
+        check("R5-L1: unlink EIO during the janitor's cleanup → the erasure is settled (RK gone, state "
+              "lifted) and the cleanup stays pending, files still there",
+              cancelled7 and ok and not er._s.uncertain and sid7 in er._s.cleanup and gen_files(sid7) != []
+              and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid7) is None,
+              (cancelled7, ok, er._s.uncertain, er._s.cleanup, gen_files(sid7)))
+        await er.run_cleanup(st, clock=lambda: now["t"])
+        check("R5-L1: …backoff: not retried before its time", fails["left"] == er.CLEANUP_ALARM_AFTER - 1
+              and er._s.cleanup[sid7]["tries"] == 1, (fails, er._s.cleanup))
+        for _ in range(er.CLEANUP_ALARM_AFTER - 1):
+            now["t"] += er.CLEANUP_BACKOFF_MAX
+            await er.run_cleanup(st, clock=lambda: now["t"])
+        check("R5-L1: …repeated failures raise the transcript.erasureCleanup alarm, the task is kept",
+              sid7 in er._s.cleanup and any(a[0] == "transcript.erasureCleanup" and sid7 in a[1] for a in st.alarms),
+              (er._s.cleanup, st.alarms[-3:]))
+        now["t"] += er.CLEANUP_BACKOFF_MAX
+        left = await er.run_cleanup(st, clock=lambda: now["t"])
+        rows = await db.fetchall("SELECT state FROM tx_files WHERE sid=?", sid7)
+        check("R5-L1: …the disk recovers: the next pass unlinks the retired generations (rows gone), task done",
+              left == [] and gen_files(sid7) == [] and rows and all(r["state"] == "gone" for r in rows),
+              (left, gen_files(sid7), [r["state"] for r in rows]))
+    finally:
+        st._unlink_if_ours_sync = orig_unlink
     # janitorul o face singur, imediat (trezit de anulare, nu la următorul interval)
     sid4, _ = await make_rec(st, host_id)
     er.start(st)
@@ -870,7 +907,8 @@ def g_freshness():
                           mode="prove")
     check("M1: …one known at the restore to hold n=3 that still does → proof", d.proof == "destinations")
     check("summary carries the threshold and the merged known heads",
-          set(d.summary(1)) == {"state", "proof", "since", "n", "threshold", "known", "required", "overflow"}
+          set(d.summary(1)) == {"state", "proof", "since", "n", "threshold", "known", "required", "overflow",
+                                "unverified"}
           and d.summary(1)["known"] == {"a": 3} and d.summary(1)["required"] == ["a"])
     d = er.decide_restore(k_erase=K, inst=INST, j_b=j3, tracked=True, dest_results=[dest("a", j2)],
                           required_dests={"a"}, known_attested={"a": 3})
@@ -1436,6 +1474,129 @@ def g_r2m2_restore():
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
 
+R5H1_MARKER = {}
+
+
+def g_r5h1_restore():
+    print("== R5-H1: an unverifiable newer object seen at stage blocks the volume proof (stage → apply → resume) ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-r5h1")
+        ents = [(8000 + i, s, 3, bytes(32)) for i, s in enumerate(sids(4))]
+        j1, j2, j3 = build(ents[:1]), build(ents[:2]), build(ents[:3])
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1, descs=["e5" * 16])
+        jp.write_bytes(j1)
+        blob = backup.make_encrypted(PASS, keys=hk)                # backup la n=1
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)                                          # J_v ajunge la capul viu n=2
+        did = "sftp:u@h:22/r5h1"
+
+        def unverifiable(k, inst):
+            return [er.DestResult(did, False, error="unverifiable", unverified=3)], [did]
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("control: no destination, J_v reaches the live head n=2 → stage proven by the volume",
+              info.get("erasure_proof") == "volume", info)
+        info = backup.stage_restore(blob, PASS, keys=hk, erasure_fetch=unverifiable)
+        check("R5-H1: J_v reaches n=2 but a destination shows an unverifiable n=3 → stage unproven",
+              info.get("erasure") == "unproven" and info.get("erasure_proof") == "none", info)
+        # o dovadă locală concurentă: între stage şi apply J_v ajunge chiar la n=3 (altă ramură posibilă)
+        jp.write_bytes(j3)
+        backup._fault = _crash_at("apply:db")
+        try:
+            crashed = raises(lambda: backup.apply_pending_restore(keys=hk), _Crash)
+        finally:
+            backup._fault = None
+        flag = json.loads(backup._restore_flag().read_bytes())
+        check("R5-H1: …the gap travels in the flag (destination → n), the proof is not granted",
+              crashed and flag.get("erasure_unverified") == {did: 3} and flag.get("erasure_proven") is False, flag)
+        backup.apply_pending_restore(keys=hk)                       # reluare după copia DB
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("R5-H1: …resumed apply with a local journal reaching n=3: still quarantined, the gap folded "
+              "into the known heads and the mandatory destinations",
+              cont.get("state") == "unproven" and cont.get("unverified") == {did: 3}
+              and cont.get("known", {}).get(did) == 3 and did in cont.get("required", []), cont)
+        R5H1_MARKER.update(cont)
+        # fără reluare: acelaşi refuz la primul apply
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("DELETE FROM tx_state WHERE key='continuity'")
+        con.commit()
+        con.close()
+        backup.stage_restore(blob, PASS, keys=hk, erasure_fetch=unverifiable)
+        jp.write_bytes(j3)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("R5-H1: first apply (no crash), J_v at n=3 → the restore does not lift: unproven, gap kept",
+              cont.get("state") == "unproven" and cont.get("unverified") == {did: 3}, cont)
+        # „sau acum": markerul viu ţine golul — un restore următor fără destinaţii nu-l pierde
+        set_head(config.DB_PATH, j3)
+        jp.write_bytes(j3)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("R5-H1: the live marker's gap blocks the next restore's volume proof (J_v reaches everything)",
+              info.get("erasure_proof") == "none", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…and its apply keeps the gap", cont.get("state") == "unproven"
+              and cont.get("unverified") == {did: 3}, cont)
+        # pur: J_v la acelaşi n ca obiectul neverificabil şi o altă destinaţie autentică la acelaşi n
+        live = er.Live("same", er.parse(j2, K, INST).head)
+        other = er.DestResult("sftp:u@h:22/other", True, er.parse(j3, K, INST), j3)
+        d = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, j_v=j3, live=live,
+                              dest_results=[other, er.DestResult(did, False, error="unverifiable", unverified=3)],
+                              required_dests={other.id, did})
+        check("R5-H1: J_v and another destination at n=3 do not cover an unverifiable n=3 → no proof",
+              d.proof == "none" and d.unverified == {did: 3} and d.known.get(did) == 3 and did in d.required, d)
+        d = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, j_v=j3, live=live,
+                              staged=er.Terms(unverified={did: 3}))
+        check("R5-H1: a gap kept by the backup's own marker blocks the volume proof too", d.proof == "none", d)
+        _, proven, _ = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j1, live_journal=j3,
+                                          threshold=live.head, live_ok=True, unverified={did: 3})
+        _, proven0, _ = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j1, live_journal=j3,
+                                           threshold=live.head, live_ok=True)
+        check("R5-H1: reconcile_apply never proves with a gap (it does without)", proven is False and proven0 is True)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
+async def g_r5h1_prove(st):
+    print("== R5-H1: the janitor lifts the restore's gap only once that destination is readable ==")
+    cur = journal_path().read_bytes()
+    p = er.parse(cur, K, INST)
+    n = p.n
+    d = FakeDest(R5H1_MARKER.get("required", ["sftp:u@h:22/r5h1"])[0])
+    d.objs[er.object_name(INST, n)] = cur
+    victim = bytes([0x5a] * 16)
+    newer = _extend(cur, victim)
+    d.objs[er.object_name(INST, n + 1)] = newer[:-1] + bytes([newer[-1] ^ 1])   # n+1 neautentic
+    DESTS[:] = [d]
+    # markerul exact în forma scrisă de apply (g_r5h1_restore), mutat pe capul acestui volum
+    mark = {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+            "known": {d.id: n + 1}, "required": [d.id], "unverified": {d.id: n + 1}}
+    check("the marker shape is the one the apply wrote", set(R5H1_MARKER) <= set(mark) | {"overflow"}
+          and "unverified" in R5H1_MARKER, R5H1_MARKER)
+    await set_marker(st, mark)
+    check("R5-H1: the gap is an unreached head: a new local erasure is refused (behind)", er._behind())
+    check("R5-H1: the destination still shows the unverifiable n+1 → try_prove keeps the quarantine",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+                          "unverified": {d.id: n + 1}})
+    del d.objs[er.object_name(INST, n + 1)]
+    check("R5-H1: a marker gap alone (not in known/required) is still an obligation: the object removed, "
+          "the destination at n proves nothing", await er.try_prove(st) is False and er.continuity() is not None)
+    await set_marker(st, mark)
+    d.objs[er.object_name(INST, n + 1)] = newer                                  # copia autentică
+    ok = await er.try_prove(st)
+    check("R5-H1: the destination fixed (authentic n+1) → try_prove lifts and adopts its tombstone",
+          ok and er.continuity() is None and victim.hex() in st.tombstoned
+          and er.parse(journal_path().read_bytes(), K, INST).n == n + 1, (ok, er.continuity()))
+    DESTS[:] = []
+
+
 def g_live_bad_restore():
     print("== recheck 6678938: a restore over an unreadable live erasure state keeps the live intents ==")
     saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
@@ -1711,8 +1872,32 @@ async def g_r4_fetch():
         check(f"[{tag}] an older damaged object below an authentic n=3 is covered → n=3 proves",
               r.ok and r.parsed is not None and r.parsed.n == 3, r)
         r = await one({er.object_name(INST, 3, "aa11bb22"): j3, er.object_name(INST, 3, "cc33dd44"): j3[:-1] + bytes([j3[-1] ^ 1])}, cf)
-        check(f"[{tag}] a damaged copy at the SAME n as an authentic one is covered → n=3 proves",
-              r.ok and r.parsed is not None and r.parsed.n == 3, r)
+        # R5-M1: egalitatea numerică nu e acelaşi lanţ — o variantă defectă la acelaşi n e un gol
+        check(f"[{tag}] R5-M1: a damaged copy at the SAME n as an authentic one is a gap → unverifiable",
+              not r.ok and r.error == "unverifiable" and r.unverified == 3, r)
+        j3b = _extend(j2, bytes([0x77] * 16))           # altă ramură la n=3
+        r = await one({er.object_name(INST, 3, "aa11bb22"): j3, er.object_name(INST, 3, "cc33dd44"): j3b}, cf)
+        check(f"[{tag}] R5-M1: two authentic objects at the same n on different branches → conflict",
+              not r.ok and r.error == "conflict", r)
+        r = await one({er.object_name(INST, 3, "cc33dd44"): j3b, er.object_name(INST, 3, "aa11bb22"): j3}, cf)
+        check(f"[{tag}] R5-M1: …whichever variant sorts first", not r.ok and r.error == "conflict", r)
+        j4 = _extend(j3, bytes([0x44] * 16))
+        torn = j3b + b"\x00" * 40                        # prefix autentic (altă ramură) + coadă stricată
+        r = await one({er.object_name(INST, 4): j4, er.object_name(INST, 4, "dd44ee55"): torn}, cf)
+        check(f"[{tag}] R5-M1: a damaged object whose authentic prefix is on another branch, next to a "
+              "full journal of that n → conflict, never covered", not r.ok and r.error == "conflict", r)
+        r = await one({er.object_name(INST, 4): j4, er.object_name(INST, 2, "dd44ee55"): j3b[:er.prefix_len(2)] + b"zz"}, cf)
+        check(f"[{tag}] R5-M1: a damaged older object whose authentic prefix is on the chain → covered (n=4)",
+              r.ok and r.parsed is not None and r.parsed.n == 4, r)
+        many = {er.object_name(INST, 3, "%08x" % i): j3 for i in range(er.FETCH_MAX_OBJECTS + 1)}
+        many.update({er.object_name(INST, 2): j2})
+        r = await one(many, cf)
+        if cf is None or cf >= 3:
+            check(f"[{tag}] R5-M1: more variants of the head than the budget reads → a gap (unverifiable n=3)",
+                  not r.ok and r.error == "unverifiable" and r.unverified == 3, r)
+        else:
+            check(f"[{tag}] R5-M1: every variant above the restore is read → identical copies prove n=3",
+                  r.ok and r.parsed is not None and r.parsed.n == 3, r)
     # decide_restore: o destinaţie cu parsed n=0 (chiar dacă cineva o construieşte) nu dovedeşte
     p0 = er.parse(er.header(INST), K, INST)
     dec = er.decide_restore(k_erase=K, inst=INST, tracked=True,
@@ -2132,6 +2317,7 @@ async def main():
     g_recheck_pure()
     g_rh1_consecutive()
     g_r2m2_restore()
+    g_r5h1_restore()
     g_live_bad_restore()
     await g_r4_fetch()
     config.ensure_dirs()
@@ -2159,6 +2345,7 @@ async def main():
         await g_prove_race(st, host_id)
         await g_behind(st, host_id)
         await g_retire(st, c, uid, host_id)
+        await g_r5h1_prove(st)
         st = await g_rh2(st, c, uid, host_id)
     finally:
         await txhub.shutdown()

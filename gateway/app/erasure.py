@@ -75,6 +75,9 @@ ATTEST_INTERVAL = 30.0
 ATTEST_BACKOFF_MAX = 1800.0
 PROVE_INTERVAL = 600.0
 FETCH_MAX_OBJECTS = 4                            # câte obiecte (cele mai noi) se încearcă per destinaţie
+CLEANUP_BACKOFF = 30.0                           # R5-L1: prima reîncercare a curăţării (s), apoi dublată
+CLEANUP_BACKOFF_MAX = 3600.0
+CLEANUP_ALARM_AFTER = 3                          # eşecuri consecutive pe un sid → alarmă
 PROVE_MAX_OBJECTS = 64                           # try_prove: toate obiectele de după restore, cel mult atâtea
 REVERIFY_INTERVAL = 3600.0                       # un read-back vechi nu dovedeşte că obiectul mai există azi
 KNOWN_MAX = 64                                   # destinaţii ţinute în pragurile unui restore
@@ -228,12 +231,15 @@ def merge_threshold(*heads):
 class Terms:
     """What a continuity marker obliges a later proof to reach (R-H1/R-M2): the committed
     threshold, the known per-destination heads, the destinations mandatory at the restore, whether
-    the known heads overflowed KNOWN_MAX (then nothing proves), and n of the restore."""
+    the known heads overflowed KNOWN_MAX (then nothing proves), and n of the restore. R5-H1:
+    `unverified` = {destination: n} of a newer object a restore saw there and could not
+    authenticate (also folded into `known` and `required`): while it is kept, no volume proof."""
     threshold: Head = EMPTY_HEAD
     known: dict = field(default_factory=dict)
     required: tuple = ()
     overflow: bool = False
     n: int = 0
+    unverified: dict = field(default_factory=dict)
 
 
 def terms_of(cont):
@@ -245,9 +251,10 @@ def terms_of(cont):
     req = tuple(required_from_json(cont.get("required", [])))
     ovf = cont.get("overflow", False)
     r_n = cont.get("n", 0)
+    unv = known_from_json(cont.get("unverified", {}))
     if type(ovf) is not bool or type(r_n) is not int or r_n < 0:
         raise JournalError("bad-state", "continuity")
-    return Terms(t, known, req, ovf, r_n)
+    return Terms(t, known, req, ovf, r_n, unv)
 
 
 def marker_terms_in(db_path):
@@ -288,6 +295,7 @@ class Live:
     attested: dict = field(default_factory=dict)
     required: frozenset = frozenset()
     overflow: bool = False
+    unverified: dict = field(default_factory=dict)      # R5-H1: din markerul viu
 
 
 def live_state(db_path, live_inst, inst):
@@ -307,7 +315,8 @@ def live_state(db_path, live_inst, inst):
     known = {d: v["n"] for d, v in att.items()
              if type(d) is str and isinstance(v, dict) and type(v.get("n")) is int and v["n"] >= 0}
     return Live("same", merge_threshold(head, terms.threshold), merge_known(known, terms.known),
-                frozenset(terms.required), terms.overflow or known_overflow(known, terms.known))
+                frozenset(terms.required), terms.overflow or known_overflow(known, terms.known),
+                dict(terms.unverified))
 
 
 @dataclass
@@ -544,6 +553,7 @@ class _State:
     damaged: Parsed = None         # R2-H1: prefixul autentic citit la un boot cu jurnal stricat (sau None)
     head_known: bool = True        # R2-H1: capul comis s-a putut citi din DB la boot
     cancelled: set = field(default_factory=set)       # R3-M1: sid-uri cu intenţia anulată în zbor
+    cleanup: dict = field(default_factory=dict)       # R5-L1: sid → {tries, next}: curăţare fizică de reluat
     booted: bool = False
     quarantine_pass: bool = False
     task: object = None
@@ -1070,15 +1080,14 @@ async def resume_intents(st=None, *, clock=time.time):
                 else:
                     # ROLLBACK confirmat (niciun rând, nicio intrare): ştergerea n-a avut loc
                     st.tombstoned.discard(sid)
+                if erased:
+                    # R5-L1: sarcina de curăţare devine explicită ÎNAINTE ca sid-ul să iasă din
+                    # `cancelled` (fără await între ele): o eroare de I/O nu o mai poate pierde
+                    s.cleanup.setdefault(sid, {"tries": 0, "next": 0.0})
                 s.cancelled.discard(sid)
-            if erased:
-                # R4-M1: curăţarea fizică a lui erase, şi când pasul DB a fost comis de cererea
-                # anulată (intrare prezentă, intenţie absentă) sau re-aplicat aici: toate generaţiile
-                # `retired` ale sid-ului, după barieră, prin calea idempotentă care respectă pin-urile
-                gens = await st.read(lambda c, sid=sid: c.execute(
-                    "SELECT gen_id, kind FROM tx_files WHERE sid=? AND state='retired'", (sid,)).fetchall())
-                for hexid, kind in gens:
-                    await st.retire(sid, kind, hexid)
+    # R4-M1: curăţarea fizică a lui erase (pasul DB comis de cererea anulată sau re-aplicat aici),
+    # după barieră; R5-L1: reîncercată de janitor cu backoff până reuşeşte
+    await run_cleanup(st, clock=clock)
     async with st.barrier:
         if s.uncertain not in _RESUMABLE or s.cancelled:
             return False
@@ -1088,6 +1097,41 @@ async def resume_intents(st=None, *, clock=time.time):
             s.head_db = head
         s.uncertain = ""
     return True
+
+
+async def run_cleanup(st=None, *, clock=time.time):
+    """R4-M1 / R5-L1: unlink every `retired` generation of the sids an erase left to clean (a
+    cancelled request finished by `resume_intents`), through `st.retire` (idempotent, defers a
+    pinned generation). A sid stays in `s.cleanup` until its pass completes; an error (EIO, a full
+    disk) keeps it with an exponential backoff, and from CLEANUP_ALARM_AFTER failures on it raises
+    the `transcript.erasureCleanup` alarm every time. The RK is already destroyed: this is only
+    the files. → the sids still pending."""
+    s = _s
+    st = st or s.store
+    if st is None:
+        return sorted(s.cleanup)
+    now = clock()
+    for sid in sorted(s.cleanup):
+        job = s.cleanup.get(sid)
+        if job is None or job["next"] > now:
+            continue
+        try:
+            gens = await st.read(lambda c, sid=sid: c.execute(
+                "SELECT gen_id, kind FROM tx_files WHERE sid=? AND state='retired'", (sid,)).fetchall())
+            for hexid, kind in gens:
+                await st.retire(sid, kind, hexid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                   # noqa: BLE001 — rămâne de făcut, cu backoff
+            job["tries"] += 1
+            job["next"] = clock() + min(CLEANUP_BACKOFF * (2 ** (job["tries"] - 1)), CLEANUP_BACKOFF_MAX)
+            log.warning("erasure cleanup of %s failed (%d): %s", sid, job["tries"], type(e).__name__)
+            if job["tries"] >= CLEANUP_ALARM_AFTER:
+                st.alarm("transcript.erasureCleanup", "%s: the erased recording's files could not be "
+                         "removed after %d attempts (%s)" % (sid, job["tries"], type(e).__name__))
+            continue
+        s.cleanup.pop(sid, None)
+    return sorted(s.cleanup)
 
 
 def _ready_or_raise(st, sid):
@@ -1285,7 +1329,13 @@ async def fetch_head(d, k_erase, inst, check_from=None):
     proves nothing, not even n=0. R4-H2: an object that cannot be authenticated (bad header, bad
     MAC, partial, a name whose n does not match its entries) and is named above the best authentic
     one is a GAP, never skipped in favour of an older journal: `Unverifiable` (the destination
-    answered, but proves nothing). One at or below the authentic head is covered by it."""
+    answered, but proves nothing). One strictly below the authentic head is covered by it.
+
+    R5-M1: numeric equality is not the same chain. Every object named at the best authentic n is
+    read (all variants; one left unread for the budget is a gap → `Unverifiable`), two authentic
+    ones that differ → ErasureConflict, and a damaged one AT that n is a gap too (`Unverifiable`).
+    The authentic prefix of a damaged object is never a proof, but it is checked against the chain:
+    a prefix on another branch → ErasureConflict (it may hold a tombstone or a fork)."""
     names = []
     for n in await d.list():
         p = parse_object_name(n)
@@ -1300,8 +1350,14 @@ async def fetch_head(d, k_erase, inst, check_from=None):
             raise JournalError("too-many", "too many journal objects to check")
         pick = above + [x for x in names if x[0] <= check_from][:FETCH_MAX_OBJECTS]
     got = []
+    prefixes = []                                 # R5-M1: prefixe autentice ale obiectelor defecte
     failed = 0                                    # cel mai mare n (din nume sau conţinut) neverificabil
+    top_n = None                                  # n-ul celui mai nou obiect autentic (check_from=None)
+    read = set()
     for _n, name in pick:
+        if check_from is None and top_n is not None and _n < top_n:
+            break                                 # toate variantele lui top_n au fost citite
+        read.add(name)
         try:
             raw = bytes(await d.get(name))
             p = parse(raw, k_erase, inst)
@@ -1310,15 +1366,25 @@ async def fetch_head(d, k_erase, inst, check_from=None):
             continue
         if p.bad or p.n != _n:
             failed = max(failed, _n, p.n)         # neautentic sau nume minţit: nu e dovadă, e un gol
+            if p.n:
+                prefixes.append((name, p))        # dar intrările lui autentice se compară cu lanţul
             continue
         if p.n == 0:
             continue                              # R4-H1: doar antetul (fără MAC) — nicio dovadă
         got.append((name, p, raw[:p.valid_len]))
-        if check_from is None:
-            break                                 # cel mai nou autentic; ce era deasupra e în `failed`
+        if top_n is None:
+            top_n = _n
     best = _on_one_chain([(name, p) for name, p, _raw in got]) if got else None
-    if failed > (best[1].n if best else 0):
-        raise Unverifiable(failed)
+    if prefixes:
+        # R5-M1: un prefix autentic pe altă ramură = fork (poate ţine un tombstone), nu „acoperit"
+        _on_one_chain([(name, p) for name, p, _raw in got] + prefixes)
+    unread = [x[0] for x in names if best is not None and x[0] >= best[1].n and x[1] not in read]
+    if unread:
+        # R5-M1: o variantă a aceluiaşi n (sau mai nouă) necitită din buget poate fi altă ramură:
+        # e un gol ca un obiect neverificabil (restore-ul îl păstrează), niciodată o alegere
+        failed = max(failed, max(unread))
+    if failed and failed >= (best[1].n if best else 0):
+        raise Unverifiable(failed)                # R5-M1: un obiect defect la acelaşi n e tot un gol
     if best is None:
         return None
     return next((p, raw) for name, p, raw in got if name == best[0])
@@ -1394,11 +1460,13 @@ class Decision:
     short: bool = False             # sursele NU ating pragul cunoscut (H1): fără dovadă
     required: list = field(default_factory=list)    # R-M2: destinaţiile obligatorii, păstrate în marker
     overflow: bool = False          # R-M2: prea multe capete cunoscute: nicio dovadă
+    unverified: dict = field(default_factory=dict)  # R5-H1: destinaţie → n al unui obiect neverificabil
 
     def summary(self, since):
         return {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n,
                 "threshold": self.threshold.to_json(), "known": dict(self.known),
-                "required": list(self.required), "overflow": bool(self.overflow)}
+                "required": list(self.required), "overflow": bool(self.overflow),
+                "unverified": dict(self.unverified)}
 
 
 def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_results=(),
@@ -1420,15 +1488,25 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     R-H1: `staged` = the `Terms` of the backup's own continuity marker (a dataset backed up while
     in quarantine): its threshold, known heads and mandatory destinations are merged in, so a
     re-import never lowers what an earlier restore must still reach. R-M2: the mandatory set is
-    kept (`required`), and an overflow of known heads proves nothing."""
+    kept (`required`), and an overflow of known heads proves nothing.
+    R5-H1: a destination holding a newer object that cannot be authenticated (a fresh result with
+    error `unverifiable`, or one kept by a marker as `unverified`) may hold an erasure we do not
+    have: its n is folded into the known heads and the destination becomes mandatory (a later
+    proof needs an authentic copy there reaching it), the gap is kept in `unverified`, and while
+    it is kept the VOLUME never proves (equal numbers are not the same chain). A fresh
+    unverifiable result refuses every proof."""
     live = live if live is not None else Live("none")
     staged = staged if staged is not None else Terms()
     same = live.state == "same"
-    known = merge_known(known_attested, live.attested if same else None, staged.known)
+    fresh_unver = {r.id: r.unverified for r in dest_results
+                   if not r.ok and r.error == "unverifiable" and type(r.unverified) is int and r.unverified > 0}
+    unver = merge_known(staged.unverified, live.unverified if same else None, fresh_unver)
+    known = merge_known(known_attested, live.attested if same else None, staged.known, unver)
     overflow = (staged.overflow or (same and live.overflow)
-                or known_overflow(known_attested, live.attested if same else None, staged.known))
+                or known_overflow(known_attested, live.attested if same else None, staged.known, unver))
     t = merge_threshold(live.head if same else None, staged.threshold)
-    required_all = set(required_dests) | set(staged.required) | (set(live.required) if same else set())
+    required_all = (set(required_dests) | set(staged.required) | (set(live.required) if same else set())
+                    | set(unver))
     cands = []
     pb = None
     if j_b is not None:
@@ -1487,18 +1565,18 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     # R2-M2: un cap off-host cunoscut (şi al unei destinaţii retrase) peste pragul local e tot o
     # obligaţie: J_v dovedeşte doar dacă îl atinge şi pe el
     top = max([t.n] + list(known.values()))
-    if not met:
-        proof = "none"
-    elif live.state == "same" and pv is not None and reaches(pv, t) and pv.n >= top:
+    if not met or any(r.error == "unverifiable" for r in dest_results):
+        proof = "none"                             # R5-H1: un gol observat acum nu se dovedeşte
+    elif live.state == "same" and pv is not None and reaches(pv, t) and pv.n >= top and not unver:
         proof = "volume"
     elif req and all(dest_ok(d) for d in req):
         proof = "destinations"
     else:
         proof = "none"
-    tracked_any = tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0
+    tracked_any = tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0 or bool(fresh_unver)
     state = "not-tracked" if not tracked_any else ("proven" if proof != "none" else "unproven")
     return Decision(state, proof, star_bytes if tracked_any else None, head, rolled, unreachable,
-                    t, merge_known(known, observed), not met, sorted(required_all), overflow)
+                    t, merge_known(known, observed), not met, sorted(required_all), overflow, unver)
 
 
 def journal_reaches(raw, k_erase, inst, t):
@@ -1512,7 +1590,7 @@ def journal_reaches(raw, k_erase, inst, t):
 
 
 def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, stage_summary=None,
-                    threshold=EMPTY_HEAD, live_ok=False, known=None):
+                    threshold=EMPTY_HEAD, live_ok=False, known=None, unverified=None):
     """The same reconciliation again under the boot lock, immediately before apply: the staged J*
     and the live journal must lie on one chain; the longer one is published. Returns (journal bytes
     to publish or None, proven, head).
@@ -1522,8 +1600,14 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
     and the live database's now); J_v must hold it and so must the journal published. A proof by
     destinations at stage is not re-verifiable here: it never lifts the quarantine (the janitor's
     `try_prove` re-fetches them). R2-M2: `known` = the per-destination heads kept (a retired
-    destination's too): J_v and the published journal must reach the highest of them as well."""
-    top = max([threshold.n] + list((known or {}).values()))
+    destination's too): J_v and the published journal must reach the highest of them as well.
+    R5-H1: `unverified` = the gaps kept from the stage, the flag or the live marker (a destination
+    holding a newer object nobody could authenticate): while there is one, nothing is proven here
+    (the quarantine stays, and only the janitor's `try_prove` lifts it once that destination
+    answers with an authentic journal reaching it)."""
+    unverified = merge_known(unverified)
+    known = merge_known(known, unverified)
+    top = max([threshold.n] + list(known.values()))
     cands = []
     if staged_journal is not None:
         ps = parse(staged_journal, k_erase, inst)
@@ -1551,6 +1635,8 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
               and pv.n >= top and final.n >= top)
     if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0 and top == 0:
         proven = True                              # nimic urmărit nicăieri: nimic de dovedit
+    if unverified:
+        proven = False                             # R5-H1: un gol observat nu e acoperit de J_v
     return out, proven, head
 
 
@@ -1624,7 +1710,7 @@ def _quarantine_cohort_sync(c, reason, now, plain=()):
 
 
 def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=None, transcripts_dir=None,
-                       required=None, overflow=False):
+                       required=None, overflow=False, unverified=None):
     """Restore without proof (apply, after the DB copy): the WHOLE cohort quarantined with reason
     `continuity` (H2): every readable descriptor (→ `quarantined`), and every (sid, kind) still in
     plaintext — a migration row that owns a file, or a 3.7-named file under `transcripts_dir` with
@@ -1648,6 +1734,8 @@ def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=Non
                 mark["required"] = required_from_json(list(required))
             if overflow:
                 mark["overflow"] = True
+            if unverified:
+                mark["unverified"] = known_from_json(unverified)   # R5-H1: golul rămâne în marker
             _set_json(con, "continuity", mark)
             con.execute("COMMIT")
         except BaseException:
@@ -1776,7 +1864,7 @@ def _behind():
     terms = _marker_terms(s.continuity)
     if terms is None or s.parsed is None:
         return True
-    top = max([terms.threshold.n] + list(terms.known.values()))
+    top = max([terms.threshold.n] + list(terms.known.values()) + list(terms.unverified.values()))
     return not reaches(s.parsed, terms.threshold) or s.parsed.n < top
 
 
@@ -1798,7 +1886,9 @@ async def try_prove(st=None):
     terms = _marker_terms(cont)
     if terms is None or terms.overflow:
         return False                               # R-M2: obligaţii pierdute = nicio dovadă
-    t, known, r_n = terms.threshold, terms.known, terms.n
+    # R5-H1: golul păstrat de restore e o obligaţie: destinaţia lui trebuie să răspundă acum cu un
+    # jurnal autentic care îl atinge (fetch-ul citeşte tot ce e peste r_n; obiectul defect → nicio dovadă)
+    t, known, r_n = terms.threshold, merge_known(terms.known, terms.unverified), terms.n
     dests = await destinations()
     if not dests:
         return False
@@ -1814,7 +1904,8 @@ async def try_prove(st=None):
                              # R-M2: destinaţiile obligatorii la restore rămân obligatorii chiar
                              # dacă au dispărut din configurare (nu le putem citi → nicio dovadă)
                              dest_results=results,
-                             required_dests=set(d.id for d in dests) | set(terms.required),
+                             required_dests=(set(d.id for d in dests) | set(terms.required)
+                                             | set(terms.unverified)),
                              known_attested=known, live=Live("same", t, {}), mode="prove")
     except ErasureConflict as e:
         s.conflict = str(e)
@@ -2051,7 +2142,7 @@ def _known_top():
         terms = _marker_terms(s.continuity)
         if terms is None:
             return None
-        top = max([top, terms.threshold.n] + list(terms.known.values()))
+        top = max([top, terms.threshold.n] + list(terms.known.values()) + list(terms.unverified.values()))
     return top
 
 
@@ -2075,7 +2166,7 @@ def _required_dest_ids():
     if s.continuity and s.continuity.get("state") == "unproven":
         terms = _marker_terms(s.continuity)
         if terms is not None:
-            return set(terms.required)
+            return set(terms.required) | set(terms.unverified)
     return set()
 
 
@@ -2256,7 +2347,15 @@ async def retire_destination(st, dest_id, *, audit_row):
         # aceeaşi secţiune critică cu try_prove (CAS pe `s.continuity`): o dovadă în zbor care a
         # citit markerul vechi nu mai adoptă nimic; st.txn ar re-lua bariera (asyncio.Lock nu e
         # reentrant), deci tranzacţia direct pe firul DB, ca în try_prove
-        known_head = terms.known.get(dest_id, 0)
+        known_head = max(terms.known.get(dest_id, 0), terms.unverified.get(dest_id, 0))
+        if dest_id in terms.unverified:
+            # R5-H1: golul unei destinaţii retrase rămâne obligaţie (cap cunoscut), dar nu o mai cere
+            new["known"] = merge_known(terms.known, {dest_id: known_head})
+            unv = {d: n for d, n in terms.unverified.items() if d != dest_id}
+            if unv:
+                new["unverified"] = unv
+            else:
+                new.pop("unverified", None)
 
         def fn(c):
             now_cfg = _configured_in_txn(c)
@@ -2316,6 +2415,8 @@ async def _loop(st):
         try:
             if _s.uncertain in _RESUMABLE:
                 await resume_intents(st)               # R3-M1: imediat, nu la următorul boot
+            if _s.cleanup:
+                await run_cleanup(st)                  # R5-L1: curăţarea rămasă, cu backoff
             await attest_once(st)
             if _s.continuity and time.time() - last_prove > PROVE_INTERVAL:
                 last_prove = time.time()

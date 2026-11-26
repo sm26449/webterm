@@ -2057,7 +2057,9 @@ committed head is never repaired: it is the quarantine case below.
    served again), re-reads the committed head and lifts the state; if the process dies first, the
    boot completes the intent. Whenever the sid ends erased, the janitor also unlinks the sid's
    `retired` generations through the pin-respecting `retire` path, as erase does (recheck 1c4bd4a,
-   R4-M1), including when the cancelled request's step 2 had already committed. The journal state (damaged, uncertain, behind) is re-checked under
+   R4-M1), including when the cancelled request's step 2 had already committed. That cleanup is
+   an explicit task (recheck 46097a2, R5-L1): an I/O error keeps it, retried with a backoff, and
+   repeated failures raise an alarm; the RK is already destroyed either way. The journal state (damaged, uncertain, behind) is re-checked under
    the barrier before step 0, not only on entry.
 1. Same barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
    with its own time budget, 5 s, beyond → the route answers 503 and the boot decides from the
@@ -2157,7 +2159,9 @@ authentic tombstone of the sid anywhere → `409 transcript.recoveryTombstoned`;
 an object named above its best authentic journal that cannot be authenticated (bad header or MAC,
 partial, a name whose n does not match its entries) → `409 transcript.recoveryGap` (recheck 1c4bd4a,
 R4-H2: that object may hold the tombstone; the fetch never falls back to the older copy, while a
-damaged object at or below the authentic head is covered by it); no destination with an authentic
+damaged object strictly below the authentic head is covered by it — one AT that n is a gap too, and
+two authentic objects at the same n, or a damaged object whose authentic prefix lies on another
+branch, are a conflict, recheck 46097a2 R5-M1); no destination with an authentic
 journal → `409 transcript.recoveryNoJournal` (an object with zero entries is a bare header without a
 MAC and is never a journal, R4-H1); finally at least one destination's chain
 must reach every required head (n and MAC) and the highest head known anywhere (attested heads, the
@@ -3006,7 +3010,14 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   normal Owner flow on the converted descriptor; release lifts only the kinds it releases.
 - **Destinations (M1, H3).** A destination proves only with an authentic head (an empty listing
   never does, nor an object with zero entries — R4-H1 — nor a destination holding a newer object
-  that cannot be authenticated — R4-H2) that reaches max(its known head, the threshold), at stage at least n = 1. Apply never
+  that cannot be authenticated — R4-H2) that reaches max(its known head, the threshold), at stage at least n = 1.
+  *Gap (R5-H1).* A newer object a destination holds and nobody could authenticate may hold an
+  erasure we do not have: the restore keeps it as `unverified` {destination: n} through the stage
+  summary, the flag and the continuity marker (merged with the live marker's), folds n into the
+  known heads and makes the destination mandatory. While a gap is kept, the volume never proves,
+  at stage or at apply (first or resumed), even with J_v reaching n (equal numbers are not the same
+  chain); only `try_prove` lifts it, once that destination answers with an authentic journal
+  reaching n. An Owner retire of that destination keeps n as a known head. Apply never
   lifts a quarantine on a stage proof by destinations (it cannot re-fetch them at boot): it writes
   the marker and the janitor's `try_prove` re-fetches live. `try_prove` uses only what the marker
   knew at the restore (our own later uploads prove nothing: a destination nobody knew to hold a
@@ -3121,6 +3132,20 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   the way out; the per-destination rule is stricter than "covered by another destination's chain",
   on purpose. *R4-M1:* `resume_intents` unlinks the sid's `retired` generations after the barrier
   (still under the lease) whenever it settles the sid as erased.
+- **Recheck (46097a2) fixes.** *R5-H1:* `Decision.unverified` / summary `unverified` → flag
+  `erasure_unverified` → marker `unverified` (`Terms.unverified`, `Live.unverified`);
+  `decide_restore` folds it into `known` and `required` and refuses `proof="volume"` while it is
+  not empty (any fresh `unverifiable` result refuses every proof); `reconcile_apply(unverified=)`
+  and `_erasure_apply_plan` never prove with one; `try_prove`, `_behind`, `_known_top` and
+  `_required_dest_ids` treat it as an obligation; `retire_destination` moves it into `known`.
+  *R5-M1:* `fetch_head` reads every variant of the best authentic n (an unread one for the budget is a
+  gap, `Unverifiable`), checks the authentic prefixes of damaged objects against the chain
+  (`ErasureConflict`), and treats a damaged object at the best n as `Unverifiable`. *R5-L1:*
+  `_s.cleanup` {sid: tries, next} is set under the barrier before the sid leaves `cancelled`;
+  `run_cleanup` (after `resume_intents`, and on every janitor pass) retries with backoff
+  (`CLEANUP_BACKOFF` doubling to `CLEANUP_BACKOFF_MAX`) and raises `transcript.erasureCleanup`
+  from `CLEANUP_ALARM_AFTER` failures. A restart loses the task; the boot's retired-generation
+  collection covers it then.
 
 ## Appendix: Test vectors (v1)
 
