@@ -35,6 +35,9 @@
 #   WEBTERM_UID                 uid:gid the app runs as (default 10001:10001)
 #   WEBTERM_APP_CONTAINER       the app container (default: the one that mounts the volume at /data)
 #   WEBTERM_BACKUP_PASSPHRASE   required for an encrypted archive (.wtbk, or .enc from a 3.7 backup.sh)
+#   TMPDIR                      where the private copy of step 1 goes (default /tmp; it needs the
+#                               archive's size free — a 3.8 .wtbk of any size is then read as a
+#                               stream, in bounded memory)
 #
 #   --verify (3.6.8): a restore TEST that changes nothing — the same checks as steps 1–2; the
 #   result is recorded for Settings → System health ("restore verified").
@@ -107,6 +110,18 @@ umask 077
 PRIV=$(mktemp -d)
 chmod 700 "$PRIV"
 PINNED="$PRIV/archive"
+# copia privată are mărimea arhivei (o arhivă host 3.8 poate avea zeci de GB): refuz devreme, cu
+# indicaţia TMPDIR, în loc de un ENOSPC la jumătatea copiei
+NEED=$(stat -L -c %s -- "$ARCHIVE") || { echo "cannot read $ARCHIVE" >&2; exit 1; }
+FREE=$(df -B1 --output=avail -- "$PRIV" 2>/dev/null | tail -n1 | tr -d ' ') || FREE=""
+case "$FREE" in
+  ''|*[!0-9]*) ;;
+  *) if [ "$FREE" -lt "$NEED" ]; then
+       echo "REFUSING: $PRIV has $((FREE >> 20)) MiB free; the private copy of '$SRC_NAME' needs $((NEED >> 20)) MiB." >&2
+       echo "          Point TMPDIR at a filesystem with room (TMPDIR=/var/tmp $0 …) — nothing was changed." >&2
+       exit 1
+     fi ;;
+esac
 case "$ARCHIVE" in
   *.enc)
     : "${WEBTERM_BACKUP_PASSPHRASE:?encrypted archive — set WEBTERM_BACKUP_PASSPHRASE}"
@@ -119,7 +134,8 @@ case "$ARCHIVE" in
 esac
 chmod 600 "$PINNED"
 SHA=$(sha256sum "$PINNED" | cut -d' ' -f1)
-if [ "$(head -c 5 "$PINNED")" = WTBK1 ]; then
+MAGIC5=$(head -c 5 "$PINNED")
+if [ "$MAGIC5" = WTBK1 ] || [ "$MAGIC5" = WTBK2 ]; then
   : "${WEBTERM_BACKUP_PASSPHRASE:?encrypted archive (.wtbk) — set WEBTERM_BACKUP_PASSPHRASE}"
 elif [ "$(od -An -tx1 -N2 "$PINNED" | tr -d ' \n')" = 1f8b ]; then
   :   # un tar.gz 3.7: îl verifică doar codul gateway-ului (pasul 2)

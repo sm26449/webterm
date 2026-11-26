@@ -57,6 +57,7 @@ from app import keyring as kr  # noqa: E402
 from app import migration as mg  # noqa: E402
 from app import snapshot as wts  # noqa: E402
 from app import txstore as ts  # noqa: E402
+from app import wtbk  # noqa: E402
 
 PASS = "parola-de-test-lunga"
 INST = bytes(range(0xa0, 0xb0))
@@ -189,6 +190,13 @@ def descs(st, sid):
     for kind, blob, version in sql("SELECT kind, blob, version FROM tx_descriptors WHERE sid=?", sid):
         out[kind] = st.decode((blob, version), sid, kind, bytes(env))
     return out
+
+
+def live_blob(hk):
+    """`hostops backup --live` through the socket: the streamed WTBK2 it writes to stdout."""
+    out = io.BytesIO()
+    hostops._live_via_socket(hk, PASS, True, out)
+    return out.getvalue()
 
 
 def archive(blob, hk):
@@ -480,11 +488,15 @@ async def g_socket(st, hk):
     check("created at boot: .ctl 0700, backup.sock 0600, System health ok", ok and mode == 0o600 and dmode == 0o700
           and ctlsock.health() is None, (oct(mode), oct(dmode)))
     # calea fericită, prin hostops (acelaşi consumator ca backup.sh)
-    blob = await asyncio.to_thread(hostops._live_via_socket, hk, PASS, True)
+    blob = await asyncio.to_thread(live_blob, hk)
     mem, man = archive(blob, hk)
-    check("hostops --live through the socket: a verified WTBK1(WTS1) with the recordings included",
-          gen_members(mem) and {v[0] for v in recs_of(man).values()} >= {"included"} and spool_files() == [])
+    check("hostops --live through the socket: a verified WTBK2(WTS1) with the recordings included",
+          blob[:5] == b"WTBK2" and gen_members(mem) and {v[0] for v in recs_of(man).values()} >= {"included"} and spool_files() == [])
     check("…and the archive restores (stage check)", backup.verify_restorable(blob, PASS, keys=hk)["restorable"])
+    r = wtbk.Reader(io.BytesIO(blob), PASS)
+    sv = backup.verify_host_stream(r, keys=hk, max_plaintext=r.plain_len, unpacked_len=r.unpacked_len)
+    check("…read as a stream (restore.sh): the unpacked size the gateway announced is exact",
+          sv["restorable"] and sv["unpacked_len"] == r.unpacked_len and r.done)
     # peer străin (simulat: verificarea SO_PEERCRED refuză uid-ul nostru)
     check("peer rule: uid 0 and the gateway uid only", ctlsock.peer_ok(0) and ctlsock.peer_ok(os.geteuid())
           and not ctlsock.peer_ok(65534))
@@ -652,12 +664,12 @@ async def g_socket(st, hk):
     await ctlsock.stop()
     check("stop: the socket is gone", not os.path.lexists(path))
     # socket fără răspuns → hostops refuză
-    refused = await asyncio.to_thread(raises, lambda: hostops._live_via_socket(hk, PASS, True), hostops.Refused)
+    refused = await asyncio.to_thread(raises, lambda: live_blob(hk), hostops.Refused)
     check("no socket while the gateway runs → hostops backup --live refused (never a direct read)", refused)
     dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     dead.bind(path)                                     # legat, fără listen: nimeni nu răspunde
     try:
-        refused = await asyncio.to_thread(raises, lambda: hostops._live_via_socket(hk, PASS, True), hostops.Refused)
+        refused = await asyncio.to_thread(raises, lambda: live_blob(hk), hostops.Refused)
     finally:
         dead.close()
         os.unlink(path)
@@ -732,7 +744,7 @@ async def g_workdir(st, hk):
     ok = await ctlsock.start()
     try:
         with system_tmp_full() as hits:
-            blob = await asyncio.to_thread(hostops._live_via_socket, hk, PASS, True)
+            blob = await asyncio.to_thread(live_blob, hk)
             name = await asyncio.to_thread(backup.run_scheduled_backup, True, hk)
             dl = await asyncio.to_thread(backup.make_encrypted, PASS, True, hk)
             v1 = await asyncio.to_thread(backup.verify_restorable, blob, PASS, keys=hk)
@@ -749,7 +761,7 @@ async def g_workdir(st, hk):
         backup._TarOut.finish = boom
         try:
             failed = await asyncio.to_thread(raises, lambda: backup.make_encrypted(PASS, True, hk), OSError)
-            live_failed = await asyncio.to_thread(raises, lambda: hostops._live_via_socket(hk, PASS, True),
+            live_failed = await asyncio.to_thread(raises, lambda: live_blob(hk),
                                                   hostops.Refused)
         finally:
             backup._TarOut.finish = orig

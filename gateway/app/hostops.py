@@ -4,16 +4,21 @@
 gateway), never with a shell `tar` or a hand-written swap (PR4 review, H2/H3/M5):
 
     python3 -m app.hostops backup [--live] [--no-transcripts]
-        → a protected volume's archive on stdout: WTBK1(portable WTS1), the passphrase from
-          WEBTERM_BACKUP_PASSPHRASE. Written by backup.py's protected writer (inventory through
-          fds, inode/nlink filters, signing-pair checks, self-verification). `--live`: run inside
+        → a protected volume's archive on stdout: WTBK2(portable WTS1) — the streamed passphrase
+          layer (wtbk.py, §12.10.1), the passphrase from WEBTERM_BACKUP_PASSPHRASE — in bounded
+          memory whatever the volume's size. Written by backup.py's protected writer (inventory
+          through fds, inode/nlink filters, signing-pair checks) into a private work file on the
+          volume, checked restorable, then wrapped. `--live`: run inside
           the running app (`docker exec`); the gateway holds `.lock`, so the capture takes the
           shared `.maint.lock` instead (never during a boot's restore / migration phase).
           With encrypted recordings (the flag, the socket or any of their artefacts), `--live`
           never reads the volume: the gateway takes the snapshot through its local control socket
-          `DATA_DIR/.ctl/backup.sock` (ctlsock.py, §12.11.3) and streams the verified WTS1 back;
-          no answer → refused (exit 3).
+          `DATA_DIR/.ctl/backup.sock` (ctlsock.py, §12.11.3) and streams the verified WTS1 back,
+          wrapped on the fly (its exact sizes come with the answer); no answer → refused (exit 3).
           Without `--live` the data directory's `.lock` must be free (the app is stopped).
+    python3 -m app.hostops estimate
+        → `estimate: N`, an upper bound (bytes, uncompressed) of the backup; backup.sh refuses
+          early when its destination has less free space.
     python3 -m app.hostops verify --sha256 HEX [--legacy-import]          (archive on stdin)
         → the gateway's full restore check (strict extractor, keyring, database) in a private
           scratch directory; the data volume is only read (no lock: the app may run).
@@ -23,7 +28,9 @@ gateway), never with a shell `tar` or a hand-written swap (PR4 review, H2/H3/M5)
           under its own lock, with the resumable journal. Never moves `.lock` or `master.key`.
 
 The archive on stdin must hash to `--sha256` (the digest the script took of its private, pinned
-copy): what was checked is what is staged. Legacy archives (a 3.7 tar.gz, already decrypted by
+copy): what was checked is what is staged. A WTBK2 is read as a stream (bounded memory): the
+digest is checked when the input ends, which is before the end of the archive is accepted, so
+before anything is published; WTBK1 and 3.7 archives are read whole (≤ 2 GiB, as before). Legacy archives (a 3.7 tar.gz, already decrypted by
 the script) go through the same public `backup` entry points.
 
 Exit codes (R-M1, stage-restore): 0 committed — the new flag is published and its directory
@@ -50,13 +57,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import backup, config, ctlsock, txstore
+from . import backup, config, ctlsock, txstore, wtbk
 from . import keyring as kr
 from . import keys
+from . import snapshot as wts
 
 EXIT_OK, EXIT_ERR, EXIT_REFUSED, EXIT_UNCERTAIN = 0, 1, 3, 4
 # antetul stratului cu parolă (backup.encrypt); un tar.gz începe cu magicul gzip
 WTBK_MAGIC = b"WTBK1"
+WTBK2_MAGIC = wtbk.MAGIC
 GZIP_MAGIC = b"\x1f\x8b"
 ENV_PASSPHRASE = "WEBTERM_BACKUP_PASSPHRASE"
 # aceeaşi limită ca plafonul de decomprimare al restore-ului: arhiva stă în memorie o dată
@@ -109,23 +118,97 @@ def _point_at(data_dir):
     config.DB_PATH = p / "webterm.db"
 
 
-def _read_stdin(expect):
-    buf = bytearray()
-    src = sys.stdin.buffer
-    while True:
-        chunk = src.read(1 << 20)
-        if not chunk:
-            break
-        buf += chunk
-        if len(buf) > STDIN_MAX:
-            raise Refused("the archive is larger than %d bytes — refused" % STDIN_MAX)
-    raw = bytes(buf)
-    digest = hashlib.sha256(raw).hexdigest()
-    if expect is not None and digest != expect:
-        # M5: arhiva verificată şi cea aplicată sunt aceeaşi copie fixată, octet cu octet
-        raise Refused("the archive is not the one that was checked (sha256 %s, expected %s) — "
-                      "refused" % (digest, expect))
-    return raw, digest
+class PinMismatch(ValueError):
+    """The input is not the archive the script pinned (M5)."""
+
+
+class _Pinned:
+    """stdin, hashed as it is read. When it ends, its SHA-256 must be `expect` (M5: what was
+    checked is what is staged): a WTBK2 reader reaches that end before it accepts the archive's
+    last chunk, so a different file is refused before anything is published. `peek` keeps the
+    first bytes for the format check (they are hashed once, when read)."""
+
+    def __init__(self, src, expect):
+        self._src = src
+        self._expect = expect
+        self._h = hashlib.sha256()
+        self._head = b""
+        self._eof = False
+        self.size = 0
+
+    def _pull(self, n):
+        b = self._src.read(n)
+        if b:
+            self._h.update(b)
+            self.size += len(b)
+        elif not self._eof:
+            self._eof = True
+            if self._expect is not None and self.digest != self._expect:
+                raise PinMismatch("the archive is not the one that was checked (sha256 %s, expected %s) — "
+                                  "refused" % (self.digest, self._expect))
+        return b
+
+    def peek(self, n):
+        while len(self._head) < n:
+            b = self._pull(n - len(self._head))
+            if not b:
+                break
+            self._head += b
+        return self._head[:n]
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            raise ValueError("unbounded read")
+        if self._head:
+            out, self._head = self._head[:n], self._head[n:]
+            return out
+        return self._pull(n)
+
+    def read_all(self, cap):
+        buf = bytearray()
+        while True:
+            b = self.read(1 << 20)
+            if not b:
+                return bytes(buf)
+            buf += b
+            if len(buf) > cap:
+                raise Refused("the archive is larger than %d bytes — refused (only a WTBK2 archive, "
+                              "written by this version's backup.sh, is read as a stream)" % cap)
+
+    @property
+    def digest(self):
+        return self._h.hexdigest()
+
+
+def _open_wtbk2(src):
+    """The WTBK2 layer over `src`: header and passphrase checked before any body byte is read."""
+    try:
+        return wtbk.Reader(src, _passphrase())
+    except (wtbk.WtbkError, PinMismatch) as e:
+        raise Refused("the archive cannot be opened: %s" % _refusal(e)) from None
+
+
+def _stream_route(inv, legacy_import):
+    """RC-M1 for a WTBK2: it carries a 3.8 snapshot only (content type WTS1 in its authenticated
+    header; the WTS1 reader checks the magic again), so the same policy as `_route` gives `wts`."""
+    try:
+        return backup.restore_route(wts.MAGIC, inv.kind == "protected", legacy_import)
+    except ValueError as e:
+        raise Refused("the archive is refused: %s" % _refusal(e)) from None
+
+
+def _need_space(path, need, what):
+    try:
+        free = backup.free_bytes(path)
+    except OSError as e:
+        raise Refused("the free space of the data volume cannot be read (%s) — refused" % e.strerror) from None
+    if free < need:
+        raise Refused("the data volume has %s free; %s needs at least %s — refused. Free some space, "
+                      "then run this again" % (_mib(free), what, _mib(need)))
+
+
+def _mib(n):
+    return "%d MiB" % (n >> 20)
 
 
 def _passphrase():
@@ -143,6 +226,8 @@ def _wrap_legacy(raw):
 
 
 def _archive_kind(raw):
+    if raw[:len(WTBK2_MAGIC)] == WTBK2_MAGIC:
+        return "wtbk2"
     if raw[:len(WTBK_MAGIC)] == WTBK_MAGIC:
         return "wtbk"
     if raw[:2] == GZIP_MAGIC:
@@ -222,25 +307,68 @@ def cmd_backup(args):
             # un restore pus în staging se aplică la boot: o captură acum ar salva starea de dinainte
             _say("note: a restore is staged on this volume and is applied at the next start of the app")
         hk, resolved = _open_keys(view, inv)
+        out = _HashedOut(sys.stdout.buffer)
         if lock is None and _needs_socket():
             # PR6c (§12.11.3): gateway-ul rulează şi ţine înregistrări criptate → snapshot-ul îl ia
             # EL (barieră, pin-uri), prin socket-ul local; fără răspuns → refuz, niciodată o citire
             # directă a volumului viu
-            blob = _live_via_socket(hk, passphrase, not args.no_transcripts)
+            _live_via_socket(hk, passphrase, not args.no_transcripts, out)
         else:
-            blob = backup.make_encrypted(passphrase, include_transcripts=not args.no_transcripts, keys=hk)
+            _local_snapshot(hk, passphrase, not args.no_transcripts, out)
+        out.flush()
     except (ValueError, OSError) as e:
         raise Refused("the backup was not written: %s" % _refusal(e)) from None
     finally:
         if maint is not None:
             os.close(maint)
         view.release()
-    out = sys.stdout.buffer
-    out.write(blob)
-    out.flush()
     _say("kind: %s" % ("reduced" if resolved.source == "volume" else "protected"))
-    _say("sha256: %s" % hashlib.sha256(blob).hexdigest())
+    _say("sha256: %s" % out.digest)
     return EXIT_OK
+
+
+class _HashedOut:
+    """stdout, hashed as written; every write must be taken whole (the WTBK2 writer checks it)."""
+
+    def __init__(self, dst):
+        self._dst = dst
+        self._h = hashlib.sha256()
+
+    def write(self, b):
+        n = self._dst.write(b)
+        if n == len(b):
+            self._h.update(b)
+        return n
+
+    def flush(self):
+        self._dst.flush()
+
+    @property
+    def digest(self):
+        return self._h.hexdigest()
+
+
+def _copy_into(src, w):
+    for b in iter(lambda: src.read(1 << 20), b""):
+        w.write(b)
+
+
+def _local_snapshot(hk, passphrase, include, out):
+    """The WTS1 written by the gateway's code into a private file of a work dir on the data volume
+    (never /tmp: a 64 MiB tmpfs in production; never memory: the volume may be larger than RAM),
+    checked restorable through the portable route, then wrapped in WTBK2 with its exact sizes."""
+    _need_space(config.DATA_DIR, backup.host_estimate() + backup.DISK_RESERVE, "the backup's work copy")
+    with backup.work_dir("hostbk-") as wd:
+        fd = os.open(os.path.join(wd, "host.wts"), os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "w+b") as f:
+            backup.write_host_snapshot(f, include, keys=hk)
+            size, unpacked = backup.verify_host_snapshot(f, keys=hk)
+            f.seek(0)
+            w = wtbk.Writer(out, passphrase, plain_len=size, unpacked_len=unpacked)
+            _copy_into(f, w)
+            # mai puţini octeţi decât fişierul verificat → close refuză (niciun ultim chunk scris)
+            w.close()
 
 
 def _needs_socket():
@@ -254,43 +382,30 @@ def _needs_socket():
         return True
 
 
-def _live_via_socket(hk, passphrase, include):
-    """`hostops backup --live` through the gateway's control socket: the WTS1 lands in a private
-    temp file, its length and SHA-256 must be the gateway's answer and its structure must pass the
-    restore check before the passphrase layer is added; a partial file is deleted, never reused."""
+def _live_via_socket(hk, passphrase, include, out):
+    """`hostops backup --live` through the gateway's control socket. The gateway verified its
+    spool in full (restorable, portable route) before answering with its size, SHA-256 and unpacked
+    size; the bytes are wrapped in WTBK2 as they arrive (no second copy on the volume, nothing in
+    memory). The last WTBK2 chunk is written only after the SHA-256 of everything read matched the
+    answer: a short, changed or failed transfer leaves an archive without its end, which every
+    reader refuses, and exit 3 (backup.sh then publishes nothing; it also runs the full restore
+    check on the result before publishing)."""
     try:
         client = ctlsock.Client(ctlsock.socket_path())
     except (ctlsock.ClientError, OSError) as e:
         raise Refused("the running gateway did not answer on its backup control socket (%s): a live "
                       "volume with encrypted recordings is never read directly — refused. System health "
                       "shows why the socket is missing; or stop the app and back up again" % e) from None
-    # WTS-ul primit stă în directorul de lucru de pe volumul de date (backup.work_dir), niciodată
-    # în /tmp: în containerul app-ului /tmp e un tmpfs de 64 MiB, iar arhiva are mărimea datelor
-    scratch = contextlib.ExitStack()
     try:
-        tmp = os.path.join(scratch.enter_context(backup.work_dir("live-")), "live.wts")
-        fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    except BaseException:
-        client.close()
-        scratch.close()
-        raise
-    try:
-        with os.fdopen(fd, "w+b") as f:
-            try:
-                size, _sha = client.snapshot(f, recordings=include)
-            except (ctlsock.ClientError, OSError) as e:
-                raise Refused("the live backup through the gateway failed: %s — refused" % e) from None
-            f.flush()
-            if f.tell() != size:
-                raise Refused("the live backup is not the size the gateway announced — refused")
-            f.seek(0)
-            backup._verify_wts(f, hk, None, prefer="portable")
-            f.seek(0)
-            data = f.read()
+        try:
+            snap, size, sha, unpacked = client.start(recordings=include)
+            w = wtbk.Writer(out, passphrase, plain_len=size, unpacked_len=unpacked)
+            client.read_into(w, snap, size, sha)
+        except (ctlsock.ClientError, OSError) as e:
+            raise Refused("the live backup through the gateway failed: %s — refused" % e) from None
+        w.close()
     finally:
         client.close()
-        scratch.close()
-    return backup.encrypt(data, passphrase)
 
 
 # ── verify ───────────────────────────────────────────────────────────────────
@@ -355,8 +470,11 @@ def _verify_scratch(stack):
 
 
 def cmd_verify(args):
-    raw, digest = _read_stdin(args.sha256)
-    kind = _archive_kind(raw)
+    src = _Pinned(sys.stdin.buffer, args.sha256)
+    kind = _archive_kind(src.peek(len(WTBK2_MAGIC)))
+    raw = None
+    if kind != "wtbk2":
+        raw, digest = _read_stdin_from(src)
     view = _DirView(str(config.DATA_DIR))
     stack = contextlib.ExitStack()
     try:
@@ -373,7 +491,18 @@ def cmd_verify(args):
             fd = os.open(os.path.join(scratch, keys.MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as f:
                 f.write(blob)
-        route, info = _check(raw, kind, inv, hk, args.legacy_import)
+        if kind == "wtbk2":
+            route = _stream_route(inv, args.legacy_import)
+            r = _open_wtbk2(src)
+            try:
+                info = backup.verify_host_stream(r, keys=hk, max_plaintext=r.plain_len,
+                                                 unpacked_len=r.unpacked_len)
+                r.finish()
+            except Exception as e:              # noqa: BLE001 — orice eroare a cititorului = refuz
+                raise Refused("the archive is refused: %s" % _refusal(e)) from None
+            digest = src.digest
+        else:
+            route, info = _check(raw, kind, inv, hk, args.legacy_import)
     finally:
         view.release()
         stack.close()
@@ -392,9 +521,33 @@ def cmd_verify(args):
 # ── stage-restore ────────────────────────────────────────────────────────────
 
 
+def _read_stdin_from(src):
+    try:
+        raw = src.read_all(STDIN_MAX)
+    except PinMismatch as e:
+        raise Refused(str(e)) from None
+    return raw, src.digest
+
+
+def _stage_stream(src, inv, hk, legacy_import, progress):
+    """A WTBK2 staged as a stream. Free space first: the staged copy and the copy the apply makes
+    at the next boot both hold the declared unpacked size (refused before anything is written)."""
+    route = _stream_route(inv, legacy_import)
+    r = _open_wtbk2(src)
+    _need_space(config.DATA_DIR, 2 * r.unpacked_len + backup.DISK_RESERVE,
+                "this restore (the staged copy, then the copy the next start makes)")
+    info = backup.stage_host_stream(r, keys=hk, max_plaintext=r.plain_len, unpacked_len=r.unpacked_len,
+                                    progress=progress)
+    r.finish()
+    return route, info
+
+
 def cmd_stage(args):
-    raw, digest = _read_stdin(args.sha256)
-    kind = _archive_kind(raw)
+    src = _Pinned(sys.stdin.buffer, args.sha256)
+    kind = _archive_kind(src.peek(len(WTBK2_MAGIC)))
+    raw = digest = None
+    if kind != "wtbk2":
+        raw, digest = _read_stdin_from(src)
     data = str(config.DATA_DIR)
     _point_at(data)
     try:
@@ -417,15 +570,24 @@ def cmd_stage(args):
             # 3.7: un singur set fără jurnal; nu-l înlocuim pe jumătate peste unul deja flag-uit
             raise Refused("a restore is already staged on this volume: start the app once (it applies "
                           "it), then run this again")
-        # RC-M1: aceeaşi rută ca verify (format interior + politica ţintei), decisă înainte de orice
-        route, _inner, blob, pw = _route(raw, kind, inv, args.legacy_import)
-        del _inner
-        if blob is None:
-            blob, pw = _wrap_legacy(raw)
         progress = backup.StageProgress()
+        if kind != "wtbk2":
+            # RC-M1: aceeaşi rută ca verify (format interior + politica ţintei), decisă înainte de orice
+            route, _inner, blob, pw = _route(raw, kind, inv, args.legacy_import)
+            del _inner
+            if blob is None:
+                blob, pw = _wrap_legacy(raw)
         try:
-            info = backup.stage_restore(blob, pw, keys=hk, legacy_import=route == "legacy-import",
-                                        progress=progress)
+            if kind == "wtbk2":
+                route, info = _stage_stream(src, inv, hk, args.legacy_import, progress)
+                digest = src.digest
+            else:
+                info = backup.stage_restore(blob, pw, keys=hk, legacy_import=route == "legacy-import",
+                                            progress=progress)
+        except Refused:
+            if progress.mutated:
+                raise Uncertain("the staging failed after the data volume began to change") from None
+            raise
         except Exception as e:                  # noqa: BLE001
             # R-M1: rezultatul vine din ce a raportat staging-ul, nu dintr-o comparaţie de octeţi
             # a flagului: înainte de prima schimbare → refuz curat; după commit (flag publicat ŞI
@@ -453,9 +615,17 @@ def cmd_stage(args):
     return EXIT_OK
 
 
+def cmd_estimate(args):
+    """An upper bound of the backup's size (backup.sh: refuse early when the destination is too
+    small). Reads sizes only (lstat), no lock: the app may run."""
+    print("estimate: %d" % backup.host_estimate())
+    return EXIT_OK
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="python3 -m app.hostops")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("estimate")
     b = sub.add_parser("backup")
     b.add_argument("--live", action="store_true")
     b.add_argument("--no-transcripts", action="store_true")
@@ -464,10 +634,11 @@ def main(argv=None):
         s.add_argument("--sha256", required=True)
         s.add_argument("--legacy-import", action="store_true")
     args = p.parse_args(argv)
-    fn = {"backup": cmd_backup, "verify": cmd_verify, "stage-restore": cmd_stage}[args.cmd]
+    fn = {"backup": cmd_backup, "verify": cmd_verify, "stage-restore": cmd_stage,
+          "estimate": cmd_estimate}[args.cmd]
     try:
         return fn(args)
-    except Refused as e:
+    except (Refused, PinMismatch) as e:
         _say("REFUSING: %s" % e)
         return EXIT_REFUSED
     except Uncertain as e:

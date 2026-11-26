@@ -58,6 +58,7 @@ from . import keys as keystore
 from . import legacyvault
 from . import snapshot as wts
 from . import txstore
+from . import wtbk
 
 log = logging.getLogger("webterm")
 
@@ -264,6 +265,16 @@ def encrypt(data: bytes, passphrase: str) -> bytes:
 
 
 def decrypt(blob: bytes, passphrase: str) -> bytes:
+    if blob[:len(wtbk.MAGIC)] == wtbk.MAGIC:
+        # o arhivă host (backup.sh, WTBK2) încărcată prin UI: aceeaşi uşă, în memorie (blob-ul e deja
+        # mărginit de UPLOAD_MAX); mărimile declarate în antet sunt verificate de cititorul WTS1
+        r = wtbk.Reader(io.BytesIO(blob), passphrase, max_plain=len(blob))
+        out = bytearray()
+        while True:
+            b = r.read(wtbk.CHUNK)
+            if not b:
+                return bytes(out)
+            out += b
     if blob[:len(_MAGIC)] != _MAGIC:
         raise ValueError("nu pare un backup WebTerm")
     off = len(_MAGIC)
@@ -459,6 +470,12 @@ def encrypt_stored(name: str, passphrase: str, keys=None, mk=None) -> bytes:
 # gateway-ului la extragere; BoundedGunzip (snapshot.py) se opreşte la plafon, deci nu
 # materializează niciodată bomba.
 RESTORE_MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024      # 2 GB
+# Calea host-ului (backup.sh / restore.sh, snapshot-urile stocate, copia de siguranţă, socket-ul de
+# control): fără plafon fix. Scrierea e mărginită de inventar şi de discul liber al destinaţiei;
+# citirea de mărimile EXACTE declarate în antetul autentificat (WTBK2) sau de fişierul însuşi,
+# plus discul liber al staging-ului; plafonul de raport al BoundedGunzip rămâne (bombă de compresie).
+HOST_MAX = 1 << 62
+DISK_RESERVE = 64 << 20        # ce lăsăm liber pe volum peste estimare (DB-ul viu, jurnalele)
 
 
 def _inspect(raw: bytes) -> dict:
@@ -566,7 +583,10 @@ def verify_stored(name: str, keys=None) -> dict:
             td = _private_tmpdir()
             try:
                 with open(os.open(str(path), _FILE_RO), "rb") as f:
-                    info, _inner = _verify_wts(f, hk, td)
+                    # un .wts stocat (programat, copie de siguranţă) nu mai are plafonul fix de 2 GiB:
+                    # bugetul e mărimea lui şi discul liber pe care se extrage
+                    info, _inner = _verify_wts(f, hk, td, max_plaintext=os.fstat(f.fileno()).st_size,
+                                               max_unpacked=max(0, free_bytes(td) - DISK_RESERVE))
             finally:
                 shutil.rmtree(td, ignore_errors=True)
         info.pop("_content", None)
@@ -1477,11 +1497,12 @@ class _TarOut:
     count, unpacked size, content-manifest size. Every file is hashed on exactly the bytes
     written; the manifest goes last."""
 
-    def __init__(self, w):
+    def __init__(self, w, max_unpacked=RESTORE_MAX_UNCOMPRESSED):
         self._tar = tarfile.open(fileobj=w, mode="w|gz", format=tarfile.USTAR_FORMAT)
         self.entries: list = []
         self._count = 0
         self._size = 0
+        self._max = max_unpacked
 
     def _info(self, name, size, is_dir=False):
         ti = tarfile.TarInfo(name)
@@ -1497,7 +1518,7 @@ class _TarOut:
         self._size += 512 + size + (-size) % 512
         if self._count > MAX_MEMBERS:
             raise wts.SnapshotTooLarge("too-many-members")
-        if self._size + 1024 + tarfile.RECORDSIZE > RESTORE_MAX_UNCOMPRESSED:
+        if self._size + 1024 + tarfile.RECORDSIZE > self._max:
             raise wts.SnapshotTooLarge("unpacked-budget")
 
     def add_dir(self, name):
@@ -1719,20 +1740,28 @@ def _check_staged_signing(td: str) -> None:
     _check_signing_pair(*got)
 
 
+def _limits(host: bool) -> tuple:
+    """(max WTS1 plaintext, max unpacked tar) of a writer: the restore route's budgets for what
+    goes through memory (download / upload), none on the host path (streamed to a file)."""
+    return (HOST_MAX, HOST_MAX) if host else (wts.MAX_PLAINTEXT, RESTORE_MAX_UNCOMPRESSED)
+
+
 def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
-               portable: bool, safety: bool = False, cancel=None) -> None:
+               portable: bool, safety: bool = False, cancel=None, host: bool = False) -> None:
     """Streams a WTS1 container to `out`: tar.gz {webterm.db (VACUUM INTO), keys.wtk, fleet
-    signing key, [transcripts], wts-manifest.json (last)}. Never `secret`, never the MK."""
+    signing key, [transcripts], wts-manifest.json (last)}. Never `secret`, never the MK.
+    `host`: no fixed size budget (a file on disk, read back with its own size as the budget)."""
     ring = hk.ring
+    max_pt, max_un = _limits(host)
     signing = _signing_pair_live()              # R-H2: înainte de writer — un refuz nu lasă nimic
     if txstore.enabled():
         # PR6c (§12.11.3): copia DB-ului, înregistrările WTX1 şi textul clar al migrării printr-un
         # SINGUR snapshot (bariera Store-ului viu, sau lacătul de boot fără el)
-        _write_wts_tx(out, hk, keys_blob, include_transcripts, local, portable, safety, signing, cancel)
+        _write_wts_tx(out, hk, keys_blob, include_transcripts, local, portable, safety, signing, cancel, host)
         return
     # flag oprit: exact calea PR5 (boot-ul a refuzat deja un volum cu artefacte criptate)
     w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
-                   snk=ring.snk if local else None, mk=hk.mk if portable else None)
+                   snk=ring.snk if local else None, mk=hk.mk if portable else None, max_plaintext=max_pt)
     with work_dir() as td:
         dbcopy = os.path.join(td, "webterm.db")
         con = sqlite3.connect(str(config.DB_PATH))
@@ -1753,7 +1782,7 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
                                  % (files[0][:80], txstore.ENV_FLAG))
             raise ValueError("this volume holds encrypted recordings (%s); back it up with %s=1 — refused"
                              % (found[0][:80], txstore.ENV_FLAG))
-        t = _TarOut(w)
+        t = _TarOut(w, max_un)
         size = os.path.getsize(dbcopy)
         with open(dbcopy, "rb") as f:
             t.add_stream("webterm.db", size, _file_chunks(f, size))
@@ -1772,7 +1801,7 @@ class SnapshotBusy(ValueError):
 
 
 def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, local: bool,
-                  portable: bool, safety: bool, signing: dict, cancel=None) -> None:
+                  portable: bool, safety: bool, signing: dict, cancel=None, host: bool = False) -> None:
     """§12.11.3 with encrypted recordings on: `txstore.backup_snapshot()` (VACUUM INTO + pins
     under the barrier), then per recording pair a verify pass and an emit pass. A pair that fails
     authentication is excluded as a unit (listed with its reason, alarm, the backup goes on); a
@@ -1780,6 +1809,7 @@ def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool
     (new Writer = new content key) without it; a second change fails the backup. `out` must be
     seekable (a temp file or the export buffer)."""
     ring = hk.ring
+    max_pt, max_un = _limits(host)
     dropped = {}
     for attempt in (0, 1):
         with work_dir() as td:
@@ -1792,8 +1822,9 @@ def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool
                                    "moment" % e.detail) from None
             try:
                 w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
-                               snk=ring.snk if local else None, mk=hk.mk if portable else None)
-                t = _TarOut(w)
+                               snk=ring.snk if local else None, mk=hk.mk if portable else None,
+                               max_plaintext=max_pt)
+                t = _TarOut(w, max_un)
                 size = os.path.getsize(dbcopy)
                 with open(dbcopy, "rb") as f:
                     t.add_stream("webterm.db", size, _file_chunks(f, size))
@@ -1917,12 +1948,13 @@ def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=
             pass
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "wb") as f:
-            _write_wts(f, hk, keys_blob, include_transcripts, local, portable, safety)
+            _write_wts(f, hk, keys_blob, include_transcripts, local, portable, safety, host=True)
             f.flush()
             _fsync(f.fileno())
-        # M2: succes doar pentru o arhivă pe care restore-ul o acceptă (bugete, manifest, keyring)
+        # M2: succes doar pentru o arhivă pe care restore-ul o acceptă (bugete, manifest, keyring);
+        # bugetul citirii = mărimea fişierului scris (fără plafonul fix de 2 GiB al încărcărilor)
         with open(os.open(tmp, _FILE_RO), "rb") as f:
-            _verify_wts(f, hk, None, prefer="local" if local else "portable")
+            _verify_wts(f, hk, None, prefer="local" if local else "portable", **_file_budget(f))
         if exclusive:
             os.link(tmp, path)
             os.unlink(tmp)
@@ -1960,30 +1992,110 @@ class _ExportBuf(io.BytesIO):
 def spool_live_snapshot(f, include_transcripts: bool, cancel=None, keys=None) -> None:
     """Control socket (§12.11.3, `hostops backup --live`): the WTS1 of the in-app download (local +
     portable envelopes) written into the gateway's private spool `f`, through the same snapshot
-    (barrier, pins, verify and emit passes). Capped like the download (UPLOAD_MAX), then fsynced."""
+    (barrier, pins, verify and emit passes), then fsynced. No fixed size cap: hostops wraps it in
+    the streamed WTBK2 layer, which restore.sh reads in bounded memory (the socket checked the
+    spool's free space before it started)."""
     if not is_protected():
         raise ValueError("the live backup socket serves protected volumes only")
     hk, blob = _host(keys)
-    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, cancel=cancel)
+    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, cancel=cancel, host=True)
     f.flush()
-    if f.tell() + _WTBK_OVERHEAD > UPLOAD_MAX:
-        raise wts.SnapshotTooLarge("export", "larger than the %d MiB restore upload limit" % (UPLOAD_MAX >> 20))
     _fsync(f.fileno())
+
+
+def _file_budget(f) -> dict:
+    """Reader budgets of a WTS1 file we wrote ourselves and only hash (nothing extracted but the
+    database): its plaintext is at most its size; the unpacked size has no fixed cap (the
+    gunzip's ratio cap still stops a bomb)."""
+    return {"max_plaintext": os.fstat(f.fileno()).st_size, "max_unpacked": HOST_MAX}
 
 
 def verify_spool(f, keys=None) -> tuple:
     """The full archive check of a spooled WTS1 (portable route, database included) BEFORE anything
-    of it is offered; → (size, SHA-256 hex) of exactly the verified bytes."""
+    of it is offered; → (size, SHA-256 hex) of exactly the verified bytes, and the exact unpacked
+    size of its tar stream (the WTBK2 header declares it)."""
     hk, _ = _host(keys)
     f.seek(0)
-    _verify_wts(f, hk, None, prefer="portable")
+    info, _inner = _verify_wts(f, hk, None, prefer="portable", **_file_budget(f))
     f.seek(0)
     h = hashlib.sha256()
     size = 0
     for b in iter(lambda: f.read(1 << 20), b""):
         h.update(b)
         size += len(b)
-    return size, h.hexdigest()
+    return size, h.hexdigest(), info["unpacked_len"]
+
+
+def free_bytes(path) -> int:
+    """Bytes an unprivileged writer may still use on the filesystem holding `path`."""
+    st = os.statvfs(str(path))
+    return st.f_bavail * st.f_frsize
+
+
+def host_estimate() -> int:
+    """Upper bound of a host backup (uncompressed): the database (+ its WAL) and every regular file
+    under transcripts/ (symlinks not followed), plus the tar overhead and a margin. backup.sh
+    compares it with the free space of the backup directory, hostops with the volume's."""
+    n = 0
+    for p in (config.DB_PATH, config.DATA_DIR / "webterm.db-wal"):
+        with contextlib.suppress(OSError):
+            n += os.lstat(str(p)).st_size
+    files = 0
+    for dp, _dn, fn in os.walk(str(config.TRANSCRIPT_DIR)):
+        for name in fn:
+            with contextlib.suppress(OSError):
+                st = os.lstat(os.path.join(dp, name))
+                if stat.S_ISREG(st.st_mode):
+                    n += st.st_size
+                    files += 1
+    return n + 1024 * (files + 8) + n // 100 + (16 << 20)
+
+
+def write_host_snapshot(f, include_transcripts: bool, keys=None) -> None:
+    """`hostops backup` without the control socket: the portable WTS1 (local + portable
+    envelopes, like a download) streamed into `f`, a private file in a work dir on the data
+    volume, then fsynced. No fixed size cap (the host path, §12.10.1)."""
+    if not is_protected():
+        raise ValueError("this installation is not protected: the host archive is the 3.7 one")
+    hk, blob = _host(keys)
+    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, host=True)
+    f.flush()
+    _fsync(f.fileno())
+
+
+def verify_host_snapshot(f, keys=None) -> tuple:
+    """The restorable check of a host WTS1 file through the portable route (the one restore.sh
+    uses on another installation), before hostops wraps it: → (size, exact unpacked size), the
+    two lengths the WTBK2 header declares."""
+    hk, _ = _host(keys)
+    f.seek(0)
+    info, _inner = _verify_wts(f, hk, None, prefer="portable", **_file_budget(f))
+    return os.fstat(f.fileno()).st_size, info["unpacked_len"]
+
+
+def verify_host_stream(src, keys=None, *, max_plaintext: int, unpacked_len: int) -> dict:
+    """`hostops verify` of a WTBK2: the WTS1 read from `src` (the authenticated WTBK2 plaintext)
+    through the restorable check — every byte authenticated and hashed, the strict tar and the
+    content manifest, the inner keys.wtk, the database extracted alone into a work dir and
+    checked — in bounded memory; the unpacked size must be exactly the declared one."""
+    hk, _ = _host(keys)
+    info, _inner = _verify_wts(src, hk, None, max_plaintext=max_plaintext, max_unpacked=unpacked_len,
+                               expect_unpacked=unpacked_len)
+    info.pop("_content", None)
+    return info
+
+
+def stage_host_stream(src, keys=None, *, max_plaintext: int, unpacked_len: int, progress=None) -> dict:
+    """`hostops stage-restore` of a WTBK2: stage_restore's protected route over a stream. The WTS1
+    is extracted into the private `.restore-verify-*` directory on the volume as it is read;
+    nothing is published before the last byte (WTS1 final frame, WTBK2 last chunk, end of input
+    and whatever the source checks there) is proven and the unpacked size equals the declared."""
+    progress = progress if progress is not None else StageProgress()
+    _invalidate_kind()
+    restore_route(wts.MAGIC, is_protected(), False)          # RC-M1: un WTS1 doar pe un volum protejat
+    return _stage_wts(src, keys, None, "local", progress, None,
+                      budget={"max_plaintext": max_plaintext, "max_unpacked": unpacked_len,
+                              "expect_unpacked": unpacked_len})
 
 
 def make_portable_bytes(include_transcripts: bool = False, keys=None) -> bytes:
@@ -2029,13 +2141,14 @@ def _unlock(reader, hk: HostKeys, mk=None, prefer: str = "local") -> None:
                                mk_id=reader.mk_id)
 
 
-def _unpack_verified(reader, dest, db_dest=None) -> tuple:
+def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMPRESSED) -> tuple:
     """Streams the authenticated tar.gz through the strict extractor into `dest` (a fresh
     private dir; None = hash only, except `webterm.db` into `db_dest` when given — R-M2's
     restorable check of a produced container), then the gzip and WTS1 streams to their
     authenticated end; the extracted set must equal the content manifest and the signing files
-    must be a valid pair (R-H2). Returns (info, inner keys.wtk bytes)."""
-    gz = wts.BoundedGunzip(reader, RESTORE_MAX_UNCOMPRESSED)
+    must be a valid pair (R-H2). Returns (info, inner keys.wtk bytes); info["unpacked_len"] is the
+    exact size of the decompressed tar stream."""
+    gz = wts.BoundedGunzip(reader, max_unpacked)
     arc = _Archive(gz, "wts1", mem_only=(CONTENT_MANIFEST,), mem_also=(KEYS_NAME, *_SIGNING))
     try:
         for name, is_dir, _size in arc.entries():
@@ -2069,7 +2182,8 @@ def _unpack_verified(reader, dest, db_dest=None) -> tuple:
     _check_signing_pair(arc.mem.get(_SIGNING[0]), arc.mem.get(_SIGNING[1]))
     info = {"has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
             "has_signing_key": "agent-signing.key" in arc.seen,
-            "erasure": "tracked" if extras is not None else "not-tracked", "_content": extras}
+            "erasure": "tracked" if extras is not None else "not-tracked", "_content": extras,
+            "unpacked_len": gz.out_len}
     return info, arc.mem[KEYS_NAME]
 
 
@@ -2157,18 +2271,23 @@ def _open_inner(blob: bytes, reader, hk: HostKeys, mk=None) -> kr.Keyring:
 
 
 def _verify_wts(fileobj, hk: HostKeys, dest, mk=None, prefer="local", max_plaintext=wts.MAX_PLAINTEXT,
-                restorable: bool = True) -> tuple:
+                restorable: bool = True, max_unpacked=RESTORE_MAX_UNCOMPRESSED, expect_unpacked=None) -> tuple:
     """Full check of a WTS1. R-M2: `restorable` (default) = structural (header MAC, envelope,
     every chunk, final frame, EOF, strict tar, content manifest, signing pair, inner keys.wtk
     bound to the header) + the database (integrity + minimal schema): extracted into `dest`, or,
     with `dest=None`, only `webterm.db` into a private temp dir. `restorable=False` with
-    `dest=None` = structural only (hash, nothing written). Returns (info, inner keyring)."""
+    `dest=None` = structural only (hash, nothing written). `expect_unpacked`: the exact unpacked
+    size an authenticated outer header declared (WTBK2); any other size is refused before the
+    caller publishes anything. Returns (info, inner keyring)."""
     reader = wts.Reader(fileobj, max_plaintext)
     _unlock(reader, hk, mk, prefer)
     with contextlib.ExitStack() as stack:
         # DB-ul extras pentru verificare: în directorul de lucru de pe volum, nu în /tmp (tmpfs mic)
         tmp = stack.enter_context(work_dir("verify-")) if dest is None and restorable else None
-        info, inner_blob = _unpack_verified(reader, dest, db_dest=tmp)
+        info, inner_blob = _unpack_verified(reader, dest, db_dest=tmp, max_unpacked=max_unpacked)
+        if expect_unpacked is not None and info["unpacked_len"] != expect_unpacked:
+            raise wts.SnapshotError("declared-size-mismatch", "%d unpacked, %d declared"
+                                    % (info["unpacked_len"], expect_unpacked))
         inner = _open_inner(inner_blob, reader, hk, mk)
         where = dest if dest is not None else tmp
         users_since = _check_db(os.path.join(where, "webterm.db")) if where is not None else None
@@ -2452,7 +2571,8 @@ def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None, erasur
     log.warning("RESTORE staged — it is applied on the next restart")
 
 
-def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasure_fetch=None) -> dict:
+def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasure_fetch=None,
+               budget=None) -> dict:
     """Protected restore of a WTS1: everything verified in a private dir BEFORE restore-pending/
     is touched; the staged keys.wtk is the snapshot's keyring re-wrapped under the host MK; the
     verified files are exactly the ones published (no second extraction)."""
@@ -2461,7 +2581,7 @@ def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasu
         _refuse_active_journal()
         td = _private_tmpdir()
         try:
-            info, inner = _verify_wts(fileobj, hk, td, mk, prefer)
+            info, inner = _verify_wts(fileobj, hk, td, mk, prefer, **(budget or {}))
             content = info.pop("_content", None)
             summary = _erasure_stage(td, content, inner, erasure_fetch, live_inst=hk.ring.installation_id)
             if summary is not None:

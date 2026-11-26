@@ -86,6 +86,13 @@ back.
   configured with opens the archive's `keys.wtk` (checked with the app image before the app is
   stopped), refuses archives that mix `secret` and `keys.wtk` or carry key material, and no
   longer moves the data directory's `.lock` aside. Pre-3.8 volumes and archives work as before.
+- **Host backups of protected volumes work at any size.** The encrypted host archive used to be
+  built and encrypted in memory and capped at 2 GiB of data, so a volume with a few GB of
+  transcripts could not be backed up at all ("encrypted backup too large"), where 3.7 had streamed
+  any size. `backup.sh` now writes a streamed format (`.wtbk`, WTBK2: authenticated 1 MiB chunks)
+  and `restore.sh` reads it the same way, in a few MiB of memory whatever the volume's size; both
+  refuse early, with the sizes, when the backup directory or the data volume lacks the space.
+  Archives written by earlier 3.8 release candidates still restore.
 
 ## [3.7.1] — 2026-11-22 · agent (61)
 

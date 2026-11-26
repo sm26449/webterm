@@ -472,6 +472,11 @@ class BoundedGunzip:
                 self._eof = True
         return bytes(out)
 
+    @property
+    def out_len(self):
+        """Decompressed bytes delivered so far (the whole stream once EOF was reached)."""
+        return self._out
+
     def drain_zeros(self):
         """After the tar end marker: only zero padding may remain (tar record blocking)."""
         while True:

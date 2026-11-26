@@ -297,7 +297,8 @@ def _estimate():
 
 def _worker(fd, name, include, cancel, spool_fd):
     """Runs in a thread and OWNS the spool from submit: writes the WTS1, fsyncs, verifies it in
-    full, and on any failure or cancel unlinks it before returning. → (size, sha256 hex)."""
+    full, and on any failure or cancel unlinks it before returning. → (size, sha256 hex, unpacked
+    size of its tar stream)."""
     ok = False
     try:
         with os.fdopen(os.dup(fd), "w+b") as f:
@@ -307,11 +308,11 @@ def _worker(fd, name, include, cancel, spool_fd):
                 backup.spool_live_snapshot(f, include, cancel)
             if cancel.is_set():
                 raise backup.SnapshotBusy("cancelled")
-            size, sha = backup.verify_spool(f)
+            size, sha, unpacked = backup.verify_spool(f)
         if cancel.is_set():
             raise backup.SnapshotBusy("cancelled")
         ok = True
-        return size, sha
+        return size, sha, unpacked
     finally:
         if not ok:
             with contextlib.suppress(OSError):
@@ -503,7 +504,7 @@ async def _op_start(req, reader, writer, conn, peer):
                 await _send(writer, {"ok": False, "id": rid, "code": "backup.busy"})
         return False
     try:
-        size, sha = fut.result()
+        size, sha, unpacked = fut.result()
     except backup.SnapshotBusy:
         await _audit(peer, "snapshot.start", 409, "busy")
         await _send(writer, {"ok": False, "id": rid, "code": "backup.busy"})
@@ -518,7 +519,8 @@ async def _op_start(req, reader, writer, conn, peer):
     # slotul trece la spool-ul gata în acelaşi pas sincron (bugetul de spool-uri îl vede imediat)
     _clear_inflight(cancel)(None)
     await _audit(peer, "snapshot.start", 200, "size=%d" % size)
-    await _send(writer, {"ok": True, "id": rid, "snap": name, "size": size, "sha256": sha})
+    # `unpacked`: mărimea exactă a tar-ului din WTS1, pe care hostops o declară în antetul WTBK2
+    await _send(writer, {"ok": True, "id": rid, "snap": name, "size": size, "sha256": sha, "unpacked": unpacked})
     return True
 
 
@@ -632,16 +634,28 @@ class Client:
             raise ClientError("bad answer from the gateway")
         return doc
 
-    def snapshot(self, out, *, recordings=True):
-        """→ (size, sha256 hex) after the bytes were written to `out` and both were checked."""
+    def start(self, *, recordings=True):
+        """`snapshot.start` → (snap, size, sha256 hex, unpacked size), all checked for type."""
         doc = self.call("snapshot.start", timeout=self.start_timeout, profile="portable",
                         recordings="all" if recordings else "none")
         if not doc.get("ok"):
             raise ClientError("the gateway refused the live backup (%s)" % (doc.get("code") or doc.get("error")),
                               doc.get("code", ""))
-        snap, size, sha = doc.get("snap"), doc.get("size"), doc.get("sha256")
-        if type(snap) is not str or type(size) is not int or type(sha) is not str or size < 0:
+        snap, size, sha, unpacked = doc.get("snap"), doc.get("size"), doc.get("sha256"), doc.get("unpacked")
+        if (type(snap) is not str or type(size) is not int or type(sha) is not str or size < 0
+                or type(unpacked) is not int or unpacked < 0):
             raise ClientError("bad snapshot.start answer")
+        return snap, size, sha, unpacked
+
+    def snapshot(self, out, *, recordings=True):
+        """→ (size, sha256 hex) after the bytes were written to `out` and both were checked."""
+        snap, size, sha, _unpacked = self.start(recordings=recordings)
+        self.read_into(out, snap, size, sha)
+        return size, sha
+
+    def read_into(self, out, snap, size, sha):
+        """The spool's bytes, in order, into `out`; the SHA-256 is checked after the last one (the
+        caller must not finish `out` before this returns), then the spool is released."""
         h = hashlib.sha256()
         off = 0
         while off < size:
@@ -657,4 +671,3 @@ class Client:
         if h.hexdigest() != sha:
             raise ClientError("the archive read from the gateway does not match its SHA-256")
         self.call("snapshot.release", snap=snap)
-        return size, sha

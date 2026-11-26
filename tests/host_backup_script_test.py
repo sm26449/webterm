@@ -8,7 +8,7 @@ PATH: „imaginea app-ului" e python-ul local cu gateway/ pe PYTHONPATH (exact c
 
 Scenarii:
   * backup legacy (3.7): tar.gz cu `secret`, fără `.lock`;
-  * backup protejat: .wtbk (WTBK1 → WTS1) scris de gateway, cu app-ul pornit (`docker exec`, lock-ul
+  * backup protejat: .wtbk (WTBK2 → WTS1) scris de gateway, cu app-ul pornit (`docker exec`, lock-ul
     ţinut de „gateway") şi oprit (container nou fără reţea, cheia montată read-only, nicio
     `--env-file`); verificat înainte de publicare; fără parolă / app nesănătos / cheie dată ca
     valoare cu app-ul oprit / lock ocupat → refuz, nicio arhivă;
@@ -373,8 +373,12 @@ def tree(d):
 
 
 def data_tree(d):
-    # ce contează pentru date: fără lacăte (create la prima utilizare, niciodată scrise)
-    return {k: v for k, v in tree(d).items() if k not in (".lock", ".maint.lock")}
+    # ce contează pentru date: fără lacăte (create la prima utilizare, niciodată scrise); lacătul
+    # operaţiilor de restore (backups/.restore.lock) îl ia şi un staging în flux refuzat la capăt
+    out = {k: v for k, v in tree(d).items() if k not in (".lock", ".maint.lock", "backups/.restore.lock")}
+    if "backups" in out and not any(k.startswith("backups/") for k in out):
+        del out["backups"]
+    return out
 
 
 def names(archive):
@@ -452,8 +456,8 @@ def test_backup(e):
         gw.release()
     arc = newest(e) if rc == 0 else ""
     raw = open(arc, "rb").read() if arc else b""
-    check("protejat, app pornit: .wtbk scris de gateway (docker exec), criptat WTBK1",
-          rc == 0 and arc.endswith(".wtbk") and raw[:5] == b"WTBK1" and "exec -i" in e.calls(), out + e.calls())
+    check("protejat, app pornit: .wtbk scris de gateway (docker exec), criptat WTBK2 (în flux)",
+          rc == 0 and arc.endswith(".wtbk") and raw[:5] == b"WTBK2" and "exec -i" in e.calls(), out + e.calls())
     check("…verificat înainte de publicare, fără temporar rămas, mod 0600",
           "(verified)" in out and os.listdir(e.out) == [os.path.basename(arc)]
           and stat.S_IMODE(os.stat(arc).st_mode) == 0o600, (out, os.listdir(e.out) if os.path.isdir(e.out) else None))
@@ -810,6 +814,36 @@ def test_hostops(e):
     check("stage-restore fără parolă → exit 3", rc == hostops.EXIT_REFUSED and "PASSPHRASE" in out, out)
     rc, out = hostops_run(e, "hsrc", ["stage-restore", "--sha256", sha], blob, kenv)
     check("stage-restore → exit 0, set în staging", rc == 0 and "staged: protected" in out, out)
+    # §12.10.1: arhiva host e WTBK2 (în flux); WTBK1(WTS1) al rc-urilor anterioare rămâne restaurabil
+    check("hostops backup scrie WTBK2", blob[:5] == hostops.WTBK2_MAGIC == b"WTBK2", blob[:8])
+    rc, out = hostops_run(e, "hsrc", ["estimate"], b"", kenv)
+    est = int(out.split("estimate: ")[1].split()[0]) if "estimate: " in out else -1
+    check("hostops estimate → o margine superioară (≥ DB-ul volumului)",
+          rc == 0 and est >= os.path.getsize(os.path.join(d, "webterm.db")), out)
+    w1 = backup.encrypt(backup.decrypt(blob, PASS), PASS)
+    s1 = hashlib.sha256(w1).hexdigest()
+    rc1, out1 = hostops_run(e, "hsrc", ["verify", "--sha256", s1], w1, kenv)
+    rc2, out2 = hostops_run(e, "hsrc", ["stage-restore", "--sha256", s1], w1, kenv)
+    check("WTBK1(WTS1) (arhivă host 3.8-rc) → verify şi stage-restore tot exit 0",
+          rc1 == 0 and rc2 == 0 and "staged: protected" in out2, (out1, out2))
+    mid = len(blob) // 2
+    bad = {"trunchiată (ultimul octet)": blob[:-1], "un octet inversat la mijloc": blob[:mid] + bytes([blob[mid] ^ 1]) + blob[mid + 1:],
+           "antet alterat (unpacked_len)": blob[:44] + bytes([blob[44] ^ 1]) + blob[45:],
+           "un chunk în plus": blob + blob[-100:], "doar o parte din antet": blob[:60]}
+    res = {}
+    for name, b_ in bad.items():
+        sb = hashlib.sha256(b_).hexdigest()
+        before = data_tree(d)
+        rv, ov = hostops_run(e, "hsrc", ["verify", "--sha256", sb], b_, kenv)
+        rs, os_ = hostops_run(e, "hsrc", ["stage-restore", "--sha256", sb], b_, kenv)
+        res[name] = (rv, rs, data_tree(d) == before)
+    check("WTBK2 alterat → verify şi stage-restore exit 3, volumul identic",
+          all(v == (hostops.EXIT_REFUSED, hostops.EXIT_REFUSED, True) for v in res.values()), res)
+    before = data_tree(d)
+    rs, os_ = hostops_run(e, "hsrc", ["stage-restore", "--sha256", sha], blob,
+                          {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_BACKUP_PASSPHRASE": "alta-parola"})
+    check("WTBK2 cu parola greşită → exit 3 înaintea oricărei scrieri", rs == hostops.EXIT_REFUSED
+          and "wrong passphrase" in os_ and data_tree(d) == before, os_)
     check("hostops.WTBK_MAGIC e antetul real al backup.encrypt", backup.encrypt(b"x", "p")[:5] == hostops.WTBK_MAGIC)
     check("R-M1: codurile de ieşire sunt distincte (0 commit, 3 refuz, 4 incert)",
           (hostops.EXIT_OK, hostops.EXIT_REFUSED, hostops.EXIT_UNCERTAIN) == (0, 3, 4))

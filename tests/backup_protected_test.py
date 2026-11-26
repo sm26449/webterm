@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tracemalloc
 import zlib
 from pathlib import Path
 
@@ -28,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 from app import backup, config  # noqa: E402
 from app import keyring as kr  # noqa: E402
 from app import snapshot as wts  # noqa: E402
+from app import wtbk  # noqa: E402
 
 ok = 0
 total = 0
@@ -1408,6 +1410,119 @@ def review_tests():
     l1_tests()
 
 
+class _Tamper:
+    """Fişier citit cu o alterare pe drum: `cut` octeţi lipsă la final, sau octetul `flip` inversat."""
+
+    def __init__(self, f, cut=0, flip=None):
+        self._f, self._left, self._flip, self._pos = f, os.fstat(f.fileno()).st_size - cut, flip, 0
+
+    def read(self, n):
+        b = self._f.read(max(0, min(n, self._left - self._pos)))
+        if self._flip is not None and self._pos <= self._flip < self._pos + len(b):
+            i = self._flip - self._pos
+            b = b[:i] + bytes([b[i] ^ 1]) + b[i + 1:]
+        self._pos += len(b)
+        return b
+
+
+def _wrap_file(src_path, dst_path, size, unpacked):
+    with open(src_path, "rb") as f, open(dst_path, "wb") as o:
+        w = wtbk.Writer(o, PASS, plain_len=size, unpacked_len=unpacked, log2n=15)
+        for b in iter(lambda: f.read(1 << 20), b""):
+            w.write(b)
+        w.close()
+
+
+def _tx_hashes(root):
+    import hashlib
+    out = {}
+    for dp, _dn, fn in os.walk(root):
+        for n in fn:
+            p = os.path.join(dp, n)
+            with open(p, "rb") as f:
+                h = hashlib.sha256()
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    h.update(b)
+            out[os.path.relpath(p, root)] = h.hexdigest()
+    return out
+
+
+def host_stream_tests():
+    """§12.10.1: the host path (backup.sh / restore.sh) streams a WTBK2 of any size — no 2 GiB cap,
+    no whole-archive buffer — and refuses every lie before anything is published."""
+    print("── host path: WTBK2 streamed, no fixed size cap, bounded memory")
+    hk, _K = volume("HS", email="hs@x")
+    td = config.TRANSCRIPT_DIR
+    line = b"\x1b[32mstefan@srv\x1b[0m:\x1b[34m~/proj\x1b[0m$ tail -f /var/log/syslog | grep -i error\r\n"
+    for i in range(14):
+        (td / ("r%02d.out" % i)).write_bytes(os.urandom(16 << 20))
+    for i in range(32):
+        (td / ("t%02d.cast" % i)).write_bytes((line * ((1 << 20) // len(line) + 1))[:1 << 20])
+    want = _tx_hashes(str(td))
+    data_n = sum(os.path.getsize(os.path.join(td, n)) for n in want)
+    check("estimate: an upper bound of the data (≥ the transcripts + DB)",
+          backup.host_estimate() >= data_n + os.path.getsize(config.DB_PATH))
+    check("the host writer has no fixed cap (the in-app one keeps 2 GiB)",
+          backup._limits(True) == (backup.HOST_MAX, backup.HOST_MAX)
+          and backup._limits(False) == (wts.MAX_PLAINTEXT, backup.RESTORE_MAX_UNCOMPRESSED))
+    work = tempfile.mkdtemp(dir=ROOT, prefix="hs-work-")
+    snap, arc = os.path.join(work, "host.wts"), os.path.join(work, "a.wtbk")
+    tracemalloc.start()
+    with open(snap, "w+b") as f:
+        backup.write_host_snapshot(f, True, keys=hk)
+        size, unpacked = backup.verify_host_snapshot(f, keys=hk)
+    peak_w = tracemalloc.get_traced_memory()[1]
+    tracemalloc.reset_peak()
+    _wrap_file(snap, arc, size, unpacked)
+    peak_wrap = tracemalloc.get_traced_memory()[1]
+    check("host snapshot of %d MiB: written and checked restorable, exact sizes known" % (data_n >> 20),
+          size == os.path.getsize(snap) and unpacked > data_n, (size, unpacked, data_n))
+
+    def stream(path, fn, **kw):
+        with open(path, "rb") as f:
+            src = _Tamper(f, **kw) if kw else f
+            r = wtbk.Reader(src, PASS)
+            res = fn(r, keys=hk, max_plaintext=r.plain_len, unpacked_len=r.unpacked_len)
+            r.finish()
+            return res
+    tracemalloc.reset_peak()
+    info = stream(arc, backup.verify_host_stream)
+    peak_v = tracemalloc.get_traced_memory()[1]
+    check("verify of the stream: restorable, unpacked size = declared", info["restorable"]
+          and info["unpacked_len"] == unpacked)
+    # minciuni şi alterări: nimic publicat, nimic rămas
+    lies = {}
+    for name, dec in (("declared unpacked − 1", unpacked - 1), ("declared unpacked + 1", unpacked + 1)):
+        bad = os.path.join(work, "lie.wtbk")
+        _wrap_file(snap, bad, size, dec)
+        lies[name] = refused(lambda: stream(bad, backup.stage_host_stream)) and nothing_staged()
+        os.unlink(bad)
+    asz = os.path.getsize(arc)
+    for name, kw in (("last chunk truncated", {"cut": 1}), ("last chunk missing", {"cut": wtbk.CHUNK // 2 + 16}),
+                     ("a byte flipped in a middle chunk", {"flip": asz // 2}),
+                     ("a byte flipped in the header", {"flip": 40})):
+        lies[name] = refused(lambda: stream(arc, backup.stage_host_stream, **kw)) and nothing_staged()
+    lies["wrong passphrase"] = refused(lambda: wtbk.Reader(open(arc, "rb"), "wrong")) and nothing_staged()
+    check("stage of a lying / tampered stream → refused, nothing staged, no temp dir", all(lies.values()), lies)
+    os.unlink(snap)
+    tracemalloc.reset_peak()
+    info = stream(arc, backup.stage_host_stream)
+    peak_s = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    staged = _tx_hashes(str(pending() / "transcripts"))
+    check("stage of the stream: every transcript staged byte for byte", staged == want,
+          set(staged) ^ set(want))
+    check("bounded memory over %d MiB (peaks KiB: write %d, wrap %d, verify %d, stage %d; < 32 MiB)"
+          % (asz >> 20, peak_w >> 10, peak_wrap >> 10, peak_v >> 10, peak_s >> 10),
+          max(peak_w, peak_wrap, peak_v, peak_s) < 32 << 20)
+    os.unlink(arc)
+    backup.apply_pending_restore(keys=hk)
+    check("…applied at boot: the live transcripts are the archive's", _tx_hashes(str(td)) == want
+          and db_email() == "hs@x")
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(os.path.join(ROOT, "HS"), ignore_errors=True)
+
+
 def main():
     # ── A: volum protejat, cu un `secret` rămas (sub-starea secret_leftover a migrării)
     hk, K = volume("A", secret_leftover=True)
@@ -1651,6 +1766,7 @@ def main():
     pr4_recheck_tests()
     pr4_second_recheck_tests()
     rc4_wal_header_tests()
+    host_stream_tests()
 
     print(f"\n{ok}/{total} passed")
     shutil.rmtree(ROOT, ignore_errors=True)

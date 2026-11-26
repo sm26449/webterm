@@ -172,7 +172,7 @@ if regular("keys.wtk"):
                  "(docs/INSTALL.md, Encryption at rest: `ambiguous`)")
     # H3 (recenzia PR4): arhiva unui volum protejat NU se face aici cu tar. O scrie gateway-ul
     # (python3 -m app.hostops backup, în imaginea app-ului): inventar prin fd-uri, filtre
-    # inode/nlink, perechea de semnare verificată, WTS1 portabil sub WTBK1. Aici doar clasificăm.
+    # inode/nlink, perechea de semnare verificată, WTS1 portabil sub WTBK2. Aici doar clasificăm.
     print("kind: %s" % ("reduced" if present("master.key") else "protected"))
     sys.exit(0)
 else:
@@ -217,7 +217,7 @@ VOLKIND=$(printf '%s\n' "$BK_RUN" | sed -n 's/^kind: //p')
 # ── volum protejat (3.8): arhiva o scrie gateway-ul, nu tar-ul din shell (H3) ─────────────────
 # `python3 -m app.hostops backup` în imaginea app-ului: inventarul prin fd-uri şi filtrele
 # inode/nlink ale backup.py (un hardlink spre cheie nu intră), perechea de semnare verificată,
-# WTS1 portabil sub WTBK1 cu parola de mai jos. Cu app-ul pornit rulează ÎN el (`docker exec`,
+# WTS1 portabil sub WTBK2 (stratul cu parolă în flux, memorie mărginită oricât de mare e volumul). Cu app-ul pornit rulează ÎN el (`docker exec`,
 # sub `.maint.lock` partajat); oprit, într-un container nou care ia `.lock`. Arhiva se scrie într-un
 # temporar, se verifică cu codul restore-ului şi abia apoi se publică (rename atomic).
 # 3.8 PR6c: cu înregistrările criptate active, `--live` cere snapshot-ul gateway-ului prin socket-ul
@@ -330,6 +330,26 @@ case "$VOLKIND" in
       bk_refuse "an archive with the same name exists" \
         "REFUSING: $ARCHIVE already exists (two backups in the same second?) — nothing was published."
     fi
+    # Spaţiul destinaţiei, verificat ÎNAINTE de a scrie ceva: estimarea gateway-ului e o margine
+    # superioară (datele necomprimate + antetele tar); o arhivă mai mică decât ea încape oricum
+    rc=0
+    EST_OUT=$(hostops "$VMODE" estimate 2>&1) || rc=$?
+    EST=$(printf '%s\n' "$EST_OUT" | sed -n 's/^estimate: //p')
+    if [ "$rc" != 0 ] || [ -z "$EST" ] || [ -n "${EST//[0-9]/}" ]; then
+      bk_refuse "the backup size could not be estimated" "$(printf '%s' "$EST_OUT" | tail -n3)" \
+        "REFUSING: the gateway could not estimate the backup's size (exit $rc) — nothing was written."
+    fi
+    FREE=$(df -B1 --output=avail -- "$OUT" 2>/dev/null | tail -n1 | tr -d ' ') || FREE=""
+    case "$FREE" in
+      ''|*[!0-9]*) bk_refuse "the free space of the backup directory is unknown" \
+                     "REFUSING: cannot read the free space of $OUT (df) — nothing was written." ;;
+    esac
+    if [ "$FREE" -lt "$EST" ]; then
+      bk_refuse "not enough free space in the backup directory" \
+        "REFUSING: $OUT has $((FREE >> 20)) MiB free; this backup can take up to $((EST >> 20)) MiB" \
+        "          (the volume's data, uncompressed) — nothing was written. Free some space, or point" \
+        "          WEBTERM_BACKUP_DIR at a larger disk."
+    fi
     # R-L1: temporar UNIC (mktemp, 0600) în acelaşi director: două rulări nu-şi şterg temporarele
     BK_TMP=$(mktemp --suffix=.wtbk.tmp "$OUT/.webterm-$STAMP.XXXXXXXX") \
       || bk_refuse "cannot create a temporary file in $OUT" "REFUSING: cannot create a temporary file in $OUT."
@@ -388,7 +408,7 @@ chmod 600 "$ARCHIVE" 2>/dev/null || true
 # Criptare (recomandat): arhiva conține cheia seifului. Cu o parolă → openssl AES-256;
 # fără openssl sau fără parolă → avertizăm zgomotos (arhiva rămâne în clar, doar 0600).
 if [ "$VOLKIND" != legacy ]; then
-  :   # deja criptată (WTBK1, scrisă de gateway)
+  :   # deja criptată (WTBK2, scrisă de gateway)
 elif [ -n "${WEBTERM_BACKUP_PASSPHRASE:-}" ]; then
   if command -v openssl >/dev/null 2>&1; then
     # AES-256-CBC + PBKDF2 (200k). NU e AEAD, şi asta e o limitare a uneltei, nu o scăpare:
