@@ -85,12 +85,17 @@ class Crash(BaseException):
 
 
 def fault_at(point):
-    state = {"done": False}
+    """`point` or `point#k` (the k-th time that point is reached: `pre-commit#2` = the COMMIT of
+    step 2, after the erase intent's own transaction)."""
+    name, _, nth = point.partition("#")
+    state = {"done": False, "seen": 0}
 
     def hook(p):
-        if p == point and not state["done"]:
-            state["done"] = True
-            raise Crash(p)
+        if p == name and not state["done"]:
+            state["seen"] += 1
+            if state["seen"] == int(nth or 1):
+                state["done"] = True
+                raise Crash(p)
     return hook
 
 
@@ -372,7 +377,19 @@ async def _refused(coro):
 
 async def g_crash(st, host_id):
     print("== erase: crash at every step, boot re-applies before readers ==")
-    for point in ("journal-written", "erase-appended", "pre-commit", "erase-committed"):
+    sid, data = await make_rec(st, host_id)
+    n0 = er.parse(journal_path().read_bytes(), K, INST).n
+    st.fault = fault_at("pre-commit#1")
+    try:
+        await er.erase(st, sid)
+    except Crash:
+        pass
+    st.fault = None
+    st = await reboot()
+    check("crash before the erase intent commits → nothing durable: not erased, journal unchanged, readable",
+          er.parse(journal_path().read_bytes(), K, INST).n == n0 and await read_all(st, sid) == data
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None)
+    for point in ("intent-committed", "journal-written", "erase-appended", "pre-commit#2", "erase-committed"):
         sid, _ = await make_rec(st, host_id)
         n0 = er.parse(journal_path().read_bytes(), K, INST).n
         st.fault = fault_at(point)
@@ -387,7 +404,9 @@ async def g_crash(st, host_id):
         rk = await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid)
         check(f"crash at {point}: journal n={n0 + 1}, RK destroyed, head = journal, files gone",
               crashed and p.n == n0 + 1 and rk is None and (await head_db())["n"] == p.n
-              and gen_files(sid) == [] and sid in st.tombstoned, (crashed, p.n, n0, rk, gen_files(sid)))
+              and gen_files(sid) == [] and sid in st.tombstoned
+              and p.entries[-1].sid_hex == sid
+              and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None, (crashed, p.n, n0, rk, gen_files(sid)))
     rep = await er.boot(st)
     check("a second boot is idempotent (nothing re-applied)", rep.reapplied == [] and not rep.diag)
     # un restore a adus înapoi RK-ul unui sid şters: boot-ul îl distruge din nou, înaintea cititorilor
@@ -424,6 +443,74 @@ async def g_crash(st, host_id):
     st = await reboot()
     check("after restart the boot decided from the file (entry present → re-applied)",
           await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is None and not er.health_has("erasure_uncertain"))
+    return st
+
+
+async def _crash_erase(st, sid, point):
+    st.fault = fault_at(point)
+    try:
+        await er.erase(st, sid)
+        crashed = False
+    except Crash:
+        crashed = True
+    st.fault = None
+    return crashed
+
+
+async def g_intents(st, host_id):
+    print("== R2-H1: the durable erase intent outlives a lost / damaged journal entry ==")
+    good = journal_path().read_bytes()
+    n0 = er.parse(good, K, INST).n
+    # (a) fsync al intrării, cădere înainte de COMMIT-ul pasului 2, apoi intrarea pierdută CURAT:
+    # jurnalul pare sănătos (n = capul DB), dar RK-ul ar fi rămas
+    sid, _ = await make_rec(st, host_id)
+    crashed = await _crash_erase(st, sid, "pre-commit#2")
+    intent = await db.fetchone("SELECT kinds FROM tx_erase_intents WHERE sid=?", sid)
+    check("crash between the journal fsync and step 2's COMMIT: the intent is durable",
+          crashed and intent is not None and intent["kinds"] == "cast,out"
+          and er.parse(journal_path().read_bytes(), K, INST).n == n0 + 1, intent)
+    journal_path().write_bytes(good)                       # intrarea n0+1 pierdută
+    st = await reboot()
+    p = er.parse(journal_path().read_bytes(), K, INST)
+    check("…entry lost, journal looks healthy → the boot completes the erasure from the intent "
+          "(new entry, RK destroyed, head advanced, intent cleared, not served)",
+          not er._s.diag and p.n == n0 + 1 and p.entries[-1].sid_hex == sid
+          and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is None
+          and (await head_db())["n"] == n0 + 1 and sid in st.tombstoned
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None and await _refused(read_all(st, sid)),
+          (er._s.diag, p.n, n0))
+    # (b) aceeaşi cădere, apoi jurnalul STRICAT (intrare ≤ capul comis): diagnostic, carantină
+    good = journal_path().read_bytes()
+    n1 = er.parse(good, K, INST).n
+    keep, _ = await make_rec(st, host_id)
+    sid, _ = await make_rec(st, host_id)
+    crashed = await _crash_erase(st, sid, "pre-commit#2")
+    t = bytearray(good)
+    t[er.prefix_len(1) - 5] ^= 1
+    journal_path().write_bytes(bytes(t))
+    st = await reboot()
+    check("…entry fsynced, step 2 lost, journal then damaged → diag prefix, the intent's RK destroyed at "
+          "boot, the sid tombstoned, the intent kept (not journalled)",
+          crashed and er._s.diag == "prefix" and sid in st.tombstoned
+          and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is None
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", sid) is not None, er._s.diag)
+    check("…journal recovery of that sid refused",
+          await _erasure_code(er.recover_journal(st, sid, "prefix")) in ("transcript.missing",
+                                                                            "transcript.recoveryNoKey"))
+    # o intenţie rămasă pe un sid care încă are RK (de ex. pasul DB eşuat): recuperarea o refuză
+    await db.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?, 'out', 1)", keep)
+    check("…a sid with an outstanding erase intent → 409 transcript.recoveryErasePending",
+          await _erasure_code(er.recover_journal(st, keep, "prefix")) == "transcript.recoveryErasePending")
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid=?", keep)
+    journal_path().write_bytes(good)
+    await unquarantine_all()
+    st = await reboot()
+    p = er.parse(journal_path().read_bytes(), K, INST)
+    check("journal repaired → the kept intent is journalled now (entry appended, intent cleared), "
+          "the other recording untouched",
+          not er._s.diag and p.n == n1 + 1 and p.entries[-1].sid_hex == sid
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None
+          and await read_all(st, keep) is not None, (er._s.diag, p.n, n1))
     return st
 
 
@@ -999,11 +1086,20 @@ def g_h1_restore():
         check("…resume: the journal WE published is not J_v → still unproven, threshold from the flag",
               cont.get("state") == "unproven" and cont.get("threshold", {}).get("n") == 2
               and cont.get("known", {}).get(d.id) == 3, cont)
-        # (d) dovedit de volum, cădere după DB: reluarea păstrează dovada (jurnalul atinge pragul)
+        # (d) dovedit de volum, cădere după DB: reluarea păstrează dovada (jurnalul atinge pragul).
+        # R2-M2: markerul ţine capul n=3 al destinaţiei din (c): un J_v n=2 nu-l mai dovedeşte
         set_head(config.DB_PATH, j2)
         jp.write_bytes(j2)
         info = backup.stage_restore(blob, PASS, keys=hk)
-        check("journal holding the live head → stage proven by the volume",
+        check("R2-M2: a journal holding the live head (n=2) but not the kept off-host head (n=3) → unproven",
+              info.get("erasure_proof") == "none", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        check("…apply keeps the marker with the off-host head", (tx_state("continuity") or {}).get("known", {})
+              .get(d.id) == 3)
+        jp.write_bytes(j3)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("journal holding the live head and the kept off-host head → stage proven by the volume",
               info.get("erasure_proof") == "volume", info)
         backup._fault = _crash_at("apply:db")
         try:
@@ -1014,8 +1110,8 @@ def g_h1_restore():
               (tx_state("erasure_head") or {}).get("n") == 1)
         backup.apply_pending_restore(keys=hk)
         hk = reopen(hk)
-        check("…resume: proven from the flag and re-checked on the journal left (n=2 ≥ threshold) → no marker",
-              tx_state("continuity") is None and jp.read_bytes() == j2)
+        check("…resume: proven from the flag and re-checked on the journal left (n=3 ≥ threshold) → no marker",
+              tx_state("continuity") is None and jp.read_bytes() == j3)
         # (e) ştergere comisă ÎNTRE stage şi apply, cu jurnalul pierzând-o: apply o vede
         set_head(config.DB_PATH, j2)
         jp.write_bytes(j2)
@@ -1118,6 +1214,66 @@ def g_rh1_consecutive():
         hk = reopen(hk)
         check("a volume journal that reaches the kept threshold proves continuity (marker cleared)",
               info.get("erasure_proof") == "volume" and tx_state("continuity") is None, info)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
+def _put_marker(dbp, mark):
+    con = sqlite3.connect(str(dbp))
+    con.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('continuity', ?)", (json.dumps(mark),))
+    con.commit()
+    con.close()
+
+
+def g_r2m2_restore():
+    print("== R2-M2: a kept off-host head of a retired destination survives the next restore; "
+          "R2-H1: erase intents survive a restore ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-r2m2")
+        ents = [(6000 + i, s, 3, bytes(32)) for i, s in enumerate(sids(3))]
+        j1, j2, j3 = build(ents[:1]), build(ents[:2]), build(ents[:3])
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1)
+        jp.write_bytes(j1)
+        old = backup.make_encrypted(PASS, keys=hk)                # backup la n=1
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        h2 = er.parse(j2, K, INST).head
+        gone = "sftp:u@h:22/retired"
+        # un restore anterior fără dovadă, cu destinaţia „gone" (cap n=3 cunoscut) deja retrasă
+        _put_marker(config.DB_PATH, {"state": "unproven", "since": 1, "n": 2, "threshold": h2.to_json(),
+                                     "known": {gone: 3}})
+        pending = "c4" * 16
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?, 'out', 5)", (pending,))
+        con.commit()
+        con.close()
+        info = backup.stage_restore(old, PASS, keys=hk)
+        check("J_v reaches the local threshold (n=2) but not the retired destination's kept head (n=3) "
+              "→ stage unproven", info.get("erasure") == "unproven" and info.get("erasure_proof") == "none", info)
+        backup._fault = _crash_at("apply:db")
+        try:
+            crashed = raises(lambda: backup.apply_pending_restore(keys=hk), _Crash)
+        finally:
+            backup._fault = None
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("…apply (resumed after the DB copy): the marker keeps the off-host head n=3 and the threshold",
+              crashed and cont.get("state") == "unproven" and cont.get("known", {}).get(gone) == 3
+              and cont.get("threshold", {}).get("n") == 2, cont)
+        con = sqlite3.connect(str(config.DB_PATH))
+        row = con.execute("SELECT kinds FROM tx_erase_intents WHERE sid=?", (pending,)).fetchone()
+        con.close()
+        check("R2-H1: the live volume's erase intent is carried into the restored database (the boot "
+              "completes it)", row == ("out",), row)
+        _, proven, _ = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j1, live_journal=j2,
+                                          threshold=h2, live_ok=True, known={gone: 3})
+        _, proven3, _ = er.reconcile_apply(k_erase=K, inst=INST, staged_journal=j1, live_journal=j3,
+                                           threshold=h2, live_ok=True, known={gone: 3})
+        check("reconcile_apply: J_v below a kept off-host head never proves; reaching it does",
+              proven is False and proven3 is True)
     finally:
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
@@ -1292,7 +1448,7 @@ async def g_rh2(st, c, uid, host_id):
     check("…still not served after migration", await _refused(read_all(st, sid)))
     check("…and the continuity recovery never opens a journal quarantine",
           await _erasure_code(er.recover(st, sid)) == "transcript.notRecoverable")
-    await g_journal_recovery(st, c, uid, host_id, jrec)
+    await g_journal_recovery(st, c, uid, host_id, jrec, good)
     journal_path().write_bytes(good)
     st = await reboot()
     check("journal repaired: the journal quarantine stays (not lifted by a later clean boot)",
@@ -1411,7 +1567,7 @@ class _Mails:
         self._mod.notify_security_change = self._orig
 
 
-async def g_journal_recovery(st, c, uid, host_id, jrec):
+async def g_journal_recovery(st, c, uid, host_id, jrec, good):
     print("== Owner recovery of a journal:* quarantine (strict) ==")
     (ok_sid, ok_data), (tomb, _), (nokey, _) = jrec
     s = await statuses()
@@ -1439,6 +1595,40 @@ async def g_journal_recovery(st, c, uid, host_id, jrec):
     r = await c.post(url, json={"confirm": ok_sid[:8] + " rollback"})
     check("no fresh factor → 403, still quarantined",
           r.status_code == 403 and (await statuses())[(ok_sid, "out")] == "quarantined", r.text)
+    # R2-H1 (c): jurnalul local (n-1) e sub capul comis (n); fără o sursă care să-l acopere → refuz
+    n = er.parse(good, K, INST).n
+
+    async def code_now():
+        r = await c.post(url, json={"confirm": ok_sid[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
+        return r.status_code, r.json().get("code")
+    DESTS[:] = []
+    check("unexplained gap (local n-1 < committed head n, no destination) → 409 transcript.recoveryGap",
+          await code_now() == (409, "transcript.recoveryGap")
+          and (await statuses())[(ok_sid, "out")] == "quarantined")
+    d = FakeDest("sftp:u@h:22/jr")
+    d.objs[er.object_name(INST, n)] = good
+    d.fail = True
+    DESTS[:] = [d]
+    check("…the destination that would cover it unreachable → still recoveryGap",
+          await code_now() == (409, "transcript.recoveryGap"))
+    d.fail = False
+    d.objs = {er.object_name(INST, n - 1): good[:er.prefix_len(n - 1)]}
+    check("…a destination holding only n-1 → still recoveryGap", await code_now() == (409, "transcript.recoveryGap"))
+    # (b) un tombstone autentic al sid-ului pe o destinaţie (o ştergere pe care jurnalul local a pierdut-o)
+    d.objs = {er.object_name(INST, n + 1): _extend(good, bytes.fromhex(ok_sid))}
+    check("an authentic off-host tombstone of the sid → 409 transcript.recoveryTombstoned",
+          await code_now() == (409, "transcript.recoveryTombstoned")
+          and (await statuses())[(ok_sid, "out")] == "quarantined")
+    d.objs = {er.object_name(INST, n): good}
+    fork = good[:er.prefix_len(n - 1)]
+    fork = _extend(fork, bytes([0x77] * 16))
+    d2 = FakeDest("ftps:u@h:21/jr")
+    d2.objs[er.object_name(INST, n)] = fork
+    DESTS[:] = [d, d2]
+    check("two destination journals that diverge → 409 transcript.recoveryConflict, signalled",
+          await code_now() == (409, "transcript.recoveryConflict") and er.health_has("erasure_conflict"))
+    er._s.conflict = ""
+    DESTS[:] = [d]
     with _Mails() as mails:
         r = await c.post(f"/api/sessions/{tomb}/recovery",
                          json={"confirm": tomb[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
@@ -1477,6 +1667,7 @@ async def g_journal_recovery(st, c, uid, host_id, jrec):
     check("the module refuses a diagnosis System health does not show",
           await _erasure_code(er.recover_journal(st, ok_sid, "fork")) == "transcript.journalNotDiagnosed")
     st.tombstoned.discard(tomb)
+    DESTS[:] = []
 
 
 async def g_retire(st, c, uid, host_id):
@@ -1529,11 +1720,40 @@ async def g_retire(st, c, uid, host_id):
     a = await db.fetchone("SELECT detail FROM audit_log WHERE path=? AND method='POST' ORDER BY id DESC", url)
     check("…audited", a is not None and "retired from the continuity proof" in (a["detail"] or "")
           and "lifted" in a["detail"], a)
+    rows = await db.fetchall("SELECT detail, actor FROM audit_log WHERE path=? AND detail LIKE '%durable record%' "
+                             "ORDER BY id", url)
+    check("R2-M1: each retirement also has a durable audit row written with the marker (actor, known head)",
+          len(rows) == 2 and "known head %d" % (n + 1) in rows[0]["detail"] and rows[0]["actor"] == "o@x.co",
+          [dict(r) for r in rows])
     check("…and the marker is gone from the database too",
           await db.fetchone("SELECT 1 FROM tx_state WHERE key='continuity'") is None)
     r = await c.post(url, json={"confirm": gone, "stepup_grant": grant(uid, 0)})
     check("no unproven restore any more → 404 transcript.destinationUnknown",
           r.status_code == 404 and r.json().get("code") == "transcript.destinationUnknown", r.text)
+    # R2-M1: o cădere / anulare după COMMIT (înainte de try_prove şi de auditul cererii) lasă urma
+    await set_marker(st, dict(base, required=sorted([d.id, gone])))
+    row = {"ts": time.time(), "actor": "o@x.co", "actor_id": uid, "ip": "127.0.0.1", "path": "/x/direct"}
+    await er.retire_destination(st, gone, audit_row=row)
+    a = await db.fetchone("SELECT detail FROM audit_log WHERE path='/x/direct'")
+    check("R2-M1: the retirement and its audit row commit together (nothing after the COMMIT is needed)",
+          gone not in er.continuity().get("required", []) and a is not None and gone in a["detail"], a)
+    # o reconfigurare cât retragerea aşteaptă bariera: verificarea se reface la COMMIT
+    await set_marker(st, dict(base, required=sorted([d.id, gone])))
+    await st.barrier.acquire()
+    task = asyncio.ensure_future(er.retire_destination(st, gone, audit_row=dict(row, path="/x/race")))
+    waiting = await _until_waiting(task)
+    for k, v in (("cloud_provider", "sftp"), ("cloud_user", "u"), ("cloud_host", "h"), ("cloud_port", "22"),
+                 ("cloud_path", "old/gone")):
+        await db.execute("INSERT OR REPLACE INTO app_settings(key, value) VALUES(?,?)", k, v)
+    st.barrier.release()
+    code = await _erasure_code(task)
+    check("R2-M1: the destination configured while the retirement waited for the barrier → refused at "
+          "COMMIT (transcript.destinationConfigured), marker and audit unchanged",
+          waiting and code == "transcript.destinationConfigured" and gone in er.continuity().get("required", [])
+          and await db.fetchone("SELECT 1 FROM audit_log WHERE path='/x/race'") is None, code)
+    await db.execute("DELETE FROM app_settings WHERE key LIKE 'cloud_%'")
+    await st.txn(lambda cu: cu.execute("DELETE FROM tx_state WHERE key='continuity'"))
+    er._s.continuity = None
     DESTS[:] = []
     await unquarantine_all()
 
@@ -1545,6 +1765,7 @@ async def main():
     g_h1_restore()
     g_recheck_pure()
     g_rh1_consecutive()
+    g_r2m2_restore()
     config.ensure_dirs()
     security.init_crypto(config.load_secret())
     await db.connect()
@@ -1560,6 +1781,7 @@ async def main():
         host_id = (await c.post("/api/hosts", json={"name": "h1"})).json()["id"]
         st, _live = await g_boot_and_route(c, uid, host_id)
         st = await g_crash(st, host_id)
+        st = await g_intents(st, host_id)
         st, keep = await g_diagnostics(st, host_id)
         await g_cap(st, host_id)
         await g_attest(st, host_id)

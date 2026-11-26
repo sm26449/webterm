@@ -17,7 +17,9 @@ Pieces:
   appended `O_APPEND` + fsync after checking that its length is the one we last saw; tail repair
   (copy the authentic prefix to a temp `O_EXCL` file, fsync, rename, directory fsync, cut bytes
   kept as `erasures.wtj.tail-<ms>`).
-* **Erasure** (`erase`): the four steps of §12.11.4 under the sid's lease and the Store barrier.
+* **Erasure** (`erase`): the four steps of §12.11.4 under the sid's lease and the Store barrier,
+  preceded by a durable erase intent (`tx_erase_intents`, R2-H1) that only step 2 clears; the boot
+  completes any intent left, so a lost or damaged journal entry never hides an erasure.
 * **Boot** (`boot`): verify the journal against the DB's committed head before any reader; re-apply
   missing entries; quarantine every recording on a missing / rolled-back / forked / broken journal.
 * **Attestation** (`attest_once`, janitor `start`): one immutable object per head and destination,
@@ -530,6 +532,8 @@ class _State:
     dest_ids: list = None          # ultimele destinaţii configurate văzute (None = încă necunoscut)
     conflict: str = ""
     continuity: dict = None        # {state: unproven, since, n} | None
+    damaged: Parsed = None         # R2-H1: prefixul autentic citit la un boot cu jurnal stricat (sau None)
+    head_known: bool = True        # R2-H1: capul comis s-a putut citi din DB la boot
     booted: bool = False
     quarantine_pass: bool = False
     task: object = None
@@ -609,10 +613,12 @@ def _set_json(c, key, value):
               "value=excluded.value", (key, json.dumps(value, sort_keys=True, separators=(",", ":"))))
 
 
-def _destroy_sync(c, sid, head=None):
+def _destroy_sync(c, sid, head=None, clear_intent=True):
     """Erasure step 2 for one sid, inside the caller's transaction: live share and replay links
     revoked, RK destroyed, descriptors and gaps gone, generations → retired, head advanced
-    (monotonic). Returns the generations to retire."""
+    (monotonic), and (R2-H1) the sid's erase intent cleared in the SAME transaction, unless
+    `clear_intent` is False (the erasure has no journal entry yet). Returns the generations to
+    retire."""
     c.execute("UPDATE sessions SET share_token=NULL, share_expires=NULL, share_writable=0 WHERE id=?", (sid,))
     c.execute("DELETE FROM replay_opens WHERE link_id IN (SELECT id FROM replay_links WHERE sid=?)", (sid,))
     c.execute("DELETE FROM replay_links WHERE sid=?", (sid,))
@@ -622,11 +628,78 @@ def _destroy_sync(c, sid, head=None):
     c.execute("DELETE FROM tx_descriptors WHERE sid=?", (sid,))
     c.execute("DELETE FROM tx_gaps WHERE sid=?", (sid,))
     c.execute("DELETE FROM tx_quarantine WHERE sid=?", (sid,))
+    if clear_intent:
+        _ensure_intent_table(c)
+        c.execute("DELETE FROM tx_erase_intents WHERE sid=?", (sid,))
     if head is not None:
         cur = _get_json(c, "erasure_head")
         if cur is None or Head.from_json(cur).n < head.n:
             _set_json(c, "erasure_head", head.to_json())
     return [(g[0], g[1]) for g in gens]
+
+
+# R2-H1: intenţia durabilă de ştergere. Un rând `tx_erase_intents` se comite (FULL fsync pe conexiunea
+# Store-ului) ÎNAINTE de pasul 1 şi dispare doar în tranzacţia pasului 2. Un jurnal pierdut / stricat
+# după fsync-ul intrării, dar înainte de COMMIT, nu mai poate ascunde ştergerea: boot-ul o duce la
+# capăt din intenţie, iar recuperarea Owner refuză un sid cu intenţie.
+
+
+def _ensure_intent_table(c):
+    # DB-ul unui backup / volum mai vechi decât tabela: aceeaşi definiţie ca db.SCHEMA (aditiv)
+    c.execute("CREATE TABLE IF NOT EXISTS tx_erase_intents (sid TEXT PRIMARY KEY, kinds TEXT NOT NULL, "
+              "since REAL NOT NULL)")
+
+
+def _put_intent_sync(c, sid, kinds, now):
+    _ensure_intent_table(c)
+    c.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?,?,?) ON CONFLICT(sid) DO NOTHING",
+              (sid, ",".join(sorted(k for k in kinds if k in ("out", "cast"))), now))
+
+
+def _intents_sync(c):
+    """{sid: [kinds]} of every outstanding erase intent."""
+    _ensure_intent_table(c)
+    out = {}
+    for sid, kinds in c.execute("SELECT sid, kinds FROM tx_erase_intents ORDER BY since, sid").fetchall():
+        out[sid] = [k for k in (kinds or "").split(",") if k in ("out", "cast")]
+    return out
+
+
+def intents_in(db_path):
+    """{sid: [kinds]} of the erase intents in the database at `db_path` (a live DB before a restore
+    replaces it); {} without the table. An unreadable DB → sqlite3.Error (the caller refuses)."""
+    con = sqlite3.connect(pathlib_uri(db_path), uri=True)
+    try:
+        try:
+            rows = con.execute("SELECT sid, kinds FROM tx_erase_intents").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                return {}
+            raise
+    finally:
+        con.close()
+    return {sid: [k for k in (kinds or "").split(",") if k in ("out", "cast")]
+            for sid, kinds in rows if type(sid) is str and re.fullmatch(r"[0-9a-f]{32}", sid)}
+
+
+def carry_intents_sync(db_path, intents, now=None):
+    """Restore apply (R2-H1): the live volume's outstanding erase intents are written into the
+    restored database, so the boot that follows completes them (a restore never hides one)."""
+    if not intents:
+        return
+    now = time.time() if now is None else now
+    con = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            for sid, kinds in sorted(intents.items()):
+                _put_intent_sync(con, sid, kinds, now)
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+    finally:
+        con.close()
 
 
 async def _read_state(st):
@@ -646,6 +719,37 @@ class BootReport:
     tail: str = ""
     quarantined: int = 0
     created: bool = False
+    completed: list = field(default_factory=list)     # R2-H1: intenţii duse la capăt la boot
+
+
+async def _complete_intents(st, intents, journalled, rep, clock):
+    """Boot, healthy journal (R2-H1): an intent whose sid the journal holds is cleared (its DB step
+    ran above); any other is an erasure whose entry was lost or never written: it is completed now
+    (a new entry + step 2), or, while the journal is behind a restore's threshold (a new entry would
+    fork it), destroyed in the database only with the intent kept for a later boot."""
+    s = _s
+    done = [sid for sid in intents if sid in journalled]
+    if done:
+        await st.txn(lambda c: [c.execute("DELETE FROM tx_erase_intents WHERE sid=?", (x,)) for x in done])
+    for sid, kinds in intents.items():
+        if sid in journalled:
+            continue
+        rep.completed.append(sid)
+        if _behind() or s.parsed.n >= CAP or s.uncertain:
+            await st.txn(lambda c, sid=sid: _destroy_sync(c, sid, clear_intent=False))
+            continue
+        env = await st.read(lambda c, sid=sid: c.execute("SELECT envelope FROM session_keys WHERE sid=?",
+                                                         (sid,)).fetchone())
+        try:
+            async with st.barrier:
+                await _journal_and_destroy(st, sid, kinds or ["out", "cast"], env, clock)
+        except ErasureError as e:
+            # incert: sid-ul rămâne tombstone în memorie, intenţia în DB; ştergerile se refuză
+            log.warning("erasure boot: intent %s not completed: %s", sid[:8], e.code)
+            try:
+                await st.txn(lambda c, sid=sid: _destroy_sync(c, sid, clear_intent=False))
+            except Exception as x:               # noqa: BLE001 — tombstone-ul din memorie rămâne
+                log.warning("erasure boot: intent %s: RK not destroyed: %s", sid[:8], type(x).__name__)
 
 
 async def boot(st, data_dir=None, clock=time.time):
@@ -662,6 +766,15 @@ async def boot(st, data_dir=None, clock=time.time):
     except JournalError as e:
         head, att, cont = None, None, None
         rep.diag = "db-" + e.reason
+    # R2-H1: intenţiile de ştergere se citesc înaintea jurnalului; fiecare sid numit nu mai e servit
+    # de aici (fail closed), oricare ar fi starea jurnalului
+    try:
+        intents = await st.txn(_intents_sync)
+    except (sqlite3.Error, txstore.Uncertain):
+        intents = {}
+        rep.diag = rep.diag or "db-intents"
+    st.tombstoned.update(intents)
+    s.head_known = head is not None
     s.head_db = head or EMPTY_HEAD
     s.attested = att if isinstance(att, dict) else {}
     s.continuity = cont if isinstance(cont, dict) else None
@@ -714,6 +827,12 @@ async def boot(st, data_dir=None, clock=time.time):
         st.bump(None)
         st.alarm("transcript.erasureJournal", f"erasure journal {rep.diag}: every recording quarantined")
         s.parsed = None
+        s.damaged = parsed
+        # R2-H1: o intenţie fără pas DB confirmat se completează în DB (RK distrus), fără intrare de
+        # jurnal (jurnalul stricat nu primeşte adăugări); intenţia rămâne: nu e jurnalizată
+        for sid in intents:
+            await st.txn(lambda c, sid=sid: _destroy_sync(c, sid, clear_intent=False))
+            rep.completed.append(sid)
     else:
         s.parsed = parsed
         sids = {e.sid_hex for e in parsed.entries}
@@ -733,6 +852,7 @@ async def boot(st, data_dir=None, clock=time.time):
             if sid in sids:
                 await st.txn(lambda c, sid=sid: _destroy_sync(c, sid))
                 rep.destroyed.append(sid)
+        await _complete_intents(st, intents, sids, rep, clock)
     # carantina de continuitate (restore fără dovadă): ce a marcat restore-ul rămâne în carantină
     if s.continuity and s.continuity.get("state") == "unproven":
         st.alarm("transcript.erasureUnproven", "erasures after %s cannot be proven" % s.continuity.get("since"))
@@ -758,6 +878,22 @@ async def _journal_and_destroy(st, sid, kinds, env, clock):
     rk_hash = keyring.envelope_hash(bytes(env[0])) if env is not None else b"\x00" * 32
     entry = encode_entry(s.journal.k, st.inst, prev.mac, n, t_ms, bytes.fromhex(sid),
                          kinds_bits(kinds), rk_hash)
+    # R2-H1: intenţia durabilă ÎNAINTE de pasul 1 (o tranzacţie proprie, comisă): de aici un jurnal
+    # pierdut nu mai poate ascunde ştergerea, boot-ul o completează din intenţie
+    try:
+        await st.io(st._run_txn, lambda c: _put_intent_sync(c, sid, kinds, clock()))
+    except txstore.Uncertain:
+        # poate fi comisă: sid-ul nu mai e servit, boot-ul decide (o intenţie comisă se completează)
+        s.uncertain = "intent-uncertain"
+        st.tombstone(sid)
+        st.alarm("transcript.erasureUncertain", f"{sid}: erase intent commit uncertain")
+        raise ErasureError("transcript.erasureUncertain",
+                           "the erasure could not be recorded; restart the gateway", 503) from None
+    except Exception as x:
+        # ROLLBACK: nimic scris, nimic jurnalizat
+        log.warning("erasure %s: intent not written: %s", sid[:8], type(x).__name__)
+        raise ErasureError("transcript.erasureUnavailable", "the erasure could not be recorded", 503) from None
+    st._fault("intent-committed")
     fut = asyncio.ensure_future(st.io(s.journal.append, entry, prefix_len(prev.n), st._fault))
     try:
         await asyncio.wait_for(asyncio.shield(fut), APPEND_BUDGET)
@@ -1216,9 +1352,12 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
             return False
         need = max(known.get(d, 0), t.n, floor)
         return need >= 1 and r.parsed.n >= need and reaches(r.parsed, t)
+    # R2-M2: un cap off-host cunoscut (şi al unei destinaţii retrase) peste pragul local e tot o
+    # obligaţie: J_v dovedeşte doar dacă îl atinge şi pe el
+    top = max([t.n] + list(known.values()))
     if not met:
         proof = "none"
-    elif live.state == "same" and pv is not None and reaches(pv, t):
+    elif live.state == "same" and pv is not None and reaches(pv, t) and pv.n >= top:
         proof = "volume"
     elif req and all(dest_ok(d) for d in req):
         proof = "destinations"
@@ -1241,7 +1380,7 @@ def journal_reaches(raw, k_erase, inst, t):
 
 
 def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, stage_summary=None,
-                    threshold=EMPTY_HEAD, live_ok=False):
+                    threshold=EMPTY_HEAD, live_ok=False, known=None):
     """The same reconciliation again under the boot lock, immediately before apply: the staged J*
     and the live journal must lie on one chain; the longer one is published. Returns (journal bytes
     to publish or None, proven, head).
@@ -1250,7 +1389,9 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
     the same installation and readable, `threshold` = the highest committed head known (the stage's
     and the live database's now); J_v must hold it and so must the journal published. A proof by
     destinations at stage is not re-verifiable here: it never lifts the quarantine (the janitor's
-    `try_prove` re-fetches them)."""
+    `try_prove` re-fetches them). R2-M2: `known` = the per-destination heads kept (a retired
+    destination's too): J_v and the published journal must reach the highest of them as well."""
+    top = max([threshold.n] + list((known or {}).values()))
     cands = []
     if staged_journal is not None:
         ps = parse(staged_journal, k_erase, inst)
@@ -1274,8 +1415,9 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
         if pv is not None and best[0] == "volume" and best[1].n == pv.n and not pv.bad:
             out = None                             # jurnalul de pe volum e deja cel mai lung
     final = best[1] if best is not None else None
-    proven = live_ok and pv is not None and reaches(pv, threshold) and reaches(final, threshold)
-    if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0 and threshold.n == 0:
+    proven = (live_ok and pv is not None and reaches(pv, threshold) and reaches(final, threshold)
+              and pv.n >= top and final.n >= top)
+    if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0 and top == 0:
         proven = True                              # nimic urmărit nicăieri: nimic de dovedit
     return out, proven, head
 
@@ -1672,13 +1814,15 @@ async def list_quarantined(st):
     return {"items": out, "continuity": _s.continuity, "journal_diag": diag or None}
 
 
-async def _set_status(st, sid, frm, to, *, allowed=_continuity_only, need_key=False):
+async def _set_status(st, sid, frm, to, *, allowed=_continuity_only, need_key=False, guard=None):
     txstore._sid_bytes(sid)
     if sid in st.tombstoned:
         raise ErasureError("transcript.missing", "no recording for this session", 404)
     async with st.lease(sid):
         async with st.revoking(sid):
             def fn(c):
+                if guard is not None:
+                    guard(c)
                 rows = c.execute("SELECT d.kind, d.status, q.reason FROM tx_descriptors d LEFT JOIN "
                                  "tx_quarantine q ON q.sid=d.sid AND q.kind=d.kind WHERE d.sid=?",
                                  (sid,)).fetchall()
@@ -1722,9 +1866,102 @@ async def recover_journal(st, sid, diag):
     if not diag or journal_diag() != diag or not health_has("erasure_journal_broken"):
         raise ErasureError("transcript.journalNotDiagnosed",
                            "System health does not show this erasure journal diagnosis", 409)
+    txstore._sid_bytes(sid)
+    s = _s
+    if sid in st.tombstoned:
+        raise ErasureError("transcript.missing", "no recording for this session", 404)
+    intent, key = await st.read(lambda c: (
+        _has_intent(c, sid), c.execute("SELECT 1 FROM session_keys WHERE sid=?", (sid,)).fetchone() is not None))
+    if intent:
+        raise ErasureError("transcript.recoveryErasePending",
+                           "an erasure of this recording was requested and may be journalled; "
+                           "it is never recovered", 409)
+    if not key:
+        raise ErasureError("transcript.recoveryNoKey",
+                           "this recording's key was destroyed; it cannot be recovered", 409)
+    head0, dmg0 = s.head_db, s.damaged
+    # R2-H1: dovada se ia ÎN AFARA barierei (I/O off-host), apoi se re-verifică sub ea
+    await _journal_recovery_proof(st, sid)
     want = "journal:" + diag
+
+    def guard(c):
+        if journal_diag() != diag or s.head_db is not head0 or s.damaged is not dmg0 or sid in st.tombstoned:
+            raise ErasureError("transcript.recoveryState", "the erasure journal state changed; try again", 409)
+        if _has_intent(c, sid):
+            raise ErasureError("transcript.recoveryErasePending",
+                               "an erasure of this recording was requested and may be journalled; "
+                               "it is never recovered", 409)
     return await _set_status(st, sid, "quarantined", "recovery",
-                             allowed=lambda r: r == want, need_key=True)
+                             allowed=lambda r: r == want, need_key=True, guard=guard)
+
+
+def _has_intent(c, sid):
+    try:
+        return c.execute("SELECT 1 FROM tx_erase_intents WHERE sid=?", (sid,)).fetchone() is not None
+    except sqlite3.OperationalError:
+        return True                                # tabela nu se poate citi: fail closed
+
+
+def _known_top():
+    """R2-H1: the highest erasure head this volume knows was committed or held anywhere: the DB
+    head, every attested head, the continuity marker's threshold and known heads. None = a source
+    that cannot be read (fail closed: nothing proves the gap closed)."""
+    s = _s
+    if not s.head_known:
+        return None
+    top = s.head_db.n
+    for v in (s.attested or {}).values():
+        if not isinstance(v, dict) or type(v.get("n", 0)) is not int:
+            return None
+        top = max(top, v.get("n", 0))
+    if s.continuity and s.continuity.get("state") == "unproven":
+        terms = _marker_terms(s.continuity)
+        if terms is None:
+            return None
+        top = max([top, terms.threshold.n] + list(terms.known.values()))
+    return top
+
+
+async def _journal_recovery_proof(st, sid):
+    """R2-H1 (b)+(c): before a `journal:*` recovery, every reachable destination journal is read.
+    An authentic tombstone of `sid` in any of them → refused; destination journals that diverge →
+    refused and signalled; and the gap between the readable local prefix and the highest known head
+    must be covered by a source that holds the committed head (local, else a destination), or the
+    recovery is refused until it is."""
+    s = _s
+    top = _known_top()
+    k = s.journal.k
+    dests = await destinations()
+    results = await fetch_all(dests, k, st.inst, check_from=top or 0) if dests else []
+    forks = [r.id for r in results if r.error == "conflict"]
+    good = [r for r in results if r.ok and r.parsed is not None]
+    try:
+        if forks:
+            raise ErasureConflict("erasure journals at %s diverge" % forks[0][:120])
+        _on_one_chain([(r.id, r.parsed) for r in good])
+    except ErasureConflict as e:
+        s.conflict = str(e)
+        st.alarm("transcript.erasureConflict", str(e))
+        raise ErasureError("transcript.recoveryConflict",
+                           "the destinations' erasure journals diverge; recovery is refused", 409) from None
+    b = bytes.fromhex(sid)
+    if any(e.sid == b for r in good for e in r.parsed.entries):
+        raise ErasureError("transcript.recoveryTombstoned",
+                           "an off-host erasure journal erases this recording; it is never recovered", 409)
+    if top is None:
+        raise ErasureError("transcript.recoveryGap",
+                           "the committed erasure head cannot be read; recovery is refused", 409)
+    if top == 0:
+        return                                     # nimic comis sau atestat nicăieri: niciun gol
+    head = s.head_db
+    local = s.damaged
+    if local is not None and reaches(local, head) and local.n >= top:
+        return
+    if any(reaches(r.parsed, head) and r.parsed.n >= top for r in good):
+        return
+    raise ErasureError("transcript.recoveryGap",
+                       "erasures up to n=%d are not readable here or on any reachable destination; "
+                       "recovery is refused until they are" % top, 409)
 
 
 async def release(st, sid):
@@ -1766,13 +2003,36 @@ async def _configured_ids_strict():
                            "the configured destinations cannot be read", 503) from None
 
 
-async def retire_destination(st, dest_id):
+def _configured_in_txn(c):
+    """R2-M1: the destination configured NOW, read inside the marker's transaction (BEGIN IMMEDIATE:
+    a concurrent settings save commits before it, and is seen, or after it)."""
+    try:
+        cfg = dict(c.execute("SELECT key, value FROM app_settings WHERE key LIKE 'cloud_%'").fetchall())
+    except sqlite3.OperationalError:
+        return None                                # nu se poate citi: refuz (apelantul)
+    did = dest_id_from_settings({k: v or "" for k, v in cfg.items()})
+    return {did} if did else set()
+
+
+def _audit_sync(c, row):
+    c.execute("INSERT INTO audit_log(ts, actor, ip, method, path, status, detail, actor_id, via) "
+              "VALUES(?,?,?,?,?,?,?,?,?)",
+              (row["ts"], (row.get("actor") or "")[:200], (row.get("ip") or "")[:64], row.get("method", "POST"),
+               (row.get("path") or "")[:400], int(row.get("status", 200)), (row.get("detail") or "")[:500],
+               row.get("actor_id"), (row.get("via") or "")[:64]))
+
+
+async def retire_destination(st, dest_id, *, audit_row=None):
     """Remove `dest_id` from the continuity marker's `required` set (R-M2), an audited Owner
     override for a destination that no longer exists. The quarantine stays; its known head stays
     too (a proof must still reach the highest head that destination was known to hold, so retiring
     it never forgets an erasure it was known to have). Refused for a destination that is still
     configured: `try_prove` requires every configured destination anyway, so retiring it would
-    change nothing; remove it from the backup settings first."""
+    change nothing; remove it from the backup settings first.
+
+    R2-M1: the configuration is checked again inside the marker's transaction, and `audit_row`
+    (the route's actor / ip / path) is written to `audit_log` in that SAME transaction, with the
+    destination's known head: a retirement is never durable without its audit trail."""
     s = _s
     cont = s.continuity
     terms = _marker_terms(cont) if cont and cont.get("state") == "unproven" else None
@@ -1794,15 +2054,28 @@ async def retire_destination(st, dest_id):
         # aceeaşi secţiune critică cu try_prove (CAS pe `s.continuity`): o dovadă în zbor care a
         # citit markerul vechi nu mai adoptă nimic; st.txn ar re-lua bariera (asyncio.Lock nu e
         # reentrant), deci tranzacţia direct pe firul DB, ca în try_prove
+        known_head = terms.known.get(dest_id, 0)
+
+        def fn(c):
+            now_cfg = _configured_in_txn(c)
+            if now_cfg is None or dest_id in now_cfg:
+                raise ErasureError("transcript.destinationConfigured",
+                                   "this destination is still configured; remove it from the backup "
+                                   "settings first", 409)
+            _set_json(c, "continuity", new)
+            if audit_row is not None:
+                _audit_sync(c, dict(audit_row, detail="owner override: erasure destination %s retired from "
+                                    "the continuity proof (known head %d, threshold n=%d; durable record)"
+                                    % (dest_id[:120], known_head, terms.threshold.n)))
         try:
-            await st.io(st._run_txn, lambda c: _set_json(c, "continuity", new))
+            await st.io(st._run_txn, fn)
         except txstore.Uncertain:
             # rezultat necunoscut: markerul în memorie rămâne cel vechi (mai strict); boot-ul îl
             # citeşte din DB oricum ar fi fost
             raise ErasureError("transcript.erasureUncertain",
                                "the change did not finish; restart the gateway", 503) from None
         s.continuity = new
-    return {"required": left, "known_head": terms.known.get(dest_id, 0)}
+    return {"required": left, "known_head": known_head}
 
 
 async def status_of(st, sid):

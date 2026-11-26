@@ -164,7 +164,8 @@ def create_test_volume(db_path, transcripts_dir=None, env=None):
 # ── inventory of encrypted-recording artefacts (boot, backup, restore: ONE definition) ──
 
 # Tabelele care, nevide, înseamnă „înregistrări criptate pe volum" (PR6a: + migrare + carantină).
-TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps", "tx_migration", "tx_quarantine")
+TX_TABLES = ("session_keys", "tx_descriptors", "tx_files", "tx_gaps", "tx_migration", "tx_quarantine",
+             "tx_erase_intents")
 # Chei tx_state care există doar după jurnalul de ştergeri / un restore urmărit (§12.11.4) sau după
 # inventarul migrării (§12.11.5, PR6b): un volum cu ele nu mai e servit de calea 3.7.
 TX_STATE_KEYS = ("erasure_head", "attested_heads", "continuity", "recordings_format", "migration_inventory")
@@ -707,6 +708,9 @@ class Store:
     def _connect(self):
         con = _connect_rw(self._db_path)
         con.execute("PRAGMA busy_timeout=5000")
+        # R2-H1: intenţia de ştergere trebuie să fie durabilă la COMMIT (şi la o cădere de OS), nu doar
+        # la moartea procesului: FULL explicit, oricare ar fi implicitul compilării SQLite
+        con.execute("PRAGMA synchronous=FULL")
         return con
 
     def close(self):

@@ -561,6 +561,14 @@ CREATE TABLE IF NOT EXISTS tx_quarantine (
     since REAL NOT NULL,
     PRIMARY KEY (sid, kind)
 );
+-- tx_erase_intents: intenţia durabilă a unei ştergeri (R2-H1, §12.11.4), comisă ÎNAINTE de intrarea din
+-- jurnal şi ştearsă în tranzacţia pasului 2. Boot-ul completează orice intenţie rămasă (un jurnal pierdut
+-- nu ascunde ştergerea), iar recuperarea Owner refuză sid-ul. Tabelă nouă în 3.8 (nelansată).
+CREATE TABLE IF NOT EXISTS tx_erase_intents (
+    sid TEXT PRIMARY KEY,
+    kinds TEXT NOT NULL,                        -- out,cast (cele cunoscute la cerere)
+    since REAL NOT NULL
+);
 """
 
 # additive migrations for DBs created by an older version

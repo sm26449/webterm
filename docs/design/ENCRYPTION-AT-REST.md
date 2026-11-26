@@ -2045,7 +2045,11 @@ committed head is never repaired: it is the quarantine case below.
 
 **Order of `erase(sid)`** (session not live, else 409 as `delete_session`):
 
-1. Lease → barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
+0. Lease → barrier: the **erase intent** (R2-H1): one row `tx_erase_intents(sid, kinds, since)`
+   committed in its own transaction (the Store's connection runs `synchronous=FULL`), before
+   anything is appended. It is deleted only inside step 2's transaction. A crash before it commits
+   leaves nothing (not erased); an uncertain COMMIT is the `erasureUncertain` case below.
+1. Same barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
    with its own time budget, 5 s, beyond → the route answers 503 and the boot decides from the
    file). In the same synchronous section, before releasing the barrier: add the sid to the
    in-memory tombstone set and bump `revocation_epoch[sid]` (§12.11.2): from here `open` refuses it,
@@ -2079,6 +2083,15 @@ head → **every recording is quarantined**, System health critical with the dia
 fork / rollback); terminals and new recordings (new RKs) keep working. Journal ahead of the DB head
 (crash after step 1) → re-apply steps 2–3 for the missing entries. Any tombstoned sid that still
 has an RK (a restore) → destroyed the same way. Each step is repeatable after a crash.
+**Erase intents (R2-H1)** are read before the journal; every sid named is tombstoned in memory
+whatever the journal says. On a healthy journal, an intent whose sid the journal holds is cleared
+(its step 2 ran); any other intent is an erasure whose entry was lost or never written, and it is
+completed now: a new entry, then step 2 (or, while the journal is behind a restore's threshold, the
+RK destroyed in the database only, the intent kept for a later boot). On a damaged journal the RK of
+every intent sid is destroyed in the database and the intent is kept (nothing can be appended). So
+a journal entry lost between its fsync and step 2's COMMIT can no longer leave a readable recording.
+A restore carries the live volume's outstanding intents into the restored database (kept in the
+restore flag across a resumed apply).
 
 **Freshness (H3).** A MAC chain proves authenticity and order, not freshness: an authentic but old
 head (delayed upload, destination rolled back to an older version) is still authentic. Rules:
@@ -2119,7 +2132,17 @@ each read audited, UI banner "recovered without erasure proof"; the erasure guar
 for them. A known tombstone, a recording whose RK is gone, a corrupt or damaged recording, an
 absent one and a keyring-epoch quarantine are **never** opened by recovery mode. A `journal:<diag>`
 quarantine (a damaged journal at boot) is opened only on the strict terms of §12.11.8 (decision
-2026-11-26) and is never released to normal access. Releasing to normal access is one recording at a
+2026-11-26) and is never released to normal access. On top of those terms (R2-H1): a sid with an
+outstanding erase intent is refused (`409 transcript.recoveryErasePending`); every reachable
+destination journal is read first (outside the barrier) and an authentic tombstone of the sid in
+any of them refuses (`409 transcript.recoveryTombstoned`), destination journals that diverge refuse
+and are signalled (`409 transcript.recoveryConflict`); and the gap between the readable local
+prefix and the highest known head (the database head, every attested head, the continuity
+marker's threshold and known heads) must be covered by a source that holds the committed head and
+reaches that number — the local prefix, else a destination — or the recovery is refused until it
+is (`409 transcript.recoveryGap`; an unreadable database head counts as a gap). The diagnosis, the
+committed head, the tombstone set and the intent are re-checked under the barrier in the
+transaction that changes the status. Releasing to normal access is one recording at a
 time (no "release all"), each release a separate Owner action with a fresh factor, audited, with a
 security e-mail; re-quarantine is allowed. The permission is bound to the recovery route's own
 authorization (`access`, §12.11.2), not to a parameter.
@@ -2339,7 +2362,12 @@ Decided by the owner on 2026-11-26:
   transcript.destinationConfigured`), reachable or not: `try_prove` requires every configured
   destination anyway, so retiring it would change nothing (remove it from the backup settings
   first). The destination's known head is kept: a proof must still reach the highest head it was
-  known to hold, so retiring it never forgets an erasure it was known to have.
+  known to hold, so retiring it never forgets an erasure it was known to have — including the
+  volume proof of a later restore (R2-M2: J_v proves only when it reaches every kept head). The
+  configured destination is checked again inside the marker's transaction, and an `audit_log` row
+  (actor, IP, destination, its known head, the threshold) is written in that same transaction
+  (R2-M1), so a retirement is never durable without its audit trail; the security e-mail and the
+  request's own audit row follow separately.
 
 | # | Question | Recommended default |
 |---|---|---|
@@ -3020,13 +3048,28 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   System health, that the sid is not in the Store's tombstone set and that its `session_keys` row
   exists. `release` raises `transcript.releaseJournal` for a `journal:*` reason before anything
   changes; `requarantine` accepts both reasons. `list_quarantined` adds `recovery`
-  (`continuity` | `journal` | null) and, for a journal one, `confirm_word`. Known limit: an erasure
-  appended to the journal whose database step never committed (a crash between steps 1 and 2) and
-  whose journal entry is now unreadable cannot be seen locally; its RK is still present, so only
-  the off-host attestations could have shown it. The Owner accepts that window by typing the
-  diagnosis. `erasure.retire_destination` changes the marker under the Store barrier (the CAS
-  `try_prove` re-checks), reads the configured destinations strictly (a provider error refuses
-  with `503`, never "none configured") and keeps `known`.
+  (`continuity` | `journal` | null) and, for a journal one, `confirm_word`.
+  `erasure.retire_destination` changes the marker under the Store barrier (the CAS `try_prove`
+  re-checks), reads the configured destinations strictly (a provider error refuses with `503`,
+  never "none configured") and keeps `known`.
+- **Recheck (888c6b2) fixes.** *R2-H1:* the erase intent (`tx_erase_intents`, `db.SCHEMA`; listed
+  in `txstore.TX_TABLES`, so a flag-off backup refuses a dataset holding one) is committed by
+  `_journal_and_destroy` before the append (fault point `intent-committed`) and cleared by
+  `_destroy_sync` in step 2's transaction; `boot` → `_complete_intents` completes or keeps it
+  (§12.11.4 "Every boot"); `backup._erasure_apply_plan` reads the live intents (same installation;
+  unreadable → `ErasureConflict`, more than 256 → refused), keeps them in the flag
+  (`erasure_intents`) and `carry_intents_sync` writes them into the restored database right after
+  the DB copy. `recover_journal` checks the tombstone set, the intent and the RK first, then
+  `_journal_recovery_proof` (destination fetch with `check_from` = the known top, one chain,
+  tombstones, gap), then the same checks again in the status transaction. This closes the earlier
+  known limit (an entry fsynced, step 2 never committed, the entry then unreadable): the intent
+  survives it. A volume written before intents existed has none; 3.8 is unreleased, so no such
+  volume exists outside tests. *R2-M1:* `retire_destination(st, dest_id, audit_row=…)` re-reads
+  `app_settings` `cloud_*` inside its `BEGIN IMMEDIATE` transaction (a settings save while it waits
+  for the barrier is seen and refused with `transcript.destinationConfigured`) and inserts the
+  audit row in that transaction. *R2-M2:* `decide_restore` (volume proof) and `reconcile_apply`
+  (`known=`) require J_v, and the journal published, to reach max(threshold, every kept known
+  head); the apply plan's `reach` (resume) checks the same.
 
 ## Appendix: Test vectors (v1)
 

@@ -2216,7 +2216,8 @@ def _read_flag():
     doc = _strict_json(raw, err)
     if (type(doc) is not dict or not {"format", "manifest", "state", "set"} <= set(doc)
             or not set(doc) <= {"format", "manifest", "state", "set", "safety", "quarantine", "erasure_proven",
-                                "erasure_threshold", "erasure_known", "erasure_required", "erasure_overflow"}
+                                "erasure_threshold", "erasure_known", "erasure_required", "erasure_overflow",
+                                "erasure_intents"}
             or doc["format"] != _FLAG_FORMAT or doc["state"] not in _FLAG_STATES
             or type(doc["manifest"]) is not str or not _SHA_HEX.match(doc["manifest"])
             or type(doc["set"]) is not str or not _GEN_HEX.match(doc["set"])
@@ -2234,7 +2235,9 @@ def _read_flag():
             erasure.known_from_json(doc["erasure_known"])
         if "erasure_required" in doc:
             erasure.required_from_json(doc["erasure_required"])
-    except erasure.JournalError:
+        if "erasure_intents" in doc:
+            _intents_of_flag(doc["erasure_intents"])
+    except (erasure.JournalError, erasure.ErasureConflict):
         raise err() from None
     return doc
 
@@ -2864,6 +2867,7 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                 flag["erasure_known"] = er_plan["known"]
                 flag["erasure_required"] = er_plan["required"]
                 flag["erasure_overflow"] = er_plan["overflow"]
+                flag["erasure_intents"] = er_plan["intents"]
             _write_flag(flag)
             _step("apply:applying")
         if current != staged:
@@ -2888,6 +2892,10 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             if os.path.lexists(p):
                 os.unlink(p)
         _fsync_dir(config.DATA_DIR)
+        if er_plan is not None and er_plan["intents"]:
+            # R2-H1: intenţiile de ştergere ale DB-ului viu (din flag) trec în DB-ul restaurat; boot-ul
+            # care urmează le duce la capăt (un restore nu ascunde o ştergere cerută)
+            erasure.carry_intents_sync(config.DB_PATH, er_plan["intents"])
         _step("apply:db")
         if has_tx and txstore.enabled():
             # PR6c (§12.11.3 Apply): registrul şi rândurile migrării restaurate numesc inode-urile
@@ -2942,6 +2950,7 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
         raise erasure.ErasureConflict("the restore staging's erasure threshold is malformed — refused") from None
     overflow = er.get("overflow", False) is True
     live_ok = False
+    intents = {}
     if flag is None or flag.get("state") == "staged":
         live = erasure.live_state(config.DB_PATH, hk.ring.installation_id if hk is not None else None, inst)
         if live.state == "same":
@@ -2951,8 +2960,15 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
             overflow = overflow or live.overflow or erasure.known_overflow(known, live.attested)
             known = erasure.merge_known(known, live.attested)
             required = sorted(set(required) | set(live.required))
+            try:
+                intents = erasure.intents_in(config.DB_PATH)
+            except sqlite3.Error:
+                raise erasure.ErasureConflict("the live erase intents cannot be read — refused") from None
+            if len(intents) > _INTENTS_MAX:
+                raise erasure.ErasureConflict("too many unfinished erasures on the live volume — refused")
         live_ok = live.state == "same"
     else:
+        intents = _intents_of_flag(flag.get("erasure_intents", {}))
         if "erasure_threshold" in flag:
             t = erasure.Head.from_json(flag["erasure_threshold"])
         if "erasure_known" in flag:
@@ -2970,12 +2986,39 @@ def _erasure_apply_plan(rd, doc: dict, staged: bytes, mk: bytes, listed: set, fl
             foreign = e.reason == "foreign"
     publish, proven, head = erasure.reconcile_apply(k_erase=k, inst=inst, staged_journal=sj,
                                                     live_journal=None if foreign else live_j,
-                                                    stage_summary=er, threshold=t, live_ok=live_ok)
+                                                    stage_summary=er, threshold=t, live_ok=live_ok,
+                                                    known=known)
     final = publish if publish is not None else (None if foreign else live_j)
+    # R2-M2: şi la reluare, jurnalul rămas trebuie să atingă şi capetele off-host păstrate
+    top = max([t.n] + list(known.values()))
+    reach = erasure.journal_reaches(final, k, inst, t) and _journal_n(final, k, inst) >= top
     return {"publish": publish, "proven": proven and not overflow, "n": head.n, "foreign": foreign,
             "since": int(er.get("since", 0)), "threshold": t, "known": known,
-            "required": list(required), "overflow": bool(overflow),
-            "reach": erasure.journal_reaches(final, k, inst, t)}
+            "required": list(required), "overflow": bool(overflow), "reach": reach,
+            "intents": intents}
+
+
+_INTENTS_MAX = 256                      # ştergeri în zbor; peste = refuz (flag-ul are o limită de mărime)
+
+
+def _intents_of_flag(doc) -> dict:
+    """The erase intents kept in the restore flag; malformed → refused (never silently dropped)."""
+    if type(doc) is not dict or len(doc) > _INTENTS_MAX:
+        raise erasure.ErasureConflict("the restore flag's erase intents are malformed — refused")
+    for sid, kinds in doc.items():
+        if (type(sid) is not str or len(sid) != 32 or type(kinds) is not list
+                or any(k not in ("out", "cast") for k in kinds)):
+            raise erasure.ErasureConflict("the restore flag's erase intents are malformed — refused")
+    return dict(doc)
+
+
+def _journal_n(raw, k, inst) -> int:
+    if raw is None:
+        return 0
+    try:
+        return erasure.parse(raw, k, inst).n
+    except erasure.JournalError:
+        return 0
 
 
 def _erasure_publish(plan: dict, gen: str) -> None:

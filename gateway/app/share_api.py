@@ -1099,6 +1099,14 @@ def _erasure_error(e) -> ApiError:
         return ApiError(404, "transcript.destinationUnknown", msg)
     if c == "transcript.destinationConfigured":
         return ApiError(409, "transcript.destinationConfigured", msg)
+    if c == "transcript.recoveryErasePending":
+        return ApiError(409, "transcript.recoveryErasePending", msg)
+    if c == "transcript.recoveryTombstoned":
+        return ApiError(409, "transcript.recoveryTombstoned", msg)
+    if c == "transcript.recoveryGap":
+        return ApiError(409, "transcript.recoveryGap", msg)
+    if c == "transcript.recoveryConflict":
+        return ApiError(409, "transcript.recoveryConflict", msg)
     return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
 
 
@@ -1277,7 +1285,11 @@ async def retire_continuity_destination(dest_id: str, body: RetireIn, request: R
     await stepup.require_fresh_factor(0, user, body.stepup_grant, body.stepup_password,
                                       body.stepup_totp, real_factor=True)
     try:
-        res = await erasure.retire_destination(st, dest_id)
+        # R2-M1: urma de audit durabilă se scrie în ACEEAŞI tranzacţie cu markerul (o anulare sau o
+        # cădere după COMMIT nu mai poate lăsa o retragere fără urmă); e-mailul pleacă separat
+        res = await erasure.retire_destination(st, dest_id, audit_row={
+            "ts": time.time(), "actor": user["email"] or "", "actor_id": user["id"],
+            "ip": security.client_ip(request), "method": "POST", "path": request.url.path, "status": 200})
     except erasure.ErasureError as e:
         raise _erasure_error(e) from None
     lifted = False
