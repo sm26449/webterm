@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 from app import backup  # noqa: E402
 from app import keyring as kr  # noqa: E402
 from app import snapshot as wts  # noqa: E402
+from app import wtbk  # noqa: E402
 
 ok = 0
 total = 0
@@ -134,6 +135,167 @@ class CountingSrc(io.BytesIO):
         b = super().read(n)
         self.n += len(b)
         return b
+
+
+# Vectorul WTBK2 (anexa documentului de design, §12.10.1): parola de mai jos, salt 00..0f, prefix
+# f0..f7, log2_n 15, r 8, p 1, plaintext "hello", unpacked_len 10240.
+V_WTBK2_PASS = "correct horse battery staple"
+V_WTBK2 = (
+    "5754424b3201010f08011401000102030405060708090a0b0c0d0e0ff0f1f2f3f4f5f6f705000000000000000028"
+    "000000000000000000006f879dccc79bf7cac9f88138ec8481e1847f42d8b7aad2d37eb78009b94c818993ac6db5"
+    "c855d1971ac4d8e9a6f1b4788470ce0776")
+WP = "o parola de test"
+FAST = {"log2n": 15}                    # KDF-ul minim acceptat: testele rămân rapide
+
+
+def wtbk2(data, plain_len=None, unpacked=0, chunked=None):
+    out = io.BytesIO()
+    w = wtbk.Writer(out, WP, plain_len=len(data) if plain_len is None else plain_len, unpacked_len=unpacked, **FAST)
+    step = chunked or max(1, len(data))
+    for i in range(0, len(data), step):
+        w.write(data[i:i + step])
+    w.close()
+    return out.getvalue()
+
+
+def wtbk2_read(blob, pw=WP, n=100_000, **kw):
+    r = wtbk.Reader(io.BytesIO(blob), pw, **kw)
+    out = bytearray()
+    while True:
+        b = r.read(n)
+        if not b:
+            return bytes(out)
+        out += b
+
+
+def wtbk2_chunks(blob):
+    """(antet+MAC, [chunk-uri criptate]) — chunk-urile au lungimi implicite din plain_len."""
+    h = wtbk.parse_header(blob[:wtbk.HDR_LEN])
+    off = wtbk.HDR_LEN + wtbk.MAC_LEN
+    n = max(1, -(-h["plain_len"] // wtbk.CHUNK))
+    out = []
+    for i in range(n):
+        size = min(wtbk.CHUNK, h["plain_len"] - i * wtbk.CHUNK) + wtbk.TAG
+        out.append(blob[off:off + size])
+        off += size
+    return blob[:wtbk.HDR_LEN + wtbk.MAC_LEN], out
+
+
+def wtbk2_tests():
+    print("── WTBK2: stratul cu parolă în flux (arhivele host)")
+    salt, pre = wtbk._fresh_salt, wtbk._fresh_prefix
+    wtbk._fresh_salt = lambda: bytes(range(16))
+    wtbk._fresh_prefix = lambda: bytes(range(0xF0, 0xF8))
+    try:
+        out = io.BytesIO()
+        w = wtbk.Writer(out, V_WTBK2_PASS, plain_len=5, unpacked_len=10240, **FAST)
+        w.write(b"hello")
+        w.close()
+    finally:
+        wtbk._fresh_salt, wtbk._fresh_prefix = salt, pre
+    check("vector WTBK2 (anexa)", out.getvalue().hex() == V_WTBK2, out.getvalue().hex())
+    r = wtbk.Reader(io.BytesIO(bytes.fromhex(V_WTBK2)), V_WTBK2_PASS)
+    check("vector WTBK2 se citeşte: hello, unpacked 10240", r.read(99) == b"hello" and r.read(1) == b""
+          and r.unpacked_len == 10240 and r.plain_len == 5)
+    C = wtbk.CHUNK
+    rt = True
+    for n in (0, 1, C - 1, C, C + 1, 3 * C):
+        data = os.urandom(n)
+        for step in (None, 7777, C):
+            blob = wtbk2(data, chunked=step)
+            rt = rt and wtbk2_read(blob) == data and len(blob) == wtbk.HDR_LEN + 32 + n + 16 * max(1, -(-n // C))
+    check("round-trip 0, 1, C-1, C, C+1, 3C octeţi, orice fragmentare a scrierilor", rt)
+    a, b = wtbk2(b"x" * 10), wtbk2(b"x" * 10)
+    check("salt + prefix noi la fiecare arhivă", a[12:36] != b[12:36] and a != b)
+    data = os.urandom(3 * C + 123)
+    blob = wtbk2(data, unpacked=12345)
+    head, ch = wtbk2_chunks(blob)
+    bad = {
+        "parolă greşită": (blob, "alta"),
+        "un octet din antet (unpacked_len) schimbat": (blob[:44] + bytes([blob[44] ^ 1]) + blob[45:], WP),
+        "un octet din plain_len schimbat": (blob[:36] + bytes([blob[36] ^ 1]) + blob[37:], WP),
+        "un octet din MAC schimbat": (blob[:60] + bytes([blob[60] ^ 1]) + blob[61:], WP),
+        "ultimul chunk trunchiat": (blob[:-1], WP),
+        "ultimul chunk lipsă": (head + b"".join(ch[:-1]), WP),
+        "un chunk din mijloc lipsă": (head + ch[0] + ch[2] + ch[3], WP),
+        "două chunk-uri inversate": (head + ch[1] + ch[0] + ch[2] + ch[3], WP),
+        "un chunk dublat": (head + ch[0] + ch[0] + ch[1] + ch[2] + ch[3], WP),
+        "un octet într-un chunk": (head + ch[0] + ch[1][:5] + bytes([ch[1][5] ^ 1]) + ch[1][6:] + ch[2] + ch[3], WP),
+        "octeţi după ultimul chunk": (blob + b"\0", WP),
+        "un chunk în plus (extensie)": (blob + ch[3], WP),
+        "doar antetul": (blob[:wtbk.HDR_LEN + 32], WP),
+        "antet trunchiat": (blob[:40], WP),
+    }
+    res = {}
+    for name, (b_, pw) in bad.items():
+        try:
+            wtbk2_read(b_, pw)
+            res[name] = "ACCEPTED"
+        except wtbk.WtbkError as e:
+            res[name] = e.reason
+    check("WTBK2: orice alterare / trunchiere / reordonare / extensie / parolă greşită → refuz",
+          all(v != "ACCEPTED" for v in res.values()), res)
+    check("parolă greşită → refuzată la antet, înaintea oricărui chunk (mesaj clar)",
+          res["parolă greşită"] == "bad-header-mac" and refused(lambda: wtbk.Reader(io.BytesIO(blob[:88]), "x"),
+                                                               wtbk.WtbkWrongPassphrase))
+    # ultimul chunk recriptat ca ne-final cu aceeaşi cheie e imposibil fără parolă; verificăm că flag-ul
+    # final e chiar în AAD: un writer care declară mai mulţi octeţi decât primeşte nu închide arhiva
+    w = wtbk.Writer(io.BytesIO(), WP, plain_len=10, unpacked_len=0, **FAST)
+    w.write(b"x" * 9)
+    check("writer: mai puţini octeţi decât declarat → close refuză (nicio arhivă completă)",
+          refused(w.close, wtbk.WtbkError) and refused(lambda: w.write(b"x"), wtbk.WtbkError))
+    w = wtbk.Writer(io.BytesIO(), WP, plain_len=10, unpacked_len=0, **FAST)
+    check("writer: mai mulţi octeţi decât declarat → refuz, writer stricat",
+          refused(lambda: w.write(b"x" * 11), wtbk.WtbkError) and refused(w.close, wtbk.WtbkError))
+
+    class Short(io.BytesIO):
+        def write(self, b):
+            return super().write(b[:-1]) if len(b) > 100 else super().write(b)
+    w = wtbk.Writer(Short(), WP, plain_len=C + 5, unpacked_len=0, **FAST)
+    check("writer: o scriere scurtă a destinaţiei → writer stricat",
+          refused(lambda: (w.write(b"y" * (C + 5)), w.close()), wtbk.WtbkError) and refused(w.close, wtbk.WtbkError))
+    hostile = bytearray(blob[:wtbk.HDR_LEN + 32])
+    hostile[7] = 30                                     # log2_n = 30 → 128 GiB de scrypt
+    hostile2 = bytearray(blob[:wtbk.HDR_LEN + 32])
+    hostile2[10] = 21                                   # chunk_log2 ≠ 20
+    hostile3 = bytearray(blob[:wtbk.HDR_LEN + 32])
+    hostile3[52] = 1                                    # rezervat ≠ 0
+    import time as _t
+    t0 = _t.monotonic()
+    check("antet ostil (scrypt uriaş, chunk ≠ 1 MiB, rezervat ≠ 0) → refuz înaintea KDF-ului",
+          all(refused(lambda h=h: wtbk.Reader(io.BytesIO(bytes(h)), WP), wtbk.WtbkError)
+              for h in (hostile, hostile2, hostile3)) and _t.monotonic() - t0 < 1)
+    check("plain_len peste bugetul cititorului → refuz înainte de KDF",
+          refused(lambda: wtbk.Reader(io.BytesIO(blob), WP, max_plain=len(data) - 1), wtbk.WtbkError))
+    r = wtbk.Reader(io.BytesIO(blob), WP)
+    r.read(10)
+    check("finish() cu text clar necitit → refuz", refused(r.finish, wtbk.WtbkError))
+    check("WTBK1 rămâne lizibil (backup.decrypt) şi WTBK2 trece prin aceeaşi uşă",
+          backup.decrypt(backup.encrypt(b"abc", WP), WP) == b"abc" and backup.decrypt(wtbk2(b"abc"), WP) == b"abc")
+
+    # memorie mărginită: 256 MiB printr-un fişier temporar, vârful tracemalloc rămâne mic
+    total_n = 256 << 20
+    with tempfile.TemporaryFile() as f:
+        tracemalloc.start()
+        w = wtbk.Writer(f, WP, plain_len=total_n, unpacked_len=total_n, **FAST)
+        block = os.urandom(1 << 20)
+        for _ in range(total_n >> 20):
+            w.write(block)
+        w.close()
+        _cur, peak_w = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        f.seek(0)
+        r = wtbk.Reader(f, WP)
+        got = 0
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            got += len(b)
+        _cur, peak_r = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    check("256 MiB prin WTBK2: memorie mărginită (vârf < 8 MiB la scriere şi la citire)",
+          got == total_n and peak_w < 8 << 20 and peak_r < 8 << 20, (got, peak_w >> 10, peak_r >> 10))
 
 
 def main():
@@ -397,6 +559,8 @@ def main():
           res.get("t2") == "refused" and w._state == "broken" and refused(w.close), res)
     check("buget de plaintext al writer-ului (acelaşi ca al cititorului)",
           refused(lambda: wts.Writer(io.BytesIO(), max_plaintext=10, **kw).write(b"x" * 11), wts.SnapshotTooLarge))
+
+    wtbk2_tests()
 
     print(f"\n{ok}/{total} passed")
     sys.exit(0 if ok == total else 1)

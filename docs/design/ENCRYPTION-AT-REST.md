@@ -1369,15 +1369,16 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
 
 - WTBK1 is single-shot AES-GCM: downloads (`make_encrypted`, `encrypt_stored`) and uploads hold
   the whole archive (≤ 512 MiB upload, the WTS1 inside it) in memory, and the in-memory portable
-  container is verified before it is wrapped. A streamed passphrase layer is a follow-up (format
-  change, its own review).
+  container is verified before it is wrapped. The host path (`backup.sh` / `restore.sh`) uses the
+  streamed layer WTBK2 instead (§12.10.1) and has no fixed size cap; the in-app routes keep WTBK1
+  and their limits (they also accept a WTBK2 upload, read in memory under the same limit).
 - The 3.7 legacy restore path (legacy volumes) is untouched: `_gunzip_bounded` still inflates up
   to 2 GiB in memory and uses `tarfile`; it disappears with the migration.
 - No global concurrency limit for downloads / scheduled backups; verify, stage and apply are
   serialised by the operations lock only.
 - Plaintext temp copies remain, private (0700/0600) and removed on every path: the `VACUUM INTO`
   copy and transcript spool files, the restorable check's copy of `webterm.db` and the WTS1 that
-  `hostops backup --live` receives (all in a per-operation work dir `backups/.work/<op>-*` on the
+  `hostops backup` writes before wrapping it (all in a per-operation work dir `backups/.work/<op>-*` on the
   data volume, never the system temp dir: the production container is read-only with a 64 MiB
   `/tmp` tmpfs; each work dir is held under flock while in use, and a dead one is swept at boot and
   before the next operation), the verify/stage directory and `restore-pending.<generation>/` (DB,
@@ -1410,6 +1411,80 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
   extended before recordings or erasures are written (the §12.4 recovery and erasure promises).
 - The API does not pass `mk`, `prefer` or `legacy_import` yet (no UI to enter an operator MK);
   until then those routes surface `backup.needsMasterKey` and the operator uses a future CLI.
+
+### 12.10.1 Host archives: streamed passphrase layer `WTBK2` (3.8 rc5)
+
+Normative. WTBK1 is one AES-GCM over the whole archive, so a host backup held the archive (and its
+encrypted copy) in memory and was capped at 2 GiB unpacked — production volumes with a few GB of
+transcripts could not be backed up (`encrypted backup too large (unpacked-budget)`), a regression
+from 3.7's streaming `tar`. The host archive (`scripts/backup.sh` → `hostops backup`, read by
+`hostops verify` / `stage-restore` from `scripts/restore.sh`) is now `WTBK2(portable WTS1)`, written
+and read in bounded memory (two 1 MiB chunks), whatever the volume's size. Implemented in
+`gateway/app/wtbk.py`; tested in `tests/snapshot_test.py` (codec, vector, tamper, memory),
+`tests/backup_protected_test.py` (`host_stream_tests`: a 256 MiB volume streamed, lies refused,
+memory bounded), `tests/host_backup_script_test.py` and `tests/txbackup_test.py` (the control
+socket path).
+
+**Layout** (integers little-endian unless marked BE):
+
+```
+header (56 B)  "WTBK2" | ver u8 = 1 | kdf u8 = 1 (scrypt) | log2_n u8 | r u8 | p u8
+               | chunk_log2 u8 = 20 | content u8 = 1 (WTS1) | salt 16 B | nonce_prefix 8 B
+               | plain_len u64 | unpacked_len u64 | reserved 4 B = 0
+header MAC     HMAC-SHA-256(HKDF(K, "wt/v1/wtbk2-hdr"), header)                        32 B
+chunks         n = max(1, ceil(plain_len / 2^20)); chunk i = AES-256-GCM(ciphertext ‖ tag) of the
+               plaintext bytes [i·2^20, min((i+1)·2^20, plain_len)), no length prefix;
+               key = HKDF(K, "wt/v1/wtbk2-body"), nonce = nonce_prefix ‖ i u32 BE,
+               AAD = header MAC ‖ i u32 BE ‖ final u8 (1 only for i = n − 1)
+EOF            nothing after chunk n − 1
+```
+
+- `K = scrypt(passphrase UTF-8, salt, N = 2^log2_n, r, p, 32 B)`; HKDF is the keyring's
+  context-free `derive` (info = label ‖ 0x00). The writer uses `log2_n = 16, r = 8, p = 1`
+  (64 MiB, stronger than WTBK1's 2^15); a reader accepts `15 ≤ log2_n ≤ 20`, `1 ≤ p ≤ 4`,
+  `128·r·N ≤ 256 MiB`, `chunk_log2 = 20`, `content = 1`, reserved zero — checked **before** the
+  KDF runs, so a hostile header cannot buy gigabytes or minutes of scrypt. Salt and nonce prefix
+  are random per archive (the key is per archive already; the prefix makes a nonce collision across
+  archives under one passphrase-and-salt impossible too).
+- A wrong passphrase or any header byte changed fails the header MAC before any body byte is
+  read ("wrong passphrase, or the file is corrupt"). Every chunk's length follows from the
+  authenticated `plain_len`, and its index and final flag are in the AAD, so a truncated,
+  dropped, duplicated, reordered or appended chunk fails a tag or the length; bytes after the
+  last chunk are refused. A reader releases a chunk's plaintext only after its tag verified, and
+  returns end-of-stream only after the last chunk **and** the end of its input are proven.
+- `plain_len` is the exact length of the inner WTS1; `unpacked_len` is the exact size of the WTS1's
+  decompressed tar stream. Both are authenticated by the header MAC and **enforced**: the WTS1
+  reader's plaintext budget is `plain_len`, the gunzip's output budget is `unpacked_len` (plus
+  its ratio cap, unchanged), and after the archive's end the unpacked size must equal it
+  (`declared-size-mismatch`), before anything is published. The writer refuses more or fewer
+  bytes than it declared (no last chunk is written: the output never looks complete).
+
+**Writer** (`hostops backup`). Without the control socket: the portable WTS1 (local + portable
+envelopes, as before) is written by the gateway's code into a private file in a work dir on the
+data volume (`backups/.work/hostbk-*`, never `/tmp`, never memory), checked **restorable** through
+the portable route (the route restore.sh uses elsewhere), and only then wrapped, with its exact
+sizes, onto stdout. With the socket (§12.11.3): the gateway verified its spool in full and answers
+with its size, SHA-256 and unpacked size; hostops wraps the bytes as they arrive and writes the
+last chunk only after the SHA-256 of everything read matched (no second copy on the volume).
+`backup.sh` then hashes the temp file, runs `hostops verify` on it (the full restore check) and
+publishes it with `ln -T` only when both pass; any failure deletes the temp file.
+
+**Size budget of the host path.** No fixed cap. Writing: `hostops estimate` (an upper bound: the
+DB, its WAL and every regular file under `transcripts/`, uncompressed, plus tar headers and 1 %)
+must fit the backup directory's free space, else `backup.sh` refuses before writing anything;
+`hostops backup` needs the same on the data volume for its work copy (not with the socket: the
+gateway checks its own spool, §12.11.3). Reading: the restore check needs no space beyond the
+database; `stage-restore` refuses unless the data volume has `2 × unpacked_len` + 64 MiB free
+(the staged copy, then the copy the apply makes at the next boot); `restore.sh` refuses when its
+private copy (`TMPDIR`) cannot hold the archive. Stored `.wts` snapshots and the pre-restore
+safety copy are written without the in-app cap too (a large volume's safety copy used to fail the
+apply) and read back with their own size and the free disk as budgets.
+
+**Pinned digest** (M5, `hostops verify|stage-restore --sha256`): stdin is hashed as it is read; the
+digest is compared when the input ends, which the WTBK2 reader reaches before it accepts the last
+chunk, so a different file is refused before anything is published. WTBK1 and 3.7 archives are
+still read whole (≤ 2 GiB, as before): every WTBK1 written by earlier 3.8 release candidates
+restores unchanged.
 
 ### 12.11 Recordings: publication, readers, backup coherence, erasure (PR5 design)
 
@@ -1929,7 +2004,8 @@ other use needs its own design.
   - `snapshot.start {profile, recordings: "all" | "none"}` → the gateway runs `backup_snapshot()`
     into a private spool file (`O_EXCL`, 0600, random name), fsyncs it, then runs the **full
     archive verification** (§12.10 verify) on the spool. Only after it passes: `{"ok": true,
-    "snap": <id>, "size": n, "sha256": h}`. Before that nothing of the container is sent; a failed
+    "snap": <id>, "size": n, "sha256": h, "unpacked": u}` (`u`: the exact size of its tar stream,
+    which hostops declares in the WTBK2 header, §12.10.1). Before that nothing of the container is sent; a failed
     snapshot or verification → `{"ok": false, "code": "backup.busy" | "backup.failed"}`, spool
     unlinked. Free disk is checked first (estimated size + 10 %), else `backup.noSpace`.
   - `snapshot.read {snap, offset, length ≤ 1 MiB}` → a header frame `{"ok": true, "offset",
@@ -1948,9 +2024,9 @@ other use needs its own design.
   is owned by that worker, which checks a cancel flag between steps and on exit unlinks the spool
   and releases the barrier, pins and fds; a request not yet submitted is dropped by the connection
   handler, which owns it until submit. Nothing is kept for a later connection.
-- *Consumer side* (`hostops backup --live`): writes into a temp file in the destination directory,
-  checks length, SHA-256 and the archive structure against the `snapshot.start` answer, then
-  renames; a partial output is deleted and never merged with a retry (a retry is a new
+- *Consumer side* (`hostops backup --live`): wraps the bytes in WTBK2 as they arrive (§12.10.1;
+  the last chunk only after length and SHA-256 matched the `snapshot.start` answer) into the
+  script's temp file in the destination directory, which `backup.sh` verifies and then publishes; a partial output is deleted and never merged with a retry (a retry is a new
   `snapshot.start`, a new file). Every op is audited (peer uid/pid, op, size), never with secret
   material. Tests: foreign uid, symlinked or stale socket, slow peer, disconnect after submit, a
   second concurrent start, hold limits.
@@ -3004,8 +3080,9 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   (it used to mark them `damaged`).
 - **Control socket** (`ctlsock.py`), as the protocol above. The socket is bound through
   `/proc/self/fd/<.ctl fd>/backup.sock`. `profile` accepts `portable` only (the WTS1 of the in-app
-  download; hostops adds the WTBK1 passphrase layer itself, so no passphrase crosses the socket).
-  The spool is capped like the download (a 512 MiB WTBK1). The SO_PEERCRED refusal is tested
+  download; hostops adds the passphrase layer itself, so no passphrase crosses the socket). Since
+  rc5 the spool has no size cap (hostops streams it into WTBK2, §12.10.1); free space is checked
+  as before. The SO_PEERCRED refusal is tested
   through `ctlsock.peer_ok` (the suite runs as root, which the rule admits). `hostops backup --live`
   uses the socket whenever the flag is set, the socket exists or the shared inventory finds any
   encrypted-recording artefact; no answer → exit 3, and `backup.sh` prints the refusal. System
@@ -3275,5 +3352,6 @@ KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
 | index `WTI1` (kind 1, data_count 2, entries (0, 0, 96) and (1, 7, 128), whole file) | `5754493101010000101112131415161718191a1b1c1d1e1f020000000000000002000000000000000000000000000000600000000000000001000000070000000000000080000000000000004d1d98fab4e55f31a7430c27fafb843ac8aeaeb6869afbff8be106b89cbe86e9` |
 | portable KEK `HKDF(MK, "wt/v1/portable")` | `8cf0b68c716729fd2f2861bf8232e1411b37dc6eec228c11cba070073072e309` |
 | `WTS1` container (§12.10; SNK = `c0c1…df`, CK = `e0e1…ff`, MK and installation id above, created above, epoch 1, local + portable, plaintext `"hello"`; asserted in `tests/snapshot_test.py` `V_HELLO`) | `5754533101030000a0a1a2a3a4a5a6a7a8a9aaabacadaeaf00748d00a2010000010000000000000052062057e5bbb03e34bb12c0d05de4340100000001ed9b1d5549111099b6ed05e8bfca4f01400026fb1d7fa012d28c4c5427d09944e1fe698511c3c9c10b25e9d3e14464345fc93946edfef0bff8ec4f7b57cbeca807f6990734678749226331d245a7c94f9b9602bd94d0405378ffd3483fbc61aeb726b04000d078ded7e9a4c9494594450817cf72703278eb90a778effd81bd782c2675d36374f0d948bcea715e31fb16d4e5d5feac48077dc11ced6e0250c07656e5edfeed2c19853094b2dfe59e48df9db07f26fd87f554dcae070f090acbdb32e522dca80015000000a57126689e1a2bfed1114598dc410836ab394337a0012000000015adc832ed8bcdf93ea3b74295134b8817cba9764076dfea902388a32d8c32d8` |
+| `WTBK2` archive (§12.10.1; passphrase `"correct horse battery staple"`, salt `000102…0f`, nonce prefix `f0f1…f7`, log2_n 15, r 8, p 1, plaintext `"hello"`, unpacked_len 10240; asserted in `tests/snapshot_test.py` `V_WTBK2`) | `5754424b3201010f08011401000102030405060708090a0b0c0d0e0ff0f1f2f3f4f5f6f705000000000000000028000000000000000000006f879dccc79bf7cac9f88138ec8481e1847f42d8b7aad2d37eb78009b94c818993ac6db5c855d1971ac4d8e9a6f1b4788470ce0776` |
 
 The manifest and descriptor bytes in full are in `tests/keyring_test.py` (`V_MANIFEST`, `V_DESC`).
