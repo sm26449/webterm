@@ -2176,7 +2176,34 @@ security e-mail; re-quarantine is allowed. A release never discharges an off-hos
 (recheck 464852b, R6-H2): while the continuity marker keeps a gap (`unverified`), a mandatory
 destination (`required`) or an overflow, or a fork has been seen, it answers
 `409 transcript.releaseUnproven` even when the local journal reaches every number; only the
-janitor's destination proof or the audited retire of a gone destination clears that. The permission is bound to the recovery route's own
+janitor's destination proof or the audited retire of a gone destination clears that.
+
+**Authenticated conflict (recheck b8deb0d, R7-H1).** Two authentic journals that diverge, seen
+anywhere (a destination listing two branches, two destinations, a destination against the volume,
+at stage, apply, `try_prove` or a journal recovery), are recorded durably in the continuity marker
+(created if there is none) and carried by the restore flag: the branch heads (n and MAC), their
+common prefixes, the sids erased after the fork on any branch and the destinations (bounded:
+16 heads, 512 sids, 8 destinations; beyond that the record is marked `overflow`). Every tombstone
+of every branch is applied as soon as it is seen: in-memory tombstone, RK destroyed, and a durable
+erase intent for each sid the local journal does not hold (an erasure on any branch wins; the boot
+turns the record's sids into intents again, so a restart or a restore keeps them). While the
+record exists, `try_prove`, apply, release (`409 transcript.releaseUnproven`) and both recovery
+paths (`409 transcript.recoveryConflict`) lift nothing, even after one branch disappears from the
+listing. It is cleared only by:
+
+- an **Owner resolution**, `POST /api/recordings/continuity/conflict/resolve` (Owner @ all,
+  `backups.manage`, real fresh factor, typed "`<n> <first 16 hex of the MAC>`"): every configured
+  and required destination must answer completely (`409 transcript.conflictUnproven`); a branch
+  newly visible joins the record first; the chosen head must be an authentic journal visible now
+  and the newest of its line (`409 transcript.conflictBranchUnknown`), and must reach every common
+  prefix and the marker's threshold, erase every recorded sid and lie on one chain with the volume
+  journal (`409 transcript.conflictMissingTombstone`; an overflowed record is always refused). It is
+  adopted under the barrier with the audit row in the marker's transaction; every other visible
+  branch head is kept as `rejected` (later fetches skip exactly those objects), and the forking
+  destinations' gap becomes the adopted head. The quarantine is lifted only by the proof that
+  follows;
+- the audited **retire** of the forking destination(s): when none is left the record is closed and
+  its sids stay erase intents. The permission is bound to the recovery route's own
 authorization (`access`, §12.11.2), not to a parameter.
 
 #### 12.11.5 Migration of plaintext recordings
@@ -3166,6 +3193,17 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   not create a fork that was not already there). *R6-L1:* `_cleanup_delay` caps the exponent before
   the multiplication; `run_cleanup` keeps a task whose `retire` returned `deferred` (re-checked after
   `CLEANUP_BACKOFF`, not a failure), so an unlink that fails after the last unpin is retried.
+- **Recheck (b8deb0d) fixes.** *R7-H1:* `fetch_head` attaches the authentic branches to the
+  `ErasureConflict` it raises (`DestResult.branches`); `merge_conflict` / `conflict_union` build the
+  record (`Terms.conflict`, `Live.conflict`, `Decision.conflict` → summary `conflict` → flag
+  `erasure_conflict` → marker `conflict`); `_record_conflict` persists it under the barrier and
+  applies every branch's tombstones (RK destroyed, intents); `boot` re-creates intents from it;
+  `try_prove` records any fork and returns False while a record exists; `reconcile_apply` and the
+  apply plan never prove with one; `recover`, `recover_journal` and `release` refuse;
+  `resolve_conflict` (route above) and `retire_destination` are the only ways out; `fetch_head(ignore=)`
+  skips the heads a resolution rejected. *R7-L1:* `_s.conflict` is cleared only together with the
+  durable record (resolution, or the retire that closes it); System health and release read the
+  record itself, so a restart keeps the diagnosis.
 
 ## Appendix: Test vectors (v1)
 

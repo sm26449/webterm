@@ -290,6 +290,31 @@ async def set_marker(st, mark):
     er._s.continuity = mark
 
 
+async def _conflict_snap():
+    """Before a check that records a conflict (R7-H1): the marker (DB + memory) and the intents."""
+    row = await db.fetchone("SELECT value FROM tx_state WHERE key='continuity'")
+    return (row["value"] if row else None, {r["sid"] for r in await db.fetchall("SELECT sid FROM tx_erase_intents")},
+            er._s.continuity)
+
+
+async def _forget_conflict(st, snap):
+    """Test reset after a recorded conflict (what an Owner resolution would do): the marker and the
+    intents as they were before, the in-memory diagnosis cleared."""
+    val, intents, mem = snap
+
+    def fn(c):
+        if val is None:
+            c.execute("DELETE FROM tx_state WHERE key='continuity'")
+        else:
+            c.execute("INSERT OR REPLACE INTO tx_state(key, value) VALUES('continuity', ?)", (val,))
+        for (x,) in c.execute("SELECT sid FROM tx_erase_intents").fetchall():
+            if x not in intents:
+                c.execute("DELETE FROM tx_erase_intents WHERE sid=?", (x,))
+    await st.txn(fn)
+    er._s.continuity = mem
+    er._s.conflict = ""
+
+
 async def unquarantine_all():
     await db.execute("UPDATE tx_descriptors SET status='ok' WHERE status='quarantined'")
     await db.execute("DELETE FROM tx_quarantine")
@@ -1672,6 +1697,13 @@ def g_r6h1_restore():
         cont = tx_state("continuity") or {}
         check("R6-H1: first apply (no crash) → unproven, the fork kept", cont.get("state") == "unproven"
               and cont.get("unverified") == {d.id: 3}, cont)
+        conf = cont.get("conflict") or {}
+        check("R7-H1: …the marker keeps the AUTHENTICATED conflict: both branch heads (n + MAC), the common "
+              "prefix, and the erasure of the branch the volume does not have",
+              sorted((h["n"], h["mac"]) for h in conf.get("heads", []))
+              == sorted((3, er.parse(j, K, INST).head.mac.hex()) for j in (j3, j3b))
+              and conf.get("bases") == [er.parse(j2, K, INST).head.to_json()]
+              and bytes([0x6b] * 16).hex() in conf.get("sids", []) and d.id in conf.get("dests", []), conf)
         set_head(config.DB_PATH, j3)
         jp.write_bytes(j3)
         info = backup.stage_restore(blob, PASS, keys=hk)
@@ -1966,6 +1998,143 @@ async def g_r6h2_release(st, c, uid, host_id):
     await unquarantine_all()
 
 
+async def g_r7h1_conflict(st, c, uid, host_id):
+    print("== R7-H1: an authenticated fork stays a conflict when one branch vanishes ==")
+    cur = journal_path().read_bytes()
+    p = er.parse(cur, K, INST)
+    n = p.n
+    keep, data = await make_rec(st, host_id)
+    victim, _ = await make_rec(st, host_id)
+    await st.txn(lambda cu: er._quarantine_cohort_sync(cu, "continuity", time.time()))
+    x = bytes([0x71] * 16)
+    ja = _extend(cur, x)                                   # ramura A: şterge x
+    jb = _extend(cur, bytes.fromhex(victim))               # ramura B: şterge o înregistrare prezentă aici
+    jc = _extend(ja, bytes.fromhex(victim))                # C extinde A şi conţine ambele ştergeri
+    d = FakeDest("sftp:u@h:22/r7h1")
+    na, nb, nc = (er.object_name(INST, n + 1, "aaaa1111"), er.object_name(INST, n + 1, "bbbb2222"),
+                  er.object_name(INST, n + 2, "cccc3333"))
+    d.objs = {na: ja, nb: jb}
+    DESTS[:] = [d]
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+                          "known": {d.id: n}, "required": [d.id]})
+    ok = await er.try_prove(st)
+    conf = (er.continuity() or {}).get("conflict") or {}
+    row = await db.fetchone("SELECT value FROM tx_state WHERE key='continuity'")
+    check("R7-H1: a fork at the destination → try_prove lifts nothing and RECORDS it (both heads, the common "
+          "prefix, both erasures, the destination), in the database too",
+          ok is False and len(conf.get("heads", [])) == 2 and conf.get("bases") == [p.head.to_json()]
+          and {x.hex(), victim} <= set(conf.get("sids", [])) and conf.get("dests") == [d.id]
+          and row is not None and json.loads(row["value"]).get("conflict") == conf, conf)
+
+    async def rk(sid):
+        return await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid) is not None
+
+    async def intent(sid):
+        return await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", sid) is not None
+    check("R7-H1: the erasure seen on branch B is applied at once: tombstone, RK destroyed, durable intent",
+          victim in st.tombstoned and not await rk(victim) and await intent(victim) and await rk(keep))
+    del d.objs[nb]                                         # ramura cu ştergerea dispare din listing
+    ok = await er.try_prove(st)
+    check("R7-H1: branch B vanished from the listing → try_prove still does NOT lift (conflict kept), "
+          "the other recordings stay quarantined",
+          ok is False and er.conflict_open() and er.continuity() is not None
+          and (await statuses())[(keep, "out")] == "quarantined")
+    check("R7-H1: …the vanished branch's erasure still holds (tombstone, no RK, intent)",
+          victim in st.tombstoned and not await rk(victim) and await intent(victim))
+    r = await c.post(f"/api/sessions/{keep}/recovery", json={"confirm": time.strftime("%Y-%m-%d", time.gmtime(1)),
+                                                              "stepup_grant": grant(uid, host_id)})
+    check("R7-H1: Owner recovery refused while the conflict is recorded → 409 transcript.recoveryConflict",
+          r.status_code == 409 and r.json().get("code") == "transcript.recoveryConflict"
+          and (await statuses())[(keep, "out")] == "quarantined", r.text)
+    check("R7-H1: release refused while the conflict is recorded (the fork's gap: behind)",
+          await _erasure_code(er.release(st, keep)) == "transcript.releaseBehind")
+    full = er._s.continuity
+    er._s.continuity = {k_: v for k_, v in full.items() if k_ not in ("unverified", "required")}
+    er._s.continuity["known"] = {d.id: n}
+    er._s.conflict = ""
+    try:
+        check("R7-H1: …and with every other obligation gone, the recorded conflict alone (not the in-memory "
+              "diagnosis) refuses release → transcript.releaseUnproven",
+              not er._behind() and await _erasure_code(er.release(st, keep)) == "transcript.releaseUnproven")
+    finally:
+        er._s.continuity = full
+    st = await reboot()
+    check("R7-H1: after a restart the conflict is still recorded (System health critical), the erasure "
+          "kept (tombstone from the intent, no RK), and try_prove still lifts nothing",
+          er.conflict_open() and er.health_has("erasure_conflict") and victim in st.tombstoned
+          and not await rk(victim) and await er.try_prove(st) is False and er.conflict_open())
+    url = "/api/recordings/continuity/conflict/resolve"
+    ha, hc = er.parse(ja, K, INST).head, er.parse(jc, K, INST).head
+
+    def body(h, confirm=None):
+        return {"n": h.n, "mac": h.mac.hex(), "confirm": confirm if confirm is not None
+                else "%d %s" % (h.n, h.mac.hex()[:16]), "stepup_grant": grant(uid, 0)}
+    r = await c.post(url, json=body(ha, confirm="%d" % ha.n))
+    check("R7-H1: resolve with a wrong typed head → 400 transcript.conflictConfirm",
+          r.status_code == 400 and r.json().get("code") == "transcript.conflictConfirm", r.text)
+    security._stepup_windows.clear()
+    r = await c.post(url, json=dict(body(ha), stepup_grant=""))
+    check("R7-H1: resolve without a fresh factor → 403, conflict kept", r.status_code == 403 and er.conflict_open(),
+          r.text)
+    r = await c.post(url, json=body(ha))
+    check("R7-H1: resolve adopting branch A (it lacks the erasure seen on B) → 409 "
+          "transcript.conflictMissingTombstone, conflict kept, nothing adopted",
+          r.status_code == 409 and r.json().get("code") == "transcript.conflictMissingTombstone"
+          and er.conflict_open() and journal_path().read_bytes() == cur, r.text)
+    r = await c.post(url, json=body(hc))
+    check("R7-H1: a head no destination holds now → 409 transcript.conflictBranchUnknown",
+          r.status_code == 409 and r.json().get("code") == "transcript.conflictBranchUnknown", r.text)
+    d.objs[nb] = jb                                        # B din nou vizibil, plus C (superset)
+    d.objs[nc] = jc
+    r = await c.post(url, json=body(ha))
+    check("R7-H1: A is not the newest head of its line any more (C extends it) → conflictBranchUnknown",
+          r.status_code == 409 and r.json().get("code") == "transcript.conflictBranchUnknown", r.text)
+    with _Mails() as mails:
+        r = await c.post(url, json=body(hc))
+        check("R7-H1: resolve adopting C (holds every erasure seen on any branch) → conflict cleared, C "
+              "adopted, B rejected, and the proof that follows lifts the quarantine",
+              r.status_code == 200 and r.json().get("lifted") is True and r.json().get("rejected") == 1
+              and not er.conflict_open() and er.continuity() is None
+              and journal_path().read_bytes() == jc and (await statuses())[(keep, "out")] == "ok"
+              and (await c.get(f"/api/sessions/{keep}/transcript?format=out")).content == data, r.text)
+        check("R7-H1: …the erasure is now journalled (intent cleared), the recording stays erased",
+              victim in st.tombstoned and not await rk(victim) and not await intent(victim)
+              and not er.health_has("erasure_conflict"))
+        check("R7-H1: …security e-mail", any("conflict was resolved" in m for m in mails.sent), mails.sent)
+    a = await db.fetchone("SELECT detail, actor FROM audit_log WHERE path=? AND detail LIKE '%durable record%'", url)
+    check("R7-H1: …audited in the marker's transaction", a is not None and a["actor"] == "o@x.co"
+          and "owner resolution" in a["detail"], a)
+    r = await c.post(url, json=body(hc))
+    check("R7-H1: nothing recorded any more → 404 transcript.conflictNone",
+          r.status_code == 404 and r.json().get("code") == "transcript.conflictNone", r.text)
+    # retragerea auditată a destinaţiei care a arătat fork-ul închide conflictul, păstrând ştergerile
+    cur = journal_path().read_bytes()
+    p = er.parse(cur, K, INST)
+    victim2, _ = await make_rec(st, host_id)
+    y = bytes([0x72] * 16)
+    d2 = FakeDest("sftp:u@h:22/r7h1-gone")
+    d2.objs = {er.object_name(INST, p.n + 1, "dddd4444"): _extend(cur, bytes.fromhex(victim2)),
+               er.object_name(INST, p.n + 1, "eeee5555"): _extend(cur, y)}
+    DESTS[:] = [d2]
+    await set_marker(st, {"state": "unproven", "since": 1, "n": p.n, "threshold": p.head.to_json(),
+                          "known": {d2.id: p.n}, "required": [d2.id]})
+    check("R7-H1 (retire): the fork is recorded", await er.try_prove(st) is False and er.conflict_open())
+    DESTS[:] = []
+    r = await c.post("/api/recordings/continuity/destinations/%s/retire" % d2.id,
+                     json={"confirm": d2.id, "stepup_grant": grant(uid, 0)})
+    check("R7-H1 (retire): retiring the forking destination closes the conflict (System health clear, "
+          "R7-L1), the quarantine stays, and both branches' erasures remain durable intents",
+          r.status_code == 200 and not er.conflict_open() and not er.health_has("erasure_conflict")
+          and er.continuity() is not None and await intent(victim2) and await intent(y.hex())
+          and victim2 in st.tombstoned and not await rk(victim2), r.text)
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid IN (?, ?)", victim2, y.hex())
+    await st.txn(lambda cu: cu.execute("DELETE FROM tx_state WHERE key='continuity'"))
+    er._s.continuity = None
+    DESTS[:] = []
+    await unquarantine_all()
+    return st
+
+
 async def g_rh2(st, c, uid, host_id):
     print("== R-H2: boot with an invalid journal quarantines pending plaintext too ==")
     sid = os.urandom(16).hex()
@@ -2149,11 +2318,17 @@ async def g_prove_race(st, host_id):
     after = er.parse(journal_path().read_bytes(), K, INST)
     check("concurrent erasure first, then try_prove: fork detected under the barrier → nothing adopted",
           e_wait and p_wait and res["erased"] and ok is False and after.n == n1 + 1
-          and after.entries[-1].sid_hex == victim and y.hex() not in st.tombstoned, (ok, after.n))
-    check("…the local tombstone survives, the quarantine stays, the conflict is reported",
-          victim in st.tombstoned and er.continuity() is not None and er.health_has("erasure_conflict"))
+          and after.entries[-1].sid_hex == victim, (ok, after.n))
+    conf = (er.continuity() or {}).get("conflict") or {}
+    check("…the local tombstone survives, the quarantine stays, the conflict is reported and RECORDED "
+          "(R7-H1: both branch heads, both erasures; the other branch's erasure applied: intent + tombstone)",
+          victim in st.tombstoned and er.continuity() is not None and er.health_has("erasure_conflict")
+          and len(conf.get("heads", [])) == 2 and {victim, y.hex()} <= set(conf.get("sids", []))
+          and y.hex() in st.tombstoned
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", y.hex()) is not None, conf)
     check("erase answers `destroyed` once the DB step committed (not just journalled)", res.get("state") == "destroyed")
     er._s.conflict = ""
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid=?", y.hex())
     await st.txn(lambda c: c.execute("DELETE FROM tx_state WHERE key='continuity'"))
     er._s.continuity = None
     await unquarantine_all()
@@ -2294,10 +2469,16 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
         df = FakeDest("sftp:u@h:22/fork")
         df.objs[er.object_name(INST, n)] = other
         DESTS[:] = [df]
+        snap = await _conflict_snap()
         check("R3-H2: the only destination's chain diverges from the readable local prefix (head n=0) → "
               "recoveryConflict, signalled", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
               == "transcript.recoveryConflict" and er.health_has("erasure_conflict"))
-        er._s.conflict = ""
+        check("R7-H1: …the fork seen by a journal recovery is recorded durably (a marker created for it)",
+              er.conflict_open() and (await db.fetchone("SELECT 1 FROM tx_state WHERE key='continuity' AND "
+                                                         "value LIKE '%\"conflict\"%'")) is not None)
+        check("R7-H1: …and while it is recorded every later recovery attempt is refused the same way",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryConflict")
+        await _forget_conflict(st, snap)
         # R3-H2: capul DB n, pragul markerului n+1 cu MAC A (ramura care ŞTERGE ok_sid, nevăzută aici);
         # singura destinaţie extinde n cu o intrare n+1 diferită (MAC B), fără ok_sid
         s0.head_db = er.parse(good, K, INST).head
@@ -2308,10 +2489,11 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
         db_ = FakeDest("sftp:u@h:22/branch-b")
         db_.objs[er.object_name(INST, n + 1)] = branch_b
         DESTS[:] = [db_]
+        snap = await _conflict_snap()
         check("R3-H2: a destination reaching the threshold's NUMBER with another MAC never proves → "
               "recoveryConflict", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
               == "transcript.recoveryConflict" and (await statuses())[(ok_sid, "out")] == "quarantined")
-        er._s.conflict = ""
+        await _forget_conflict(st, snap)
         db_.objs = {er.object_name(INST, n): good}
         check("R3-H2: a destination below the marker's threshold → recoveryGap",
               await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryGap")
@@ -2355,9 +2537,10 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
     d2 = FakeDest("ftps:u@h:21/jr")
     d2.objs[er.object_name(INST, n)] = fork
     DESTS[:] = [d, d2]
+    snap = await _conflict_snap()
     check("two destination journals that diverge → 409 transcript.recoveryConflict, signalled",
           await code_now() == (409, "transcript.recoveryConflict") and er.health_has("erasure_conflict"))
-    er._s.conflict = ""
+    await _forget_conflict(st, snap)
     DESTS[:] = [d]
     # un obiect mai VECHI stricat sub capul autentic e acoperit: nu blochează recuperarea
     d.objs[er.object_name(INST, n - 1)] = b"junk"
@@ -2537,6 +2720,7 @@ async def main():
         await g_retire(st, c, uid, host_id)
         await g_r5h1_prove(st)
         await g_r6h2_release(st, c, uid, host_id)
+        st = await g_r7h1_conflict(st, c, uid, host_id)
         st = await g_rh2(st, c, uid, host_id)
     finally:
         await txhub.shutdown()

@@ -81,6 +81,11 @@ CLEANUP_ALARM_AFTER = 3                          # eşecuri consecutive pe un si
 PROVE_MAX_OBJECTS = 64                           # try_prove: toate obiectele de după restore, cel mult atâtea
 REVERIFY_INTERVAL = 3600.0                       # un read-back vechi nu dovedeşte că obiectul mai există azi
 KNOWN_MAX = 64                                   # destinaţii ţinute în pragurile unui restore
+# R7-H1: conflictul autentificat (fork) ţinut în marker; limitele încap în flag-ul restore-ului (64 KiB)
+CONFLICT_SIDS_MAX = 512
+CONFLICT_HEADS_MAX = 16
+CONFLICT_DESTS_MAX = 8
+REJECTED_MAX = 64
 
 _OBJ_RE = re.compile(r"^([0-9a-f]{32})\.erasures\.([0-9a-f]{16})(?:\.([0-9a-f]{8,32}))?\.wtj$")
 _PLAIN_NAME = re.compile(r"^([0-9a-f]{32})\.(out|cast)$")
@@ -227,19 +232,148 @@ def merge_threshold(*heads):
     return out
 
 
+# ── R7-H1: the authenticated conflict (a fork seen) ─────────────────────────
+#
+# Două ramuri autentice văzute o dată rămân un conflict până la o decizie explicită: dispariţia
+# uneia din listing nu e o reconciliere. Înregistrarea (în markerul de continuitate, în flag-ul
+# restore-ului) ţine capetele ramurilor (n + MAC), prefixele comune („bases": orice ramură adoptată
+# trebuie să le atingă) şi sid-urile şterse după prefixul comun pe ORICARE ramură. Tombstone-urile
+# se aplică la vedere (RK distrus + intenţie durabilă de ştergere): o ştergere pe orice ramură câştigă.
+
+
+def _sid_list(doc, cap):
+    if type(doc) is not list or len(doc) > cap:
+        raise JournalError("bad-conflict")
+    for x in doc:
+        if type(x) is not str or not re.fullmatch(r"[0-9a-f]{32}", x):
+            raise JournalError("bad-conflict")
+    return sorted(set(doc))
+
+
+def _head_list(doc, cap):
+    if type(doc) is not list or len(doc) > cap:
+        raise JournalError("bad-conflict")
+    out = {}
+    for h in doc:
+        try:
+            hh = Head.from_json(h)
+        except JournalError:
+            raise JournalError("bad-conflict") from None
+        out[(hh.n, hh.mac)] = hh
+    return [out[k] for k in sorted(out)]
+
+
+def conflict_from_json(doc):
+    """The validated conflict record, as a canonical dict; JournalError when malformed."""
+    if (type(doc) is not dict
+            or not set(doc) <= {"since", "bases", "heads", "sids", "dests", "overflow"}
+            or type(doc.get("since", 0)) is not int or type(doc.get("overflow", False)) is not bool):
+        raise JournalError("bad-conflict")
+    dests = doc.get("dests", [])
+    if type(dests) is not list or len(dests) > CONFLICT_DESTS_MAX or not all(
+            type(d) is str and 0 < len(d) <= 512 for d in dests):
+        raise JournalError("bad-conflict")
+    heads = _head_list(doc.get("heads", []), CONFLICT_HEADS_MAX)
+    if len(heads) < 2:
+        raise JournalError("bad-conflict")       # un conflict are cel puţin două ramuri
+    return {"since": doc.get("since", 0), "bases": [h.to_json() for h in _head_list(doc.get("bases", []),
+                                                                                   CONFLICT_HEADS_MAX)],
+            "heads": [h.to_json() for h in heads], "sids": _sid_list(doc.get("sids", []), CONFLICT_SIDS_MAX),
+            "dests": sorted(set(dests)), "overflow": doc.get("overflow", False)}
+
+
+def _same_chain(a, b):
+    """Two authentic prefixes on one chain (the shorter one is a prefix of the longer)."""
+    lo, hi = (a, b) if a.n <= b.n else (b, a)
+    return lo.n == 0 or hmac.compare_digest(lo.entries[lo.n - 1].mac, hi.entries[lo.n - 1].mac)
+
+
+def _fork_base(branches):
+    """The longest prefix every branch shares (n), by MAC (a MAC chain: equal at m = equal below)."""
+    m = min(p.n for p in branches)
+    while m > 0:
+        mac = branches[0].entries[m - 1].mac
+        if all(hmac.compare_digest(p.entries[m - 1].mac, mac) for p in branches):
+            break
+        m -= 1
+    return m
+
+
+def branch_sids(branches):
+    """Every sid an authentic branch erases (all entries: any of them may be missing locally)."""
+    return {e.sid_hex for p in branches for e in p.entries}
+
+
+def merge_conflict(old, branches=(), dests=(), now=None):
+    """`old` (a record or None) plus a newly seen set of authentic `branches` (Parsed, n ≥ 1) at
+    `dests`. The bases, heads, sids and destinations only ever grow; past a bound the record is
+    marked `overflow` (fail closed: an Owner resolution is refused; the tombstones are still applied,
+    they become erase intents). Returns None when there is nothing to record."""
+    branches = [p for p in branches if p is not None and p.n > 0]
+    new = None
+    if len(branches) >= 2 and not all(_same_chain(a, b) for a in branches for b in branches):
+        m = _fork_base(branches)
+        base = branches[0].entries[m - 1] if m else None
+        heads = {(p.head.n, p.head.mac): p.head.to_json() for p in branches}
+        sids_ = sorted({e.sid_hex for p in branches for e in p.entries[m:]})
+        dd = sorted({d for d in dests if type(d) is str and 0 < len(d) <= 512})
+        new = {"since": int(time.time() if now is None else now),
+               "bases": [Head(base.n, base.time_ms, base.mac).to_json()] if base else [],
+               "heads": [heads[k] for k in sorted(heads, reverse=True)][:CONFLICT_HEADS_MAX],
+               "sids": sids_[:CONFLICT_SIDS_MAX], "dests": dd[:CONFLICT_DESTS_MAX],
+               "overflow": (len(heads) > CONFLICT_HEADS_MAX or len(sids_) > CONFLICT_SIDS_MAX
+                            or len(dd) > CONFLICT_DESTS_MAX)}
+    return conflict_union(old, new)
+
+
+def conflict_admits(rec, p):
+    """'' when the authentic journal `p` may close the conflict `rec` (it reaches every base and
+    erases every sid seen on any branch), else why not."""
+    if rec.get("overflow"):
+        return "the conflict record overflowed (too many branches or erasures to check)"
+    for b in rec["bases"]:
+        if not reaches(p, Head.from_json(b)):
+            return "the chosen journal does not hold the common prefix n=%d" % b["n"]
+    have = {e.sid_hex for e in p.entries}
+    miss = [s for s in rec["sids"] if s not in have]
+    if miss:
+        return "the chosen journal does not erase %d recording(s) erased on another branch" % len(miss)
+    return ""
+
+
+def conflict_union(a, b):
+    """Two conflict records (either may be None) → one (every base, head, sid, destination kept)."""
+    if a is None or b is None:
+        return a if b is None else conflict_from_json(b)
+    bases = {(h["n"], h["mac"]): h for h in a["bases"] + b["bases"]}
+    heads = {(h["n"], h["mac"]): h for h in a["heads"] + b["heads"]}
+    sids_ = sorted(set(a["sids"]) | set(b["sids"]))
+    dd = sorted(set(a["dests"]) | set(b["dests"]))
+    ovf = (a["overflow"] or b["overflow"] or len(bases) > CONFLICT_HEADS_MAX or len(heads) > CONFLICT_HEADS_MAX
+           or len(sids_) > CONFLICT_SIDS_MAX or len(dd) > CONFLICT_DESTS_MAX)
+    return conflict_from_json({"since": min(a["since"], b["since"]) or max(a["since"], b["since"]),
+                               "overflow": ovf, "bases": [bases[k] for k in sorted(bases)][:CONFLICT_HEADS_MAX],
+                               "heads": [heads[k] for k in sorted(heads, reverse=True)][:CONFLICT_HEADS_MAX],
+                               "sids": sids_[:CONFLICT_SIDS_MAX], "dests": dd[:CONFLICT_DESTS_MAX]})
+
+
 @dataclass(frozen=True)
 class Terms:
     """What a continuity marker obliges a later proof to reach (R-H1/R-M2): the committed
     threshold, the known per-destination heads, the destinations mandatory at the restore, whether
     the known heads overflowed KNOWN_MAX (then nothing proves), and n of the restore. R5-H1:
     `unverified` = {destination: n} of a newer object a restore saw there and could not
-    authenticate (also folded into `known` and `required`): while it is kept, no volume proof."""
+    authenticate (also folded into `known` and `required`): while it is kept, no volume proof.
+    R7-H1: `conflict` = the authenticated conflict record (None = none): while it is kept nothing
+    lifts the quarantine; `rejected` = branch heads an Owner resolution rejected."""
     threshold: Head = EMPTY_HEAD
     known: dict = field(default_factory=dict)
     required: tuple = ()
     overflow: bool = False
     n: int = 0
     unverified: dict = field(default_factory=dict)
+    conflict: dict = None
+    rejected: tuple = ()
 
 
 def terms_of(cont):
@@ -254,7 +388,9 @@ def terms_of(cont):
     unv = known_from_json(cont.get("unverified", {}))
     if type(ovf) is not bool or type(r_n) is not int or r_n < 0:
         raise JournalError("bad-state", "continuity")
-    return Terms(t, known, req, ovf, r_n, unv)
+    conf = conflict_from_json(cont["conflict"]) if cont.get("conflict") is not None else None
+    rej = tuple(_head_list(cont.get("rejected", []), REJECTED_MAX))
+    return Terms(t, known, req, ovf, r_n, unv, conf, rej)
 
 
 def marker_terms_in(db_path):
@@ -296,6 +432,7 @@ class Live:
     required: frozenset = frozenset()
     overflow: bool = False
     unverified: dict = field(default_factory=dict)      # R5-H1: din markerul viu
+    conflict: dict = None                                # R7-H1: conflictul autentificat al markerului viu
 
 
 def live_state(db_path, live_inst, inst):
@@ -316,7 +453,7 @@ def live_state(db_path, live_inst, inst):
              if type(d) is str and isinstance(v, dict) and type(v.get("n")) is int and v["n"] >= 0}
     return Live("same", merge_threshold(head, terms.threshold), merge_known(known, terms.known),
                 frozenset(terms.required), terms.overflow or known_overflow(known, terms.known),
-                dict(terms.unverified))
+                dict(terms.unverified), terms.conflict)
 
 
 @dataclass
@@ -794,6 +931,18 @@ async def boot(st, data_dir=None, clock=time.time):
     except (sqlite3.Error, txstore.Uncertain):
         intents = {}
         rep.diag = rep.diag or "db-intents"
+    # R7-H1: tombstone-urile unui conflict autentificat păstrat de marker (orice ramură, chiar una
+    # dispărută de atunci) sunt ştergeri cerute: intenţii durabile, duse la capăt ca oricare alta
+    conf = _marker_conflict(cont if isinstance(cont, dict) else None)
+    if conf is not None and not rep.diag.startswith("db-intents"):
+        add = {sid: ["out", "cast"] for sid in conf["sids"] if sid not in intents}
+        if add:
+            now0 = clock()
+            try:
+                await st.txn(lambda c: [_put_intent_sync(c, x, k_, now0) for x, k_ in add.items()])
+            except (sqlite3.Error, txstore.Uncertain):
+                rep.diag = rep.diag or "db-intents"
+            intents.update(add)
     st.tombstoned.update(intents)
     s.head_known = head is not None
     s.head_db = head or EMPTY_HEAD
@@ -1330,7 +1479,7 @@ async def attest_once(st=None, dests=None, clock=time.time):
     return out
 
 
-async def fetch_head(d, k_erase, inst, check_from=None):
+async def fetch_head(d, k_erase, inst, check_from=None, ignore=()):
     """The newest authentic journal a destination holds for `inst`: (Parsed, bytes) or None when it
     holds none; raises on an unreachable destination. Objects are tried newest first.
 
@@ -1349,7 +1498,12 @@ async def fetch_head(d, k_erase, inst, check_from=None):
     read (all variants; one left unread for the budget is a gap → `Unverifiable`), two authentic
     ones that differ → ErasureConflict, and a damaged one AT that n is a gap too (`Unverifiable`).
     The authentic prefix of a damaged object is never a proof, but it is checked against the chain:
-    a prefix on another branch → ErasureConflict (it may hold a tombstone or a fork)."""
+    a prefix on another branch → ErasureConflict (it may hold a tombstone or a fork).
+
+    R7-H1: `ignore` = {(n, mac)} of branch heads an audited Owner resolution rejected (their
+    tombstones are already erase intents): such an object is neither a candidate nor a gap. Any
+    other authentic object still counts; a conflict carries its branches (`e.branches`)."""
+    ignore = {(h.n, h.mac) for h in ignore}
     names = []
     for n in await d.list():
         p = parse_object_name(n)
@@ -1385,6 +1539,8 @@ async def fetch_head(d, k_erase, inst, check_from=None):
             continue
         if p.n == 0:
             continue                              # R4-H1: doar antetul (fără MAC) — nicio dovadă
+        if (p.head.n, p.head.mac) in ignore:
+            continue                              # R7-H1: ramură respinsă de rezolvarea Owner-ului
         got.append((name, p, raw[:p.valid_len]))
         if top_n is None:
             top_n = _n
@@ -1397,6 +1553,9 @@ async def fetch_head(d, k_erase, inst, check_from=None):
         # R6-H1: fork-ul poartă cel mai mare n listat (o ramură poate ţine o ştergere până acolo):
         # restore-ul îl păstrează ca gol (flag → marker), niciodată ca destinaţie doar „indisponibilă"
         e.n = max(x[0] for x in names)
+        # R7-H1: ramurile autentice văzute (şi prefixele autentice ale obiectelor defecte) intră în
+        # înregistrarea durabilă a conflictului; tombstone-urile lor se aplică la vedere
+        e.branches = [p for _name, p, _raw in got] + [p for _name, p in prefixes]
         raise
     unread = [x[0] for x in names if best is not None and x[0] >= best[1].n and x[1] not in read]
     if unread:
@@ -1422,19 +1581,21 @@ class DestResult:
     error: str = ""
     unverified: int = 0            # R4-H2: n-ul unui obiect mai nou neverificabil (error='unverifiable');
     #                                R6-H1: la error='conflict' (fork), cel mai mare n listat acolo
+    branches: list = field(default_factory=list)   # R7-H1: la error='conflict', ramurile autentice văzute
 
 
-async def fetch_all(dests, k_erase, inst, check_from=None):
+async def fetch_all(dests, k_erase, inst, check_from=None, ignore=()):
     out = []
     for d in dests:
         try:
-            got = await fetch_head(d, k_erase, inst, check_from)
+            got = await fetch_head(d, k_erase, inst, check_from, ignore)
             out.append(DestResult(d.id, True, got[0] if got else None, got[1] if got else None))
         except ErasureConflict as e:
             n = getattr(e, "n", 0)
             log.warning("erasure: %s holds diverging erasure journals (fork)", d.id)
             # R6-H1: n ≥ 1 (un fork are intrări autentice); unul necunoscut tot gol rămâne
-            out.append(DestResult(d.id, False, error="conflict", unverified=n if type(n) is int and n > 0 else 1))
+            out.append(DestResult(d.id, False, error="conflict", unverified=n if type(n) is int and n > 0 else 1,
+                                  branches=list(getattr(e, "branches", None) or [])))
         except Unverifiable as e:
             log.warning("erasure: %s holds an unverifiable journal object n=%d", d.id, e.n)
             out.append(DestResult(d.id, False, error="unverifiable", unverified=e.n))
@@ -1488,12 +1649,16 @@ class Decision:
     required: list = field(default_factory=list)    # R-M2: destinaţiile obligatorii, păstrate în marker
     overflow: bool = False          # R-M2: prea multe capete cunoscute: nicio dovadă
     unverified: dict = field(default_factory=dict)  # R5-H1: destinaţie → n al unui obiect neverificabil
+    conflict: dict = None           # R7-H1: conflictul autentificat (fork văzut acum sau păstrat de un marker)
 
     def summary(self, since):
-        return {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n,
-                "threshold": self.threshold.to_json(), "known": dict(self.known),
-                "required": list(self.required), "overflow": bool(self.overflow),
-                "unverified": dict(self.unverified)}
+        out = {"state": self.state, "proof": self.proof, "since": int(since or 0), "n": self.head.n,
+               "threshold": self.threshold.to_json(), "known": dict(self.known),
+               "required": list(self.required), "overflow": bool(self.overflow),
+               "unverified": dict(self.unverified)}
+        if self.conflict is not None:
+            out["conflict"] = self.conflict
+        return out
 
 
 def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_results=(),
@@ -1531,6 +1696,12 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     fresh_unver = {r.id: r.unverified for r in dest_results
                    if not r.ok and r.error in GAP_ERRORS and type(r.unverified) is int and r.unverified > 0}
     unver = merge_known(staged.unverified, live.unverified if same else None, fresh_unver)
+    # R7-H1: conflictul autentificat (al backup-ului, al markerului viu, un fork văzut acum) se
+    # păstrează întreg (capete + tombstone-uri), nu doar ca număr
+    conflict = conflict_union(staged.conflict, live.conflict if same else None)
+    for r in dest_results:
+        if r.error == "conflict" and r.branches:
+            conflict = merge_conflict(conflict, r.branches, [r.id])
     known = merge_known(known_attested, live.attested if same else None, staged.known, unver)
     overflow = (staged.overflow or (same and live.overflow)
                 or known_overflow(known_attested, live.attested if same else None, staged.known, unver))
@@ -1595,18 +1766,19 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     # R2-M2: un cap off-host cunoscut (şi al unei destinaţii retrase) peste pragul local e tot o
     # obligaţie: J_v dovedeşte doar dacă îl atinge şi pe el
     top = max([t.n] + list(known.values()))
-    if not met or any(r.error in GAP_ERRORS for r in dest_results):
-        proof = "none"                             # R5-H1 / R6-H1: un gol sau un fork observat acum
+    if not met or any(r.error in GAP_ERRORS for r in dest_results) or conflict is not None:
+        proof = "none"                             # R5-H1 / R6-H1 / R7-H1: un gol, un fork (acum sau păstrat)
     elif live.state == "same" and pv is not None and reaches(pv, t) and pv.n >= top and not unver:
         proof = "volume"
     elif req and all(dest_ok(d) for d in req):
         proof = "destinations"
     else:
         proof = "none"
-    tracked_any = tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0 or bool(fresh_unver)
+    tracked_any = (tracked or head.n > 0 or bool(known) or pv is not None or t.n > 0 or bool(fresh_unver)
+                   or conflict is not None)
     state = "not-tracked" if not tracked_any else ("proven" if proof != "none" else "unproven")
     return Decision(state, proof, star_bytes if tracked_any else None, head, rolled, unreachable,
-                    t, merge_known(known, observed), not met, sorted(required_all), overflow, unver)
+                    t, merge_known(known, observed), not met, sorted(required_all), overflow, unver, conflict)
 
 
 def journal_reaches(raw, k_erase, inst, t):
@@ -1620,7 +1792,7 @@ def journal_reaches(raw, k_erase, inst, t):
 
 
 def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, stage_summary=None,
-                    threshold=EMPTY_HEAD, live_ok=False, known=None, unverified=None):
+                    threshold=EMPTY_HEAD, live_ok=False, known=None, unverified=None, conflict=None):
     """The same reconciliation again under the boot lock, immediately before apply: the staged J*
     and the live journal must lie on one chain; the longer one is published. Returns (journal bytes
     to publish or None, proven, head).
@@ -1665,8 +1837,8 @@ def reconcile_apply(*, k_erase, inst, staged_journal=None, live_journal=None, st
               and pv.n >= top and final.n >= top)
     if (stage_summary or {}).get("state") == "not-tracked" and head.n == 0 and top == 0:
         proven = True                              # nimic urmărit nicăieri: nimic de dovedit
-    if unverified:
-        proven = False                             # R5-H1: un gol observat nu e acoperit de J_v
+    if unverified or conflict:
+        proven = False                             # R5-H1 / R7-H1: un gol sau un conflict nu e acoperit de J_v
     return out, proven, head
 
 
@@ -1740,7 +1912,7 @@ def _quarantine_cohort_sync(c, reason, now, plain=()):
 
 
 def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=None, transcripts_dir=None,
-                       required=None, overflow=False, unverified=None):
+                       required=None, overflow=False, unverified=None, conflict=None):
     """Restore without proof (apply, after the DB copy): the WHOLE cohort quarantined with reason
     `continuity` (H2): every readable descriptor (→ `quarantined`), and every (sid, kind) still in
     plaintext — a migration row that owns a file, or a 3.7-named file under `transcripts_dir` with
@@ -1766,6 +1938,10 @@ def mark_unproven_sync(db_path, since, n, now=None, *, threshold=None, known=Non
                 mark["overflow"] = True
             if unverified:
                 mark["unverified"] = known_from_json(unverified)   # R5-H1: golul rămâne în marker
+            if conflict:
+                # R7-H1: conflictul autentificat (ramuri + tombstone-uri) rămâne în marker; boot-ul
+                # transformă tombstone-urile lui în intenţii de ştergere
+                mark["conflict"] = conflict_from_json(conflict)
             _set_json(con, "continuity", mark)
             con.execute("COMMIT")
         except BaseException:
@@ -1898,6 +2074,99 @@ def _behind():
     return not reaches(s.parsed, terms.threshold) or s.parsed.n < top
 
 
+def _marker_conflict(cont):
+    """R7-H1: the authenticated conflict record a continuity marker keeps, or None. A marker that
+    cannot be read is handled as unreadable by every caller (no proof), not as "no conflict"."""
+    if not cont or cont.get("state") != "unproven":
+        return None
+    terms = _marker_terms(cont)
+    return terms.conflict if terms is not None else None
+
+
+def conflict_open():
+    """R7-H1: an authenticated conflict is recorded and not resolved (System health, release)."""
+    return _marker_conflict(_s.continuity) is not None
+
+
+async def _record_conflict_locked(st, branches, dests, gaps, msg, clock=time.time):
+    """R7-H1, caller holds the barrier: an authentic fork seen now (`branches`: authentic Parsed, at
+    `dests`; `gaps` = {destination: highest n listed} for a fork AT a destination) is made durable
+    in the continuity marker (created when there is none: a fork means continuity is unproven), and
+    every tombstone of every branch is applied at once: in-memory tombstone, RK destroyed, and a
+    durable erase intent for each sid the local journal does not hold yet (when the recording still
+    has a key or a descriptor, or the sid is erased after the fork point) — an erasure on ANY
+    authentic branch wins, also after that branch disappears. Returns the generations to retire."""
+    s = _s
+    s.conflict = (msg or "erasure journals diverge")[:300]
+    st.alarm("transcript.erasureConflict", s.conflict)
+    branches = [p for p in branches if p is not None and p.n > 0]
+    cont = s.continuity if s.continuity and s.continuity.get("state") == "unproven" else None
+    terms = _marker_terms(cont) if cont is not None else Terms()
+    new_cont = None
+    rec = None
+    if terms is not None:
+        rec = merge_conflict(terms.conflict, branches, list(dests) + list(gaps or {}))
+    if terms is not None and (cont is not None or rec is not None):
+        # fără ramuri autentice divergente (ex.: alt MAC doar la capul comis) nu se creează un marker
+        new_cont = dict(cont) if cont is not None else {"state": "unproven", "since": int(clock()),
+                                                        "n": s.head_db.n}
+        if cont is None and s.head_db.n:
+            new_cont["threshold"] = s.head_db.to_json()
+        if rec is not None:
+            new_cont["conflict"] = rec
+        if gaps:
+            # R6-H1: un fork la o destinaţie e şi un gol la cel mai mare n listat (obligatoriu)
+            new_cont["unverified"] = merge_known(terms.unverified, gaps)
+            req = sorted(set(terms.required) | set(gaps))
+            if len(req) > KNOWN_MAX:
+                new_cont["overflow"] = True
+                req = req[:KNOWN_MAX]
+            new_cont["required"] = req
+    tomb = branch_sids(branches)
+    journalled = {e.sid_hex for e in s.parsed.entries} if s.parsed is not None else set()
+    # toate sid-urile de după punctul de fork (nu doar cele încăpute în înregistrare): intenţii
+    divergent = ({e.sid_hex for p in branches for e in p.entries[_fork_base(branches):]}
+                 if len(branches) >= 2 else set())
+    for sid in sorted(tomb - st.tombstoned):
+        st.tombstone(sid)                          # memoria întâi (fail closed)
+        st.drop_key(sid)
+    created = cont is None and new_cont is not None
+    plain = await st.io(_plain_cohort_fd, st.dir_fd) if created else ()
+    now = clock()
+
+    def fn(c):
+        have = ({r[0] for r in c.execute("SELECT sid FROM session_keys").fetchall()}
+                | {r[0] for r in c.execute("SELECT sid FROM tx_descriptors").fetchall()})
+        out = []
+        for sid in sorted((tomb - journalled) & (have | divergent)):
+            _put_intent_sync(c, sid, ("out", "cast"), now)
+        for sid in sorted(tomb & have):
+            out += [(sid, kind, hexid) for hexid, kind in _destroy_sync(c, sid, clear_intent=False)]
+        if created:
+            _quarantine_cohort_sync(c, "continuity", now, plain)
+        if new_cont is not None:
+            _set_json(c, "continuity", new_cont)
+        return out
+    try:
+        gens = await st.io(st._run_txn, fn)
+    except txstore.Uncertain:
+        # rezultat necunoscut: memoria ţine starea mai strictă; următoarea observare o rescrie
+        log.warning("erasure: the conflict record did not commit (uncertain)")
+        gens = []
+    if new_cont is not None:
+        s.continuity = new_cont
+    return gens
+
+
+async def _record_conflict(st, branches, dests, gaps, msg):
+    """`_record_conflict_locked` under the barrier, then the generations retired."""
+    async with st.barrier:
+        gens = await _record_conflict_locked(st, branches, dests, gaps, msg)
+    for sid, kind, hexid in gens:
+        await st.retire(sid, kind, hexid)
+    st.bump(None)
+
+
 async def try_prove(st=None):
     """With every required destination answering an authentic, non-rolled-back head on our chain
     that reaches what was known at the restore (the marker's threshold and per-destination heads):
@@ -1907,7 +2176,12 @@ async def try_prove(st=None):
     file and on `s.parsed`): an erasure appended while we fetched is on the volume journal, and a
     destination chain that does not extend it is a fork → nothing adopted, quarantine kept. The
     adoption (journal replace + in-memory tombstones) and ONE transaction (destroy every new sid,
-    advance the DB head monotonically, lift) run in the same critical section as erase's append."""
+    advance the DB head monotonically, lift) run in the same critical section as erase's append.
+
+    R7-H1: any fork seen (at a destination, between destinations, or with the volume) is recorded
+    durably with its branches and tombstones (`_record_conflict`); while the marker keeps a conflict
+    record nothing is lifted here, even when a branch later disappears from the listing. Only an
+    Owner resolution (`resolve_conflict`) or the retire of the forking destination clears it."""
     s = _s
     st = st or s.store
     if st is None or s.diag or s.uncertain or s.parsed is None or not s.continuity:
@@ -1923,11 +2197,15 @@ async def try_prove(st=None):
     if not dests:
         return False
     k = s.journal.k
-    results = await fetch_all(dests, k, st.inst, check_from=r_n)
-    forks = [r.id for r in results if r.error == "conflict"]
+    results = await fetch_all(dests, k, st.inst, check_from=r_n, ignore=terms.rejected)
+    forks = [r for r in results if r.error == "conflict"]
     if forks:
-        s.conflict = "erasure journals at %s diverge" % forks[0][:120]
-        st.alarm("transcript.erasureConflict", s.conflict)
+        await _record_conflict(st, [p for r in forks for p in r.branches], [], {r.id: r.unverified for r in forks},
+                               "erasure journals at %s diverge" % forks[0].id[:120])
+        return False
+    if terms.conflict is not None:
+        # R7-H1: un fork autentificat odată rămâne conflict, chiar dacă o ramură a dispărut
+        s.conflict = s.conflict or "an erasure journal fork is recorded; an Owner must resolve it"
         return False
     try:
         dec = decide_restore(k_erase=k, inst=st.inst, j_b=None, tracked=True, j_v=None,
@@ -1938,14 +2216,15 @@ async def try_prove(st=None):
                                              | set(terms.unverified)),
                              known_attested=known, live=Live("same", t, {}), mode="prove")
     except ErasureConflict as e:
-        s.conflict = str(e)
-        st.alarm("transcript.erasureConflict", str(e))
+        ok = [r for r in results if r.ok and r.parsed is not None]
+        await _record_conflict(st, [r.parsed for r in ok], [r.id for r in ok], {}, str(e))
         return False
     s.rolled_back = set(dec.rolled_back)
     if dec.proof != "destinations":
         return False
     star = parse(dec.journal, k, st.inst) if dec.journal else None
     gens = []
+    fork_gens = None
     async with st.barrier:
         if s.diag or s.uncertain or s.parsed is None or s.continuity is not cont:
             return False
@@ -1961,47 +2240,48 @@ async def try_prove(st=None):
         try:
             _on_one_chain(cands)
         except ErasureConflict as e:
-            # o ştergere locală (după restore sau concurentă) şi o ramură a destinaţiei: oprim
-            s.conflict = str(e)
-            st.alarm("transcript.erasureConflict", str(e))
-            return False
-        final = star if star is not None and star.n > cur.n else cur
-        if not reaches(final, t):
-            return False
-        new = list(star.entries[cur.n:]) if final is star else []
-        if new:
-            await st.io(s.journal.replace, dec.journal)
-            s.parsed = star
-            for e in new:
-                st.tombstone(e.sid_hex)
-                st.drop_key(e.sid_hex)
+            # o ştergere locală (după restore sau concurentă) şi o ramură a destinaţiei: oprim şi
+            # păstrăm conflictul (R7-H1) cu ambele ramuri
+            fork_gens = await _record_conflict_locked(
+                st, [cur, star], [r.id for r in results if r.ok and r.parsed is not None], {}, str(e))
+        if fork_gens is None:
+            final = star if star is not None and star.n > cur.n else cur
+            if not reaches(final, t):
+                return False
+            new = list(star.entries[cur.n:]) if final is star else []
+            if new:
+                await st.io(s.journal.replace, dec.journal)
+                s.parsed = star
+                for e in new:
+                    st.tombstone(e.sid_hex)
+                    st.drop_key(e.sid_hex)
 
-        def fn(c):
-            out = []
-            for e in new:
-                out += [(e.sid_hex, kind, hexid) for hexid, kind in
-                        _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac))]
-            rows = c.execute("SELECT sid, kind FROM tx_quarantine WHERE reason='continuity'").fetchall()
-            for sid, kind in rows:
-                c.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=? AND kind=? AND "
-                          "status IN ('quarantined','recovery')", (sid, kind))
-            c.execute("DELETE FROM tx_quarantine WHERE reason='continuity'")
-            c.execute("DELETE FROM tx_state WHERE key='continuity'")
-            return out
-        try:
-            gens = await st.io(st._run_txn, fn)
-        except txstore.Uncertain:
-            # jurnalul e deja adoptat (durabil); boot-ul re-aplică paşii 2–3 şi carantina rămâne
-            # până la un nou try_prove
-            s.uncertain = "commit-uncertain"
-            return False
-        if new and s.head_db.n < star.head.n:
-            s.head_db = star.head
-        s.continuity = None
-    for sid, kind, hexid in gens:
+            def fn(c):
+                out = []
+                for e in new:
+                    out += [(e.sid_hex, kind, hexid) for hexid, kind in
+                            _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac))]
+                rows = c.execute("SELECT sid, kind FROM tx_quarantine WHERE reason='continuity'").fetchall()
+                for sid, kind in rows:
+                    c.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=? AND kind=? AND "
+                              "status IN ('quarantined','recovery')", (sid, kind))
+                c.execute("DELETE FROM tx_quarantine WHERE reason='continuity'")
+                c.execute("DELETE FROM tx_state WHERE key='continuity'")
+                return out
+            try:
+                gens = await st.io(st._run_txn, fn)
+            except txstore.Uncertain:
+                # jurnalul e deja adoptat (durabil); boot-ul re-aplică paşii 2–3 şi carantina rămâne
+                # până la un nou try_prove
+                s.uncertain = "commit-uncertain"
+                return False
+            if new and s.head_db.n < star.head.n:
+                s.head_db = star.head
+            s.continuity = None
+    for sid, kind, hexid in (fork_gens if fork_gens is not None else gens):
         await st.retire(sid, kind, hexid)
     st.bump(None)
-    return True
+    return fork_gens is None
 
 
 # ── Owner recovery (§12.11.4 "Owner recovery mode", Q4) ──────────────────────
@@ -2106,9 +2386,25 @@ async def _set_status(st, sid, frm, to, *, allowed=_continuity_only, need_key=Fa
             return await st.txn(fn)
 
 
+def _refuse_on_conflict():
+    """R7-H1: while an authenticated conflict is recorded no recovery path opens anything."""
+    if conflict_open():
+        raise ErasureError("transcript.recoveryConflict",
+                           "the erasure journals diverge (a fork is recorded); recovery is refused until "
+                           "an Owner resolves it", 409)
+
+
 async def recover(st, sid):
-    """quarantined (continuity) → recovery: readable by Owners only, through the recovery route."""
-    return await _set_status(st, sid, "quarantined", "recovery")
+    """quarantined (continuity) → recovery: readable by Owners only, through the recovery route.
+    R7-H1: refused while an authenticated conflict is recorded (re-checked in the transaction)."""
+    _refuse_on_conflict()
+    cont0 = _s.continuity
+
+    def guard(_c):
+        if _s.continuity is not cont0:
+            raise ErasureError("transcript.recoveryState", "the continuity state changed; try again", 409)
+        _refuse_on_conflict()
+    return await _set_status(st, sid, "quarantined", "recovery", guard=guard)
 
 
 async def recover_journal(st, sid, diag):
@@ -2123,6 +2419,7 @@ async def recover_journal(st, sid, diag):
     s = _s
     if sid in st.tombstoned:
         raise ErasureError("transcript.missing", "no recording for this session", 404)
+    _refuse_on_conflict()
     intent, key = await st.read(lambda c: (
         _has_intent(c, sid), c.execute("SELECT 1 FROM session_keys WHERE sid=?", (sid,)).fetchone() is not None))
     if intent:
@@ -2141,6 +2438,7 @@ async def recover_journal(st, sid, diag):
         if (journal_diag() != diag or s.head_db is not head0 or s.damaged is not dmg0
                 or s.continuity is not cont0 or sid in st.tombstoned):
             raise ErasureError("transcript.recoveryState", "the erasure journal state changed; try again", 409)
+        _refuse_on_conflict()
         if _has_intent(c, sid):
             raise ErasureError("transcript.recoveryErasePending",
                                "an erasure of this recording was requested and may be journalled; "
@@ -2254,8 +2552,11 @@ async def _journal_recovery_proof(st, sid):
                     raise ErasureConflict("the erasure journal at %s holds another entry n=%d than the "
                                           "committed one" % (r.id[:120], h.n))
     except ErasureConflict as e:
-        s.conflict = str(e)
-        st.alarm("transcript.erasureConflict", str(e))
+        # R7-H1: ramurile autentice văzute rămân durabile (marker), tombstone-urile lor aplicate
+        fork_rs = [r for r in results if r.error == "conflict"]
+        await _record_conflict(st, [r.parsed for r in good] + [p for r in fork_rs for p in r.branches]
+                               + ([local] if local is not None and local.n else []),
+                               [r.id for r in good], {r.id: r.unverified for r in fork_rs}, str(e))
         raise ErasureError("transcript.recoveryConflict",
                            "the erasure journals diverge; recovery is refused", 409) from None
     b = bytes.fromhex(sid)
@@ -2320,7 +2621,7 @@ def _release_check():
                            "erasures committed before the last restore are not on this volume yet; "
                            "the recording stays in recovery until they are proven", 409)
     s = _s
-    owed = bool(s.conflict)
+    owed = bool(s.conflict) or conflict_open()     # R7-H1: conflictul durabil, nu doar cel din memorie
     if s.continuity and s.continuity.get("state") == "unproven":
         terms = _marker_terms(s.continuity)
         # R6-H2: poziţia numerică (_behind) nu e dovadă: obligaţia off-host o ridică doar try_prove
@@ -2417,16 +2718,35 @@ async def retire_destination(st, dest_id, *, audit_row):
             else:
                 new.pop("unverified", None)
 
+        # R7-H1: retragerea destinaţiei care a arătat fork-ul o scoate din conflict; când nu mai
+        # rămâne nicio destinaţie, conflictul se închide, iar tombstone-urile lui rămân intenţii
+        # de ştergere durabile (scrise din nou în aceeaşi tranzacţie)
+        conf = terms.conflict
+        closed = ()
+        if conf is not None and dest_id in conf["dests"]:
+            left_d = [d for d in conf["dests"] if d != dest_id]
+            if left_d:
+                new["conflict"] = dict(conf, dests=left_d)
+            else:
+                new.pop("conflict", None)
+                journalled = {e.sid_hex for e in s.parsed.entries} if s.parsed is not None else set()
+                closed = [x for x in conf["sids"] if x not in journalled]
+        now = time.time()
+
         def fn(c):
             now_cfg = _configured_in_txn(c)
             if now_cfg is None or dest_id in now_cfg:
                 raise ErasureError("transcript.destinationConfigured",
                                    "this destination is still configured; remove it from the backup "
                                    "settings first", 409)
+            for x in closed:
+                _put_intent_sync(c, x, ("out", "cast"), now)
             _set_json(c, "continuity", new)
             _audit_sync(c, dict(audit_row, detail="owner override: erasure destination %s retired from "
-                                "the continuity proof (known head %d, threshold n=%d; durable record)"
-                                % (dest_id[:120], known_head, terms.threshold.n)))
+                                "the continuity proof (known head %d, threshold n=%d%s; durable record)"
+                                % (dest_id[:120], known_head, terms.threshold.n,
+                                   "; erasure conflict closed, %d tombstone(s) kept" % len(conf["sids"])
+                                   if conf is not None and "conflict" not in new else "")))
         try:
             await st.io(st._run_txn, fn)
         except txstore.Uncertain:
@@ -2435,7 +2755,157 @@ async def retire_destination(st, dest_id, *, audit_row):
             raise ErasureError("transcript.erasureUncertain",
                                "the change did not finish; restart the gateway", 503) from None
         s.continuity = new
-    return {"required": left, "known_head": known_head}
+        if conf is not None and "conflict" not in new:
+            s.conflict = ""                        # R7-L1: diagnosticul se închide cu conflictul durabil
+    return {"required": left, "known_head": known_head,
+            "conflict_closed": conf is not None and "conflict" not in new}
+
+
+# ── Owner resolution of an authenticated conflict (R7-H1) ────────────────────
+
+
+def journal_bytes(inst, p, n):
+    """The WTJ1 bytes of the first `n` entries of the authentic prefix `p` (re-encoded as read)."""
+    return header(inst) + b"".join(_BODY.pack(e.n, e.time_ms, bytes(e.sid), e.kinds, bytes(e.rk_hash)) + e.mac
+                                   for e in p.entries[:n])
+
+
+async def resolve_conflict(st, n, mac_hex, *, audit_row):
+    """R7-H1: the audited Owner resolution of a recorded erasure conflict. The Owner names one
+    authentic branch head (n + MAC) visible NOW (at a destination, or the volume's own journal).
+    Every configured and required destination must answer; any branch newly visible joins the record
+    first (its tombstones applied). The chosen journal must be the newest head of its line, reach
+    every common prefix of the record and the marker's threshold, erase EVERY sid erased on any
+    branch, and lie on one chain with the volume journal; otherwise `conflictMissingTombstone` /
+    `conflictBranchUnknown`, nothing changed. Then, under the barrier (CAS on the marker and the
+    journal file) and in ONE transaction with the audit row: the chosen journal adopted (its new
+    tombstones destroyed), the conflict record removed, every other visible branch head kept as
+    `rejected` (later fetches skip exactly those objects), and for the destinations of the record
+    the gap at the fork's n replaced by the adopted head. The continuity quarantine itself stays:
+    the next `try_prove` lifts it once every destination proves the adopted chain."""
+    if not isinstance(audit_row, dict) or not audit_row.get("ts"):
+        raise ValueError("resolve_conflict needs the audit row of the Owner's request")
+    s = _s
+    cont = s.continuity
+    terms = _marker_terms(cont) if cont and cont.get("state") == "unproven" else None
+    if terms is None or terms.conflict is None:
+        raise ErasureError("transcript.conflictNone", "no erasure conflict is recorded", 404)
+    if s.diag or s.parsed is None:
+        raise ErasureError("transcript.erasureJournalBroken",
+                           "the erasure journal is damaged (%s); a conflict cannot be resolved" % (s.diag or "?"), 503)
+    if s.uncertain:
+        raise ErasureError("transcript.erasureUncertain", "an erasure did not finish; restart the gateway", 503)
+    if type(n) is not int or n < 1 or type(mac_hex) is not str or not re.fullmatch(r"[0-9a-f]{64}", mac_hex):
+        raise ErasureError("transcript.conflictBranchUnknown", "name a branch head (n and MAC)", 409)
+    want = bytes.fromhex(mac_hex)
+    k = s.journal.k
+    try:
+        dests = list(await _dest_provider()) if _dest_provider is not None else []
+    except Exception as e:                       # noqa: BLE001 — configurare ilizibilă = refuz
+        log.warning("erasure: destinations unavailable: %s", type(e).__name__)
+        raise ErasureError("transcript.conflictUnproven",
+                           "the backup destinations cannot be read; the conflict stays", 409) from None
+    missing = sorted((set(terms.required) | set(terms.unverified) | set(terms.conflict["dests"]))
+                     - {d.id for d in dests})
+    results = await fetch_all(dests, k, st.inst, check_from=0, ignore=terms.rejected) if dests else []
+    down = missing + [r.id for r in results if not r.ok and r.error != "conflict"]
+    if down:
+        raise ErasureError("transcript.conflictUnproven",
+                           "the backup destination %s cannot be read completely; the conflict stays (retire "
+                           "a destination that is gone)" % down[0][:120], 409)
+    fork_rs = [r for r in results if r.error == "conflict"]
+    ok_rs = [r for r in results if r.ok and r.parsed is not None and r.parsed.n]
+    seen = ([r.parsed for r in ok_rs] + [p for r in fork_rs for p in r.branches]
+            + ([s.parsed] if s.parsed.n else []))
+    if not all(_same_chain(a, b) for a in seen for b in seen):
+        # o ramură nouă vizibilă acum intră în înregistrare înainte de alegere (tombstone-uri aplicate)
+        await _record_conflict(st, seen, [r.id for r in ok_rs], {r.id: r.unverified for r in fork_rs},
+                               "erasure journals diverge (seen at the Owner resolution)")
+    cont = s.continuity
+    terms = _marker_terms(cont) if cont and cont.get("state") == "unproven" else None
+    if terms is None or terms.conflict is None:
+        raise ErasureError("transcript.recoveryState", "the continuity state changed; try again", 409)
+    rec = terms.conflict
+    src = next((p for p in seen if p.n >= n and hmac.compare_digest(p.entries[n - 1].mac, want)), None)
+    if src is None:
+        raise ErasureError("transcript.conflictBranchUnknown",
+                           "no authentic erasure journal visible now holds that head", 409)
+    chosen = parse(journal_bytes(st.inst, src, n), k, st.inst)
+    longer = [p.n for p in seen if p.n > n and _same_chain(p, chosen)]
+    if longer:
+        raise ErasureError("transcript.conflictBranchUnknown",
+                           "choose the newest head of that branch (n=%d)" % max(longer), 409)
+    why = conflict_admits(rec, chosen)
+    if not why and not _same_chain(chosen, s.parsed):
+        why = "the chosen journal diverges from this volume's erasure journal"
+    final = chosen if chosen.n > s.parsed.n else s.parsed
+    if not why and not reaches(final, terms.threshold):
+        why = "the chosen journal does not hold the restore's committed head n=%d" % terms.threshold.n
+    rejected = {(h.n, h.mac): h for h in terms.rejected}
+    for p in seen:
+        if not _same_chain(p, chosen):
+            rejected[(p.head.n, p.head.mac)] = p.head
+    if not why and len(rejected) > REJECTED_MAX:
+        why = "too many rejected branches to record"
+    if why:
+        raise ErasureError("transcript.conflictMissingTombstone", why, 409)
+    gens = []
+    async with st.barrier:
+        if s.diag or s.uncertain or s.parsed is None or s.continuity is not cont:
+            raise ErasureError("transcript.recoveryState", "the erasure state changed; try again", 409)
+        cur = s.parsed
+        raw = await st.io(s.journal.read_bytes)
+        now_p = parse(raw, k, st.inst) if raw is not None and len(raw) == prefix_len(cur.n) else None
+        if (now_p is None or now_p.n != cur.n or now_p.bad
+                or not hmac.compare_digest(now_p.head.mac, cur.head.mac) or not _same_chain(chosen, cur)):
+            raise ErasureError("transcript.recoveryState", "the erasure journal changed; try again", 409)
+        final = chosen if chosen.n > cur.n else cur
+        new_entries = list(chosen.entries[cur.n:]) if final is chosen else []
+        new = dict(cont)
+        new.pop("conflict", None)
+        new["rejected"] = [rejected[x].to_json() for x in sorted(rejected)]
+        known = dict(terms.known)
+        unv = dict(terms.unverified)
+        for d in rec["dests"]:
+            # golul la n-ul fork-ului (cel mai mare n listat, poate al ramurii respinse) devine capul adoptat
+            gap = unv.pop(d, 0)
+            known[d] = min(max(known.get(d, 0), gap), final.n)
+        new["known"] = known
+        if unv:
+            new["unverified"] = unv
+        else:
+            new.pop("unverified", None)
+        if new_entries:
+            await st.io(s.journal.replace, journal_bytes(st.inst, chosen, chosen.n))
+            s.parsed = chosen
+            for e in new_entries:
+                st.tombstone(e.sid_hex)
+                st.drop_key(e.sid_hex)
+
+        def fn(c):
+            out = []
+            for e in new_entries:
+                out += [(e.sid_hex, kind, hexid) for hexid, kind in
+                        _destroy_sync(c, e.sid_hex, Head(e.n, e.time_ms, e.mac))]
+            _set_json(c, "continuity", new)
+            _audit_sync(c, dict(audit_row, detail="owner resolution: erasure conflict resolved by adopting "
+                                "the journal n=%d (%s…), %d branch head(s) rejected, %d tombstone(s) checked; "
+                                "durable record" % (chosen.n, mac_hex[:16], len(rejected), len(rec["sids"]))))
+            return out
+        try:
+            gens = await st.io(st._run_txn, fn)
+        except txstore.Uncertain:
+            s.uncertain = "commit-uncertain"
+            raise ErasureError("transcript.erasureUncertain",
+                               "the change did not finish; restart the gateway", 503) from None
+        if new_entries and s.head_db.n < chosen.head.n:
+            s.head_db = chosen.head
+        s.continuity = new
+        s.conflict = ""                            # R7-L1: diagnosticul se închide cu conflictul durabil
+    for sid, kind, hexid in gens:
+        await st.retire(sid, kind, hexid)
+    st.bump(None)
+    return {"n": final.n, "rejected": len(rejected), "tombstones": len(rec["sids"])}
 
 
 async def status_of(st, sid):
@@ -2517,7 +2987,7 @@ def health():
     if s.continuity and s.continuity.get("state") == "unproven":
         out.append(("warning", "erasure_unproven",
                     {"date": time.strftime("%Y-%m-%d", time.gmtime(s.continuity.get("since") or 0))}))
-    if s.conflict:
+    if s.conflict or conflict_open():
         out.append(("critical", "erasure_conflict", {}))
     head = s.head_db.n
     if head and s.dest_ids == []:

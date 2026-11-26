@@ -1115,6 +1115,14 @@ def _erasure_error(e) -> ApiError:
         return ApiError(409, "transcript.recoveryUnreachable", msg)
     if c == "transcript.recoveryNoJournal":
         return ApiError(409, "transcript.recoveryNoJournal", msg)
+    if c == "transcript.conflictNone":
+        return ApiError(404, "transcript.conflictNone", msg)
+    if c == "transcript.conflictBranchUnknown":
+        return ApiError(409, "transcript.conflictBranchUnknown", msg)
+    if c == "transcript.conflictMissingTombstone":
+        return ApiError(409, "transcript.conflictMissingTombstone", msg)
+    if c == "transcript.conflictUnproven":
+        return ApiError(409, "transcript.conflictUnproven", msg)
     return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
 
 
@@ -1312,6 +1320,51 @@ async def retire_continuity_destination(dest_id: str, body: RetireIn, request: R
                                         % dest_id[:120], security.client_ip(request), user["email"],
                                         fleet=True, user_id=user["id"])
     return {"ok": True, "required": res["required"], "lifted": bool(lifted)}
+
+
+class ResolveIn(BaseModel):
+    n: int = 0                    # capul ramurii adoptate
+    mac: str = ""                 # MAC-ul intrării n (64 hex)
+    confirm: str = ""             # tastat: "<n> <primele 16 caractere ale MAC-ului>"
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+@router.post("/api/recordings/continuity/conflict/resolve")
+async def resolve_continuity_conflict(body: ResolveIn, request: Request,
+                                      user=Depends(authz.perm('backups.manage'))):
+    """R7-H1, Owner decision: resolve a recorded erasure-journal conflict (a fork seen at a
+    destination or against the volume) by adopting ONE authentic branch that erases every recording
+    erased on any branch. Refused otherwise; the quarantine is lifted only by the proof that follows."""
+    st = _erasure_store()
+    mac = (body.mac or "").strip().lower()
+    if (body.n < 1 or not re.fullmatch(r"[0-9a-f]{64}", mac)
+            or body.confirm.strip().lower() != "%d %s" % (body.n, mac[:16])):
+        raise ApiError(400, "transcript.conflictConfirm",
+                       "type the branch head (n and the first 16 characters of its MAC) to confirm")
+    await _require_owner(user)
+    # factor REAL proaspăt, nelegat de un host (ca retragerea unei destinaţii)
+    await stepup.require_fresh_factor(0, user, body.stepup_grant, body.stepup_password,
+                                      body.stepup_totp, real_factor=True)
+    try:
+        # urma de audit durabilă se scrie în ACEEAŞI tranzacţie cu markerul (ca la retragere)
+        res = await erasure.resolve_conflict(st, body.n, mac, audit_row={
+            "ts": time.time(), "actor": user["email"] or "", "actor_id": user["id"],
+            "ip": security.client_ip(request), "method": "POST", "path": request.url.path, "status": 200})
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    lifted = False
+    try:
+        lifted = await erasure.try_prove(st)
+    except Exception as e:                       # noqa: BLE001 — dovada reîncearcă janitorul
+        log.warning("resolve: proof attempt failed: %s", type(e).__name__)
+    audit.detail(request, "owner resolution: erasure conflict resolved (journal n=%d, %d branch head(s) "
+                 "rejected; quarantine %s)" % (res["n"], res["rejected"], "lifted" if lifted else "kept"))
+    email_alerts.notify_security_change("an erasure-journal conflict was resolved by an Owner (journal n=%d)"
+                                        % res["n"], security.client_ip(request), user["email"],
+                                        fleet=True, user_id=user["id"])
+    return {"ok": True, "n": res["n"], "rejected": res["rejected"], "lifted": bool(lifted)}
 
 
 async def _recovery_decide(request: Request, uid_expected: int):
