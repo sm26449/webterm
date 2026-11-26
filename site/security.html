@@ -106,6 +106,26 @@
   </div>
 </section>
 
+<section class="alt" id="at-rest" aria-labelledby="s-rest">
+  <div class="wrap">
+    <p class="eyebrow">New in 3.8</p>
+    <h2 id="s-rest">Encryption at rest, <b>with a key you keep apart.</b></h2>
+    <p class="sub">Until 3.7, the key that encrypts every stored credential (agent tokens, SSH passwords and keys, TOTP secrets, SMTP and cloud logins) sat in the same data volume as the credentials. From 3.8 it is locked with a master key kept outside that volume, so a copy of the volume or of a backup no longer gives them away.</p>
+    <ul class="list">
+      <li><b>A master key outside the data</b><p>New installations get a key file outside the data volume, mounted read-only. Keep a copy off the machine: without it, the installation and its backups cannot be opened. A missing or wrong key stops the gateway before it touches anything; it never falls back to the old key.</p></li>
+      <li><b>Backups that never hold the key</b><p>Every backup and snapshot the gateway writes is an encrypted container that only the master key opens, and the key is never inside it. The host backup script works the same way.</p></li>
+      <li><b>Encrypted session recordings</b><p>Opt-in. Each recording gets its own key. Existing recordings are converted in the background, and the plaintext is deleted only after the encrypted copy is verified. An upgrade never turns this on for you.</p></li>
+      <li><b>Erasing a recording is final</b><p>An Owner erase destroys the recording’s key and writes the erasure to a journal that is copied to your SFTP or FTPS destination and read back. Restoring an older backup does not bring the recording back.</p></li>
+      <li><b>Quarantine instead of guessing</b><p>When a restore cannot prove which erasures happened after the backup, the restored recordings are held back. They are released once the destination proves the history; until then an Owner can open one at a time, with a fresh second factor, and it is audited.</p></li>
+      <li><b>A one-way move from 3.7</b><p>Upgrading changes nothing until you add a key. The next start checks that the old key really opens the database, then migrates once. Download a backup first: after the migration there is no way back to 3.7 on the same volume.</p></li>
+    </ul>
+    <div class="callout">
+      <strong>What it does not cover.</strong> The database file itself is not encrypted yet: host names, accounts and the audit log stay readable inside the volume. Encryption at rest protects a stolen disk, a copied volume or a backup. It does not protect a server that is running and compromised, because the running gateway holds the key.
+    </div>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Turning it on, step by step →</a>
+  </div>
+</section>
+
 <section aria-labelledby="s-ops">
   <div class="wrap">
     <h2 id="s-ops">Running it</h2>

@@ -106,6 +106,26 @@
   </div>
 </section>
 
+<section class="alt" id="at-rest" aria-labelledby="s-rest">
+  <div class="wrap">
+    <p class="eyebrow">Nou în 3.8</p>
+    <h2 id="s-rest">Criptare la repaus, <b>cu o cheie ținută separat.</b></h2>
+    <p class="sub">Până la 3.7, cheia care criptează fiecare credențială salvată (tokenurile agenților, parolele și cheile SSH, secretele TOTP, conturile SMTP și cloud) stătea în același volum de date cu credențialele. Din 3.8 e încuiată cu o cheie principală ținută în afara volumului, așa că o copie a volumului sau a unui backup nu le mai dă pe mână.</p>
+    <ul class="list">
+      <li><b>O cheie principală în afara datelor</b><p>Instalările noi primesc un fișier-cheie în afara volumului de date, montat doar pentru citire. Păstrează o copie în afara serverului: fără ea, instalarea și backup-urile ei nu mai pot fi deschise. O cheie lipsă sau greșită oprește gateway-ul înainte să atingă ceva; nu revine niciodată la cheia veche.</p></li>
+      <li><b>Backup-uri care nu conțin cheia</b><p>Fiecare backup și snapshot scris de gateway e un container criptat pe care îl deschide doar cheia principală, iar cheia nu e niciodată în el. Scriptul de backup de pe host face la fel.</p></li>
+      <li><b>Înregistrări de sesiune criptate</b><p>Opțional. Fiecare înregistrare are cheia ei. Înregistrările existente sunt convertite în fundal, iar textul în clar se șterge doar după ce copia criptată e verificată. Un upgrade nu pornește niciodată asta în locul tău.</p></li>
+      <li><b>Ștergerea unei înregistrări e definitivă</b><p>Ștergerea făcută de un Owner distruge cheia înregistrării și scrie ștergerea într-un jurnal copiat pe destinația ta SFTP sau FTPS și citit înapoi. Restaurarea unui backup mai vechi nu aduce înregistrarea înapoi.</p></li>
+      <li><b>Carantină în loc de ghicit</b><p>Când o restaurare nu poate dovedi ce ștergeri au avut loc după backup, înregistrările restaurate sunt ținute deoparte. Se eliberează când destinația dovedește istoricul; până atunci un Owner le poate deschide una câte una, cu un al doilea factor proaspăt, iar accesul e auditat.</p></li>
+      <li><b>O mutare fără întoarcere de la 3.7</b><p>Upgrade-ul nu schimbă nimic până nu adaugi o cheie. Următoarea pornire verifică întâi că vechea cheie chiar deschide baza de date, apoi migrează o singură dată. Descarcă un backup înainte: după migrare nu mai există drum înapoi la 3.7 pe același volum.</p></li>
+    </ul>
+    <div class="callout">
+      <strong>Ce nu acoperă.</strong> Fișierul bazei de date nu e încă criptat: numele hosturilor, conturile și jurnalul de audit rămân lizibile în volum. Criptarea la repaus te apără de un disc furat, de un volum copiat sau de un backup. Nu apără un server care rulează și e compromis, pentru că gateway-ul pornit ține cheia.
+    </div>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Cum o pornești, pas cu pas (în engleză) →</a>
+  </div>
+</section>
+
 <section aria-labelledby="s-ops">
   <div class="wrap">
     <h2 id="s-ops">În exploatare</h2>
