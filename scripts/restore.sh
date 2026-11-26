@@ -159,7 +159,7 @@ find_app() {   # → APP_CID ("" = none); 1 when Docker cannot tell
 # Cheia brută într-o variabilă de mediu nu se copiază niciodată (M5): refuz, cu explicaţie.
 APP_IMG="" KEY_ARGS=()
 app_run_args() {   # → APP_IMG, KEY_ARGS; 1 + APP_ERR when the key setup cannot be reproduced
-  local envs kf kv want mounts typ name src dst found=""
+  local envs kf kv tx want mounts typ name src dst found=""
   APP_IMG=$(docker inspect --format '{{.Image}}' "$APP_CID") || { APP_ERR="cannot inspect $APP_CID"; return 1; }
   envs=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$APP_CID") \
     || { APP_ERR="cannot inspect $APP_CID"; return 1; }
@@ -170,6 +170,11 @@ app_run_args() {   # → APP_IMG, KEY_ARGS; 1 + APP_ERR when the key setup canno
   kf=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_MASTER_KEY_FILE=//p' | head -n1)
   kv=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_KEY_IN_VOLUME=//p' | head -n1)
   KEY_ARGS=(-e "WEBTERM_MASTER_KEY_FILE=$kf" -e "WEBTERM_KEY_IN_VOLUME=$kv")
+  # 3.8: acelaşi flag de înregistrări criptate ca app-ul (ca în backup.sh). Fără el, staging-ul din
+  # containerul nou refuza orice arhivă cu înregistrări WTX1 / jurnal de ştergeri, deşi app-ul care
+  # o aplică le are active (repetiţia e2e a activării, 2026-11-26)
+  tx=$(printf '%s\n' "$envs" | sed -n 's/^WEBTERM_TX_RECORDINGS=//p' | head -n1)
+  KEY_ARGS+=(-e "WEBTERM_TX_RECORDINGS=$tx")
   want="${kf:-/run/secrets/webterm_master_key}"
   if [ -z "$kf" ] && [ "$kv" = 1 ]; then want=""; fi
   [ -n "$want" ] || return 0

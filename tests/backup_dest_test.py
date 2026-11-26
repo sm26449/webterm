@@ -73,6 +73,26 @@ async def main():
         await backup_dest.sftp_delete(cfg, "webterm-20260101-000000.wtbk")
         check("delete SFTP a şters fişierul", not os.path.exists(landed))
 
+        # 4b. put_new (atestarea jurnalului de ştergeri, 3.8): octeţii ajung întregi pe un server
+        # REAL (repetiţia e2e: `open` în mod text pica pe `write(bytes)` şi lăsa obiectul final gol),
+        # fără `.part` rămas; a doua scriere pe acelaşi nume e refuzată şi nu schimbă conţinutul
+        blob = bytes(range(256)) * 3
+        await backup_dest.sftp_put_new(cfg, "abc.erasures.0000000000000001.wtj", blob)
+        obj = os.path.join(root, "abc.erasures.0000000000000001.wtj")
+        check("put_new SFTP: conţinut binar intact", os.path.exists(obj) and open(obj, "rb").read() == blob)
+        check("put_new SFTP: niciun .part rămas",
+              not [n for n in os.listdir(root) if n.endswith(backup_dest.PART_SUFFIX)], str(os.listdir(root)))
+        check("put_new SFTP: citirea înapoi dă aceiaşi octeţi",
+              await backup_dest.sftp_get(cfg, "abc.erasures.0000000000000001.wtj", 1 << 20) == blob)
+        try:
+            await backup_dest.sftp_put_new(cfg, "abc.erasures.0000000000000001.wtj", b"other")
+            exists = False
+        except backup_dest.Exists:
+            exists = True
+        check("put_new SFTP: numele existent ⇒ Exists, conţinut neschimbat",
+              exists and open(obj, "rb").read() == blob)
+        os.unlink(obj)
+
         # 5. PINUIRE host-key: o cheie de host GREŞITĂ ⇒ refuz (posibil MITM)
         wrong = asyncssh.generate_private_key("ssh-ed25519")
         bad_cfg = dict(cfg, hostkey=" ".join(wrong.export_public_key().decode().split()[:2]))

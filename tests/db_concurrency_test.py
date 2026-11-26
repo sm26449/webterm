@@ -4,13 +4,14 @@ transaction - SQL statements in progress". Rafală mixtă RETURNING + scrieri si
 iar fiecare UPDATE s-a aplicat o singură dată."""
 import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
 
 os.environ["WEBTERM_DATA_DIR"] = tempfile.mkdtemp(prefix="wt-dbconc-")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 
-from app import db  # noqa: E402
+from app import config, db  # noqa: E402
 
 ok_n = total = 0
 
@@ -51,6 +52,40 @@ async def main():
         check("every UPDATE applied exactly once", total_n == n, total_n)
         none = await db.execute_returning("UPDATE conc_t SET n=n WHERE id=-1 RETURNING id")
         check("no matching row → None", none is None)
+
+        # 3.8 (repetiţia e2e a activării): o scriere eşuată nu lasă tranzacţia implicită a conexiunii
+        # partajate deschisă. Altfel ţinea lock-ul de scriere (conexiunea Store-ului bloca), iar cu un
+        # snapshot fixat de o citire şi un commit extern, orice scriere următoare pica pe loc.
+        await db.execute("CREATE TABLE IF NOT EXISTS uniq_t (x INTEGER UNIQUE)")
+        await db.execute("INSERT INTO uniq_t VALUES(1)")
+        failed = False
+        try:
+            await db.execute("INSERT INTO uniq_t VALUES(1)")
+        except sqlite3.IntegrityError:
+            failed = True
+        check("a failing write raises", failed)
+        check("no dangling transaction after a failed execute", not db._conn.in_transaction)
+        try:
+            await db.execute_returning("INSERT INTO uniq_t VALUES(1) RETURNING x")
+        except sqlite3.IntegrityError:
+            pass
+        check("no dangling transaction after a failed execute_returning", not db._conn.in_transaction)
+        await db.fetchall("SELECT * FROM conc_t")
+        ext = sqlite3.connect(str(config.DB_PATH), isolation_level=None, timeout=1)
+        try:
+            ext.execute("INSERT INTO uniq_t VALUES(2)")         # alt conector (Store) poate scrie
+            ext_ok = True
+        except sqlite3.OperationalError:
+            ext_ok = False
+        finally:
+            ext.close()
+        check("another connection can write after the failure", ext_ok)
+        try:
+            await db.execute("INSERT INTO uniq_t VALUES(3)")
+            after = True
+        except sqlite3.OperationalError:
+            after = False
+        check("the gateway writes again after an external commit", after)
     finally:
         await db.close()
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import ftplib
 import io
+import secrets
 import ssl
 
 import asyncssh
@@ -341,7 +342,8 @@ class Exists(DestError):
 
 
 async def sftp_put_new(cfg: dict, name: str, data: bytes) -> None:
-    """Scriere care NU suprascrie: open cu O_CREAT|O_EXCL pe server (SFTP v3 FXF_EXCL)."""
+    """Scriere care NU suprascrie şi nu lasă niciodată un obiect final parţial: conţinutul merge
+    într-un `.part` unic (O_CREAT|O_EXCL), apoi rename SFTP v3, care refuză o ţintă existentă."""
     conn = await _sftp_connect(cfg)
     sftp = None
     try:
@@ -353,16 +355,37 @@ async def sftp_put_new(cfg: dict, name: str, data: bytes) -> None:
             raise Exists("the object already exists")
         except asyncssh.SFTPNoSuchFile:
             pass
+        # Repetiţia e2e 3.8 (2026-11-26): `open` fără `encoding=None` deschidea fişierul în mod
+        # text, deci `write(bytes)` pica (AttributeError) DUPĂ ce numele final fusese creat gol; cu
+        # nume determinist (fără nonce la SFTP) obiectul gol bloca pentru totdeauna atestarea
+        # capului n (Exists → citire înapoi ≠ jurnal). Scriem într-un `.part` (ignorat de listări),
+        # iar numele final apare doar complet, prin rename.
+        tmp = "%s.%s%s" % (final, secrets.token_hex(4), PART_SUFFIX)
         flags = asyncssh.FXF_WRITE | asyncssh.FXF_CREAT | asyncssh.FXF_EXCL
-        f = await _t(sftp.open(final, flags), "open")
         try:
-            for off in range(0, len(data), WRITE_CHUNK):
-                await _t(f.write(data[off:off + WRITE_CHUNK]), "write")
-        finally:
+            f = await _t(sftp.open(tmp, flags, encoding=None), "open")
             try:
-                await asyncio.wait_for(f.close(), OP_TIMEOUT)
+                for off in range(0, len(data), WRITE_CHUNK):
+                    await _t(f.write(data[off:off + WRITE_CHUNK]), "write")
+            finally:
+                try:
+                    await asyncio.wait_for(f.close(), OP_TIMEOUT)
+                except Exception:                   # noqa: BLE001
+                    pass
+            try:
+                await _t(sftp.rename(tmp, final), "rename")   # v3: refuză dacă ţinta există
+            except asyncssh.SFTPError:
+                try:
+                    await _t(sftp.stat(final), "stat")
+                except asyncssh.SFTPError:
+                    raise
+                raise Exists("the object already exists") from None
+        except BaseException:
+            try:
+                await asyncio.wait_for(sftp.remove(tmp), timeout=CLOSE_TIMEOUT)
             except Exception:                       # noqa: BLE001
                 pass
+            raise
     except asyncssh.SFTPError as e:
         raise DestError("SFTP: scrierea a eşuat: %s" % e)
     finally:

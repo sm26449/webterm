@@ -1239,11 +1239,37 @@ async def _joined() -> bool:
     return True
 
 
+async def _end_dangling() -> None:
+    """After a failed write outside `transaction()`: end the implicit transaction it left open.
+    Commit first (the other coroutines' finished writes in it are kept, as their own commit would),
+    rollback only if the commit itself fails."""
+    if _conn is None or not _conn.in_transaction:
+        return
+    try:
+        await _conn.commit()
+    except Exception:                          # noqa: BLE001 — ultima plasă; eroarea originală urcă
+        try:
+            await _conn.rollback()
+        except Exception:                      # noqa: BLE001
+            log.exception("db: could not end a dangling transaction")
+
+
 async def execute(sql: str, *args) -> int:
     joined = await _joined()
-    cur = await _conn.execute(sql, args)
-    if not joined:
-        await _conn.commit()
+    # 3.8 (repetiţia e2e a activării, 2026-11-26): o scriere eşuată (BUSY, „SQL statements in
+    # progress" la commit, constrângere) lăsa tranzacţia implicită a conexiunii PARTAJATE deschisă;
+    # citirile următoare fixau un snapshot în ea, iar după primul commit al conexiunii Store-ului
+    # (txstore, alt conector pe acelaşi DB) ORICE scriere a gateway-ului pica pe loc cu „database is
+    # locked" (SQLITE_BUSY_SNAPSHOT), pentru totdeauna: login 500, health/janitor/reaper eşuate.
+    # Închidem tranzacţia la eşec, ca prima eroare să rămână una singură.
+    try:
+        cur = await _conn.execute(sql, args)
+        if not joined:
+            await _conn.commit()
+    except BaseException:
+        if not joined:
+            await _end_dangling()
+        raise
     return cur.lastrowid
 
 
@@ -1264,9 +1290,14 @@ async def execute_returning_all(sql: str, *args) -> list:
     """`execute_returning` for a write that may touch several rows: every RETURNING row, in the
     same single serialized step (used where the caller must act on EXACTLY the rows it changed)."""
     joined = await _joined()
-    rows = await _conn.execute_fetchall(sql, args)
-    if not joined:
-        await _conn.commit()
+    try:
+        rows = await _conn.execute_fetchall(sql, args)
+        if not joined:
+            await _conn.commit()
+    except BaseException:
+        if not joined:
+            await _end_dangling()          # ca la `execute`: nicio tranzacţie lăsată deschisă
+        raise
     return list(rows)
 
 

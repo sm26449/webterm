@@ -924,6 +924,14 @@ def test_rcm1(e):
 def main():
     global FOREIGN_DB
     FOREIGN_DB = _foreign_db()
+    # 3.8 (repetiţia e2e a activării): containerul nou în care rulează codul gateway-ului (backup
+    # offline, staging-ul restore-ului) primeşte ACELAŞI flag de înregistrări criptate ca app-ul;
+    # fără el, restore.sh refuza orice arhivă cu înregistrări WTX1 / jurnal de ştergeri
+    for sc in ("backup.sh", "restore.sh"):
+        src = open(os.path.join(REPO, "scripts", sc)).read()
+        check("%s: the tool container gets the app's WEBTERM_TX_RECORDINGS" % sc,
+              "sed -n 's/^WEBTERM_TX_RECORDINGS=//p'" in src
+              and 'KEY_ARGS+=(-e "WEBTERM_TX_RECORDINGS=$tx")' in src)
     e = Env()
     try:
         test_backup(e)
