@@ -92,6 +92,15 @@ class JournalError(Exception):
         self.reason = reason
 
 
+class Unverifiable(JournalError):
+    """R4-H2: a destination holds an object named above its best authentic journal that cannot be
+    authenticated: it may hold the erasure we look for, so the destination proves nothing."""
+
+    def __init__(self, n):
+        super().__init__("unverifiable", "an erasure journal object n=%d cannot be authenticated" % n)
+        self.n = n
+
+
 class ErasureError(Exception):
     """A refused erasure / recovery action; `code` is the route's error code."""
 
@@ -1031,6 +1040,7 @@ async def resume_intents(st=None, *, clock=time.time):
     for sid in sorted(s.cancelled):
         # aceeaşi ordine ca erase (lease, apoi bariera): niciun deadlock cu o cerere în aşteptare
         async with st.lease(sid):
+            erased = False
             async with st.barrier:
                 if s.uncertain not in _RESUMABLE or s.diag or s.parsed is None:
                     return False
@@ -1049,16 +1059,26 @@ async def resume_intents(st=None, *, clock=time.time):
                     if intent is not None:
                         await st.io(st._run_txn, lambda c, sid=sid, e=entry:
                                     _destroy_sync(c, sid, Head(e.n, e.time_ms, e.mac)))
+                    erased = True
                 elif intent is not None:
                     kinds = [k for k in (intent[0] or "").split(",") if k in ("out", "cast")]
                     _n, _gens, confirmed = await _journal_and_destroy(
                         st, sid, kinds or ["out", "cast"], env, clock, resuming=True)
                     if not confirmed:
                         return False                   # COMMIT incert: rămâne pentru boot
+                    erased = True
                 else:
                     # ROLLBACK confirmat (niciun rând, nicio intrare): ştergerea n-a avut loc
                     st.tombstoned.discard(sid)
                 s.cancelled.discard(sid)
+            if erased:
+                # R4-M1: curăţarea fizică a lui erase, şi când pasul DB a fost comis de cererea
+                # anulată (intrare prezentă, intenţie absentă) sau re-aplicat aici: toate generaţiile
+                # `retired` ale sid-ului, după barieră, prin calea idempotentă care respectă pin-urile
+                gens = await st.read(lambda c, sid=sid: c.execute(
+                    "SELECT gen_id, kind FROM tx_files WHERE sid=? AND state='retired'", (sid,)).fetchall())
+                for hexid, kind in gens:
+                    await st.retire(sid, kind, hexid)
     async with st.barrier:
         if s.uncertain not in _RESUMABLE or s.cancelled:
             return False
@@ -1231,7 +1251,8 @@ async def attest_once(st=None, dests=None, clock=time.time):
             if not hmac.compare_digest(bytes(back), data):
                 raise JournalError("readback-mismatch")
             p = parse(back, s.journal.k, st.inst)
-            if p.n != head.n or p.bad or not hmac.compare_digest(p.head.mac, head.mac):
+            # R4-H1: un read-back fără nicio intrare (doar antetul) nu atestă nimic
+            if p.n < 1 or p.n != head.n or p.bad or not hmac.compare_digest(p.head.mac, head.mac):
                 raise JournalError("readback-unauthentic")
             s.attested = await _commit_attested(st, d.id, head, name, again=again)
             s.dests[d.id] = {"state": "ok", "since": None, "error": "", "next": 0, "tries": 0,
@@ -1258,7 +1279,13 @@ async def fetch_head(d, k_erase, inst, check_from=None):
     `check_from` (try_prove, H3/M1): EVERY object named above that n is read (at most
     PROVE_MAX_OBJECTS, else JournalError) and all the authentic ones must lie on one chain
     (ErasureConflict otherwise): after a restore our own uploads can be newer than the
-    attestation of the dataset we were restored from, and a fork with it must not hide."""
+    attestation of the dataset we were restored from, and a fork with it must not hide.
+
+    R4-H1: an object with zero entries (a bare WTJ1 header carries no MAC) is never a journal: it
+    proves nothing, not even n=0. R4-H2: an object that cannot be authenticated (bad header, bad
+    MAC, partial, a name whose n does not match its entries) and is named above the best authentic
+    one is a GAP, never skipped in favour of an older journal: `Unverifiable` (the destination
+    answered, but proves nothing). One at or below the authentic head is covered by it."""
     names = []
     for n in await d.list():
         p = parse_object_name(n)
@@ -1266,43 +1293,45 @@ async def fetch_head(d, k_erase, inst, check_from=None):
             names.append((p[1], n))
     names.sort(reverse=True)
     if check_from is None:
-        for _n, name in names[:FETCH_MAX_OBJECTS]:
-            try:
-                raw = bytes(await d.get(name))
-                p = parse(raw, k_erase, inst)
-            except JournalError:
-                continue
-            if p.bad or p.n != _n:
-                continue                              # neautentic sau nume minţit: nu e dovadă
-            return p, raw[:p.valid_len]
-        return None
-    above = [x for x in names if x[0] > check_from]
-    if len(above) > PROVE_MAX_OBJECTS:
-        raise JournalError("too-many", "too many journal objects to check")
-    pick = above + [x for x in names if x[0] <= check_from][:FETCH_MAX_OBJECTS]
+        pick = names[:FETCH_MAX_OBJECTS]
+    else:
+        above = [x for x in names if x[0] > check_from]
+        if len(above) > PROVE_MAX_OBJECTS:
+            raise JournalError("too-many", "too many journal objects to check")
+        pick = above + [x for x in names if x[0] <= check_from][:FETCH_MAX_OBJECTS]
     got = []
+    failed = 0                                    # cel mai mare n (din nume sau conţinut) neverificabil
     for _n, name in pick:
         try:
             raw = bytes(await d.get(name))
             p = parse(raw, k_erase, inst)
         except JournalError:
+            failed = max(failed, _n)
             continue
         if p.bad or p.n != _n:
+            failed = max(failed, _n, p.n)         # neautentic sau nume minţit: nu e dovadă, e un gol
             continue
+        if p.n == 0:
+            continue                              # R4-H1: doar antetul (fără MAC) — nicio dovadă
         got.append((name, p, raw[:p.valid_len]))
-    if not got:
+        if check_from is None:
+            break                                 # cel mai nou autentic; ce era deasupra e în `failed`
+    best = _on_one_chain([(name, p) for name, p, _raw in got]) if got else None
+    if failed > (best[1].n if best else 0):
+        raise Unverifiable(failed)
+    if best is None:
         return None
-    best = _on_one_chain([(name, p) for name, p, _raw in got])
     return next((p, raw) for name, p, raw in got if name == best[0])
 
 
 @dataclass
 class DestResult:
     id: str
-    ok: bool                       # a răspuns (nimic sau un jurnal autentic)
+    ok: bool                       # a răspuns (nimic sau un jurnal autentic); False şi la R4-H2
     parsed: Parsed = None          # None = niciun jurnal autentic: o destinaţie GOALĂ nu e dovadă (M1)
     data: bytes = None
     error: str = ""
+    unverified: int = 0            # R4-H2: n-ul unui obiect mai nou neverificabil (error='unverifiable')
 
 
 async def fetch_all(dests, k_erase, inst, check_from=None):
@@ -1313,6 +1342,9 @@ async def fetch_all(dests, k_erase, inst, check_from=None):
             out.append(DestResult(d.id, True, got[0] if got else None, got[1] if got else None))
         except ErasureConflict:
             out.append(DestResult(d.id, False, error="conflict"))
+        except Unverifiable as e:
+            log.warning("erasure: %s holds an unverifiable journal object n=%d", d.id, e.n)
+            out.append(DestResult(d.id, False, error="unverifiable", unverified=e.n))
         except Exception as e:                   # noqa: BLE001 — inaccesibilă = fără dovadă
             out.append(DestResult(d.id, False, error=getattr(e, "reason", "") or type(e).__name__))
     return out
@@ -1417,8 +1449,12 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     for r in dest_results:
         by_id[r.id] = r
         if not r.ok:
-            unreachable.append(r.id)
+            unreachable.append(r.id)               # inclusiv R4-H2: un obiect mai nou neverificabil
             continue
+        if r.parsed is not None and not r.parsed.n:
+            # R4-H1: zero intrări = doar antetul, fără MAC; nu e jurnal, nu e dovadă (nici pentru n=0)
+            r = DestResult(r.id, True, None, None)
+            by_id[r.id] = r
         n = r.parsed.n if r.parsed is not None else 0
         if n < known.get(r.id, 0):
             rolled.append(r.id)                    # mai vechi decât ce ştie o sursă: nu e dovadă
@@ -1444,7 +1480,7 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
 
     def dest_ok(d):
         r = by_id.get(d)
-        if r is None or not r.ok or r.parsed is None or d in rolled:
+        if r is None or not r.ok or r.parsed is None or r.parsed.n < 1 or d in rolled:
             return False
         need = max(known.get(d, 0), t.n, floor)
         return need >= 1 and r.parsed.n >= need and reaches(r.parsed, t)
@@ -2055,8 +2091,10 @@ async def _journal_recovery_proof(st, sid):
       chain, and none may hold a different MAC at a required head's n (the DB head, the marker's
       threshold) → `recoveryConflict` (signalled), never a numeric choice;
     * an authentic tombstone of `sid` in any of them → `recoveryTombstoned`;
-    * no destination holds an authentic journal → `recoveryNoJournal` (an empty journal proves
-      nothing);
+    * a destination holds an object above its best authentic journal that cannot be authenticated
+      (R4-H2) → `recoveryGap` (it may hold the tombstone);
+    * no destination holds an authentic journal → `recoveryNoJournal` (an empty listing, or an
+      object with zero entries — a bare header carries no MAC — proves nothing, R4-H1);
     * at least one destination's authentic chain must reach every required head (n + MAC) and the
       highest head known anywhere (attested, marker's known heads) → else `recoveryGap`. A marker
       that cannot be read, or whose known heads overflowed, is a gap too."""
@@ -2080,7 +2118,8 @@ async def _journal_recovery_proof(st, sid):
                            "quarantined for a damaged journal cannot be recovered without one", 409)
     results = await fetch_all(dests, k, st.inst, check_from=top) if dests else []
     forks = [r.id for r in results if r.error == "conflict"]
-    good = [r for r in results if r.ok and r.parsed is not None]
+    # R4-H1: un jurnal fără intrări (antet fără MAC) nu e niciodată dovadă
+    good = [r for r in results if r.ok and r.parsed is not None and r.parsed.n > 0]
     local = s.damaged
     try:
         if forks:
@@ -2102,6 +2141,14 @@ async def _journal_recovery_proof(st, sid):
     if any(e.sid == b for r in good for e in r.parsed.entries):
         raise ErasureError("transcript.recoveryTombstoned",
                            "an off-host erasure journal erases this recording; it is never recovered", 409)
+    # R4-H2: un obiect mai nou decât jurnalul autentic al destinaţiei, care nu se poate autentifica,
+    # poate ţine tocmai tombstone-ul căutat: gol în dovadă, niciodată coborât la copia mai veche
+    unver = [r for r in results if r.error == "unverifiable"]
+    if unver:
+        raise ErasureError("transcript.recoveryGap",
+                           "the backup destination %s holds an erasure journal object (n=%d) that cannot "
+                           "be authenticated; recovery is refused until it is readable or removed"
+                           % (unver[0].id[:120], unver[0].unverified), 409)
     down = sorted(missing) + [r.id for r in results if not r.ok]
     if down:
         raise ErasureError("transcript.recoveryUnreachable",

@@ -577,6 +577,8 @@ async def g_cancel(st, host_id):
           and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None
           and (await head_db())["n"] == n0 + 1 and er._s.head_db.n == n0 + 1 and sid in st.tombstoned,
           (ok, p.n, n0, er._s.uncertain))
+    check("R4-M1: …and the retired generation files are unlinked (steps 1–2 from the intent)",
+          gen_files(sid) == [], gen_files(sid))
     check("…erasures accepted again", (await er.erase(st, other)).get("state") == "destroyed")
     # ROLLBACK confirmat: nimic durabil, înregistrarea se serveşte din nou
     sid2, data2 = await make_rec(st, host_id)
@@ -600,6 +602,49 @@ async def g_cancel(st, host_id):
           ok and not er._s.uncertain and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid3) is None
           and await db.fetchone("SELECT 1 FROM tx_erase_intents") is None
           and er._s.head_db.n == (await head_db())["n"] == n1 + 1)
+    # R4-M1: pasul DB comis înainte de anulare (ramura „intrare prezentă, intenţie absentă"):
+    # generaţiile retrase se şterg fizic, ca la erase
+    rows = await db.fetchall("SELECT state FROM tx_files WHERE sid=?", sid3)
+    check("R4-M1: …the retired generation files are unlinked too (rows gone), not left until a restart",
+          gen_files(sid3) == [] and rows and all(r["state"] == "gone" for r in rows),
+          (gen_files(sid3), [r["state"] for r in rows]))
+    # R4-M1: reaplicarea pasului DB de către janitor (intenţie şi intrare prezente, pasul 2 necomis)
+    sid6, _ = await make_rec(st, host_id)
+    orig_destroy = er._destroy_sync
+    calls = {"n": 0}
+
+    def destroy_fail_once(c, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            box_cancel()
+            raise sqlite3.OperationalError("disk I/O error (test)")
+        return orig_destroy(c, *a, **kw)
+    loop = asyncio.get_running_loop()
+    task6 = asyncio.ensure_future(er.erase(st, sid6))
+
+    def box_cancel():
+        loop.call_soon_threadsafe(task6.cancel)
+        time.sleep(0.1)
+    er._destroy_sync = destroy_fail_once
+    try:
+        try:
+            await task6
+            cancelled6 = False
+        except asyncio.CancelledError:
+            cancelled6 = True
+    finally:
+        er._destroy_sync = orig_destroy
+    check("R4-M1: cancelled while step 2 rolls back: journalled, intent kept, files still there",
+          cancelled6 and er._s.uncertain == "commit-cancelled" and gen_files(sid6) != []
+          and await db.fetchone("SELECT 1 FROM tx_erase_intents WHERE sid=?", sid6) is not None,
+          (cancelled6, er._s.uncertain, gen_files(sid6)))
+    ok = await er.resume_intents(st)
+    rows = await db.fetchall("SELECT state FROM tx_files WHERE sid=?", sid6)
+    check("R4-M1: the janitor re-applies step 2 AND unlinks the retired generations",
+          ok and not er._s.uncertain and gen_files(sid6) == [] and rows
+          and all(r["state"] == "gone" for r in rows)
+          and await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", sid6) is None,
+          (ok, er._s.uncertain, gen_files(sid6), [r["state"] for r in rows]))
     # janitorul o face singur, imediat (trezit de anulare, nu la următorul interval)
     sid4, _ = await make_rec(st, host_id)
     er.start(st)
@@ -1511,6 +1556,11 @@ async def g_recovery(st, c, uid, host_id, keep):
           await er.try_prove(st) is False and er.continuity() is not None)
     n_now = er._s.parsed.n
     await set_marker(st, {"state": "unproven", "since": since, "n": n_now, "known": {d.id: n_now}})
+    junk = er.object_name(INST, n_now + 1)
+    d.objs[junk] = b"junk"
+    check("R4-H2: a newer object at the destination that cannot be authenticated → not proven",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    del d.objs[junk]
     ok = await er.try_prove(st)
     s = await statuses()
     check("every destination proves the head → continuity quarantine lifted, journal quarantine kept",
@@ -1626,6 +1676,55 @@ def _extend(journal, sid, t_ms=7000):
     """`journal` + one authentic entry (another host of the same dataset erasing `sid`)."""
     p = er.parse(journal, K, INST)
     return journal + er.encode_entry(K, INST, p.head.mac, p.n + 1, t_ms, sid, 3, bytes(32))
+
+
+async def g_r4_fetch():
+    print("== R4-H1/R4-H2: what a destination's listing proves ==")
+    j3 = build([(1000 + i, s, 3, bytes(32)) for i, s in enumerate(sids(3))])
+    j2 = j3[:er.prefix_len(2)]
+    bad4 = _extend(j3, bytes([0x44] * 16))
+    bad4 = bad4[:-1] + bytes([bad4[-1] ^ 1])            # MAC stricat pe intrarea n=4
+
+    async def one(objs, check_from=None):
+        d = FakeDest("sftp:u@h:22/r4")
+        d.objs = dict(objs)
+        return (await er.fetch_all([d], K, INST, check_from))[0]
+    for cf in (None, 0, 2):
+        tag = "check_from=%s" % cf
+        r = await one({}, cf)
+        check(f"[{tag}] an empty listing: answered, no journal (not a proof)", r.ok and r.parsed is None, r)
+        r = await one({er.object_name(INST, 0): er.header(INST)}, cf)
+        check(f"[{tag}] R4-H1: a header-only object (n=0, no MAC) is never a journal", r.ok and r.parsed is None, r)
+        r = await one({er.object_name(INST, 2): er.header(INST)}, cf)
+        check(f"[{tag}] R4-H1: a header-only object named n=2 → unverifiable, the destination proves nothing",
+              not r.ok and r.error == "unverifiable" and r.parsed is None, r)
+        r = await one({er.object_name(INST, 2): j2, er.object_name(INST, 4): bad4}, cf)
+        check(f"[{tag}] R4-H2: authentic n=2 + a newer damaged n=4 → unverifiable, never the older journal",
+              not r.ok and r.error == "unverifiable" and r.parsed is None and r.unverified == 4, r)
+        r = await one({er.object_name(INST, 2): j2, er.object_name(INST, 3): b"junk"}, cf)
+        check(f"[{tag}] R4-H2: authentic n=2 + a newer object with a bad header → unverifiable",
+              not r.ok and r.error == "unverifiable", r)
+        r = await one({er.object_name(INST, 2): j2, er.object_name(INST, 3): j2}, cf)
+        check(f"[{tag}] R4-H2: authentic n=2 + an object named n=3 holding n=2 (lying name) → unverifiable",
+              not r.ok and r.error == "unverifiable", r)
+        r = await one({er.object_name(INST, 3): j3, er.object_name(INST, 2): b"junk"}, cf)
+        check(f"[{tag}] an older damaged object below an authentic n=3 is covered → n=3 proves",
+              r.ok and r.parsed is not None and r.parsed.n == 3, r)
+        r = await one({er.object_name(INST, 3, "aa11bb22"): j3, er.object_name(INST, 3, "cc33dd44"): j3[:-1] + bytes([j3[-1] ^ 1])}, cf)
+        check(f"[{tag}] a damaged copy at the SAME n as an authentic one is covered → n=3 proves",
+              r.ok and r.parsed is not None and r.parsed.n == 3, r)
+    # decide_restore: o destinaţie cu parsed n=0 (chiar dacă cineva o construieşte) nu dovedeşte
+    p0 = er.parse(er.header(INST), K, INST)
+    dec = er.decide_restore(k_erase=K, inst=INST, tracked=True,
+                            dest_results=[er.DestResult("sftp:u@h:22/r4", True, p0, er.header(INST))],
+                            required_dests={"sftp:u@h:22/r4"}, mode="prove")
+    check("R4-H1: restore decision with a zero-entry destination journal → not proven",
+          dec.proof == "none" and dec.state == "unproven", dec)
+    dec = er.decide_restore(k_erase=K, inst=INST, tracked=True,
+                            dest_results=[er.DestResult("sftp:u@h:22/r4", False, error="unverifiable", unverified=4)],
+                            required_dests={"sftp:u@h:22/r4"}, mode="prove")
+    check("R4-H2: restore decision with an unverifiable newer object → not proven",
+          dec.proof == "none", dec)
 
 
 async def _until_waiting(task, rounds=50):
@@ -1805,6 +1904,16 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
         DESTS[:] = [FakeDest("sftp:u@h:22/empty")]
         check("R3-H1: n=0 and an empty destination → refused (recoveryNoJournal)",
               await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryNoJournal")
+        dz = FakeDest("sftp:u@h:22/header-only")
+        dz.objs[er.object_name(INST, 0)] = er.header(INST)
+        DESTS[:] = [dz]
+        check("R4-H1: n=0 and a destination holding a header-only object (no MAC) → recoveryNoJournal, "
+              "still quarantined", await _erasure_code(er.recover_journal(st, ok_sid, "rollback"))
+              == "transcript.recoveryNoJournal" and (await statuses())[(ok_sid, "out")] == "quarantined")
+        dz.objs = {er.object_name(INST, 1): er.header(INST)}
+        check("R4-H1: a header-only object named n=1 → recoveryGap (an object that cannot be authenticated)",
+              await _erasure_code(er.recover_journal(st, ok_sid, "rollback")) == "transcript.recoveryGap"
+              and (await statuses())[(ok_sid, "out")] == "quarantined")
         # R3-H2: o ramură autentică a destinaţiei care se desparte de prefixul local lizibil
         s0.damaged = er.parse(good[:er.prefix_len(n - 1)], K, INST)
         other = build([(9000 + i, bytes([0x90 + i] * 16), 3, bytes(32)) for i in range(n)])
@@ -1852,7 +1961,21 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
     check("an authentic off-host tombstone of the sid → 409 transcript.recoveryTombstoned",
           await code_now() == (409, "transcript.recoveryTombstoned")
           and (await statuses())[(ok_sid, "out")] == "quarantined")
+    # R4-H2: A dovedeşte capul n; B are acelaşi n autentic, dar şi un obiect n+1 neverificabil (poate fi
+    # tocmai tombstone-ul lui ok_sid): nu se coboară tăcut la copia mai veche
+    newer = _extend(good, bytes.fromhex(ok_sid))
+    newer = newer[:-1] + bytes([newer[-1] ^ 1])
     d.objs = {er.object_name(INST, n): good}
+    d3 = FakeDest("ftps:u@h:21/damaged-newer")
+    d3.objs = {er.object_name(INST, n): good, er.object_name(INST, n + 1): newer}
+    DESTS[:] = [d, d3]
+    check("R4-H2: one destination proves n, another holds a newer object that cannot be authenticated → "
+          "409 transcript.recoveryGap, still quarantined", await code_now() == (409, "transcript.recoveryGap")
+          and (await statuses())[(ok_sid, "out")] == "quarantined")
+    DESTS[:] = [d3]
+    check("R4-H2: the same on a single destination → recoveryGap",
+          await code_now() == (409, "transcript.recoveryGap"))
+    DESTS[:] = [d]
     fork = good[:er.prefix_len(n - 1)]
     fork = _extend(fork, bytes([0x77] * 16))
     d2 = FakeDest("ftps:u@h:21/jr")
@@ -1862,6 +1985,8 @@ async def g_journal_recovery(st, c, uid, host_id, jrec, good):
           await code_now() == (409, "transcript.recoveryConflict") and er.health_has("erasure_conflict"))
     er._s.conflict = ""
     DESTS[:] = [d]
+    # un obiect mai VECHI stricat sub capul autentic e acoperit: nu blochează recuperarea
+    d.objs[er.object_name(INST, n - 1)] = b"junk"
     with _Mails() as mails:
         r = await c.post(f"/api/sessions/{tomb}/recovery",
                          json={"confirm": tomb[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
@@ -2008,6 +2133,7 @@ async def main():
     g_rh1_consecutive()
     g_r2m2_restore()
     g_live_bad_restore()
+    await g_r4_fetch()
     config.ensure_dirs()
     security.init_crypto(config.load_secret())
     await db.connect()

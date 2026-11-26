@@ -2055,7 +2055,9 @@ committed head is never repaired: it is the quarantine case below.
    refused, and the janitor, woken at once, settles it from the database (`resume_intents`: intent
    + entry → step 2 again; intent without entry → steps 1–2; neither → rolled back, the sid is
    served again), re-reads the committed head and lifts the state; if the process dies first, the
-   boot completes the intent. The journal state (damaged, uncertain, behind) is re-checked under
+   boot completes the intent. Whenever the sid ends erased, the janitor also unlinks the sid's
+   `retired` generations through the pin-respecting `retire` path, as erase does (recheck 1c4bd4a,
+   R4-M1), including when the cancelled request's step 2 had already committed. The journal state (damaged, uncertain, behind) is re-checked under
    the barrier before step 0, not only on entry.
 1. Same barrier: append the tombstone, fsync (the one fsync allowed under the barrier: ≤ 97 B,
    with its own time budget, 5 s, beyond → the route answers 503 and the boot decides from the
@@ -2151,8 +2153,13 @@ unreadable → `409 transcript.recoveryUnreachable` (it may hold the tombstone);
 journals read (every destination's and the readable local prefix) must lie on one chain, and none
 may hold another MAC at the n of a required head (the database head, the continuity marker's
 threshold) → else `409 transcript.recoveryConflict`, signalled (R3-H2: a number is never enough); an
-authentic tombstone of the sid anywhere → `409 transcript.recoveryTombstoned`; no destination with
-an authentic journal → `409 transcript.recoveryNoJournal`; finally at least one destination's chain
+authentic tombstone of the sid anywhere → `409 transcript.recoveryTombstoned`; a destination holding
+an object named above its best authentic journal that cannot be authenticated (bad header or MAC,
+partial, a name whose n does not match its entries) → `409 transcript.recoveryGap` (recheck 1c4bd4a,
+R4-H2: that object may hold the tombstone; the fetch never falls back to the older copy, while a
+damaged object at or below the authentic head is covered by it); no destination with an authentic
+journal → `409 transcript.recoveryNoJournal` (an object with zero entries is a bare header without a
+MAC and is never a journal, R4-H1); finally at least one destination's chain
 must reach every required head (n and MAC) and the highest head known anywhere (attested heads, the
 marker's known heads) → else `409 transcript.recoveryGap` (an unreadable database head or marker,
 or a marker whose known heads overflowed, counts as a gap). The cost is accepted for the RC: on an
@@ -2998,7 +3005,8 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   respect it: a converted descriptor of a cohort member is born `quarantined`. Recovery is the
   normal Owner flow on the converted descriptor; release lifts only the kinds it releases.
 - **Destinations (M1, H3).** A destination proves only with an authentic head (an empty listing
-  never does) that reaches max(its known head, the threshold), at stage at least n = 1. Apply never
+  never does, nor an object with zero entries — R4-H1 — nor a destination holding a newer object
+  that cannot be authenticated — R4-H2) that reaches max(its known head, the threshold), at stage at least n = 1. Apply never
   lifts a quarantine on a stage proof by destinations (it cannot re-fetch them at boot): it writes
   the marker and the janitor's `try_prove` re-fetches live. `try_prove` uses only what the marker
   knew at the restore (our own later uploads prove nothing: a destination nobody knew to hold a
@@ -3102,6 +3110,17 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   for `Live("bad")` (unreadable → `ErasureConflict`); `intents_in` treats only the missing table as
   "none". *R2-M1:* `retire_destination` requires `audit_row` (a caller without one is refused
   before anything changes).
+- **Recheck (1c4bd4a) fixes.** *R4-H1:* `fetch_head` never returns a zero-entry object (a WTJ1
+  header carries no MAC); `decide_restore` (stage, apply, `try_prove`), `_journal_recovery_proof`
+  and the attestation read-back refuse a zero-entry journal explicitly as well. *R4-H2:*
+  `fetch_head` (both modes) records the highest n of every object it could not authenticate; one
+  above the best authentic journal raises `Unverifiable`, which `fetch_all` reports as
+  `DestResult(ok=False, error="unverifiable", unverified=n)`: the destination answered but proves
+  nothing (restore / `try_prove` → not proven, recovery → `recoveryGap` naming the destination and
+  n). An empty listing stays distinct (`ok=True`, no journal). Removing or repairing the object is
+  the way out; the per-destination rule is stricter than "covered by another destination's chain",
+  on purpose. *R4-M1:* `resume_intents` unlinks the sid's `retired` generations after the barrier
+  (still under the lease) whenever it settles the sid as erased.
 
 ## Appendix: Test vectors (v1)
 
