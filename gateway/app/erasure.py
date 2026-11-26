@@ -2088,6 +2088,8 @@ def conflict_open():
     return _marker_conflict(_s.continuity) is not None
 
 
+# INV-14 (docs/design/INVARIANTS.md): o ştergere de pe orice ramură autentică a jurnalului câştigă — se aplică
+# imediat şi nimic nu ridică automat carantina cât istoria e nedovedită sau ramificată.
 async def _record_conflict_locked(st, branches, dests, gaps, msg, clock=time.time):
     """R7-H1, caller holds the barrier: an authentic fork seen now (`branches`: authentic Parsed, at
     `dests`; `gaps` = {destination: highest n listed} for a fork AT a destination) is made durable
