@@ -2116,8 +2116,10 @@ stated limit, not a defect.
 e-mail. Effect: recordings quarantined **for missing continuity proof only** move to `status =
 recovery`: readable by Owners only, no live share, no replay link, no search hit for anyone else,
 each read audited, UI banner "recovered without erasure proof"; the erasure guarantee is suspended
-for them. A known tombstone, a corrupt or damaged recording, an absent one and a keyring-epoch
-quarantine are **never** opened by recovery mode. Releasing to normal access is one recording at a
+for them. A known tombstone, a recording whose RK is gone, a corrupt or damaged recording, an
+absent one and a keyring-epoch quarantine are **never** opened by recovery mode. A `journal:<diag>`
+quarantine (a damaged journal at boot) is opened only on the strict terms of §12.11.8 (decision
+2026-11-26) and is never released to normal access. Releasing to normal access is one recording at a
 time (no "release all"), each release a separate Owner action with a fresh factor, audited, with a
 security e-mail; re-quarantine is allowed. The permission is bound to the recovery route's own
 authorization (`access`, §12.11.2), not to a parameter.
@@ -2312,6 +2314,32 @@ recovery mode excepted); a host live backup whose gateway control socket does no
 Accepted as written: the erasure journal cap refuses new erasures until compaction exists; failed
 migrations block the global "fully migrated" flag; a role/permission change pauses open streams
 for a re-check.
+
+Decided by the owner on 2026-11-26:
+
+- **Owner recovery of a `journal:*` quarantine (strict).** The recovery route
+  (`POST /api/sessions/{sid}/recovery`) also opens a recording quarantined as `journal:<diag>`, on
+  these terms only: one recording at a time; Owner @ all with `backups.manage`; a real fresh factor;
+  the typed confirmation is the first 8 characters of the session id, a space, and the diagnosis
+  word System health shows for the journal (`crypto.erasure`, "The erasure journal is damaged
+  (<diag>)"), e.g. `0cc7a3af rollback`; the route refuses (`409 transcript.journalNotDiagnosed`)
+  unless that diagnosis is recorded at this boot and is the recording's only quarantine reason (a
+  repaired journal, another diagnosis or a mix with `continuity` → refused); audited, security
+  e-mail. A sid in the tombstone set (the authentic part of the damaged journal) answers `404`, and
+  a sid whose RK is gone (an erasure committed in the database) answers `409
+  transcript.recoveryNoKey`: there is nothing left to decrypt. A journal-recovered recording is
+  never released to normal access (`409 transcript.releaseJournal`); the audited recovery read is
+  its only access, and re-quarantine is allowed.
+- **Retiring a mandatory destination that is gone (audited Owner override).**
+  `POST /api/recordings/continuity/destinations/{dest_id}/retire`: Owner @ all with
+  `backups.manage`, a real fresh factor, the destination name typed exactly; audited, security
+  e-mail. It removes the destination from the continuity marker's `required` set (R-M2); the
+  quarantine stays, and the route then runs one `try_prove`, which lifts it when the remaining
+  destinations meet the threshold. A destination that is still configured is refused (`409
+  transcript.destinationConfigured`), reachable or not: `try_prove` requires every configured
+  destination anyway, so retiring it would change nothing (remove it from the backup settings
+  first). The destination's known head is kept: a proof must still reach the highest head it was
+  known to hold, so retiring it never forgets an erasure it was known to have.
 
 | # | Question | Recommended default |
 |---|---|---|
@@ -2969,21 +2997,36 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   plaintext and 3.7-named files (listed through the Store's directory fd), with reason
   `journal:<diag>`. That reason is never replaced by `continuity`, survives the conversion (the
   descriptor is born `quarantined`; the hash-only re-check still lets the verified plaintext be
-  unlinked) and is never Owner-recoverable. The writer start refuses any sid with a quarantine
-  row, whatever the reason. A later clean boot does not lift it.
+  unlinked). Owner recovery opens it only on the strict terms of §12.11.8 (2026-11-26) and never
+  releases it. The writer start refuses any sid with a quarantine row, whatever the reason. A
+  later clean boot does not lift it.
 - **No new branch under an unreached threshold (R-M1).** While the continuity marker's threshold
   (or a destination head it knew) is beyond the local journal, `erase` and the discard of a failed
   migration answer `409 transcript.erasureBehind`: a new local entry would be a second entry n+1
   next to a committed one we cannot see.
 - **Mandatory destinations are kept (R-M2).** The marker keeps `required` (every destination that
   was mandatory at the restore); `try_prove` requires them on top of the configured ones, so
-  replacing an unanswering destination proves nothing. Dropping one needs a proof; there is no
-  Owner override yet (open). More known heads than `KNOWN_MAX` set `overflow`, which never proves.
+  replacing an unanswering destination proves nothing. A destination that is gone is dropped only
+  by the audited Owner override of §12.11.8 (2026-11-26). More known heads than `KNOWN_MAX` set
+  `overflow`, which never proves.
 - **Quarantine instead of refusal, the conditions.** The threshold is durable (above), the cohort
   covers every representation (descriptor, migration row, 3.7 file), and nothing automatic turns
   missing proof into access: while the local journal is behind the threshold, `release` (back to
   normal access) answers `409 transcript.releaseBehind`. The audited Owner recovery read stays the
   only, exceptional, access.
+- **Owner decisions of 2026-11-26, as built.** `erasure.recover_journal(st, sid, diag)` re-checks,
+  under the sid's lease and in one transaction, that every descriptor is `quarantined` with reason
+  exactly `journal:<diag>`, that `diag` is this boot's diagnosis with `erasure_journal_broken` in
+  System health, that the sid is not in the Store's tombstone set and that its `session_keys` row
+  exists. `release` raises `transcript.releaseJournal` for a `journal:*` reason before anything
+  changes; `requarantine` accepts both reasons. `list_quarantined` adds `recovery`
+  (`continuity` | `journal` | null) and, for a journal one, `confirm_word`. Known limit: an erasure
+  appended to the journal whose database step never committed (a crash between steps 1 and 2) and
+  whose journal entry is now unreadable cannot be seen locally; its RK is still present, so only
+  the off-host attestations could have shown it. The Owner accepts that window by typing the
+  diagnosis. `erasure.retire_destination` changes the marker under the Store barrier (the CAS
+  `try_prove` re-checks), reads the configured destinations strictly (a provider error refuses
+  with `503`, never "none configured") and keeps `known`.
 
 ## Appendix: Test vectors (v1)
 

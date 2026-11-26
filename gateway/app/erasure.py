@@ -25,8 +25,10 @@ Pieces:
 * **Freshness and restore** (`decide_restore`, `reconcile_apply`): the newest authentic head wins,
   a stale head never overrides, divergent authentic journals are a conflict, and without proof the
   restored recordings are quarantined (`mark_unproven`).
-* **Owner recovery** (`list_quarantined`, `recover`, `release`, `requarantine`): only recordings
-  quarantined for missing continuity proof, one at a time.
+* **Owner recovery** (`list_quarantined`, `recover`, `recover_journal`, `release`, `requarantine`):
+  recordings quarantined for missing continuity proof, or (strictly, never released) for a damaged
+  journal while System health shows its diagnosis; one at a time. `retire_destination`: the
+  audited Owner override dropping a gone destination from the marker's mandatory set.
 * **Readiness** (`journal_ready`, `quarantine_ready`) for the boot's PR6 gate, and `health()` for
   System health.
 """
@@ -1610,35 +1612,67 @@ async def try_prove(st=None):
 # ── Owner recovery (§12.11.4 "Owner recovery mode", Q4) ──────────────────────
 
 
+def journal_diag():
+    """The diagnosis of the erasure journal at this boot ('' = healthy or not booted): the word
+    System health shows for `erasure_journal_broken` (`crypto.erasure`)."""
+    return _s.diag if _s.booted else ""
+
+
+def _continuity_only(reason):
+    return reason == "continuity"
+
+
+def _any_quarantine(reason):
+    return reason == "continuity" or (reason or "").startswith("journal:")
+
+
+async def quarantine_reasons(st, sid):
+    """The `tx_quarantine` reasons of one recording (every kind), as a set."""
+    rows = await st.read(lambda c: c.execute("SELECT reason FROM tx_quarantine WHERE sid=?",
+                                             (sid,)).fetchall())
+    return {r[0] for r in rows}
+
+
 async def list_quarantined(st):
     def load(c):
         return c.execute(
-            "SELECT d.sid, d.kind, d.status, q.reason, q.since FROM tx_descriptors d "
+            "SELECT d.sid, d.kind, d.status, q.reason, q.since, "
+            "EXISTS (SELECT 1 FROM session_keys k WHERE k.sid=d.sid) FROM tx_descriptors d "
             "LEFT JOIN tx_quarantine q ON q.sid=d.sid AND q.kind=d.kind "
             "WHERE d.status IN ('quarantined','recovery') "
             # H2: cohorta restore-ului fără descriptor (text clar încă nemigrat): listată, dar
             # recuperabilă abia după migrare (descriptorul convertit rămâne în carantină)
-            "UNION ALL SELECT q.sid, q.kind, 'plaintext', q.reason, q.since FROM tx_quarantine q "
+            "UNION ALL SELECT q.sid, q.kind, 'plaintext', q.reason, q.since, 0 FROM tx_quarantine q "
             "WHERE NOT EXISTS (SELECT 1 FROM tx_descriptors d WHERE d.sid=q.sid AND d.kind=q.kind) "
             "ORDER BY 1, 2").fetchall()
     rows = await st.read(load)
+    diag = journal_diag()
+    jr = "journal:" + diag if diag else None
     by = collections.OrderedDict()
-    for sid, kind, status, reason, since in rows:
+    for sid, kind, status, reason, since, has_key in rows:
         e = by.setdefault(sid, {"sid": sid, "kinds": [], "status": status, "reason": reason or "unknown",
-                                "since": since, "recoverable": True})
+                                "since": since, "recoverable": True, "_reasons": set(), "_key": bool(has_key)})
         e["kinds"].append(kind)
+        e["_reasons"].add(reason)
         if status != e["status"]:
             e["status"] = "mixed"
         if reason != "continuity":
-            e["recoverable"] = False
             e["reason"] = reason or "unknown"
     out = list(by.values())
     for e in out:
-        e["recoverable"] = e["recoverable"] and e["status"] == "quarantined" and e["sid"] not in st.tombstoned
-    return {"items": out, "continuity": _s.continuity}
+        reasons, has_key = e.pop("_reasons"), e.pop("_key")
+        # recuperare de continuitate (data backup-ului) sau, decizia Owner-ului 2026-11-26, de
+        # jurnal: doar cu diagnosticul curent afişat în System health şi cu RK-ul încă prezent
+        mode = ("continuity" if reasons == {"continuity"}
+                else "journal" if jr is not None and reasons == {jr} and has_key else None)
+        e["recovery"] = mode
+        e["recoverable"] = mode is not None and e["status"] == "quarantined" and e["sid"] not in st.tombstoned
+        if mode == "journal":
+            e["confirm_word"] = diag
+    return {"items": out, "continuity": _s.continuity, "journal_diag": diag or None}
 
 
-async def _set_status(st, sid, frm, to, *, need_reason=True):
+async def _set_status(st, sid, frm, to, *, allowed=_continuity_only, need_key=False):
     txstore._sid_bytes(sid)
     if sid in st.tombstoned:
         raise ErasureError("transcript.missing", "no recording for this session", 404)
@@ -1654,12 +1688,18 @@ async def _set_status(st, sid, frm, to, *, need_reason=True):
                     if status != frm:
                         raise ErasureError("transcript.recoveryState",
                                            "this recording is not %s" % frm, 409)
-                    # INV-14 (§12.11.4): doar carantina de CONTINUITATE se poate deschide; un
-                    # tombstone, o înregistrare stricată sau o carantină de jurnal/epoch niciodată
-                    if need_reason and reason != "continuity":
+                    # INV-14 (§12.11.4): doar carantina permisă de apelant se poate deschide
+                    # (continuitate; de jurnal doar prin recover_journal); un tombstone, o
+                    # înregistrare stricată sau o carantină de epoch niciodată
+                    if allowed is not None and not allowed(reason):
                         raise ErasureError("transcript.notRecoverable",
                                            "only recordings quarantined for missing erasure proof "
                                            "can be recovered", 409)
+                # un RK distrus (ştergere comisă în DB, chiar dacă jurnalul care o dovedea s-a
+                # pierdut) = nimic de recuperat: fără cheie nu există înregistrare
+                if need_key and c.execute("SELECT 1 FROM session_keys WHERE sid=?", (sid,)).fetchone() is None:
+                    raise ErasureError("transcript.recoveryNoKey",
+                                       "this recording's key was destroyed; it cannot be recovered", 409)
                 c.execute("UPDATE tx_descriptors SET status=? WHERE sid=? AND status=?", (to, sid, frm))
                 if to == "ok":
                     # doar kind-urile eliberate: un kind încă în clar (cohorta H2) rămâne în carantină
@@ -1674,20 +1714,95 @@ async def recover(st, sid):
     return await _set_status(st, sid, "quarantined", "recovery")
 
 
+async def recover_journal(st, sid, diag):
+    """Owner decision 2026-11-26: quarantined (`journal:<diag>`) → recovery, one recording, only
+    while this boot's journal diagnosis is exactly `diag` (the one System health shows). A sid the
+    authentic part of the journal tombstones, or whose RK is gone (an erasure committed in the
+    database), is never recovered: there is nothing left to decrypt."""
+    if not diag or journal_diag() != diag or not health_has("erasure_journal_broken"):
+        raise ErasureError("transcript.journalNotDiagnosed",
+                           "System health does not show this erasure journal diagnosis", 409)
+    want = "journal:" + diag
+    return await _set_status(st, sid, "quarantined", "recovery",
+                             allowed=lambda r: r == want, need_key=True)
+
+
 async def release(st, sid):
     """recovery → ok (one recording, an explicit Owner action). Refused while the local journal is
     behind the restore's threshold (R-H1, "quarantine instead of refuse"): a committed erasure we
     cannot see yet may name this recording, so it may not become normally readable; the audited
-    Owner recovery read (`recover`) stays the exceptional access."""
+    Owner recovery read (`recover`) stays the exceptional access. A recording recovered from a
+    `journal:*` quarantine is never released: the erasures it may be named in are unknowable."""
     if _behind():
         raise ErasureError("transcript.releaseBehind",
                            "erasures committed before the last restore are not on this volume yet; "
                            "the recording stays in recovery until they are proven", 409)
-    return await _set_status(st, sid, "recovery", "ok")
+
+    def allowed(reason):
+        if (reason or "").startswith("journal:"):
+            raise ErasureError("transcript.releaseJournal",
+                               "a recording recovered from a damaged erasure journal stays in recovery", 409)
+        return reason == "continuity"
+    return await _set_status(st, sid, "recovery", "ok", allowed=allowed)
 
 
 async def requarantine(st, sid):
-    return await _set_status(st, sid, "recovery", "quarantined")
+    # reduce accesul: orice carantină recuperată (continuitate sau jurnal) poate reveni
+    return await _set_status(st, sid, "recovery", "quarantined", allowed=_any_quarantine)
+
+
+# ── Owner override: a mandatory destination that is gone (decision 2026-11-26) ──
+
+
+async def _configured_ids_strict():
+    """The configured destination ids; a provider error refuses (never "none configured")."""
+    if _dest_provider is None:
+        return set()
+    try:
+        return {d.id for d in await _dest_provider()}
+    except Exception as e:                       # noqa: BLE001
+        log.warning("erasure: destinations unavailable: %s", type(e).__name__)
+        raise ErasureError("transcript.erasureUnavailable",
+                           "the configured destinations cannot be read", 503) from None
+
+
+async def retire_destination(st, dest_id):
+    """Remove `dest_id` from the continuity marker's `required` set (R-M2), an audited Owner
+    override for a destination that no longer exists. The quarantine stays; its known head stays
+    too (a proof must still reach the highest head that destination was known to hold, so retiring
+    it never forgets an erasure it was known to have). Refused for a destination that is still
+    configured: `try_prove` requires every configured destination anyway, so retiring it would
+    change nothing; remove it from the backup settings first."""
+    s = _s
+    cont = s.continuity
+    terms = _marker_terms(cont) if cont and cont.get("state") == "unproven" else None
+    if terms is None or dest_id not in terms.required:
+        raise ErasureError("transcript.destinationUnknown",
+                           "no unproven restore requires this destination", 404)
+    if dest_id in await _configured_ids_strict():
+        raise ErasureError("transcript.destinationConfigured",
+                           "this destination is still configured; remove it from the backup settings first", 409)
+    async with st.barrier:
+        if s.continuity is not cont:
+            raise ErasureError("transcript.recoveryState", "the continuity state changed; try again", 409)
+        new = dict(cont)
+        left = sorted(set(terms.required) - {dest_id})
+        if left:
+            new["required"] = left
+        else:
+            new.pop("required", None)
+        # aceeaşi secţiune critică cu try_prove (CAS pe `s.continuity`): o dovadă în zbor care a
+        # citit markerul vechi nu mai adoptă nimic; st.txn ar re-lua bariera (asyncio.Lock nu e
+        # reentrant), deci tranzacţia direct pe firul DB, ca în try_prove
+        try:
+            await st.io(st._run_txn, lambda c: _set_json(c, "continuity", new))
+        except txstore.Uncertain:
+            # rezultat necunoscut: markerul în memorie rămâne cel vechi (mai strict); boot-ul îl
+            # citeşte din DB oricum ar fi fost
+            raise ErasureError("transcript.erasureUncertain",
+                               "the change did not finish; restart the gateway", 503) from None
+        s.continuity = new
+    return {"required": left, "known_head": terms.known.get(dest_id, 0)}
 
 
 async def status_of(st, sid):

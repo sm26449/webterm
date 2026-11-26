@@ -34,7 +34,7 @@ NOPE = 987654          # id care nu există
 def _fill(path, ids):
     def sub(m):
         return str(ids.get(m.group(1), NOPE))
-    return re.sub(r"{(\w+)}", sub, path)
+    return re.sub(r"{(\w+)(?::\w+)?}", sub, path)
 
 
 def _body(ids):

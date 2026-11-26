@@ -1089,6 +1089,16 @@ def _erasure_error(e) -> ApiError:
         return ApiError(409, "transcript.notRecoverable", msg)
     if c == "transcript.notFailed":
         return ApiError(409, "transcript.notFailed", msg)
+    if c == "transcript.journalNotDiagnosed":
+        return ApiError(409, "transcript.journalNotDiagnosed", msg)
+    if c == "transcript.recoveryNoKey":
+        return ApiError(409, "transcript.recoveryNoKey", msg)
+    if c == "transcript.releaseJournal":
+        return ApiError(409, "transcript.releaseJournal", msg)
+    if c == "transcript.destinationUnknown":
+        return ApiError(404, "transcript.destinationUnknown", msg)
+    if c == "transcript.destinationConfigured":
+        return ApiError(409, "transcript.destinationConfigured", msg)
     return ApiError(503, "transcript.erasureUnavailable", "erasure is not available on this volume")
 
 
@@ -1157,10 +1167,15 @@ async def list_quarantined_recordings(user=Depends(authz.perm('backups.manage'))
 async def recover_recording(sid: str, body: RecoveryIn, request: Request,
                             user=Depends(authz.perm('backups.manage'))):
     """Owner recovery mode for ONE recording quarantined for missing erasure proof: → `recovery`
-    (readable by Owners only, through the recovery route). Typed confirmation = the backup date."""
+    (readable by Owners only, through the recovery route). Typed confirmation = the backup date.
+    A `journal:<diag>` quarantine (Owner decision 2026-11-26): only while System health shows that
+    diagnosis, typed confirmation = "<first 8 of the sid> <diag>", never for a sid without its key."""
     if not core.valid_sid(sid):
         raise ApiError(404, "session.missing", "no such session")
     st = _erasure_store()
+    reasons = await erasure.quarantine_reasons(st, sid)
+    if any((r or "").startswith("journal:") for r in reasons):
+        return await _recover_journal(st, sid, reasons, body, request, user)
     cont = erasure.continuity()
     date = time.strftime("%Y-%m-%d", time.gmtime((cont or {}).get("since") or 0))
     if cont is None or body.confirm.strip() != date:
@@ -1177,6 +1192,33 @@ async def recover_recording(sid: str, body: RecoveryIn, request: Request,
                                         % sid[:8], security.client_ip(request), user["email"],
                                         fleet=True, user_id=user["id"])
     return {"ok": True, "status": "recovery", "kinds": kinds}
+
+
+async def _recover_journal(st, sid, reasons, body, request, user):
+    """The strict path of the recovery route for a `journal:*` quarantine (§12.11.8, 2026-11-26)."""
+    diag = erasure.journal_diag()
+    # diagnosticul trebuie să fie EXACT cel afişat acum de System health (crypto.erasure) şi singurul
+    # motiv al înregistrării: un jurnal reparat / alt diagnostic / un amestec cu continuitatea → refuz
+    if not diag or reasons != {"journal:" + diag} or not erasure.health_has("erasure_journal_broken"):
+        raise ApiError(409, "transcript.journalNotDiagnosed",
+                       "System health does not show the erasure journal diagnosis this recording was "
+                       "quarantined for")
+    want = "%s %s" % (sid[:8], diag)
+    if " ".join(body.confirm.split()) != want:
+        raise ApiError(400, "transcript.journalRecoveryConfirm",
+                       "type the first 8 characters of the session id and the journal diagnosis",
+                       vars={"diag": diag})
+    await _owner_fresh_factor(user, sid, body)
+    try:
+        kinds = await erasure.recover_journal(st, sid, diag)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    audit.detail(request, "owner recovery: recording %s opened from a damaged erasure journal (%s)"
+                 % (sid[:8], diag))
+    email_alerts.notify_security_change("a recording was recovered from a damaged erasure journal "
+                                        "(session %s, %s)" % (sid[:8], diag), security.client_ip(request),
+                                        user["email"], fleet=True, user_id=user["id"])
+    return {"ok": True, "status": "recovery", "kinds": kinds, "reason": "journal:" + diag}
 
 
 @router.post("/api/sessions/{sid}/recovery/release")
@@ -1212,6 +1254,44 @@ async def requarantine_recording(sid: str, request: Request,
         raise _erasure_error(e) from None
     audit.detail(request, "owner recovery: recording %s quarantined again" % sid[:8])
     return {"ok": True, "status": "quarantined", "kinds": kinds}
+
+
+class RetireIn(BaseModel):
+    confirm: str = ""             # tastat: numele exact al destinaţiei
+    stepup_grant: str = ""
+    stepup_password: str = ""
+    stepup_totp: str = ""
+
+
+@router.post("/api/recordings/continuity/destinations/{dest_id:path}/retire")
+async def retire_continuity_destination(dest_id: str, body: RetireIn, request: Request,
+                                        user=Depends(authz.perm('backups.manage'))):
+    """Owner override (decision 2026-11-26): drop a destination that no longer exists from the
+    continuity marker's mandatory set. The quarantine stays; the next proof may lift it with the
+    remaining destinations. Refused for a destination still configured (it is required anyway)."""
+    st = _erasure_store()
+    if not dest_id or len(dest_id) > 512 or body.confirm.strip() != dest_id:
+        raise ApiError(400, "transcript.retireConfirm", "type the destination name to confirm")
+    await _require_owner(user)
+    # factor REAL proaspăt, nelegat de un host (ca o ştergere fără sesiune: host 0)
+    await stepup.require_fresh_factor(0, user, body.stepup_grant, body.stepup_password,
+                                      body.stepup_totp, real_factor=True)
+    try:
+        res = await erasure.retire_destination(st, dest_id)
+    except erasure.ErasureError as e:
+        raise _erasure_error(e) from None
+    lifted = False
+    try:
+        lifted = await erasure.try_prove(st)
+    except Exception as e:                       # noqa: BLE001 — dovada reîncearcă janitorul
+        log.warning("retire: proof attempt failed: %s", type(e).__name__)
+    audit.detail(request, "owner override: erasure destination %s retired from the continuity proof "
+                 "(known head %d; quarantine %s)" % (dest_id[:120], res["known_head"],
+                                                     "lifted" if lifted else "kept"))
+    email_alerts.notify_security_change("an erasure destination was retired from the continuity proof (%s)"
+                                        % dest_id[:120], security.client_ip(request), user["email"],
+                                        fleet=True, user_id=user["id"])
+    return {"ok": True, "required": res["required"], "lifted": bool(lifted)}
 
 
 async def _recovery_decide(request: Request, uid_expected: int):

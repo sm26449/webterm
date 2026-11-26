@@ -1150,8 +1150,9 @@ async def g_recovery(st, c, uid, host_id, keep):
     r = await c.post(f"/api/sessions/{rec}/recovery", json={"confirm": date})
     check("no fresh factor → 403", r.status_code == 403, r.text)
     r = await c.post(f"/api/sessions/{keep}/recovery", json={"confirm": date, "stepup_grant": grant(uid, host_id)})
-    check("a journal quarantine is never opened by recovery → 409 transcript.notRecoverable",
-          r.status_code == 409 and r.json().get("code") == "transcript.notRecoverable", r.text)
+    check("a journal quarantine whose diagnosis System health does not show (healthy journal) → 409 "
+          "transcript.journalNotDiagnosed", r.status_code == 409
+          and r.json().get("code") == "transcript.journalNotDiagnosed", r.text)
     r = await c.post(f"/api/sessions/{rec}/recovery", json={"confirm": date, "stepup_grant": grant(uid, host_id)})
     check("recover one recording → recovery", r.status_code == 200 and (await statuses())[(rec, "out")] == "recovery", r.text)
     r = await c.get(f"/api/sessions/{rec}/transcript?format=out")
@@ -1250,7 +1251,7 @@ async def g_behind(st, host_id):
     await unquarantine_all()
 
 
-async def g_rh2(st, host_id):
+async def g_rh2(st, c, uid, host_id):
     print("== R-H2: boot with an invalid journal quarantines pending plaintext too ==")
     sid = os.urandom(16).hex()
     stray = os.urandom(16).hex()
@@ -1266,6 +1267,8 @@ async def g_rh2(st, host_id):
     check("baseline: a pending plaintext recording is readable on a healthy journal",
           m is not None and m["state"] == "pending" and await read_all(st, sid) == data, m)
     Path(config.TRANSCRIPT_DIR, stray + ".cast").write_bytes(b"stray")
+    # înregistrări criptate pentru recuperarea strictă din carantina de jurnal (decizia 2026-11-26)
+    jrec = [await make_rec(st, host_id) for _ in range(3)]
     good = journal_path().read_bytes()
     n = er.parse(good, K, INST).n
     journal_path().write_bytes(good[:er.prefix_len(n - 1)])
@@ -1287,13 +1290,19 @@ async def g_rh2(st, host_id):
     check("…the plaintext is gone after the verified conversion (hash-only re-check allowed)",
           not Path(config.TRANSCRIPT_DIR, sid + ".out").exists() and out.get("out") == "unlinked", out)
     check("…still not served after migration", await _refused(read_all(st, sid)))
-    check("…and the Owner recovery never opens a journal quarantine",
+    check("…and the continuity recovery never opens a journal quarantine",
           await _erasure_code(er.recover(st, sid)) == "transcript.notRecoverable")
+    await g_journal_recovery(st, c, uid, host_id, jrec)
     journal_path().write_bytes(good)
     st = await reboot()
     check("journal repaired: the journal quarantine stays (not lifted by a later clean boot)",
           not er._s.diag and (await statuses()).get((sid, "out")) == "quarantined"
           and await _refused(read_all(st, sid)))
+    r = await c.post(f"/api/sessions/{sid}/recovery", json={"confirm": sid[:8] + " rollback",
+                                                           "stepup_grant": grant(uid, host_id)})
+    check("journal repaired: System health no longer shows the diagnosis → journal recovery refused "
+          "(409 transcript.journalNotDiagnosed)",
+          r.status_code == 409 and r.json().get("code") == "transcript.journalNotDiagnosed", r.text)
     os.unlink(os.path.join(config.TRANSCRIPT_DIR, stray + ".cast"))
     return st
 
@@ -1383,6 +1392,152 @@ async def g_prove_race(st, host_id):
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
+# ── 11. Owner decisions 2026-11-26: journal recovery, retiring a gone destination ──
+
+
+class _Mails:
+    def __init__(self):
+        self.sent = []
+        self._orig = None
+
+    def __enter__(self):
+        from app import email_alerts
+        self._mod = email_alerts
+        self._orig = email_alerts.notify_security_change
+        email_alerts.notify_security_change = lambda what, *a, **kw: self.sent.append(what)
+        return self
+
+    def __exit__(self, *exc):
+        self._mod.notify_security_change = self._orig
+
+
+async def g_journal_recovery(st, c, uid, host_id, jrec):
+    print("== Owner recovery of a journal:* quarantine (strict) ==")
+    (ok_sid, ok_data), (tomb, _), (nokey, _) = jrec
+    s = await statuses()
+    reasons = [await er.quarantine_reasons(st, x) for x, _ in jrec]
+    check("baseline: the encrypted recordings are in the journal:rollback cohort",
+          all(s.get((x, "out")) == "quarantined" for x, _ in jrec)
+          and all(r == {"journal:rollback"} for r in reasons)
+          and er.health_has("erasure_journal_broken") and er.journal_diag() == "rollback")
+    # un RK distrus (ştergere comisă în DB, jurnalul care o arăta pierdut) şi un sid tombstone
+    await db.execute("DELETE FROM session_keys WHERE sid=?", nokey)
+    st.tombstoned.add(tomb)
+    r = await c.get("/api/recordings/quarantine")
+    items = {i["sid"]: i for i in r.json().get("items", [])} if r.status_code == 200 else {}
+    check("list: journal recovery offered with the System health word, never for a sid without its key "
+          "or tombstoned", items.get(ok_sid, {}).get("recoverable") is True
+          and items[ok_sid].get("recovery") == "journal" and items[ok_sid].get("confirm_word") == "rollback"
+          and items.get(nokey, {}).get("recoverable") is False and items.get(tomb, {}).get("recoverable") is False
+          and r.json().get("journal_diag") == "rollback", r.text[:400])
+    url = f"/api/sessions/{ok_sid}/recovery"
+    for bad in (ok_sid[:8], "rollback", ok_sid[:8] + " fork", "2000-01-01"):
+        r = await c.post(url, json={"confirm": bad, "stepup_grant": grant(uid, host_id)})
+        check("wrong typed confirmation %r → 400 transcript.journalRecoveryConfirm" % bad,
+              r.status_code == 400 and r.json().get("code") == "transcript.journalRecoveryConfirm", r.text)
+    security._stepup_windows.clear()
+    r = await c.post(url, json={"confirm": ok_sid[:8] + " rollback"})
+    check("no fresh factor → 403, still quarantined",
+          r.status_code == 403 and (await statuses())[(ok_sid, "out")] == "quarantined", r.text)
+    with _Mails() as mails:
+        r = await c.post(f"/api/sessions/{tomb}/recovery",
+                         json={"confirm": tomb[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
+        check("a tombstoned sid is never recovered → 404 transcript.missing",
+              r.status_code == 404 and r.json().get("code") == "transcript.missing"
+              and (await statuses())[(tomb, "out")] == "quarantined", r.text)
+        r = await c.post(f"/api/sessions/{nokey}/recovery",
+                         json={"confirm": nokey[:8] + " rollback", "stepup_grant": grant(uid, host_id)})
+        check("a sid whose RK was destroyed is never recovered → 409 transcript.recoveryNoKey",
+              r.status_code == 409 and r.json().get("code") == "transcript.recoveryNoKey"
+              and (await statuses())[(nokey, "out")] == "quarantined", r.text)
+        check("…and neither refusal sends a security e-mail", mails.sent == [], mails.sent)
+        r = await c.post(url, json={"confirm": "  %s   rollback " % ok_sid[:8], "stepup_grant": grant(uid, host_id)})
+        check("typed sid + diagnosis, Owner, real fresh factor → recovery (one recording)",
+              r.status_code == 200 and r.json().get("reason") == "journal:rollback"
+              and (await statuses())[(ok_sid, "out")] == "recovery", r.text)
+        check("…with a security e-mail", any("damaged erasure journal" in m for m in mails.sent), mails.sent)
+    a = await db.fetchone("SELECT detail FROM audit_log WHERE path=? AND method='POST' ORDER BY id DESC", url)
+    check("…audited with the diagnosis", a is not None and "damaged erasure journal (rollback)" in (a["detail"] or ""), a)
+    others = await statuses()
+    check("…only that recording changed", others[(tomb, "out")] == "quarantined"
+          and others[(nokey, "out")] == "quarantined")
+    r = await c.get(f"/api/sessions/{ok_sid}/transcript?format=out")
+    check("normal read still refused (423)", r.status_code == 423, r.status_code)
+    r = await c.get(f"/api/sessions/{ok_sid}/recovery/transcript?format=out")
+    check("the audited Owner recovery read → the recording", r.status_code == 200 and r.content == ok_data,
+          r.status_code)
+    r = await c.post(f"/api/sessions/{ok_sid}/recovery/release", json={"stepup_grant": grant(uid, host_id)})
+    check("release of a journal-recovered recording → 409 transcript.releaseJournal (stays in recovery)",
+          r.status_code == 409 and r.json().get("code") == "transcript.releaseJournal"
+          and (await statuses())[(ok_sid, "out")] == "recovery", r.text)
+    r = await c.post(f"/api/sessions/{ok_sid}/recovery/requarantine")
+    check("re-quarantine → quarantined, the journal reason kept",
+          r.status_code == 200 and (await statuses())[(ok_sid, "out")] == "quarantined"
+          and (await er.quarantine_reasons(st, ok_sid)) == {"journal:rollback"}, r.text)
+    check("the module refuses a diagnosis System health does not show",
+          await _erasure_code(er.recover_journal(st, ok_sid, "fork")) == "transcript.journalNotDiagnosed")
+    st.tombstoned.discard(tomb)
+
+
+async def g_retire(st, c, uid, host_id):
+    print("== Owner override: retire a mandatory destination that is gone ==")
+    cur = journal_path().read_bytes()
+    p = er.parse(cur, K, INST)
+    n, head = p.n, p.head
+    rec, data = await make_rec(st, host_id)
+    await st.txn(lambda cu: er._quarantine_cohort_sync(cu, "continuity", time.time()))
+    d = FakeDest("sftp:u@h:22/keep")
+    d.objs[er.object_name(INST, n)] = cur
+    DESTS[:] = [d]
+    gone = "sftp:u@h:22/old/gone"
+    base = {"state": "unproven", "since": 1, "n": n, "threshold": head.to_json(), "known": {d.id: n}}
+    await set_marker(st, dict(base, required=sorted([d.id, gone])))
+    check("baseline: the gone mandatory destination blocks the proof",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    url = "/api/recordings/continuity/destinations/%s/retire" % gone
+    r = await c.post(url, json={"confirm": "gone", "stepup_grant": grant(uid, 0)})
+    check("wrong typed destination name → 400 transcript.retireConfirm",
+          r.status_code == 400 and r.json().get("code") == "transcript.retireConfirm", r.text)
+    security._stepup_windows.clear()
+    r = await c.post(url, json={"confirm": gone})
+    check("no fresh factor → 403, marker unchanged",
+          r.status_code == 403 and gone in er.continuity().get("required", []), r.text)
+    r = await c.post("/api/recordings/continuity/destinations/%s/retire" % d.id,
+                     json={"confirm": d.id, "stepup_grant": grant(uid, 0)})
+    check("a destination still configured (and reachable) → 409 transcript.destinationConfigured",
+          r.status_code == 409 and r.json().get("code") == "transcript.destinationConfigured"
+          and d.id in er.continuity().get("required", []), r.text)
+    r = await c.post("/api/recordings/continuity/destinations/sftp:x@y:22/none/retire",
+                     json={"confirm": "sftp:x@y:22/none", "stepup_grant": grant(uid, 0)})
+    check("a destination the marker does not require → 404 transcript.destinationUnknown",
+          r.status_code == 404 and r.json().get("code") == "transcript.destinationUnknown", r.text)
+    # capul cunoscut al destinaţiei retrase rămâne o obligaţie (nicio ştergere ştiută nu se uită)
+    await set_marker(st, dict(base, required=sorted([d.id, gone]), known={d.id: n, gone: n + 1}))
+    with _Mails() as mails:
+        r = await c.post(url, json={"confirm": gone, "stepup_grant": grant(uid, 0)})
+        check("retire a gone destination known to hold a HIGHER head → retired, quarantine kept",
+              r.status_code == 200 and r.json().get("lifted") is False and er.continuity() is not None
+              and gone not in er.continuity().get("required", [])
+              and (await statuses())[(rec, "out")] == "quarantined", r.text)
+        await set_marker(st, dict(base, required=sorted([d.id, gone])))
+        r = await c.post(url, json={"confirm": gone, "stepup_grant": grant(uid, 0)})
+        check("retire the gone destination → the remaining one reaches the threshold → quarantine lifted",
+              r.status_code == 200 and r.json().get("lifted") is True and er.continuity() is None
+              and (await statuses())[(rec, "out")] == "ok"
+              and (await c.get(f"/api/sessions/{rec}/transcript?format=out")).content == data, r.text)
+        check("…each retire sent a security e-mail", len([m for m in mails.sent if "retired" in m]) == 2, mails.sent)
+    a = await db.fetchone("SELECT detail FROM audit_log WHERE path=? AND method='POST' ORDER BY id DESC", url)
+    check("…audited", a is not None and "retired from the continuity proof" in (a["detail"] or "")
+          and "lifted" in a["detail"], a)
+    check("…and the marker is gone from the database too",
+          await db.fetchone("SELECT 1 FROM tx_state WHERE key='continuity'") is None)
+    r = await c.post(url, json={"confirm": gone, "stepup_grant": grant(uid, 0)})
+    check("no unproven restore any more → 404 transcript.destinationUnknown",
+          r.status_code == 404 and r.json().get("code") == "transcript.destinationUnknown", r.text)
+    DESTS[:] = []
+    await unquarantine_all()
+
+
 async def main():
     g_codec()
     g_freshness()
@@ -1412,7 +1567,8 @@ async def main():
         st = await g_recovery(st, c, uid, host_id, keep)
         await g_prove_race(st, host_id)
         await g_behind(st, host_id)
-        st = await g_rh2(st, host_id)
+        await g_retire(st, c, uid, host_id)
+        st = await g_rh2(st, c, uid, host_id)
     finally:
         await txhub.shutdown()
         await db.close()
