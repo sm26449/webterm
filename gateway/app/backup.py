@@ -2409,6 +2409,11 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
         _write_new(jp, dec.journal)
     for r in dec.rolled_back:
         log.warning("restore: erasure attestations on %s are older than recorded (rolled back)", r[:120])
+    for r in results:
+        if r.error in erasure.GAP_ERRORS:
+            # R5-H1 / R6-H1: golul (obiect neverificabil sau fork) intră în rezumat → flag → marker
+            log.warning("restore: the erasure journal at %s is %s (n=%d) — no proof, kept as a gap",
+                        r.id[:120], "a fork" if r.error == "conflict" else "unverifiable", r.unverified)
     return dec.summary(content["created"] if content is not None else 0)
 
 

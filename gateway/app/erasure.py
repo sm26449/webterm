@@ -1104,8 +1104,10 @@ async def run_cleanup(st=None, *, clock=time.time):
     cancelled request finished by `resume_intents`), through `st.retire` (idempotent, defers a
     pinned generation). A sid stays in `s.cleanup` until its pass completes; an error (EIO, a full
     disk) keeps it with an exponential backoff, and from CLEANUP_ALARM_AFTER failures on it raises
-    the `transcript.erasureCleanup` alarm every time. The RK is already destroyed: this is only
-    the files. → the sids still pending."""
+    the `transcript.erasureCleanup` alarm every time. R6-L1: a generation a reader pins
+    (`retire` → `deferred`) keeps the task too, re-checked after CLEANUP_BACKOFF without counting
+    as a failure, so a failed unlink after the last unpin is retried here until the row is `gone`.
+    The RK is already destroyed: this is only the files. → the sids still pending."""
     s = _s
     st = st or s.store
     if st is None:
@@ -1115,23 +1117,35 @@ async def run_cleanup(st=None, *, clock=time.time):
         job = s.cleanup.get(sid)
         if job is None or job["next"] > now:
             continue
+        deferred = False
         try:
             gens = await st.read(lambda c, sid=sid: c.execute(
                 "SELECT gen_id, kind FROM tx_files WHERE sid=? AND state='retired'", (sid,)).fetchall())
             for hexid, kind in gens:
-                await st.retire(sid, kind, hexid)
+                # R6-L1: „deferred" = fişier fixat de un cititor; unlink-ul trece la ultimul unpin, dar
+                # dacă acea sarcină eşuează nu o reia nimeni: sarcina rămâne până la rândul `gone`
+                deferred = (await st.retire(sid, kind, hexid)) == "deferred" or deferred
         except asyncio.CancelledError:
             raise
         except Exception as e:                   # noqa: BLE001 — rămâne de făcut, cu backoff
             job["tries"] += 1
-            job["next"] = clock() + min(CLEANUP_BACKOFF * (2 ** (job["tries"] - 1)), CLEANUP_BACKOFF_MAX)
+            job["next"] = clock() + _cleanup_delay(job["tries"])
             log.warning("erasure cleanup of %s failed (%d): %s", sid, job["tries"], type(e).__name__)
             if job["tries"] >= CLEANUP_ALARM_AFTER:
                 st.alarm("transcript.erasureCleanup", "%s: the erased recording's files could not be "
                          "removed after %d attempts (%s)" % (sid, job["tries"], type(e).__name__))
             continue
+        if deferred:
+            job["next"] = clock() + CLEANUP_BACKOFF       # nu e un eşec: fără alarmă, re-verificat
+            continue
         s.cleanup.pop(sid, None)
     return sorted(s.cleanup)
+
+
+def _cleanup_delay(tries):
+    """R6-L1: CLEANUP_BACKOFF doubled per failure, capped at CLEANUP_BACKOFF_MAX. The exponent is
+    capped first: 30.0 * 2**1100 would overflow a float (OverflowError inside the error path)."""
+    return min(CLEANUP_BACKOFF * (2.0 ** min(max(tries - 1, 0), 32)), CLEANUP_BACKOFF_MAX)
 
 
 def _ready_or_raise(st, sid):
@@ -1374,10 +1388,16 @@ async def fetch_head(d, k_erase, inst, check_from=None):
         got.append((name, p, raw[:p.valid_len]))
         if top_n is None:
             top_n = _n
-    best = _on_one_chain([(name, p) for name, p, _raw in got]) if got else None
-    if prefixes:
-        # R5-M1: un prefix autentic pe altă ramură = fork (poate ţine un tombstone), nu „acoperit"
-        _on_one_chain([(name, p) for name, p, _raw in got] + prefixes)
+    try:
+        best = _on_one_chain([(name, p) for name, p, _raw in got]) if got else None
+        if prefixes:
+            # R5-M1: un prefix autentic pe altă ramură = fork (poate ţine un tombstone), nu „acoperit"
+            _on_one_chain([(name, p) for name, p, _raw in got] + prefixes)
+    except ErasureConflict as e:
+        # R6-H1: fork-ul poartă cel mai mare n listat (o ramură poate ţine o ştergere până acolo):
+        # restore-ul îl păstrează ca gol (flag → marker), niciodată ca destinaţie doar „indisponibilă"
+        e.n = max(x[0] for x in names)
+        raise
     unread = [x[0] for x in names if best is not None and x[0] >= best[1].n and x[1] not in read]
     if unread:
         # R5-M1: o variantă a aceluiaşi n (sau mai nouă) necitită din buget poate fi altă ramură:
@@ -1390,6 +1410,9 @@ async def fetch_head(d, k_erase, inst, check_from=None):
     return next((p, raw) for name, p, raw in got if name == best[0])
 
 
+GAP_ERRORS = ("unverifiable", "conflict")   # R5-H1 / R6-H1: destinaţia a răspuns, dar ţine un gol
+
+
 @dataclass
 class DestResult:
     id: str
@@ -1397,7 +1420,8 @@ class DestResult:
     parsed: Parsed = None          # None = niciun jurnal autentic: o destinaţie GOALĂ nu e dovadă (M1)
     data: bytes = None
     error: str = ""
-    unverified: int = 0            # R4-H2: n-ul unui obiect mai nou neverificabil (error='unverifiable')
+    unverified: int = 0            # R4-H2: n-ul unui obiect mai nou neverificabil (error='unverifiable');
+    #                                R6-H1: la error='conflict' (fork), cel mai mare n listat acolo
 
 
 async def fetch_all(dests, k_erase, inst, check_from=None):
@@ -1406,8 +1430,11 @@ async def fetch_all(dests, k_erase, inst, check_from=None):
         try:
             got = await fetch_head(d, k_erase, inst, check_from)
             out.append(DestResult(d.id, True, got[0] if got else None, got[1] if got else None))
-        except ErasureConflict:
-            out.append(DestResult(d.id, False, error="conflict"))
+        except ErasureConflict as e:
+            n = getattr(e, "n", 0)
+            log.warning("erasure: %s holds diverging erasure journals (fork)", d.id)
+            # R6-H1: n ≥ 1 (un fork are intrări autentice); unul necunoscut tot gol rămâne
+            out.append(DestResult(d.id, False, error="conflict", unverified=n if type(n) is int and n > 0 else 1))
         except Unverifiable as e:
             log.warning("erasure: %s holds an unverifiable journal object n=%d", d.id, e.n)
             out.append(DestResult(d.id, False, error="unverifiable", unverified=e.n))
@@ -1494,12 +1521,15 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     have: its n is folded into the known heads and the destination becomes mandatory (a later
     proof needs an authentic copy there reaching it), the gap is kept in `unverified`, and while
     it is kept the VOLUME never proves (equal numbers are not the same chain). A fresh
-    unverifiable result refuses every proof."""
+    unverifiable result refuses every proof. R6-H1: a destination whose authentic objects diverge
+    (error `conflict`, a fork `fetch_head` detected) is the same kind of gap, at the highest n it
+    lists: kept in `unverified` (so in the flag and the marker), every proof refused."""
     live = live if live is not None else Live("none")
     staged = staged if staged is not None else Terms()
     same = live.state == "same"
+    # R6-H1: un fork la o destinaţie (`conflict`) e un gol ca un obiect neverificabil: păstrat cu n-ul lui
     fresh_unver = {r.id: r.unverified for r in dest_results
-                   if not r.ok and r.error == "unverifiable" and type(r.unverified) is int and r.unverified > 0}
+                   if not r.ok and r.error in GAP_ERRORS and type(r.unverified) is int and r.unverified > 0}
     unver = merge_known(staged.unverified, live.unverified if same else None, fresh_unver)
     known = merge_known(known_attested, live.attested if same else None, staged.known, unver)
     overflow = (staged.overflow or (same and live.overflow)
@@ -1565,8 +1595,8 @@ def decide_restore(*, k_erase, inst, j_b=None, tracked=False, j_v=None, dest_res
     # R2-M2: un cap off-host cunoscut (şi al unei destinaţii retrase) peste pragul local e tot o
     # obligaţie: J_v dovedeşte doar dacă îl atinge şi pe el
     top = max([t.n] + list(known.values()))
-    if not met or any(r.error == "unverifiable" for r in dest_results):
-        proof = "none"                             # R5-H1: un gol observat acum nu se dovedeşte
+    if not met or any(r.error in GAP_ERRORS for r in dest_results):
+        proof = "none"                             # R5-H1 / R6-H1: un gol sau un fork observat acum
     elif live.state == "same" and pv is not None and reaches(pv, t) and pv.n >= top and not unver:
         proof = "volume"
     elif req and all(dest_ok(d) for d in req):
@@ -2259,18 +2289,48 @@ async def release(st, sid):
     behind the restore's threshold (R-H1, "quarantine instead of refuse"): a committed erasure we
     cannot see yet may name this recording, so it may not become normally readable; the audited
     Owner recovery read (`recover`) stays the exceptional access. A recording recovered from a
-    `journal:*` quarantine is never released: the erasures it may be named in are unknowable."""
-    if _behind():
-        raise ErasureError("transcript.releaseBehind",
-                           "erasures committed before the last restore are not on this volume yet; "
-                           "the recording stays in recovery until they are proven", 409)
+    `journal:*` quarantine is never released: the erasures it may be named in are unknowable.
+
+    R6-H2: a local journal that reaches the marker's numbers is not a proof of continuity. While
+    the marker still owes OFF-HOST proof (a kept gap `unverified`, a mandatory destination in
+    `required`, an overflow of known heads) or a fork was seen (`conflict`), release answers
+    `transcript.releaseUnproven`: only `try_prove` (that destination answers with an authentic
+    chain reaching the head, which lifts the whole marker) or the audited `retire_destination`
+    clears that obligation. Checked before, and again in the transaction that changes the status."""
+    _release_check()
+    cont0 = _s.continuity
+
+    def guard(_c):
+        if _s.continuity is not cont0:
+            raise ErasureError("transcript.recoveryState", "the continuity state changed; try again", 409)
+        _release_check()
 
     def allowed(reason):
         if (reason or "").startswith("journal:"):
             raise ErasureError("transcript.releaseJournal",
                                "a recording recovered from a damaged erasure journal stays in recovery", 409)
         return reason == "continuity"
-    return await _set_status(st, sid, "recovery", "ok", allowed=allowed)
+    return await _set_status(st, sid, "recovery", "ok", allowed=allowed, guard=guard)
+
+
+def _release_check():
+    """The release refusals (R-H1 behind, R6-H2 an off-host obligation still owed or a fork seen)."""
+    if _behind():
+        raise ErasureError("transcript.releaseBehind",
+                           "erasures committed before the last restore are not on this volume yet; "
+                           "the recording stays in recovery until they are proven", 409)
+    s = _s
+    owed = bool(s.conflict)
+    if s.continuity and s.continuity.get("state") == "unproven":
+        terms = _marker_terms(s.continuity)
+        # R6-H2: poziţia numerică (_behind) nu e dovadă: obligaţia off-host o ridică doar try_prove
+        # sau retragerea auditată (un marker ilizibil e deja „behind")
+        owed = owed or terms is None or terms.overflow or bool(terms.unverified) or bool(terms.required)
+    if owed:
+        raise ErasureError("transcript.releaseUnproven",
+                           "a backup destination still owes proof of the erasures after the last restore "
+                           "(or holds diverging journals); the recording stays in recovery until it is "
+                           "proven or that destination is retired", 409)
 
 
 async def requarantine(st, sid):

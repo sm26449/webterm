@@ -371,6 +371,7 @@ const en: Lang = {
     'err.transcript.notRecoverable': "Only a recording quarantined for missing erasure proof can be recovered.",
     'err.transcript.erasureBehind': "Erasures made before the last restore are not on this server yet. Erasure is refused until they are proven.",
     'err.transcript.releaseBehind': "Erasures made before the last restore are not on this server yet. The recording stays in recovery until they are proven.",
+    'err.transcript.releaseUnproven': "A backup destination still owes proof of the erasures made after the last restore, or holds diverging erasure journals. The recording stays in recovery until that destination proves them or an Owner retires it.",
     'err.transcript.journalNotDiagnosed': "System health does not show the erasure journal diagnosis this recording was quarantined for, so it cannot be recovered.",
     'err.transcript.journalRecoveryConfirm': "Type the first 8 characters of the session id followed by the journal diagnosis ({diag}) to confirm.",
     'err.transcript.recoveryNoKey': "This recording's key was destroyed by an erasure, so it cannot be recovered.",

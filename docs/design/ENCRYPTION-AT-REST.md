@@ -2172,7 +2172,11 @@ quarantine cannot be recovered. The diagnosis, the committed head, the continuit
 tombstone set and the intent are re-checked under the barrier in the transaction that changes the
 status. Releasing to normal access is one recording at a
 time (no "release all"), each release a separate Owner action with a fresh factor, audited, with a
-security e-mail; re-quarantine is allowed. The permission is bound to the recovery route's own
+security e-mail; re-quarantine is allowed. A release never discharges an off-host obligation
+(recheck 464852b, R6-H2): while the continuity marker keeps a gap (`unverified`), a mandatory
+destination (`required`) or an overflow, or a fork has been seen, it answers
+`409 transcript.releaseUnproven` even when the local journal reaches every number; only the
+janitor's destination proof or the audited retire of a gone destination clears that. The permission is bound to the recovery route's own
 authorization (`access`, §12.11.2), not to a parameter.
 
 #### 12.11.5 Migration of plaintext recordings
@@ -3012,7 +3016,8 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   never does, nor an object with zero entries — R4-H1 — nor a destination holding a newer object
   that cannot be authenticated — R4-H2) that reaches max(its known head, the threshold), at stage at least n = 1.
   *Gap (R5-H1).* A newer object a destination holds and nobody could authenticate may hold an
-  erasure we do not have: the restore keeps it as `unverified` {destination: n} through the stage
+  erasure we do not have (and so may a fork: two authentic journals there that diverge, R6-H1,
+  kept as a gap at the highest n that destination lists): the restore keeps it as `unverified` {destination: n} through the stage
   summary, the flag and the continuity marker (merged with the live marker's), folds n into the
   known heads and makes the destination mandatory. While a gap is kept, the volume never proves,
   at stage or at apply (first or resumed), even with J_v reaching n (equal numbers are not the same
@@ -3076,7 +3081,9 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
 - **Quarantine instead of refusal, the conditions.** The threshold is durable (above), the cohort
   covers every representation (descriptor, migration row, 3.7 file), and nothing automatic turns
   missing proof into access: while the local journal is behind the threshold, `release` (back to
-  normal access) answers `409 transcript.releaseBehind`. The audited Owner recovery read stays the
+  normal access) answers `409 transcript.releaseBehind`, and while the marker still owes off-host
+  proof (`unverified`, `required`, `overflow`) or a fork was seen, `409 transcript.releaseUnproven`
+  (R6-H2). The audited Owner recovery read stays the
   only, exceptional, access.
 - **Owner decisions of 2026-11-26, as built.** `erasure.recover_journal(st, sid, diag)` re-checks,
   under the sid's lease and in one transaction, that every descriptor is `quarantined` with reason
@@ -3146,6 +3153,19 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   (`CLEANUP_BACKOFF` doubling to `CLEANUP_BACKOFF_MAX`) and raises `transcript.erasureCleanup`
   from `CLEANUP_ALARM_AFTER` failures. A restart loses the task; the boot's retired-generation
   collection covers it then.
+- **Recheck (464852b) fixes.** *R6-H1:* `fetch_head` tags a fork it detects with the highest n the
+  destination lists; `fetch_all` reports it as `DestResult(error="conflict", unverified=n)`, and
+  `decide_restore` treats `conflict` like `unverifiable` (`erasure.GAP_ERRORS`): every proof refused,
+  the gap kept in the summary → flag → marker, so neither the first apply nor a resumed one, nor a
+  later restore reading the live marker, accepts the volume journal as proof. The restore is not
+  refused (the database is still restored, its recordings quarantined); the fork is logged at stage
+  and `try_prove` keeps refusing while it lasts. *R6-H2:* `erasure.release` (checked before and again
+  in the status transaction, with a CAS on the marker) refuses with `transcript.releaseUnproven`
+  while the marker has `unverified`, `required` or `overflow`, or `_s.conflict` is set; `_behind`
+  stays the numeric check for `erase` / discard (a new local entry next to a gap at the same n does
+  not create a fork that was not already there). *R6-L1:* `_cleanup_delay` caps the exponent before
+  the multiplication; `run_cleanup` keeps a task whose `retire` returned `deferred` (re-checked after
+  `CLEANUP_BACKOFF`, not a failure), so an unlink that fails after the last unpin is retried.
 
 ## Appendix: Test vectors (v1)
 

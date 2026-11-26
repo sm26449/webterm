@@ -369,6 +369,7 @@ const ro: Lang = {
     'err.transcript.notRecoverable': "Doar o înregistrare pusă în carantină din lipsa dovezii ștergerilor poate fi recuperată.",
     'err.transcript.erasureBehind': "Ștergerile făcute înainte de ultima restaurare nu sunt încă pe acest server. Ștergerea e refuzată până sunt dovedite.",
     'err.transcript.releaseBehind': "Ștergerile făcute înainte de ultima restaurare nu sunt încă pe acest server. Înregistrarea rămâne în recuperare până sunt dovedite.",
+    'err.transcript.releaseUnproven': "O destinație de backup încă datorează dovada ștergerilor făcute după ultima restaurare sau are jurnale de ștergere divergente. Înregistrarea rămâne în recuperare până când acea destinație le dovedește sau un Owner o retrage.",
     'err.transcript.journalNotDiagnosed': "System health nu arată diagnosticul jurnalului de ștergeri pentru care înregistrarea e în carantină, deci nu poate fi recuperată.",
     'err.transcript.journalRecoveryConfirm': "Tastează primele 8 caractere ale sesiunii urmate de diagnosticul jurnalului ({diag}) ca să confirmi.",
     'err.transcript.recoveryNoKey': "Cheia acestei înregistrări a fost distrusă de o ștergere, deci nu poate fi recuperată.",

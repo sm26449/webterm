@@ -682,6 +682,49 @@ async def g_cancel(st, host_id):
               (left, gen_files(sid7), [r["state"] for r in rows]))
     finally:
         st._unlink_if_ours_sync = orig_unlink
+    # R6-L1: exponentul plafonat (30.0 * 2**1100 ar da OverflowError chiar în ramura de eroare)
+    check("R6-L1: the backoff exponent is capped (no float overflow after many failures)",
+          er._cleanup_delay(1) == er.CLEANUP_BACKOFF and er._cleanup_delay(10 ** 6) == er.CLEANUP_BACKOFF_MAX)
+    # R6-L1: o generaţie fixată de un cititor → „deferred"; dacă unlink-ul de la ultimul unpin eşuează,
+    # sarcina de curăţare (păstrată) îl reia până la rândul `gone`
+    sid8, _ = await make_rec(st, host_id)
+    gens8 = [r["gen_id"] for r in await db.fetchall("SELECT gen_id FROM tx_files WHERE sid=?", sid8)]
+    cancelled8 = await _cancel_erase(st, sid8, "pre-commit#1")
+    st.pin_gens(gens8)
+    now = {"t": 5000.0}
+    pinned = True
+    try:
+        ok = await er.resume_intents(st, clock=lambda: now["t"])
+        check("R6-L1: a pinned generation at cleanup → deferred, the task is kept (not a failure), files there",
+              cancelled8 and ok and sid8 in er._s.cleanup and er._s.cleanup[sid8]["tries"] == 0
+              and gen_files(sid8) != [], (cancelled8, ok, er._s.cleanup, gen_files(sid8)))
+        er._s.cleanup[sid8]["tries"] = 5000
+        fails = {"left": 1}
+        st._unlink_if_ours_sync = unlink_eio
+        st.unpin_gens(gens8)                                    # ultimul unpin: retire amânat, eşuează (EIO)
+        pinned = False
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if fails["left"] == 0:
+                break
+        await asyncio.sleep(0.05)
+        check("R6-L1: …the unpin's deferred unlink failed: files and the retired row still there",
+              fails["left"] == 0 and gen_files(sid8) != [], (fails, gen_files(sid8)))
+        fails["left"] = 1
+        now["t"] += er.CLEANUP_BACKOFF
+        left = await er.run_cleanup(st, clock=lambda: now["t"])
+        check("R6-L1: …a failure after 5000 tries: no overflow, next try at most CLEANUP_BACKOFF_MAX away",
+              sid8 in left and er._s.cleanup[sid8]["next"] <= now["t"] + er.CLEANUP_BACKOFF_MAX, er._s.cleanup)
+        now["t"] += er.CLEANUP_BACKOFF_MAX
+        left = await er.run_cleanup(st, clock=lambda: now["t"])
+        rows = await db.fetchall("SELECT state FROM tx_files WHERE sid=?", sid8)
+        check("R6-L1: …the kept task re-tries and unlinks (rows gone), task done",
+              left == [] and gen_files(sid8) == [] and rows and all(r["state"] == "gone" for r in rows),
+              (left, gen_files(sid8), [r["state"] for r in rows]))
+    finally:
+        st._unlink_if_ours_sync = orig_unlink
+        if pinned:
+            st.unpin_gens(gens8)
     # janitorul o face singur, imediat (trezit de anulare, nu la următorul interval)
     sid4, _ = await make_rec(st, host_id)
     er.start(st)
@@ -1563,6 +1606,93 @@ def g_r5h1_restore():
         config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
 
 
+def _real_fetch(dests):
+    """The stage's `erasure_fetch` through the REAL `fetch_all` / `fetch_head` (own loop, own thread:
+    the staging is synchronous and this test runs inside the main loop)."""
+    import concurrent.futures
+
+    def fetch(k, inst):
+        with concurrent.futures.ThreadPoolExecutor(1) as ex:
+            return ex.submit(asyncio.run, er.fetch_all(dests, k, inst)).result(), [d.id for d in dests]
+    return fetch
+
+
+def g_r6h1_restore():
+    print("== R6-H1: a fork a destination holds (fetch → conflict) blocks every proof (stage → apply → resume) ==")
+    saved = (config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR)
+    try:
+        hk = prot_volume("prot-r6h1")
+        ents = [(8100 + i, s, 3, bytes(32)) for i, s in enumerate(sids(3))]
+        j1, j2, j3 = build(ents[:1]), build(ents[:2]), build(ents[:3])
+        j3b = _extend(j2, bytes([0x6b] * 16))                     # altă ramură la n=3 (o ştergere absentă local)
+        jp = config.DATA_DIR / er.JOURNAL_NAME
+        set_head(config.DB_PATH, j1, descs=["e6" * 16])
+        jp.write_bytes(j1)
+        blob = backup.make_encrypted(PASS, keys=hk)                # backup la n=1
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)                                          # J_v ajunge la capul viu n=2
+        d = FakeDest("sftp:u@h:22/r6h1")
+        d.objs = {er.object_name(INST, 3, "aa11bb22"): j3, er.object_name(INST, 3, "cc33dd44"): j3b}
+        fork = _real_fetch([d])
+        res, _ids = fork(K, INST)
+        check("R6-H1: the real fetch reports the fork as a gap at its n (conflict, n=3)",
+              res[0].error == "conflict" and res[0].unverified == 3 and not res[0].ok, res)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("control: no destination, J_v reaches the live head n=2 → stage proven by the volume",
+              info.get("erasure_proof") == "volume", info)
+        info = backup.stage_restore(blob, PASS, keys=hk, erasure_fetch=fork)
+        check("R6-H1: J_v reaches n=2 but the destination holds two authentic n=3 → stage unproven "
+              "(never proof=volume)", info.get("erasure") == "unproven" and info.get("erasure_proof") == "none", info)
+        jp.write_bytes(j3)                                          # J_v ajunge şi la n=3 (una dintre ramuri)
+        backup._fault = _crash_at("apply:db")
+        try:
+            crashed = raises(lambda: backup.apply_pending_restore(keys=hk), _Crash)
+        finally:
+            backup._fault = None
+        flag = json.loads(backup._restore_flag().read_bytes())
+        check("R6-H1: …the fork travels in the flag as a gap (destination → 3), no proof",
+              crashed and flag.get("erasure_unverified") == {d.id: 3} and flag.get("erasure_proven") is False, flag)
+        backup.apply_pending_restore(keys=hk)                       # reluare
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("R6-H1: …resumed apply with J_v on one branch at n=3: quarantined, the fork kept in the marker "
+              "(known + mandatory)", cont.get("state") == "unproven" and cont.get("unverified") == {d.id: 3}
+              and cont.get("known", {}).get(d.id) == 3 and d.id in cont.get("required", []), cont)
+        # primul apply, fără crash
+        set_head(config.DB_PATH, j2)
+        jp.write_bytes(j2)
+        con = sqlite3.connect(str(config.DB_PATH))
+        con.execute("DELETE FROM tx_state WHERE key='continuity'")
+        con.commit()
+        con.close()
+        backup.stage_restore(blob, PASS, keys=hk, erasure_fetch=fork)
+        jp.write_bytes(j3)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        cont = tx_state("continuity") or {}
+        check("R6-H1: first apply (no crash) → unproven, the fork kept", cont.get("state") == "unproven"
+              and cont.get("unverified") == {d.id: 3}, cont)
+        set_head(config.DB_PATH, j3)
+        jp.write_bytes(j3)
+        info = backup.stage_restore(blob, PASS, keys=hk)
+        check("R6-H1: the live marker keeps the fork: the next restore without destinations proves nothing",
+              info.get("erasure_proof") == "none", info)
+        backup.apply_pending_restore(keys=hk)
+        hk = reopen(hk)
+        # pur: un fork + o dovadă locală şi o destinaţie autentică altfel suficiente
+        live = er.Live("same", er.parse(j2, K, INST).head)
+        other = er.DestResult("sftp:u@h:22/other", True, er.parse(j3, K, INST), j3)
+        dd = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, j_v=j3, live=live,
+                               dest_results=[other, res[0]], required_dests={other.id, d.id})
+        check("R6-H1: decide_restore: J_v and another destination reaching n=3 do not outweigh a fork → no proof",
+              dd.proof == "none" and dd.unverified == {d.id: 3} and d.id in dd.required, dd)
+        dd = er.decide_restore(k_erase=K, inst=INST, j_b=j1, tracked=True, j_v=j3, live=live,
+                               dest_results=[er.DestResult(d.id, False, error="conflict")])
+        check("R6-H1: a conflict result without n still refuses every proof", dd.proof == "none", dd)
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.TRANSCRIPT_DIR = saved
+
+
 async def g_r5h1_prove(st):
     print("== R5-H1: the janitor lifts the restore's gap only once that destination is readable ==")
     cur = journal_path().read_bytes()
@@ -1770,10 +1900,69 @@ async def g_behind(st, host_id):
           await er.try_prove(st) is False and er.continuity() is not None)
     await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": head.to_json(),
                           "known": {d.id: n}, "required": [d.id]})
-    check("…the same destination still mandatory and proving → release allowed before, lift after",
-          await er.release(st, rec) is not None and await er.try_prove(st) is True
-          and er.continuity() is None)
+    # R6-H2: o destinaţie obligatorie îşi datorează dovada: release refuzat cât timp markerul o cere,
+    # chiar dacă jurnalul local atinge numeric totul; try_prove (dovada ei) ridică
+    check("…the same destination still mandatory: release refused (R6-H2, it owes proof), try_prove lifts",
+          await _erasure_code(er.release(st, rec)) == "transcript.releaseUnproven"
+          and (await statuses())[(rec, "out")] == "recovery"
+          and await er.try_prove(st) is True and er.continuity() is None
+          and (await statuses())[(rec, "out")] == "ok")
     DESTS[:] = []
+    await unquarantine_all()
+
+
+async def g_r6h2_release(st, c, uid, host_id):
+    print("== R6-H2: release never lifts a quarantine that still owes off-host proof ==")
+    cur = journal_path().read_bytes()
+    p = er.parse(cur, K, INST)
+    n = p.n
+    rec, data = await make_rec(st, host_id)
+    await st.txn(lambda cu: er._quarantine_cohort_sync(cu, "continuity", time.time()))
+    d = FakeDest("sftp:u@h:22/r6h2")
+    d.objs[er.object_name(INST, n)] = cur[:-1] + bytes([cur[-1] ^ 1])          # n neautentic
+    DESTS[:] = [d]
+    # exact ce scrie restore-ul (R5-H1): golul la n == capul local (numeric atins)
+    mark = {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+            "known": {d.id: n}, "required": [d.id], "unverified": {d.id: n}}
+    await set_marker(st, mark)
+    check("R6-H2: local.n == unverified.n → not behind (numerically reached)", not er._behind())
+    r = await c.post(f"/api/sessions/{rec}/recovery", json={"confirm": time.strftime("%Y-%m-%d", time.gmtime(1)),
+                                                             "stepup_grant": grant(uid, host_id)})
+    check("recover (audited Owner read) still works", r.status_code == 200
+          and (await statuses())[(rec, "out")] == "recovery", r.text)
+    r = await c.post(f"/api/sessions/{rec}/recovery/release", json={"stepup_grant": grant(uid, host_id)})
+    check("R6-H2: recover → release with local.n == unverified.n → 409 transcript.releaseUnproven, stays in recovery",
+          r.status_code == 409 and r.json().get("code") == "transcript.releaseUnproven"
+          and (await statuses())[(rec, "out")] == "recovery"
+          and (await c.get(f"/api/sessions/{rec}/transcript?format=out")).status_code == 423, r.text)
+    check("R6-H2: …and try_prove keeps it while the destination still holds the damaged object",
+          await er.try_prove(st) is False and er.continuity() is not None)
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+                          "unverified": {d.id: n}})
+    check("R6-H2: a gap alone (not mandatory) also refuses release",
+          await _erasure_code(er.release(st, rec)) == "transcript.releaseUnproven")
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json(),
+                          "overflow": True})
+    check("R6-H2: an overflowed marker refuses release",
+          await _erasure_code(er.release(st, rec)) == "transcript.releaseUnproven")
+    await set_marker(st, {"state": "unproven", "since": 1, "n": n, "threshold": p.head.to_json()})
+    er._s.conflict = "erasure journals at sftp:x diverge (test)"
+    try:
+        check("R6-H2: a fork seen (System health conflict) refuses release",
+              await _erasure_code(er.release(st, rec)) == "transcript.releaseUnproven")
+    finally:
+        er._s.conflict = ""
+    # retragerea auditată: destinaţia nu mai e configurată, golul devine cap cunoscut, obligaţia e închisă
+    DESTS[:] = []
+    await set_marker(st, mark)
+    await er.retire_destination(st, d.id, audit_row={"ts": time.time(), "actor": "o@x.co", "path": "/t"})
+    cont = er.continuity() or {}
+    check("R6-H2: after the audited retire (gap → known head, no longer required) the release is allowed",
+          "unverified" not in cont and "required" not in cont and cont.get("known", {}).get(d.id) == n
+          and await er.release(st, rec) is not None and (await statuses())[(rec, "out")] == "ok"
+          and await read_all(st, rec) == data, cont)
+    await st.txn(lambda cu: cu.execute("DELETE FROM tx_state WHERE key='continuity'"))
+    er._s.continuity = None
     await unquarantine_all()
 
 
@@ -2318,6 +2507,7 @@ async def main():
     g_rh1_consecutive()
     g_r2m2_restore()
     g_r5h1_restore()
+    g_r6h1_restore()
     g_live_bad_restore()
     await g_r4_fetch()
     config.ensure_dirs()
@@ -2346,6 +2536,7 @@ async def main():
         await g_behind(st, host_id)
         await g_retire(st, c, uid, host_id)
         await g_r5h1_prove(st)
+        await g_r6h2_release(st, c, uid, host_id)
         st = await g_rh2(st, c, uid, host_id)
     finally:
         await txhub.shutdown()

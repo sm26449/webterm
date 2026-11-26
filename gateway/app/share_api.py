@@ -1083,6 +1083,8 @@ def _erasure_error(e) -> ApiError:
         return ApiError(409, "transcript.erasureBehind", msg)
     if c == "transcript.releaseBehind":
         return ApiError(409, "transcript.releaseBehind", msg)
+    if c == "transcript.releaseUnproven":
+        return ApiError(409, "transcript.releaseUnproven", msg)
     if c == "transcript.recoveryState":
         return ApiError(409, "transcript.recoveryState", msg)
     if c == "transcript.notRecoverable":
