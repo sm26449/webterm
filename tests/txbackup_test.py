@@ -23,6 +23,8 @@ Groups:
 Temp dirs; no network, no Docker.
 """
 import asyncio
+import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -691,6 +693,98 @@ async def g_socket(st, hk):
 # ── 5. retention purge ──────────────────────────────────────────────────────
 
 
+# Producţia: container read_only, /tmp tmpfs de 64 MiB (3.8 rc3: `hostops backup --live` murea cu
+# ENOSPC). Un temporar fără `dir=` explicit (directorul temporar al sistemului) eşuează aici ca acolo.
+_TMP_POS = {"mkstemp": 2, "mkdtemp": 2, "TemporaryDirectory": 2, "TemporaryFile": 6,
+            "NamedTemporaryFile": 6, "SpooledTemporaryFile": 7}
+
+
+@contextlib.contextmanager
+def system_tmp_full():
+    hits = []
+    saved = {n: getattr(tempfile, n) for n in _TMP_POS}
+
+    def wrap(n, f):
+        def g(*a, **kw):
+            d = kw.get("dir", a[_TMP_POS[n]] if len(a) > _TMP_POS[n] else None)
+            if d is None:
+                hits.append(n)
+                raise OSError(errno.ENOSPC, "No space left on device (test: the system temp dir is full)")
+            return f(*a, **kw)
+        return g
+    for n, f in saved.items():
+        setattr(tempfile, n, wrap(n, f))
+    try:
+        yield hits
+    finally:
+        for n, f in saved.items():
+            setattr(tempfile, n, f)
+
+
+def work_entries():
+    d = config.DATA_DIR / "backups" / backup.WORK_DIR
+    return sorted(os.listdir(d)) if d.is_dir() else []
+
+
+async def g_workdir(st, hk):
+    print("== protected backups with the system temp dir full (scratch on the data volume) ==")
+    backup.set_host_keys_provider(lambda: hk)
+    ok = await ctlsock.start()
+    try:
+        with system_tmp_full() as hits:
+            blob = await asyncio.to_thread(hostops._live_via_socket, hk, PASS, True)
+            name = await asyncio.to_thread(backup.run_scheduled_backup, True, hk)
+            dl = await asyncio.to_thread(backup.make_encrypted, PASS, True, hk)
+            v1 = await asyncio.to_thread(backup.verify_restorable, blob, PASS, keys=hk)
+            v2 = await asyncio.to_thread(backup.verify_stored, name, keys=hk)
+        mem, man = archive(blob, hk)
+        check("hostops --live, scheduled, download and both verifies succeed; nothing in the system temp dir",
+              ok and gen_members(mem) and v1["restorable"] and v2 and dl[:5] == b"WTBK1" and hits == [], hits)
+        check("…the work dir is left empty, the socket spool too", work_entries() == [] and spool_files() == [],
+              (work_entries(), spool_files()))
+        orig = backup._TarOut.finish
+
+        def boom(self, *a, **kw):
+            raise OSError(errno.EIO, "test: I/O error")
+        backup._TarOut.finish = boom
+        try:
+            failed = await asyncio.to_thread(raises, lambda: backup.make_encrypted(PASS, True, hk), OSError)
+            live_failed = await asyncio.to_thread(raises, lambda: hostops._live_via_socket(hk, PASS, True),
+                                                  hostops.Refused)
+        finally:
+            backup._TarOut.finish = orig
+        check("a failed protected backup (in-app and --live) leaves nothing in the work dir",
+              failed and live_failed and work_entries() == [] and spool_files() == [], (work_entries(), spool_files()))
+        held = []
+        with backup.work_dir("hostops-") as d:
+            held.append(sorted(os.listdir(config.DATA_DIR / "backups" / backup.WORK_DIR)))
+            with system_tmp_full() as hits2:
+                n = backup.sweep_work(grace=0)
+            held.append(os.path.isdir(d))
+        check("a sweep never removes a work dir held by a live operation", n == 0 and held[1] and not hits2, held)
+        with contextlib.ExitStack() as stack:
+            on_vol = hostops._verify_scratch(stack)
+            vol_ok = on_vol.startswith(str(config.DATA_DIR / "backups" / backup.WORK_DIR) + os.sep)
+        saved_wd = backup.work_dir
+
+        def ro(prefix="op-", err=errno.EROFS):
+            raise OSError(err, "test")
+        backup.work_dir = ro
+        try:
+            with contextlib.ExitStack() as stack:
+                fb = hostops._verify_scratch(stack)
+                fb_ok = os.path.isdir(fb) and not fb.startswith(str(config.DATA_DIR))
+            backup.work_dir = lambda prefix="op-": ro(prefix, errno.EACCES)
+            other = raises(lambda: hostops._verify_scratch(contextlib.ExitStack()), PermissionError)
+        finally:
+            backup.work_dir = saved_wd
+        check("hostops verify: scratch on the volume; only a read-only volume falls back to the system temp "
+              "dir (removed after); any other error refuses",
+              vol_ok and not os.path.exists(on_vol) and fb_ok and not os.path.exists(fb) and other)
+    finally:
+        await ctlsock.stop()
+
+
 async def g_purge(st):
     print("== retention purge by archived_at ==")
     txhub._store = st
@@ -886,6 +980,7 @@ async def main():
     st, hk = await g_damaged(st, hk, a, a_out)
     await g_concurrent(st, hk)
     await g_socket(st, hk)
+    await g_workdir(st, hk)
     await g_purge(st)
     st, hk = await g_h2_cohort(st, hk)
     await g_legacy_onto_migrated(st, hk)

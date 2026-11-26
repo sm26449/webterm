@@ -18,6 +18,7 @@ Scenarii end-to-end pe volume temporare:
     clean-up (temporarele şi staging-ul rămân)."""
 import asyncio
 import base64
+import fcntl
 import hashlib
 import os
 import sqlite3
@@ -25,6 +26,7 @@ import stat
 import sys
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = tempfile.mkdtemp(prefix="wt-bootkeys-")
@@ -981,6 +983,28 @@ def test_rm2_maint_lock_perms():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def test_boot_sweeps_backup_work():
+    print("── boot: temporarele unui backup întrerupt (backups/.work) se şterg; una în uz rămâne")
+    d, kf, mk, res = protected_volume("work-sweep")
+    bootkeys.release()
+    wd = d / "backups" / backup.WORK_DIR
+    wd.mkdir(parents=True, mode=0o700)
+    old = time.time() - 3600
+    for n in ("op-dead", "op-live"):
+        (wd / n).mkdir()
+        (wd / n / "webterm.db").write_bytes(b"x" * 100)
+        os.utime(wd / n, (old, old))
+    held = os.open(str(wd / "op-live"), os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    try:
+        prepare({"WEBTERM_MASTER_KEY_FILE": kf})
+        left = sorted(os.listdir(wd))
+    finally:
+        os.close(held)
+        bootkeys.release()
+    check("boot removed the dead work dir and kept the one held by a live operation", left == ["op-live"], left)
+
+
 def main_():
     test_legacy_no_key()
     test_legacy_migrates()
@@ -998,6 +1022,7 @@ def main_():
     test_m3_admin_maintenance()
     test_rm2_maint_lock_perms()
     test_rm3_schema_fingerprint()
+    test_boot_sweeps_backup_work()
     print(f"\n{ok}/{total} passed")
     raise SystemExit(0 if ok == total else 1)
 

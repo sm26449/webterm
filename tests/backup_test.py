@@ -3,6 +3,9 @@
 Verifică: roundtrip criptare (scrypt→AES-GCM), respingerea parolei greșite / fișierului
 străin, snapshot crash-consistent (VACUUM INTO) cu cheia seifului, backup-uri programate +
 retenție, și fluxul stage→apply al restore-ului (swap DB + cheie la boot). Fără WS/HTTP."""
+import contextlib
+import errno
+import fcntl
 import os
 import sqlite3
 import sys
@@ -39,6 +42,115 @@ def _seed_db(email="a@b.c"):
     con.commit()
     con.close()
     (config.DATA_DIR / "secret").write_bytes(b"S" * 32)
+
+
+# Producţia rulează containerul read_only cu /tmp tmpfs de 64 MiB (3.8 rc3: backup-ul cu
+# transcripturi murea cu ENOSPC). Orice temporar fără `dir=` explicit (= directorul temporar al
+# sistemului) eşuează aici ca acolo, şi e numărat: backup-ul trebuie să lucreze pe volum.
+_TMP_POS = {"mkstemp": 2, "mkdtemp": 2, "TemporaryDirectory": 2, "TemporaryFile": 6,
+            "NamedTemporaryFile": 6, "SpooledTemporaryFile": 7}
+
+
+@contextlib.contextmanager
+def system_tmp_full():
+    hits = []
+    saved = {n: getattr(tempfile, n) for n in _TMP_POS}
+
+    def wrap(n, f):
+        def g(*a, **kw):
+            d = kw.get("dir", a[_TMP_POS[n]] if len(a) > _TMP_POS[n] else None)
+            if d is None:
+                hits.append(n)
+                raise OSError(errno.ENOSPC, "No space left on device (test: the system temp dir is full)")
+            return f(*a, **kw)
+        return g
+    for n, f in saved.items():
+        setattr(tempfile, n, wrap(n, f))
+    try:
+        yield hits
+    finally:
+        for n, f in saved.items():
+            setattr(tempfile, n, f)
+
+
+def work_entries():
+    d = config.DATA_DIR / "backups" / backup.WORK_DIR
+    return sorted(os.listdir(d)) if d.is_dir() else []
+
+
+def workdir_tests():
+    print("== backup scratch on the data volume, never the system temp dir ==")
+    tdir = config.TRANSCRIPT_DIR
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "big.out").write_bytes(os.urandom(256 * 1024))
+    with system_tmp_full() as hits:
+        snap = backup.make_snapshot(include_transcripts=True)
+        blob = backup.make_encrypted("parola-tare", include_transcripts=True)
+        name = backup.run_scheduled_backup(include_transcripts=True)
+        info = backup.verify(blob, "parola-tare")
+    check("legacy: snapshot, download, scheduled backup and verify with the system temp dir full",
+          snap and info["has_transcripts"] and (config.DATA_DIR / "backups" / name).is_file() and hits == [],
+          hits)
+    check("…the work dir is 0700 and left empty", work_entries() == []
+          and (os.stat(config.DATA_DIR / "backups" / backup.WORK_DIR).st_mode & 0o777) == 0o700)
+    check("a legacy volume with backups/.work stays legacy (not a 3.8 trace)", backup.volume_kind() == "legacy")
+    # eşec la mijloc: temporarele dispar
+    orig = backup.sqlite3.connect
+
+    def boom(*a, **kw):
+        raise OSError(errno.EIO, "test: I/O error")
+    backup.sqlite3.connect = boom
+    try:
+        try:
+            backup.make_snapshot(include_transcripts=True)
+            failed = False
+        except OSError:
+            failed = True
+    finally:
+        backup.sqlite3.connect = orig
+    check("a failed backup leaves nothing in the work dir", failed and work_entries() == [])
+    # sweep: rest de crash (lock liber, vechi) şters; unul ţinut de o operaţie vie sau proaspăt rămâne
+    wd = config.DATA_DIR / "backups" / backup.WORK_DIR
+    old = time.time() - 3600
+    (wd / "op-dead").mkdir()
+    (wd / "op-dead" / "webterm.db").write_bytes(b"x" * 1000)
+    (wd / "stray-file").write_bytes(b"y")
+    (wd / "op-live").mkdir()
+    (wd / "op-young").mkdir()
+    for n in ("op-dead", "stray-file", "op-live"):
+        os.utime(wd / n, (old, old))
+    held = os.open(str(wd / "op-live"), os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    try:
+        n = backup.sweep_work()
+        kept = work_entries()
+        with backup.work_dir() as td:
+            inside = os.path.isdir(td) and os.path.dirname(td) == str(wd)
+        after_op = work_entries()
+    finally:
+        os.close(held)
+    check("boot sweep: dead entries removed, a locked (in use) and a fresh one kept",
+          n == 2 and kept == ["op-live", "op-young"], (n, kept))
+    check("work_dir() lives under backups/.work and is removed after use", inside and after_op == ["op-live", "op-young"],
+          after_op)
+    os.utime(wd / "op-live", (old, old))
+    os.utime(wd / "op-young", (old, old))
+    check("…once released, the next sweep removes them", backup.sweep_work() == 2 and work_entries() == [])
+    # .work ca symlink → refuz, nu urmat
+    os.rmdir(wd)
+    elsewhere = tempfile.mkdtemp()
+    os.symlink(elsewhere, wd)
+    try:
+        try:
+            with backup.work_dir():
+                pass
+            refused = False
+        except ValueError:
+            refused = True
+    finally:
+        os.unlink(wd)
+        os.rmdir(elsewhere)
+    check("backups/.work as a symlink → refused, never followed", refused)
 
 
 def main():
@@ -214,6 +326,8 @@ def main():
     good = config.DATA_DIR / "backups" / backup.run_scheduled_backup()
     check("snapshot complet după scriere atomică", good.stat().st_size > 0 and
           (good.stat().st_mode & 0o777) == 0o600)
+
+    workdir_tests()
 
     print(f"\n{ok}/{total} teste trecute")
     sys.exit(0 if ok == total else 1)

@@ -178,6 +178,16 @@ def prepare(env=None, data_dir=None, hold_maintenance=False):
             log.warning("restore applied at boot from an encrypted backup; keys.wtk re-opened "
                         "(epoch %d)", ring.epoch)
         security.init_crypto_keyring(res.keyring.fk_legacy, res.keyring.fk)
+    # temporarele unui backup / restore întrerupt (crash, container oprit) din backups/.work: sub
+    # lock-ul procesului nu mai rulează nicio operaţie a gateway-ului; una ţinută de alt proces
+    # (flock) rămâne. Un eşec aici nu opreşte boot-ul: următoarea operaţie mătură din nou.
+    try:
+        n = backup.sweep_work()
+        if n:
+            log.warning("backup: removed %d leftover work entr%s of an interrupted backup or restore",
+                        n, "y" if n == 1 else "ies")
+    except (OSError, ValueError) as e:
+        log.warning("backup: the work directory could not be swept at boot (%s)", e)
     STATE.update(mode=res.state.mode, source=res.state.source, key_location=res.state.key_location,
                  warnings=tuple(res.state.warnings), migrated=bool(res.state.migrated),
                  restore_applied=applied["restore"], legacy_proof=applied["proof"])

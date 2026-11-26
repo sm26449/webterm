@@ -40,6 +40,7 @@ INV-14 (docs/design/INVARIANTS.md): the key decides before anything is written.
 """
 import argparse
 import contextlib
+import errno
 import hashlib
 import os
 import secrets
@@ -263,7 +264,16 @@ def _live_via_socket(hk, passphrase, include):
         raise Refused("the running gateway did not answer on its backup control socket (%s): a live "
                       "volume with encrypted recordings is never read directly — refused. System health "
                       "shows why the socket is missing; or stop the app and back up again" % e) from None
-    fd, tmp = tempfile.mkstemp(prefix="wt-live-", suffix=".wts")
+    # WTS-ul primit stă în directorul de lucru de pe volumul de date (backup.work_dir), niciodată
+    # în /tmp: în containerul app-ului /tmp e un tmpfs de 64 MiB, iar arhiva are mărimea datelor
+    scratch = contextlib.ExitStack()
+    try:
+        tmp = os.path.join(scratch.enter_context(backup.work_dir("live-")), "live.wts")
+        fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except BaseException:
+        client.close()
+        scratch.close()
+        raise
     try:
         with os.fdopen(fd, "w+b") as f:
             try:
@@ -279,8 +289,7 @@ def _live_via_socket(hk, passphrase, include):
             data = f.read()
     finally:
         client.close()
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
+        scratch.close()
     return backup.encrypt(data, passphrase)
 
 
@@ -330,19 +339,35 @@ def _check(raw, kind, inv, hk, legacy_import):
         raise Refused("the archive is refused: %s" % _refusal(e)) from None
 
 
+def _verify_scratch(stack):
+    """The verify's private scratch data dir. On a writable volume (app running: `docker exec`,
+    where /tmp is a 64 MiB tmpfs) it is a work dir on the volume, like every backup temporary
+    (backup.work_dir). Only a volume mounted read-only (backup.sh's `ro` container, app stopped,
+    whose /tmp is the container's disk layer) falls back to the system temp dir."""
+    try:
+        return stack.enter_context(backup.work_dir("hostops-"))
+    except OSError as e:
+        if e.errno != errno.EROFS:
+            raise
+    scratch = tempfile.mkdtemp(prefix="wt-hostops-")
+    stack.callback(shutil.rmtree, scratch, True)
+    return scratch
+
+
 def cmd_verify(args):
     raw, digest = _read_stdin(args.sha256)
     kind = _archive_kind(raw)
     view = _DirView(str(config.DATA_DIR))
-    scratch = tempfile.mkdtemp(prefix="wt-hostops-")
+    stack = contextlib.ExitStack()
     try:
+        scratch = _verify_scratch(stack)
         inv = _inventory(view)
         hk = None
         if inv.kind == "protected":
             hk, resolved = _open_keys(view, inv)
             blob = _manifest_bytes(view.dir_fd)
         view.release()
-        # nimic din volum nu se scrie: lock-ul operaţiilor şi temporarele stau în scratch
+        # volumul nu se schimbă: lock-ul operaţiilor şi temporarele stau în scratch (privat, şters la final)
         _point_at(scratch)
         if hk is not None:
             fd = os.open(os.path.join(scratch, keys.MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -351,7 +376,7 @@ def cmd_verify(args):
         route, info = _check(raw, kind, inv, hk, args.legacy_import)
     finally:
         view.release()
-        shutil.rmtree(scratch, ignore_errors=True)
+        stack.close()
     print("sha256: %s" % digest)
     print("volume: %s" % inv.kind)
     print("archive: %s" % ("legacy-import" if route == "legacy-import" else info.get("format") or "legacy"))

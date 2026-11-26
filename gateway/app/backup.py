@@ -25,6 +25,7 @@ inventarul transcripturilor e o listă de permisiuni parcursă prin fd-uri (H3);
 extractor tar strict pentru WTS1 şi importul 3.7 (M1/M3); writer-ul aplică bugetele cititorului
 şi îşi verifică produsul (M2); un container cere un singur MK, cel din header (M4).
 """
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -118,6 +119,138 @@ def _restore_flag():
     return config.DATA_DIR / ".restore-flag"
 
 
+# ---------------------------------------------------------------- work dir (scratch on the volume)
+# Toate temporarele unui backup / restore (copia VACUUM INTO, spool-urile de transcript, WTS-ul
+# primit prin socket, DB-ul extras la verificare) stau AICI, pe volumul de date, niciodată în
+# directorul temporar al sistemului: în producţie containerul e read_only cu /tmp tmpfs de 64 MiB,
+# iar un backup cu transcripturi murea cu ENOSPC (3.8 rc3). Un director privat per operaţie,
+# ţinut sub flock cât trăieşte; ce rămâne de la un crash (lock liber) se şterge la boot şi înaintea
+# fiecărei operaţii. Sub backups/, deci fără nume rezervate în rădăcina volumului (keys.find_reserved,
+# txstore.inventory) şi fără să se potrivească cu `_NEW_BACKUP` (inventarul legacy vs 3.8).
+WORK_DIR = ".work"
+WORK_GRACE_SECS = 60           # fereastra mkdir → flock a creatorului; mai tânăr de atât nu se atinge
+_WORK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _check_private_dir(fd, what: str) -> None:
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+        raise ValueError("%s is not a directory of this service — refused" % what)
+    if st.st_mode & 0o077:
+        os.fchmod(fd, 0o700)
+
+
+def _open_work_root(create: bool):
+    """fd of backups/.work (0700, ours, never a symlink), or None when absent and not `create`."""
+    if create:
+        bdir = _backup_dir()
+    else:
+        bdir = config.DATA_DIR / "backups"
+    try:
+        bfd = os.open(str(bdir), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if create:
+            raise
+        return None
+    try:
+        if create:
+            try:
+                os.mkdir(WORK_DIR, 0o700, dir_fd=bfd)
+            except FileExistsError:
+                pass
+        try:
+            wfd = os.open(WORK_DIR, _WORK_DIR_FLAGS, dir_fd=bfd)
+        except FileNotFoundError:
+            if create:
+                raise
+            return None
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError("backups/%s is not a plain directory (symlink?) — refused" % WORK_DIR) from None
+            raise
+    finally:
+        os.close(bfd)
+    try:
+        _check_private_dir(wfd, "backups/" + WORK_DIR)
+    except BaseException:
+        os.close(wfd)
+        raise
+    return wfd
+
+
+def _sweep_work_fd(wfd, wpath: str, grace: float) -> int:
+    """Removes what a dead operation left (an entry whose flock we can take, older than `grace`);
+    an entry in use (flock held by a live operation, in this or another process) is skipped."""
+    n = 0
+    now = time.time()
+    for name in os.listdir(wfd):
+        try:
+            st = os.stat(name, dir_fd=wfd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if now - st.st_mtime < grace:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=wfd)
+            n += 1
+            continue
+        try:
+            dfd = os.open(name, _WORK_DIR_FLAGS, dir_fd=wfd)
+        except OSError:
+            continue
+        try:
+            try:
+                fcntl.flock(dfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue                      # o operaţie vie îl ţine
+            # rmtree pe Linux merge prin fd-uri şi nu urmează symlink-uri dinăuntru
+            shutil.rmtree(os.path.join(wpath, name), ignore_errors=True)
+            n += 1
+        finally:
+            os.close(dfd)
+    return n
+
+
+def sweep_work(grace: float = WORK_GRACE_SECS) -> int:
+    """Boot / before each operation: stale entries of backups/.work removed. → how many."""
+    wfd = _open_work_root(create=False)
+    if wfd is None:
+        return 0
+    try:
+        return _sweep_work_fd(wfd, str(config.DATA_DIR / "backups" / WORK_DIR), grace)
+    finally:
+        os.close(wfd)
+
+
+@contextmanager
+def work_dir(prefix: str = "op-"):
+    """A private (0700, ours, flock-held) scratch directory for one backup / restore operation,
+    under DATA_DIR/backups/.work; removed on exit, success or failure. Never the system temp dir."""
+    wfd = _open_work_root(create=True)
+    wpath = str(config.DATA_DIR / "backups" / WORK_DIR)
+    dfd = None
+    try:
+        _sweep_work_fd(wfd, wpath, WORK_GRACE_SECS)
+        name = prefix + secrets.token_hex(12)
+        os.mkdir(name, 0o700, dir_fd=wfd)
+        dfd = os.open(name, _WORK_DIR_FLAGS, dir_fd=wfd)
+        fcntl.flock(dfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _check_private_dir(dfd, "the backup work directory")
+    except BaseException:
+        if dfd is not None:
+            os.close(dfd)
+        os.close(wfd)
+        raise
+    os.close(wfd)
+    path = os.path.join(wpath, name)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+        os.close(dfd)
+
+
 # ------------------------------------------------------------------ criptare
 def _derive(passphrase: str, salt: bytes) -> bytes:
     return Scrypt(salt=salt, length=32, n=_SCRYPT_N, r=8, p=1).derive(passphrase.encode("utf-8"))
@@ -153,7 +286,7 @@ def make_snapshot(include_transcripts: bool = False) -> bytes:
     if volume_kind() != "legacy":
         raise ValueError("this installation is protected: plaintext snapshots are refused")
     buf = io.BytesIO()
-    with tempfile.TemporaryDirectory() as td:
+    with work_dir() as td:
         dbcopy = os.path.join(td, "webterm.db")
         con = sqlite3.connect(str(config.DB_PATH))
         try:
@@ -334,16 +467,14 @@ def _inspect(raw: bytes) -> dict:
     necanonice, DB-ul EverShell, perechea de semnare, cheia dovedită pe DB-ul arhivei), doar că pe
     disc ajunge numai webterm.db (într-un director privat, şters după). Lipsa cheii nu e refuz aici
     (`has_secret` False; verify_restorable / staging-ul refuză). Orice arhivă invalidă → ValueError."""
-    td = tempfile.mkdtemp(prefix="wt-inspect-")
-    try:
-        arc, secret, users_since = _extract_legacy_strict(raw, td, keep_files=False, require_secret=False)
-        has_secret = secret is not None
-        del secret
-        arc.mem.clear()
-    except (OSError, EOFError) as e:
-        raise ValueError("corrupt file, or not a WebTerm backup") from e
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
+    with work_dir("inspect-") as td:
+        try:
+            arc, secret, users_since = _extract_legacy_strict(raw, td, keep_files=False, require_secret=False)
+            has_secret = secret is not None
+            del secret
+            arc.mem.clear()
+        except (OSError, EOFError) as e:
+            raise ValueError("corrupt file, or not a WebTerm backup") from e
     return {"has_secret": has_secret,
             "has_transcripts": bool(arc.dirs) or any(n.startswith("transcripts/") for n in arc.seen),
             "users_since": users_since}
@@ -1602,7 +1733,7 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
     # flag oprit: exact calea PR5 (boot-ul a refuzat deja un volum cu artefacte criptate)
     w = wts.Writer(out, installation_id=ring.installation_id, epoch=ring.epoch, mk_id=ring.mk_id,
                    snk=ring.snk if local else None, mk=hk.mk if portable else None)
-    with tempfile.TemporaryDirectory() as td:
+    with work_dir() as td:
         dbcopy = os.path.join(td, "webterm.db")
         con = sqlite3.connect(str(config.DB_PATH))
         try:
@@ -1651,7 +1782,7 @@ def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool
     ring = hk.ring
     dropped = {}
     for attempt in (0, 1):
-        with tempfile.TemporaryDirectory() as td:
+        with work_dir() as td:
             dbcopy = os.path.join(td, "webterm.db")
             try:
                 snap = txstore.backup_snapshot(dbcopy, kwk=ring.kwk, inst=ring.installation_id,
@@ -2034,17 +2165,13 @@ def _verify_wts(fileobj, hk: HostKeys, dest, mk=None, prefer="local", max_plaint
     `dest=None` = structural only (hash, nothing written). Returns (info, inner keyring)."""
     reader = wts.Reader(fileobj, max_plaintext)
     _unlock(reader, hk, mk, prefer)
-    tmp = None
-    if dest is None and restorable:
-        tmp = tempfile.mkdtemp(prefix="wt-verify-")
-    try:
+    with contextlib.ExitStack() as stack:
+        # DB-ul extras pentru verificare: în directorul de lucru de pe volum, nu în /tmp (tmpfs mic)
+        tmp = stack.enter_context(work_dir("verify-")) if dest is None and restorable else None
         info, inner_blob = _unpack_verified(reader, dest, db_dest=tmp)
         inner = _open_inner(inner_blob, reader, hk, mk)
         where = dest if dest is not None else tmp
         users_since = _check_db(os.path.join(where, "webterm.db")) if where is not None else None
-    finally:
-        if tmp is not None:
-            shutil.rmtree(tmp, ignore_errors=True)
     info.update({"has_secret": False, "has_keyring": True, "users_since": users_since,
                  "format": "WTS1", "portable": reader.portable, "restorable": where is not None,
                  "same_installation": inner.installation_id == hk.ring.installation_id})

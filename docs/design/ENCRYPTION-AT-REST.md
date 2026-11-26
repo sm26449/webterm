@@ -1376,9 +1376,12 @@ the body is read, and cut off at 512 MiB while streaming when the length is abse
 - No global concurrency limit for downloads / scheduled backups; verify, stage and apply are
   serialised by the operations lock only.
 - Plaintext temp copies remain, private (0700/0600) and removed on every path: the `VACUUM INTO`
-  copy and transcript spool files (system temp dir), the verify/stage directory and
-  `restore-pending.<generation>/` (DB, signing key, transcripts), the restorable check's temp
-  copy of `webterm.db`, and `backups/quarantine-*` (moved transcripts, removed by hand). Their remanence on disk is outside the phase-1
+  copy and transcript spool files, the restorable check's copy of `webterm.db` and the WTS1 that
+  `hostops backup --live` receives (all in a per-operation work dir `backups/.work/<op>-*` on the
+  data volume, never the system temp dir: the production container is read-only with a 64 MiB
+  `/tmp` tmpfs; each work dir is held under flock while in use, and a dead one is swept at boot and
+  before the next operation), the verify/stage directory and `restore-pending.<generation>/` (DB,
+  signing key, transcripts), and `backups/quarantine-*` (moved transcripts, removed by hand). Their remanence on disk is outside the phase-1
   promise (it covers `secret`, `master.key` and unwrapped keyring keys, which never reach them,
   also not through an alias — H3).
 - `FK_legacy` of an imported 3.7 backup is not yet proven to decrypt its DB (§12.9 item 3).

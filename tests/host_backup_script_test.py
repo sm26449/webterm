@@ -363,6 +363,12 @@ def tree(d):
             st = os.lstat(p)
             h = hashlib.sha256(open(p, "rb").read()).hexdigest() if stat.S_ISREG(st.st_mode) else ""
             out[os.path.relpath(p, d)] = (stat.S_IFMT(st.st_mode), h, st.st_ino)
+    # directorul de lucru al backup-ului (backups/.work, temporarele de pe volum) nu e dată: rămâne
+    # GOL după orice operaţie — orice fişier lăsat în el apare mai departe ca diferenţă
+    if "backups/.work" in out and not any(k.startswith("backups/.work/") for k in out):
+        del out["backups/.work"]
+    if "backups" in out and not any(k.startswith("backups/") for k in out):
+        del out["backups"]
     return out
 
 

@@ -701,10 +701,11 @@ def m2_tests():
     old = backup.MAX_MEMBERS
     backup.MAX_MEMBERS = 5
     try:
-        before = set(os.listdir(config.DATA_DIR / "backups"))
+        before = set(os.listdir(config.DATA_DIR / "backups")) - {backup.WORK_DIR}
         check("M2: writer-ul aplică plafonul de membri al cititorului",
               refused(lambda: backup.run_scheduled_backup(include_transcripts=True, keys=hk), wts.SnapshotTooLarge)
-              and set(os.listdir(config.DATA_DIR / "backups")) == before)
+              and set(os.listdir(config.DATA_DIR / "backups")) - {backup.WORK_DIR} == before
+              and not os.listdir(config.DATA_DIR / "backups" / backup.WORK_DIR))
     finally:
         backup.MAX_MEMBERS = old
     orig = backup._TarOut.finish
