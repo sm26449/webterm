@@ -32,4 +32,7 @@ paths = [
   # mascarea secretelor din link-urile de replay (3.5.12) se testează PE secrete false cu formă
   # reală (bloc de cheie privată trunchiat, sk-…, AKIA…EXAMPLE) — exact ce trebuie să recunoască
   '''tests/replay_links_test\.py''',
+  # vectorii de test ficşi ai criptării la repaus 3.8 (chei derivate din constante publice ale
+  # testului, aceleaşi ca în anexa „Test vectors" din docs/design/ENCRYPTION-AT-REST.md)
+  '''tests/snapshot_test\.py''',
 ]
