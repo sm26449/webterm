@@ -23,7 +23,9 @@ Scenarii:
   * --verify; hostops direct: digest greşit → refuz; verify nu scrie nimic în volum."""
 import base64
 import hashlib
+import inspect
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -1316,6 +1318,116 @@ def test_m2(e):
           and not (os.path.isdir(e.out) and os.listdir(e.out)), out[-500:])
 
 
+def fake_fd_drop(total, free, low, kdir, after_safety):
+    """R-M2: the admission checks (statvfs) see `free`; the metered writers (fstatvfs) see `low` —
+    another process filled the disk after the last check. `after_safety`: only once the boot's
+    pre-restore safety copy is published (`….keep` in `kdir`), so the safety copy itself fits."""
+    real_s, real_f = os.statvfs, os.fstatvfs
+
+    def mk(avail):
+        avail = max(0, avail)
+        return os.statvfs_result((4096, 4096, total // 4096, avail // 4096, avail // 4096, 1 << 20,
+                                  1 << 20, 1 << 20, 0, 255))
+
+    def fst(fd):
+        if after_safety and not any(n.startswith("pre-restore-") and n.endswith(".keep")
+                                    for n in os.listdir(kdir)):
+            return mk(free)
+        return mk(low)
+
+    os.statvfs, os.fstatvfs = (lambda p: mk(free)), fst
+    return lambda: (setattr(os, "statvfs", real_s), setattr(os, "fstatvfs", real_f))
+
+
+def _flag_state(d):
+    p = os.path.join(d, ".restore-flag")
+    if not os.path.exists(p):
+        return None
+    try:
+        return json.loads(open(p, "rb").read()).get("state")
+    except ValueError:
+        return "?"
+
+
+def _leftovers(d):
+    return sorted(n for n in os.listdir(d) if n.endswith(".restoring"))
+
+
+def test_rm2(e):
+    """Codex R-M2: the boot apply keeps the same reserve (backup.headroom) and meters its safety
+    copy and its copies; space taken after the last admission check → a clean, resumable refusal."""
+    print("── Codex R-M2: boot apply under the write budget (space falls after the last check)")
+    kf = e.key_file("rm2.key")
+    d = protected_volume(e, "rm2src", kf, email="rm2@x")
+    hk, undo_env = _open_volume(d, kf)
+    try:
+        out = io.BytesIO()
+        hostops._local_snapshot(hk, PASS, True, out)
+        blob = out.getvalue()
+    finally:
+        undo_env()
+    sha = hashlib.sha256(blob).hexdigest()
+    kenv = {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_BACKUP_PASSPHRASE": PASS}
+    benv = {"WEBTERM_MASTER_KEY_FILE": kf}
+    keep = 5 * GIB
+    src_reserve = inspect.getsource(backup._apply_space)
+    check("R-M2: the apply's admission uses backup.headroom (not the fixed DISK_RESERVE)",
+          "_apply_reserve()" in src_reserve and "DISK_RESERVE" not in src_reserve)
+
+    tgt = protected_volume(e, "rm2tgt", kf, email="alt@x")
+    kdir = os.path.join(tgt, "backups")
+    rc, out = hostops_run(e, "rm2tgt", ["stage-restore", "--sha256", sha], blob, kenv)
+    check("R-M2: staged with room", rc == 0 and _flag_state(tgt) == "staged", out[-300:])
+
+    # A: spaţiul scade în timpul copiei de siguranţă (după verificările de admitere)
+    restore_fs = fake_fd_drop(100 * GIB, 50 * GIB, keep + (1 << 20), kdir, after_safety=False)
+    try:
+        mode, _em, _a = boot_check(tgt, benv)
+    finally:
+        restore_fs()
+    email = sqlite3.connect(os.path.join(tgt, "webterm.db")).execute("SELECT email FROM users").fetchone()[0]
+    check("R-M2: space falls during the safety copy → refused at the reserve, still `staged`, old data "
+          "kept, no partial safety copy",
+          str(mode).startswith("refused") and "safety copy could not be made" in str(mode)
+          and "reserve for the gateway" in str(mode) and _flag_state(tgt) == "staged" and email == "alt@x"
+          and not any(n.startswith("pre-restore-") for n in os.listdir(kdir)), (mode, os.listdir(kdir)))
+
+    # B: copia de siguranţă încape, apoi spaţiul scade în timpul copiilor apply-ului
+    restore_fs = fake_fd_drop(100 * GIB, 50 * GIB, keep + (1 << 20), kdir, after_safety=True)
+    try:
+        mode, _em, _a = boot_check(tgt, benv)
+    finally:
+        restore_fs()
+    check("R-M2: space falls during the apply → a clean refusal (journal kept `applying`, no partial "
+          "temporaries, a clear message)",
+          str(mode).startswith("refused") and "ran out of room while applying the restore" in str(mode)
+          and "state `applying`" in str(mode) and _flag_state(tgt) == "applying" and _leftovers(tgt) == []
+          and not os.path.lexists(os.path.join(tgt, "transcripts.restoring")), (mode, _leftovers(tgt)))
+    safety = [n for n in os.listdir(kdir) if n.startswith("pre-restore-") and n.endswith(".keep")]
+    check("R-M2: …the safety copy made before `applying` stays (the journal's recovery point)",
+          len(safety) == 1, os.listdir(kdir))
+
+    # C: reluare cu spaţiul încă lipsă → refuz înainte de orice scriere, jurnalul neschimbat
+    before = sorted(os.listdir(kdir)), open(os.path.join(tgt, ".restore-flag"), "rb").read()
+    restore_fs = fake_space(100 * GIB, 1 << 20)
+    try:
+        mode, _em, _a = boot_check(tgt, benv)
+    finally:
+        restore_fs()
+    after = sorted(os.listdir(kdir)), open(os.path.join(tgt, ".restore-flag"), "rb").read()
+    check("R-M2: resume with too little room → refused before writing (remaining work counted), "
+          "still `applying`",
+          str(mode).startswith("refused") and "resuming this restore" in str(mode)
+          and "resumes at the next start" in str(mode) and before == after and _leftovers(tgt) == [],
+          (mode, before[0], after[0]))
+
+    # D: spaţiul revine → boot-ul reia şi termină
+    mode, email, applied = boot_check(tgt, benv)
+    check("R-M2: …once space returns the boot resumes and finishes (source data, flag gone)",
+          mode == "protected" and email == "rm2@x" and applied and _flag_state(tgt) is None
+          and _leftovers(tgt) == [], (mode, email, applied))
+
+
 def _est_pre(lines):
     """hostops_pre: `estimate` answers exactly `lines` (a broken / old image)."""
     return ("from app import hostops as _h\n"
@@ -1419,6 +1531,7 @@ def main():
         test_m1(e)
         test_m2(e)
         test_rm1(e)
+        test_rm2(e)
     finally:
         shutil.rmtree(e.base, ignore_errors=True)
         shutil.rmtree(_BOOT_DIR, ignore_errors=True)

@@ -738,7 +738,22 @@ def apply_pending_restore(keys=None, force_without_safety_copy: bool = False) ->
         return False
     _invalidate_kind()
     if volume_kind() == "protected":
-        return _apply_protected(keys, force_without_safety_copy)
+        # R-M2: copia de siguranţă şi toate copiile apply-ului scriu sub ACEEAŞI politică de rezervă ca
+        # restul operaţiilor host (write_budget + headroom): spaţiul ocupat de alt proces DUPĂ ultima
+        # verificare opreşte scrierea la rezervă, nu la ENOSPC. Refuzul păstrează jurnalul (flagul nu
+        # se schimbă), deci boot-ul următor reia; statvfs e doar consultativ între scriitori
+        # independenţi (§12.10.1) — o cotă / un volum separat e varianta dură
+        with write_budget(_apply_reserve()):
+            try:
+                return _apply_protected(keys, force_without_safety_copy)
+            except NoSpace as e:
+                state = "?"
+                with contextlib.suppress(Exception):
+                    f = _read_flag()
+                    state = f["state"] if isinstance(f, dict) else str(f)
+                raise ValueError("the data volume ran out of room while applying the restore (%s); the "
+                                 "restore journal is kept (state `%s`): no half-applied data is served. "
+                                 "Free some space, then restart — the apply resumes" % (e, state)) from None
     if not flag.exists() or not (rd / "webterm.db").exists():
         return False
     # Plasă de siguranță: snapshot al stării CURENTE înainte de a o suprascrie. Sufix
@@ -1955,7 +1970,10 @@ def _wts_to_file(path, hk, keys_blob, include_transcripts, local=True, portable=
             pass
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "wb") as f:
-            _write_wts(f, hk, keys_blob, include_transcripts, local, portable, safety, host=True)
+            # R-M2: sub bugetul activ (la boot: copia de siguranţă a datelor curente) scrierea e
+            # contorizată ca orice altă scriere host; fără buget metered() lasă fişierul neschimbat
+            _write_wts(metered(f, "the pre-restore safety copy" if safety else "the snapshot file"), hk,
+                       keys_blob, include_transcripts, local, portable, safety, host=True)
             f.flush()
             _fsync(f.fileno())
         # M2: succes doar pentru o arhivă pe care restore-ul o acceptă (bugete, manifest, keyring);
@@ -3143,13 +3161,21 @@ def _copy_durable(src: str, dst) -> None:
         os.unlink(tmp)
     except FileNotFoundError:
         pass
-    with open(os.open(src, _FILE_RO), "rb") as f:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, "wb") as out:
-            for b in iter(lambda: f.read(1 << 20), b""):
-                out.write(b)
-            out.flush()
-            _fsync(out.fileno())
+    try:
+        with open(os.open(src, _FILE_RO), "rb") as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                # R-M2: copia apply-ului e contorizată (write_budget al boot-ului): se opreşte la rezervă
+                mo = metered(out, "applying the restore")
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    mo.write(b)
+                out.flush()
+                _fsync(out.fileno())
+    except BaseException:
+        # R-M2: temporarul parţial nu rămâne să ocupe exact spaţiul care lipseşte
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     os.replace(tmp, dst)
     _fsync_dir(os.path.dirname(dst))
 
@@ -3165,8 +3191,9 @@ def _copy_tree_durable(src: str, dst: str) -> None:
             with open(os.open(s, _FILE_RO), "rb") as f:
                 fd = os.open(d, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
                 with os.fdopen(fd, "wb") as out:
+                    mo = metered(out, "applying the restore (transcripts)")     # R-M2
                     for b in iter(lambda: f.read(1 << 20), b""):
-                        out.write(b)
+                        mo.write(b)
                     out.flush()
                     _fsync(out.fileno())
         else:
@@ -3182,7 +3209,12 @@ def _swap_transcripts(src: str) -> None:
     new, old = live + ".restoring", live + ".pre-restore"
     if os.path.lexists(new):
         shutil.rmtree(new)
-    _copy_tree_durable(src, new)
+    try:
+        _copy_tree_durable(src, new)
+    except BaseException:
+        # R-M2: o copie parţială (de pildă oprită de buget) e ştearsă: spaţiul revine, live-ul e neatins
+        shutil.rmtree(new, ignore_errors=True)
+        raise
     _step("apply:transcripts-copied")
     if os.path.lexists(old):
         shutil.rmtree(old)
@@ -3262,18 +3294,56 @@ def _quarantine_transcripts(gen: str) -> None:
                 "transcripts were moved to %s", os.path.relpath(dst, str(config.DATA_DIR)))
 
 
-def _apply_space(need: int, what: str) -> None:
-    """Boot (state `staged`, nothing changed yet): `need` + DISK_RESERVE free on the data volume,
-    else a clean refusal (ValueError: the boot stops, the old data and the staged set stay)."""
+def _apply_reserve() -> int:
+    """R-M2: the reserve the boot apply keeps free on the data volume — the same policy as every
+    other host operation (`headroom`, §12.10.1 "Size budget"), not the old fixed 64 MiB."""
+    try:
+        return headroom(config.DATA_DIR)
+    except OSError as e:
+        raise ValueError("the size of the data volume cannot be read (%s) — the restore is refused, "
+                         "nothing more was changed" % e.strerror) from None
+
+
+def _apply_space(need: int, what: str, nothing: str = "nothing was changed (the current data stays)") -> None:
+    """Boot: `need` + the reserve (+ one metering step, so the metered writes that follow do not
+    stop in their last 8 MiB) free on the data volume, else a clean refusal (ValueError: the boot
+    stops; the flag, the staged set and the data stay as the journal left them)."""
+    keep = _apply_reserve()
     try:
         free = free_bytes(config.DATA_DIR)
     except OSError as e:
         raise ValueError("the free space of the data volume cannot be read (%s) — the restore is refused, "
-                         "nothing was changed" % e.strerror) from None
-    if free < need + DISK_RESERVE:
-        raise ValueError("the data volume has %d MiB free; %s needs %d MiB — the restore is refused and "
-                         "nothing was changed (the current data stays). Free some space, then restart"
-                         % (free >> 20, what, (need + DISK_RESERVE) >> 20))
+                         "%s" % (e.strerror, nothing)) from None
+    total = need + keep + BUDGET_STEP
+    if free < total:
+        raise ValueError("the data volume has %d MiB free; %s needs %d MiB (%d MiB of them kept free for "
+                         "the gateway) — the restore is refused and %s. Free some space, then restart"
+                         % (free >> 20, what, total >> 20, keep >> 20, nothing))
+
+
+def _on_disk(size: int) -> int:
+    """A file's size rounded up to whole 4 KiB blocks (what a copy of it takes at least)."""
+    return (int(size) + 4095) // 4096 * 4096 + 4096
+
+
+def _partial_bytes() -> int:
+    """R-M2: bytes of an interrupted apply's leftovers that the resumed steps delete before they
+    copy again (the `.restoring` temporaries): they come back as free space."""
+    n = 0
+    for p in (str(config.DB_PATH) + ".restoring", str(config.TRANSCRIPT_DIR) + ".restoring",
+              *(str(config.DATA_DIR / name) + ".restoring" for name in _SIGNING)):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            n += st.st_size
+        elif stat.S_ISDIR(st.st_mode):
+            for root, _dirs, files in os.walk(p):
+                for f in files:
+                    with contextlib.suppress(OSError):
+                        n += os.lstat(os.path.join(root, f)).st_size
+    return n
 
 
 def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool:
@@ -3321,7 +3391,7 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             # socotit, dar între timp volumul s-a putut umple): copia setului (DB + transcripturi) şi
             # copia de siguranţă a datelor curente (+ copia DB-ului ei); lipsă → refuz curat, nimic
             # schimbat, datele vechi rămân (boot-ul refuză până se eliberează spaţiu)
-            copy_need = sum(int(e["size"]) for e in doc["files"])
+            copy_need = sum(_on_disk(e["size"]) for e in doc["files"])
             safety_need = 0
             if config.DB_PATH.exists() and not force_without_safety_copy:
                 safety_need = (host_estimate() if has_tx else db_size() + (16 << 20)) + db_size()
@@ -3365,6 +3435,15 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                     flag["erasure_conflict"] = er_plan["conflict"]
             _write_flag(flag)
             _step("apply:applying")
+        else:
+            # R-M2: reluarea unui jurnal `applying` (boot oprit la mijloc, de pildă de lipsa spaţiului):
+            # paşii rămaşi se refac integral (copie temporară + rename), deci nevoia e copia setului,
+            # minus temporarele pe care paşii le şterg înainte de a copia. Lipsă → refuz ÎNAINTE de
+            # orice scriere; flagul rămâne `applying`, următorul boot reia
+            _apply_space(max(0, sum(_on_disk(e["size"]) for e in doc["files"]) - _partial_bytes()),
+                         "resuming this restore (the rest of the copy of the staged set)",
+                         nothing="nothing more was written (the restore stays `applying` and resumes at the "
+                                 "next start)")
         if current != staged:
             _publish_keys(staged)
         _step("apply:keys")

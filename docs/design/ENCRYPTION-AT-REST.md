@@ -1513,11 +1513,27 @@ with `NoSpace` and removes what it wrote (the work dir, the spool, the staging d
   copy's verification scratch (≤ DB + WAL). `restore.sh` runs `hostops verify --for-restore` with
   the same rule **before it stops the app** (a restore test only prints a note); `restore.sh` also
   refuses when its private copy (`TMPDIR`) cannot hold the archive.
-- *Apply* (boot): before the safety copy, and again after it and before the flag says `applying`,
-  the boot checks the room it still needs (the copy of the staged set, and the safety copy) + 64 MiB.
-  Short → a clean refusal: nothing changed, the current data stays, the staged set stays staged, a
-  safety copy made by that attempt is removed (a restart loop does not accumulate copies); the boot
-  stops until space is freed.
+- *Apply* (boot; Codex R-M2): the same reserve (`backup.headroom`), no longer a fixed 64 MiB.
+  Before the safety copy, and again after it and before the flag says `applying`, the boot checks
+  the room it still needs (the copy of the staged set, each file rounded up to whole blocks, and the
+  safety copy) + the reserve + one 8 MiB metering step. Short → a clean refusal: nothing changed, the
+  current data stays, the staged set stays staged, a safety copy made by that attempt is removed (a
+  restart loop does not accumulate copies). The safety copy and every copy of the apply (signing
+  pair, transcripts, DB) are written under `write_budget`, so space another process takes after the
+  last check stops the write at the reserve instead of at ENOSPC; the partial temporary is removed.
+  Stopped while `applying`, the flag stays `applying` (the safety copy made before it stays too) and
+  the boot refuses with one line (`the data volume ran out of room while applying the restore … the
+  apply resumes`); no half-applied data is served. A resumed `applying` journal checks the work that
+  remains (the copy of the staged set, minus the `.restoring` temporaries the steps delete first)
+  before it writes anything. Each restart of a refused boot writes nothing, so a restart policy
+  only repeats the check until space is freed.
+
+**statvfs is advisory.** Every check above, and the metering, reads the free space of a filesystem
+other processes also write: between two readings (at most 8 MiB of our own writes apart) another
+writer can still take the reserve, and a refusal then comes from the kernel's ENOSPC, cleaned up the
+same way. The reserve is a margin, not a guarantee. A hard guarantee needs storage isolation: the
+data volume on its own filesystem or a project quota (XFS/ext4 `prjquota`, a size-limited volume),
+so that nothing else can consume the gateway's space.
 
 Stored `.wts` snapshots and the pre-restore safety copy are written without the in-app cap too (a
 large volume's safety copy used to fail the apply) and read back with their own size and the free
