@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Security — EverShell</title>
-<meta name="description" content="How EverShell is protected: passkeys, per-host step-up, roles and SSO, signed agent updates, an audit log, and an honest threat model.">
+<meta name="description" content="How EverShell is protected: passkeys, per-host step-up, roles and SSO, signed agent updates, an audit log, encryption at rest with a master key you keep apart, and an honest threat model.">
 <link rel="canonical" href="https://evershell.dev/security.html">
 <link rel="alternate" hreflang="en" href="https://evershell.dev/security.html">
 <link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/security.html">
@@ -114,13 +114,16 @@
     <ul class="list">
       <li><b>A master key outside the data</b><p>New installations get a key file outside the data volume, mounted read-only. Keep a copy off the machine: without it, the installation and its backups cannot be opened. A missing or wrong key stops the gateway before it touches anything; it never falls back to the old key.</p></li>
       <li><b>Backups that never hold the key</b><p>Every backup and snapshot the gateway writes is an encrypted container that only the master key opens, and the key is never inside it. The host backup script works the same way.</p></li>
+      <li><b>Host backups of any size</b><p>The host backup streams the volume in small authenticated chunks, so a few gigabytes of recordings are no obstacle, and restores read it the same way. Both check the free space first and always leave a reserve for the gateway: at least 1 GiB or 5% of the disk, whichever is larger.</p></li>
       <li><b>Encrypted session recordings</b><p>Opt-in. Each recording gets its own key. Existing recordings are converted in the background, and the plaintext is deleted only after the encrypted copy is verified. An upgrade never turns this on for you.</p></li>
+      <li><b>Compressed before they are encrypted</b><p>Encrypted data does not compress, so recordings are compressed first: on disk and in backups they stay close to the size of a gzipped plaintext, typically several times smaller. Recordings encrypted without it are recompacted in the background and replay exactly as before. On by default; <code>WEBTERM_TX_COMPRESS=0</code> turns it off.</p></li>
       <li><b>Erasing a recording is final</b><p>An Owner erase destroys the recording’s key and writes the erasure to a journal that is copied to your SFTP or FTPS destination and read back. Restoring an older backup does not bring the recording back.</p></li>
       <li><b>Quarantine instead of guessing</b><p>When a restore cannot prove which erasures happened after the backup, the restored recordings are held back. They are released once the destination proves the history; until then an Owner can open one at a time, with a fresh second factor, and it is audited.</p></li>
-      <li><b>A one-way move from 3.7</b><p>Upgrading changes nothing until you add a key. The next start checks that the old key really opens the database, then migrates once. Download a backup first: after the migration there is no way back to 3.7 on the same volume.</p></li>
+      <li><b>Visible in System health</b><p>Whether the volume is protected, reduced or still legacy, how the recordings’ encryption and compression are going, and which older backups still hold the old key in clear, so you can delete them.</p></li>
+      <li><b>A one-way move from 3.7</b><p>Upgrading changes nothing until you add a key. The next start checks that the old key really opens the database, then migrates once. Download a backup first: after the migration there is no way back to 3.7 on the same volume, and the deploy, rollback and upgrade scripts refuse to start an older image on it.</p></li>
     </ul>
     <div class="callout">
-      <strong>What it does not cover.</strong> The database file itself is not encrypted yet: host names, accounts and the audit log stay readable inside the volume. Encryption at rest protects a stolen disk, a copied volume or a backup. It does not protect a server that is running and compromised, because the running gateway holds the key.
+      <strong>What it does not cover.</strong> The database file itself is not encrypted yet: host names, accounts and the audit log stay readable inside the volume. Encryption at rest protects a stolen disk, a copied volume or a backup. It does not protect a server that is running and compromised, because the running gateway holds the key. And because compressed sizes depend on the content, someone who can both type into a session and repeatedly watch the stored size of its recording could learn something about what was printed next to it; turn compression off if that matters to you.
     </div>
     <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Turning it on, step by step →</a>
   </div>
@@ -130,7 +133,7 @@
   <div class="wrap">
     <h2 id="s-ops">Running it</h2>
     <ul class="list">
-      <li><b>Encrypted backups</b><p>Daily, encrypted, and optionally off-host: Google Drive, Dropbox, SFTP or FTPS.</p></li>
+      <li><b>Encrypted backups</b><p>Daily, encrypted, and optionally off-host: Google Drive, Dropbox, SFTP or FTPS. From 3.8, with a master key configured, a backup opens only with that key and never contains it: keep a copy of the key off the machine, or the backups cannot be restored.</p></li>
       <li><b>Pinned releases</b><p>The upgrade script takes a version tag, not <code>latest</code>, and pins it to an immutable image digest before it switches.</p></li>
       <li><b>Release checks</b><p>The publish pipeline requires unit, browser and accessibility tests, a secret scan and a Python dependency audit. The image and npm scans run weekly, separately.</p></li>
       <li><b>Reporting a vulnerability</b><p>Privately, through GitHub. See the <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">security policy</a>.</p></li>

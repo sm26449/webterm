@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Install — EverShell</title>
-<meta name="description" content="Install EverShell on your own server: requirements, the installer, the first account and adding hosts.">
+<meta name="description" content="Install EverShell on your own server: requirements, the installer, the first account, adding hosts, and upgrading from 3.7 to encryption at rest.">
 <link rel="canonical" href="https://evershell.dev/install.html">
 <link rel="alternate" hreflang="en" href="https://evershell.dev/install.html">
 <link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/install.html">
@@ -62,7 +62,7 @@
 <span class="c-dim">$</span> less install.sh    <span class="c-dim"># it runs as root: read it</span>
 <span class="c-dim">$</span> sudo ./install.sh --domain term.example.com \
       --email you@example.com</code></pre>
-      <p class="sub" style="font-size: 16px">It sets up Docker, the stack in <code>/opt/webterm</code>, a Let's Encrypt certificate, the firewall and a daily encrypted backup, then prints the URL and a one-time setup token.</p>
+      <p class="sub" style="font-size: 16px">It sets up Docker, the stack in <code>/opt/webterm</code>, a Let's Encrypt certificate, the firewall and a daily encrypted backup, then prints the URL and a one-time setup token. From 3.8 it also creates the master key that encrypts your data at rest: copy it off the machine right away, because without it the installation and its backups cannot be opened.</p>
     </div>
   </div>
 </section>
@@ -97,9 +97,26 @@
       <li><b>Other Linux distributions with Docker</b><p>Copy <code>.env.prod.example</code> to <code>.env</code>, fill it in, run <code>./deploy.sh</code>.</p></li>
       <li><b>Single sign-on</b><p>With Authentik, bundled or your own: <code>deploy.sh --with-authentik</code>.</p></li>
       <li><b>Many hosts at once</b><p>A group enrollment token: one command, run on every machine.</p></li>
-      <li><b>Upgrades</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> in <code>/opt/webterm</code>, with a rollback if you need it.</p></li>
+      <li><b>Upgrades</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> in <code>/opt/webterm</code>, with a rollback if you need it. Once a volume has moved to encryption at rest, the rollback stays within 3.8.</p></li>
     </ul>
     <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md">The full installation guide →</a>
+  </div>
+</section>
+<section class="alt" id="from-37" aria-labelledby="i-up">
+  <div class="wrap">
+    <p class="eyebrow">Upgrading to 3.8</p>
+    <h2 id="i-up">From 3.7, <b>a one-way step.</b></h2>
+    <p class="sub">Upgrading to 3.8 changes nothing on its own: with no master key configured, a 3.7 volume runs exactly as before. Adding a key turns on encryption at rest and migrates the volume once, after checking that the old key really opens the database. After that, there is no way back to 3.7 on the same volume.</p>
+    <ul class="list">
+      <li><b>Back up first</b><p>Upgrade, check that 3.8 is healthy, then download a backup from <strong>Settings → Backup</strong> before you add the key. That backup, restored into a new volume, is the only way back to 3.7.</p></li>
+      <li><b>Keep the key off the machine</b><p>Create the key file, copy it to a password manager or a recovery kit, add one line to <code>.env</code> and run <code>sudo ./deploy.sh</code>. Without the key, the installation and every backup it makes cannot be opened.</p></li>
+      <li><b>Recordings are a separate choice</b><p>Encrypting session recordings stays off until you turn it on. It needs a protected volume, an SFTP or FTPS destination, a fresh backup and free disk the size of the recordings.</p></li>
+    </ul>
+    <p style="display: flex; flex-wrap: wrap; gap: 0 28px; margin: 18px 0 0">
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Encryption at rest, step by step →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encrypting-session-recordings">Encrypting session recordings →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#going-back-to-37">Going back to 3.7 →</a>
+    </p>
   </div>
 </section>
 </main>

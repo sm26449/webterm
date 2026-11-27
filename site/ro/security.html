@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Securitate — EverShell</title>
-<meta name="description" content="Cum e protejat EverShell: passkey-uri, al doilea factor pe host, roluri și SSO, update-uri semnate pentru agent, jurnal de audit și un model de amenințări cinstit.">
+<meta name="description" content="Cum e protejat EverShell: passkey-uri, al doilea factor pe host, roluri și SSO, update-uri semnate pentru agent, jurnal de audit, criptare la repaus cu o cheie principală ținută separat și un model de amenințări cinstit.">
 <link rel="canonical" href="https://evershell.dev/ro/security.html">
 <link rel="alternate" hreflang="en" href="https://evershell.dev/security.html">
 <link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/security.html">
@@ -114,13 +114,16 @@
     <ul class="list">
       <li><b>O cheie principală în afara datelor</b><p>Instalările noi primesc un fișier-cheie în afara volumului de date, montat doar pentru citire. Păstrează o copie în afara serverului: fără ea, instalarea și backup-urile ei nu mai pot fi deschise. O cheie lipsă sau greșită oprește gateway-ul înainte să atingă ceva; nu revine niciodată la cheia veche.</p></li>
       <li><b>Backup-uri care nu conțin cheia</b><p>Fiecare backup și snapshot scris de gateway e un container criptat pe care îl deschide doar cheia principală, iar cheia nu e niciodată în el. Scriptul de backup de pe host face la fel.</p></li>
+      <li><b>Backup-uri pe host de orice mărime</b><p>Backup-ul de pe host scrie volumul în flux, în bucăți mici autentificate, așa că câțiva gigaocteți de înregistrări nu mai sunt o problemă, iar restaurarea îl citește la fel. Amândouă verifică întâi spațiul liber și lasă mereu o rezervă pentru gateway: cel puțin 1 GiB sau 5% din disc, cât e mai mult.</p></li>
       <li><b>Înregistrări de sesiune criptate</b><p>Opțional. Fiecare înregistrare are cheia ei. Înregistrările existente sunt convertite în fundal, iar textul în clar se șterge doar după ce copia criptată e verificată. Un upgrade nu pornește niciodată asta în locul tău.</p></li>
+      <li><b>Comprimate înainte de criptare</b><p>Datele criptate nu se mai comprimă, așa că înregistrările se comprimă întâi: pe disc și în backup-uri rămân aproape de mărimea textului în clar trecut prin gzip, de obicei de câteva ori mai mici. Înregistrările criptate fără comprimare sunt recompactate în fundal și se redau exact ca înainte. Pornită implicit; <code>WEBTERM_TX_COMPRESS=0</code> o oprește.</p></li>
       <li><b>Ștergerea unei înregistrări e definitivă</b><p>Ștergerea făcută de un Owner distruge cheia înregistrării și scrie ștergerea într-un jurnal copiat pe destinația ta SFTP sau FTPS și citit înapoi. Restaurarea unui backup mai vechi nu aduce înregistrarea înapoi.</p></li>
       <li><b>Carantină în loc de ghicit</b><p>Când o restaurare nu poate dovedi ce ștergeri au avut loc după backup, înregistrările restaurate sunt ținute deoparte. Se eliberează când destinația dovedește istoricul; până atunci un Owner le poate deschide una câte una, cu un al doilea factor proaspăt, iar accesul e auditat.</p></li>
-      <li><b>O mutare fără întoarcere de la 3.7</b><p>Upgrade-ul nu schimbă nimic până nu adaugi o cheie. Următoarea pornire verifică întâi că vechea cheie chiar deschide baza de date, apoi migrează o singură dată. Descarcă un backup înainte: după migrare nu mai există drum înapoi la 3.7 pe același volum.</p></li>
+      <li><b>Vizibilă în System health</b><p>Dacă volumul e protejat, cu protecție redusă sau încă în modul vechi, cum avansează criptarea și comprimarea înregistrărilor și ce backup-uri mai vechi încă țin cheia veche în clar, ca să le poți șterge.</p></li>
+      <li><b>O mutare fără întoarcere de la 3.7</b><p>Upgrade-ul nu schimbă nimic până nu adaugi o cheie. Următoarea pornire verifică întâi că vechea cheie chiar deschide baza de date, apoi migrează o singură dată. Descarcă un backup înainte: după migrare nu mai există drum înapoi la 3.7 pe același volum, iar scripturile de deploy, rollback și upgrade refuză să pornească pe el o imagine mai veche.</p></li>
     </ul>
     <div class="callout">
-      <strong>Ce nu acoperă.</strong> Fișierul bazei de date nu e încă criptat: numele hosturilor, conturile și jurnalul de audit rămân lizibile în volum. Criptarea la repaus te apără de un disc furat, de un volum copiat sau de un backup. Nu apără un server care rulează și e compromis, pentru că gateway-ul pornit ține cheia.
+      <strong>Ce nu acoperă.</strong> Fișierul bazei de date nu e încă criptat: numele hosturilor, conturile și jurnalul de audit rămân lizibile în volum. Criptarea la repaus te apără de un disc furat, de un volum copiat sau de un backup. Nu apără un server care rulează și e compromis, pentru că gateway-ul pornit ține cheia. Și pentru că mărimea după comprimare depinde de conținut, cine poate atât să scrie într-o sesiune, cât și să urmărească repetat mărimea salvată a înregistrării ei ar putea afla ceva despre ce s-a afișat lângă textul lui; oprește comprimarea dacă asta contează pentru tine.
     </div>
     <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Cum o pornești, pas cu pas (în engleză) →</a>
   </div>
@@ -130,7 +133,7 @@
   <div class="wrap">
     <h2 id="s-ops">În exploatare</h2>
     <ul class="list">
-      <li><b>Backup-uri criptate</b><p>Zilnice, criptate și, opțional, în afara serverului: Google Drive, Dropbox, SFTP sau FTPS.</p></li>
+      <li><b>Backup-uri criptate</b><p>Zilnice, criptate și, opțional, în afara serverului: Google Drive, Dropbox, SFTP sau FTPS. Din 3.8, cu o cheie principală configurată, un backup se deschide doar cu acea cheie și nu o conține niciodată: păstrează o copie a cheii în afara serverului, altfel backup-urile nu pot fi restaurate.</p></li>
       <li><b>Versiuni fixate</b><p>Scriptul de upgrade primește un tag de versiune, nu <code>latest</code>, și îl fixează pe un digest de imagine imuabil înainte să comute.</p></li>
       <li><b>Verificări înainte de publicare</b><p>Publicarea imaginii depinde de testele unitare, de browser și de accesibilitate, de o scanare de secrete și de auditul dependențelor Python. Scanările imaginii și ale pachetelor npm rulează săptămânal, separat.</p></li>
       <li><b>Raportarea unei vulnerabilități</b><p>Privat, prin GitHub. Vezi <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">politica de securitate</a>.</p></li>

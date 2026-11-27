@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Instalare — EverShell</title>
-<meta name="description" content="Instalează EverShell pe propriul server: cerințe, installer-ul, primul cont și adăugarea hosturilor.">
+<meta name="description" content="Instalează EverShell pe propriul server: cerințe, installer-ul, primul cont, adăugarea hosturilor și upgrade-ul de la 3.7 la criptarea la repaus.">
 <link rel="canonical" href="https://evershell.dev/ro/install.html">
 <link rel="alternate" hreflang="en" href="https://evershell.dev/install.html">
 <link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/install.html">
@@ -62,7 +62,7 @@
 <span class="c-dim">$</span> less install.sh    <span class="c-dim"># rulează ca root: citește-l</span>
 <span class="c-dim">$</span> sudo ./install.sh --domain term.example.com \
       --email you@example.com</code></pre>
-      <p class="sub" style="font-size: 16px">Pune Docker, stack-ul în <code>/opt/webterm</code>, un certificat Let's Encrypt, firewall-ul și un backup zilnic criptat, apoi afișează adresa și un token de configurare de unică folosință.</p>
+      <p class="sub" style="font-size: 16px">Pune Docker, stack-ul în <code>/opt/webterm</code>, un certificat Let's Encrypt, firewall-ul și un backup zilnic criptat, apoi afișează adresa și un token de configurare de unică folosință. Din 3.8 creează și cheia principală care îți criptează datele la repaus: copiaz-o imediat în afara serverului, pentru că fără ea instalarea și backup-urile ei nu mai pot fi deschise.</p>
     </div>
   </div>
 </section>
@@ -97,9 +97,26 @@
       <li><b>Alte distribuții Linux cu Docker</b><p>Copiezi <code>.env.prod.example</code> în <code>.env</code>, îl completezi și rulezi <code>./deploy.sh</code>.</p></li>
       <li><b>Single sign-on</b><p>Cu Authentik, inclus sau al tău: <code>deploy.sh --with-authentik</code>.</p></li>
       <li><b>Multe hosturi deodată</b><p>Un token de înrolare de grup: o singură comandă, rulată pe fiecare mașină.</p></li>
-      <li><b>Upgrade-uri</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> în <code>/opt/webterm</code>, cu rollback dacă ai nevoie.</p></li>
+      <li><b>Upgrade-uri</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> în <code>/opt/webterm</code>, cu rollback dacă ai nevoie. După ce un volum a trecut la criptarea la repaus, rollback-ul rămâne în cadrul 3.8.</p></li>
     </ul>
     <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md">Ghidul complet de instalare (în engleză) →</a>
+  </div>
+</section>
+<section class="alt" id="from-37" aria-labelledby="i-up">
+  <div class="wrap">
+    <p class="eyebrow">Upgrade la 3.8</p>
+    <h2 id="i-up">De la 3.7, <b>un pas fără întoarcere.</b></h2>
+    <p class="sub">Upgrade-ul la 3.8 nu schimbă nimic de la sine: fără o cheie principală configurată, un volum 3.7 merge exact ca înainte. Când adaugi cheia, pornești criptarea la repaus, iar volumul se migrează o singură dată, după ce se verifică faptul că vechea cheie chiar deschide baza de date. După asta nu mai există drum înapoi la 3.7 pe același volum.</p>
+    <ul class="list">
+      <li><b>Întâi un backup</b><p>Faci upgrade-ul, verifici că 3.8 merge bine, apoi descarci un backup din <strong>Settings → Backup</strong> înainte să adaugi cheia. Acel backup, restaurat într-un volum nou, e singurul drum înapoi la 3.7.</p></li>
+      <li><b>Cheia, în afara serverului</b><p>Creezi fișierul-cheie, îl copiezi într-un manager de parole sau într-un kit de recuperare, adaugi o linie în <code>.env</code> și rulezi <code>sudo ./deploy.sh</code>. Fără cheie, instalarea și fiecare backup pe care îl face nu mai pot fi deschise.</p></li>
+      <li><b>Înregistrările sunt o alegere separată</b><p>Criptarea înregistrărilor de sesiune rămâne oprită până o pornești tu. Are nevoie de un volum protejat, de o destinație SFTP sau FTPS, de un backup proaspăt și de spațiu liber cât înregistrările.</p></li>
+    </ul>
+    <p style="display: flex; flex-wrap: wrap; gap: 0 28px; margin: 18px 0 0">
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Criptarea la repaus, pas cu pas (în engleză) →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encrypting-session-recordings">Înregistrări criptate (în engleză) →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#going-back-to-37">Întoarcerea la 3.7 (în engleză) →</a>
+    </p>
   </div>
 </section>
 </main>

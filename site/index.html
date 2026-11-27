@@ -128,7 +128,7 @@
       <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M12 12h9"/></svg></span><h3>Split views</h3><p>Two to four sessions side by side, in five layouts, saved by name.</p></div>
       <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4 7 4 4-4 4"/><path d="M11 16h9"/><path d="M14 7h6M14 11.5h6"/></svg></span><h3>Run on hosts</h3><p>One command on many machines, with exit code and output per host.</p></div>
       <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.3 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.3-3.5-8.5S9.6 5.9 12 3.5z"/></svg></span><h3>Port forwards</h3><p>An internal web UI, such as Grafana or Proxmox, on its own subdomain, behind your login.</p></div>
-      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></span><h3>Share and replay</h3><p>Expiring links to watch or type in a live session; recordings you can replay and share.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></span><h3>Share and replay</h3><p>Expiring links to watch or type in a live session; recordings you can replay, share and, from 3.8, keep encrypted.</p></div>
       <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></span><h3>Docker, systemd, serial</h3><p>Containers, services and RS232/USB consoles on the host, without leaving the browser.</p></div>
     </div>
     <a class="more" href="tour.html">See every feature, with screenshots →</a>
@@ -148,7 +148,7 @@
       <a class="more" href="security.html">How EverShell is protected →</a>
       <div style="margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line)">
         <p class="eyebrow" style="margin-bottom: 8px">New in 3.8</p>
-        <p class="sub" style="margin-top: 0"><b>Encryption at rest.</b> Stored credentials and every backup are locked with a master key you keep outside the data volume. Session recordings can be encrypted too, and an erased recording stays erased after a restore.</p>
+        <p class="sub" style="margin-top: 0"><b>Encryption at rest.</b> Stored credentials and every backup are locked with a master key you keep outside the data volume. Session recordings can be encrypted too, compressed first so they stay small, and an erased recording stays erased after a restore. Host backups now stream at any size.</p>
         <a class="more" href="security.html#at-rest">What it covers, and what not →</a>
       </div>
     </div>
@@ -156,7 +156,7 @@
       <li><b>Passkeys and 2FA</b><p>And a fresh second factor before a shell on the hosts you flag.</p></li>
       <li><b>Roles and SSO</b><p>Which hosts each account reaches, and whether it gets a shell. OIDC and SCIM.</p></li>
       <li><b>Signed agent updates</b><p>Agents only run an update signed with your own key.</p></li>
-      <li><b>Audit log and backups</b><p>Who did what, from where. Encrypted daily backups.</p></li>
+      <li><b>Audit log and backups</b><p>Who did what, from where. Encrypted daily backups that, from 3.8, open only with a master key you keep apart.</p></li>
     </ul>
   </div>
 </section>
@@ -165,7 +165,7 @@
   <div class="wrap split2">
     <div>
       <h2 id="install-title">Your server, <b>one installer.</b></h2>
-      <p class="sub">Any Linux server with Docker and a domain pointing at it. On a fresh Ubuntu or Debian server, one installer sets up Docker, HTTPS, the firewall and a daily encrypted backup.</p>
+      <p class="sub">Any Linux server with Docker and a domain pointing at it. On a fresh Ubuntu or Debian server, one installer sets up Docker, HTTPS, the firewall, a daily encrypted backup and the master key that protects your data.</p>
       <a class="more" href="install.html">Requirements and adding hosts →</a>
     </div>
     <pre><code><span class="c-dim">$</span> git clone https://github.com/sm26449/webterm.git
@@ -175,7 +175,7 @@
       --email you@example.com</code></pre>
   </div>
 </section>
-<section class="alt" aria-labelledby="faq-title"><div class="wrap" style="max-width: 860px"><h2 id="faq-title">Questions</h2><div class="faq"><details><summary>Is it free?</summary><p>Yes. EverShell is open source under the MIT license, and you run it on your own server. There is no paid tier and no telemetry.</p></details><details><summary>What happens if the gateway goes down?</summary><p>Sessions on agent hosts keep running in tmux on the host, and are picked up again when the gateway comes back. SSH and telnet sessions live in the gateway, so those end when it restarts.</p></details><details><summary>Does the agent need root?</summary><p>No. By default it runs as a dedicated, unprivileged <code>webterm</code> user, and you decide what that user may do.</p></details><details><summary>What can I connect?</summary><p>Linux hosts with Python 3.6 or newer for the agent (older ones get a portable Python), plus anything that speaks SSH or telnet: switches, PDUs, a customer's box.</p></details><details><summary>Can a team use it?</summary><p>Yes: roles per host or folder, time-bound access, passkeys and 2FA, single sign-on via OIDC and account provisioning via SCIM, and an audit log.</p></details><details><summary>Where is my data?</summary><p>On your server: sessions, recordings and the database never leave it, and backups are encrypted before they go anywhere.</p></details></div></div></section>
+<section class="alt" aria-labelledby="faq-title"><div class="wrap" style="max-width: 860px"><h2 id="faq-title">Questions</h2><div class="faq"><details><summary>Is it free?</summary><p>Yes. EverShell is open source under the MIT license, and you run it on your own server. There is no paid tier and no telemetry.</p></details><details><summary>What happens if the gateway goes down?</summary><p>Sessions on agent hosts keep running in tmux on the host, and are picked up again when the gateway comes back. SSH and telnet sessions live in the gateway, so those end when it restarts.</p></details><details><summary>Does the agent need root?</summary><p>No. By default it runs as a dedicated, unprivileged <code>webterm</code> user, and you decide what that user may do.</p></details><details><summary>What can I connect?</summary><p>Linux hosts with Python 3.6 or newer for the agent (older ones get a portable Python), plus anything that speaks SSH or telnet: switches, PDUs, a customer's box.</p></details><details><summary>Can a team use it?</summary><p>Yes: roles per host or folder, time-bound access, passkeys and 2FA, single sign-on via OIDC and account provisioning via SCIM, and an audit log.</p></details><details><summary>Where is my data?</summary><p>On your server: sessions, recordings and the database never leave it, and backups are encrypted before they go anywhere. From 3.8, stored credentials and backups are also locked with a master key kept outside the data, and recordings can be encrypted too.</p></details></div></div></section>
 </main>
 
 <footer class="site-foot">
