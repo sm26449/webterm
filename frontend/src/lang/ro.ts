@@ -1491,7 +1491,7 @@ const ro: Lang = {
     'help.certificates.title': "Certificate TLS",
     'help.certificates.body': "EverShell urmărește certificatul pe care Traefik îl servește pentru domeniul aplicației, wildcard-ul de forward și Authentik, și avertizează înainte să expire unul sau dacă e servit certificatul implicit/greșit. Un Owner îl poate reînnoi dintr-un terminal pe hostul gateway (e nevoie de un al doilea factor proaspăt).",
     'help.health.title': "Sănătatea sistemului",
-    'help.health.body': "Un set permanent de verificări pentru eșecurile care altfel rămân tăcute: IdP-ul inaccesibil, cheia de semnare blocată, lipsa unui Owner break-glass, backup-uri care nu rulează, discul care se umple, un certificat care expiră, decalaj de ceas. Detectează, anunță și recomandă o soluție — nu rulează nimic de la sine. „Reverifică acum” le rulează pe toate.",
+    'help.health.body': "Un set permanent de verificări pentru eșecurile care altfel rămân tăcute: IdP-ul inaccesibil, cheia de semnare blocată, lipsa unui Owner break-glass, backup-uri care nu rulează, discul care se umple, un certificat care expiră, decalaj de ceas, iar cu criptarea la repaus (3.8) starea protecției, migrarea înregistrărilor și jurnalul ștergerilor. Detectează, anunță și recomandă o soluție — nu rulează nimic de la sine. „Reverifică acum” le rulează pe toate.",
     'help.transfers.title': "Transferuri",
     'help.transfers.body': "Upload-urile, download-urile și copierile între hosturi apar aici cu progres, viteză și ETA și supraviețuiesc închiderii panoului. Un fișier tras sau lipit peste un terminal își are calea tastată la prompt — un paste e un paste — nu e rulat în locul tău.",
     'help.rootMove.title': "Upload într-un folder deținut de root",
@@ -4590,7 +4590,7 @@ const ro: Lang = {
     'help.versionCheck.title': "Verificarea versiunii",
     'help.versionCheck.body': "O dată pe zi, serverul întreabă GitHub de ultima versiune EverShell; nu se trimite nimic despre instanța ta. Când există una mai nouă, o vezi aici, cu comanda care actualizează pe loc (cu verificare de sănătate și revenire automată).\n\nUn administrator o poate opri definitiv cu WEBTERM_UPDATE_CHECK=0 sau o poate îndrepta spre un fork cu WEBTERM_UPDATE_REPO.",
     'help.backup.title': "Copii de siguranță",
-    'help.backup.body': "O copie de siguranță conține baza de date (conturi, hosturi, credențiale SSH) și cheia seifului, deci e mereu criptată cu o parolă aleasă de tine. Fără parolă nu poate fi restaurată.\n\nProgramează una, trimite-o pe o destinație externă și testează o copie cu Verifică. Restaurarea înlocuiește toate conturile și credențialele și repornește aplicația; înainte se păstrează o copie a stării curente.",
+    'help.backup.body': "O copie de siguranță conține baza de date (conturi, hosturi, credențiale SSH) și cheia seifului, deci e mereu criptată cu o parolă aleasă de tine. Fără parolă nu poate fi restaurată.\n\nProgramează una, trimite-o pe o destinație externă și testează o copie cu Verifică. Restaurarea înlocuiește toate conturile și credențialele și repornește aplicația; înainte se păstrează o copie a stării curente.\n\nCu criptarea la repaus (3.8) o copie conține cheile împachetate, niciodată cheia principală: restaurarea are nevoie și de fișierul cheii principale al acestei instalări, deci păstrează o copie a cheii în afara serverului.",
   },
 }
 

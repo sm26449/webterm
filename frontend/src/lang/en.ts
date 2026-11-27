@@ -1469,7 +1469,7 @@ const en: Lang = {
     'help.certificates.title': "TLS certificates",
     'help.certificates.body': "EverShell watches the certificate Traefik serves for the app domain, the forward wildcard and Authentik, and warns before one expires or if the default/wrong certificate is served. An Owner can renew it from a terminal on the gateway host (a fresh second factor is required).",
     'help.health.title': "System health",
-    'help.health.body': "A standing set of checks for failures that otherwise stay silent: the IdP unreachable, the signing key locked, no break-glass Owner, backups not running, disk filling, a certificate expiring, clock skew. It detects, notifies and recommends a fix — it never runs anything itself. \"Re-check now\" runs them all.",
+    'help.health.body': "A standing set of checks for failures that otherwise stay silent: the IdP unreachable, the signing key locked, no break-glass Owner, backups not running, disk filling, a certificate expiring, clock skew, and with encryption at rest (3.8) the protection state, recording migration and the erasure journal. It detects, notifies and recommends a fix — it never runs anything itself. \"Re-check now\" runs them all.",
     'help.transfers.title': "Transfers",
     'help.transfers.body': "Uploads, downloads and host-to-host copies show here with progress, speed and ETA, and survive closing the panel. A file dropped or pasted onto a terminal has its path typed at the prompt — a paste is a paste — it is not run for you.",
     'help.rootMove.title': "Uploading into a root-owned folder",
@@ -4499,7 +4499,7 @@ const en: Lang = {
     'help.versionCheck.title': "Version check",
     'help.versionCheck.body': "Once a day the server asks GitHub for the latest EverShell release; nothing about your instance is sent. When a newer one exists you see it here, with the command that upgrades in place (with a health check and automatic rollback).\n\nAn administrator can turn it off for good with WEBTERM_UPDATE_CHECK=0, or point it at a fork with WEBTERM_UPDATE_REPO.",
     'help.backup.title': "Backups",
-    'help.backup.body': "A backup holds the database (accounts, hosts, SSH credentials) and the vault key, so it is always encrypted with a passphrase you choose. Without that passphrase it cannot be restored.\n\nSchedule one, send it to an external destination, and test a copy with Verify. Restoring replaces every account and credential and restarts the app; a snapshot of the current state is kept first.",
+    'help.backup.body': "A backup holds the database (accounts, hosts, SSH credentials) and the vault key, so it is always encrypted with a passphrase you choose. Without that passphrase it cannot be restored.\n\nSchedule one, send it to an external destination, and test a copy with Verify. Restoring replaces every account and credential and restarts the app; a snapshot of the current state is kept first.\n\nWith encryption at rest (3.8) a backup holds the wrapped keys, never the master key: restoring it also needs this installation's master key file, so keep a copy of that key off the server.",
   },
 }
 
