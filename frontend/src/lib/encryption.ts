@@ -129,7 +129,9 @@ export function destState(d: EraseDestination): DestState {
   if (d.ahead != null) return 'ahead'
   if (d.state === 'missing') return 'missing'
   if (d.state !== 'ok' && d.error) return 'failing'
-  if (d.attested_n <= 0 && d.behind) return d.configured ? 'behind' : 'none'
+  // nicio atestare pe o destinaţie care nu mai e configurată (ex. cerută doar de un restore): nu „la zi"
+  if (d.attested_n <= 0 && !d.configured) return 'none'
+  if (d.attested_n <= 0 && d.behind) return 'behind'
   if (d.behind) return 'behind'
   return 'attested'
 }

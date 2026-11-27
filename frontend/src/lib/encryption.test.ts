@@ -59,6 +59,8 @@ describe('starea afişată', () => {
     expect(destState(d({ ahead: 9 }))).toBe('ahead')
     expect(destState(d({ rolled_back: true, ahead: 9 }))).toBe('rolledBack')
     expect(destState(d({ configured: false, attested_n: 0, behind: true }))).toBe('none')
+    expect(destState(d({ configured: false, required: true, attested_n: 0, behind: false }))).toBe('none')
+    expect(destState(d({ attested_n: 0, behind: true }))).toBe('behind')
     expect(destTone('rolledBack')).toBe('danger')
     expect(destTone('attested')).toBe('ok')
   })
