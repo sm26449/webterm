@@ -11,6 +11,7 @@ Temp dirs + the real db module; no network, no Docker.
 """
 import asyncio
 import contextlib
+import errno
 import os
 import sqlite3
 import sys
@@ -2989,6 +2990,34 @@ async def g_recompact():
               and not await db.fetchall("SELECT 1 FROM tx_quarantine WHERE sid=?", x), (label, lg0, await ledger(x)))
         check(f"…a full verify of that source still fails ({label}): the evidence is kept",
               not (await st.verify(x))["ok"])
+    # Codex WTX2 re-review L: o eroare trecătoare la deschiderea sursei (EMFILE) NU e „sursă stricată”
+    x = new_sid()
+    await add_session(x)
+    await v1_recording(st, x, out[:120000], cast[:90000])
+    before = file_state(x)
+    real_open = os.open
+
+    def emfile_open(path, flags, *a, **kw):
+        if isinstance(path, str) and path.startswith(x) and not flags & os.O_CREAT:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, flags, *a, **kw)
+    os.open = emfile_open
+    try:
+        async with st.lease(x):
+            try:
+                await st.recompact(x)
+                raised = None
+            except Exception as e:  # noqa: BLE001
+                raised = e
+    finally:
+        os.open = real_open
+    check("EMFILE opening a healthy source → a transient 'io' error, not RecompactSourceCorrupt; nothing changed",
+          isinstance(raised, ts.TxStoreError) and not isinstance(raised, ts.RecompactSourceCorrupt)
+          and getattr(raised, "reason", "") == "io" and file_state(x) == before, repr(raised))
+    async with st.lease(x):
+        res = await st.recompact(x)
+    check("…and once descriptors are free again the same source recompacts",
+          res and await read_all(st, x) == out[:120000] and (await desc(st, x)).generations[0].ver == 2, res)
     # Generaţia recuperată (abandonată de o eroare de scriere): se verifică exact prefixul ei comis
     # (numărători, lungime logică, capăt fizic), cu semantica de recuperare: octeţii de după nu contează.
     async def v1_with_recovered(x):

@@ -3529,7 +3529,11 @@ recordings shrink without an operator command:
    pass that owes nothing, and its excess is a debt the next passes pay before attempting anything,
    so n passes do at most n × 256 MiB + one attempt of work; one above `RECOMPACT_MAX_ATTEMPT`
    (1 GiB) never runs in the background (it stays version 1, readable; System health: *too large to
-   compress in the background*). A sid with a running or starting writer is skipped (only its
+   compress in the background*). Both the pass charge and the ceiling are *estimates* taken from
+   the candidate scan, before the lease: output framing (record headers, tags, header, SEAL) is not
+   counted, and the descriptors are re-read under the lease, so actual work can exceed the
+   estimate by that framing (≈ 0.05 % for incompressible data). Debt lives in the process and a
+   restart starts with a fresh allowance. A sid with a running or starting writer is skipped (only its
    coordinator publishes, §12.11.1); it is taken after it closes. Compression off → nothing.
 2. *Under the sid's lease:* the eligibility is re-read; free space ≥ the old generations + 64 MiB
    (else postponed); every old generation is **pinned** (§12.11.3, `retire` defers).

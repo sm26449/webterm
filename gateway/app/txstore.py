@@ -2354,8 +2354,13 @@ class Snapshot(_FdOwner):
         for g in self.desc.generations:
             try:
                 fd = os.open(gen_name(sid, kind, g.gen_id.hex()), _RDONLY, dir_fd=store.dir_fd)
-            except OSError:
-                raise TxStoreError("damaged", f"generation {g.gen_id.hex()} missing") from None
+            except OSError as e:
+                # Codex WTX2 re-review L: doar un nume lipsă / nefolosibil e „damaged”; o eroare de
+                # resurse sau I/O (EMFILE, ENFILE, EIO, ENOMEM…) e trecătoare → "io", reîncercată cu
+                # backoff, nu pusă în coşul de integritate (fără reîncercare până la restart).
+                if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, errno.ENXIO):
+                    raise TxStoreError("damaged", f"generation {g.gen_id.hex()} missing") from None
+                raise TxStoreError("io", f"generation {g.gen_id.hex()}: {errno.errorcode.get(e.errno, e.errno)}") from None
             self.gens.append((g, fd, self.length))
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size < g.phys_len:
