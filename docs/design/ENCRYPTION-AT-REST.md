@@ -3519,28 +3519,47 @@ recordings shrink without an operator command:
 
 1. *Candidates* (`recompact_candidates`): every descriptor of the sid authentic, status `ok`, no
    quarantine row, no erase intent, not tombstoned, no `live` generation, at least one version-1
-   generation. Largest first; at most `RECOMPACT_PASS_BYTES` (256 MiB) of version-1 generations per
-   pass (≈ 4 GB in ~16 passes of one minute), the first candidate always. A sid with a running or
-   starting writer is skipped (only its coordinator publishes, §12.11.1); it is taken after it
-   closes. Compression off → nothing.
+   generation. Largest first. *Work budget:* each attempt is charged, **before it runs and whatever
+   its outcome** (success, a late failure, a CAS or erase refusal), its estimated I/O,
+   `recompact_work` = 2 × the physical bytes of every generation of each kind it rewrites (all of
+   them, version 2 included: a kind with one version-1 generation is copied whole; read once by
+   the full source verification, once by the copy) + 3 × their decoded bytes (the new generation
+   written, then read back twice; incompressible worst case). A pass charges at most
+   `RECOMPACT_PASS_BYTES` (256 MiB of work). An attempt larger than a pass runs only alone, in a
+   pass that owes nothing, and its excess is a debt the next passes pay before attempting anything,
+   so n passes do at most n × 256 MiB + one attempt of work; one above `RECOMPACT_MAX_ATTEMPT`
+   (1 GiB) never runs in the background (it stays version 1, readable; System health: *too large to
+   compress in the background*). A sid with a running or starting writer is skipped (only its
+   coordinator publishes, §12.11.1); it is taken after it closes. Compression off → nothing.
 2. *Under the sid's lease:* the eligibility is re-read; free space ≥ the old generations + 64 MiB
    (else postponed); every old generation is **pinned** (§12.11.3, `retire` defers).
-3. *Per kind:* a reader snapshot of the whole recording (the reader path: verified parse) is copied
+3. *Full source verification* (Codex M1): a reader snapshot per kind, and every source generation
+   checked whole on the snapshot's own fds, the ones the copy then reads (`verify_generation_fd`):
+   header and `hdr_mac`, every record, count and logical length; for a sealed generation the SEAL
+   (count, length, tag hash) and the exact physical end (`phys_len`, no byte after it); for a
+   recovered one exactly its committed prefix (bytes past `phys_len` are ignored, as for every
+   reader). A range read authenticates only the bytes it returns, so without this a generation
+   with a damaged SEAL or trailing bytes would be replaced by a valid version-2 copy and the
+   evidence lost. A source that fails (`RecompactSourceCorrupt`) is **not touched**: nothing is
+   created, its status, quarantine state and files stay as they are, the janitor raises
+   `transcript.recompactSourceCorrupt`, System health names the session (*failed their integrity
+   check and were left untouched for investigation*), and it is not retried until a restart.
+4. *Per kind:* the snapshot of the whole recording (the reader path: verified parse) is copied
    into **one** new version-2 generation through `reserve_and_create` (ledger `reserved` →
    `created`, `O_EXCL`, inode recorded) and hashed (SHA-256, length) on the way. Plaintext exists
    only in memory: nothing but encrypted records is ever written to disk.
-4. SEAL, fsync of the file and of the directory; `verify_full` on a new read-only fd of the same
+5. SEAL, fsync of the file and of the directory; `verify_full` on a new read-only fd of the same
    inode; then the new generation is read back **through the reader** (a probe descriptor) and must
    hash to the same SHA-256 and length as the source — byte-identical replay, or nothing is
    published (`readback`, the new files retired).
-5. *One transaction under the barrier* (`_recompact_txn`): refuses (INV-14) when the sid is
+6. *One transaction under the barrier* (`_recompact_txn`): refuses (INV-14) when the sid is
    tombstoned in memory or has an erase intent; CAS on the RK envelope, on every descriptor (exact
    blob and version, status `ok`) and on the quarantine; then each descriptor becomes `(T,)` with
    version + 1 (flags, `list_epoch`, `committed_at`, `archived_at` unchanged: the logical content
    is identical, offsets and gap markers stay valid), T `created` → `published` (identity checked),
    the old generations `published` → `retired`. An uncertain COMMIT is resolved by re-reading the
    descriptors on a fresh connection.
-6. *After the commit:* the old generations are retired (unlinked once no reader, cache or backup
+7. *After the commit:* the old generations are retired (unlinked once no reader, cache or backup
    pins them). Readers that opened before keep reading their fds (§12.11.2).
 
 Crash and restart: before the commit only `created` rows exist (`recover()` unlinks them at boot;
@@ -3553,7 +3572,8 @@ retires T like any published generation. Backups: a snapshot taken before the co
 the old generations (copied whole, then unlinked at release); one taken after lists T. System
 health (`crypto.migration`): *Compressing encrypted recordings: n done, m left (MB), saved MB* while
 candidates remain; a failed sid → warning *could not be compressed … still readable* (its old
-generations keep serving, retried after 1 h).
+generations keep serving, retried after 1 h); a source that failed its full verification → warning
+naming the sessions (step 3).
 
 Tests (§12.11.7 style): `txformat_test` (vectors, round trips at every reset, seeking from every
 index entry, tamper cases: flipped byte, truncated record, output past `ulen`, short output,
@@ -3562,8 +3582,12 @@ longest legal block accepted), a version byte stripped, cross-version record typ
 indexes; ratio ≥ 5× on terminal-like output), `keyring_test` (descriptor version nibble),
 `txstore_test` (v2 live / sealed reads and index seeks, recompaction byte-identical and idempotent,
 live / quarantined / erased / intent / CAS refusals, a pinned old generation, a crash at every step
-then resume), `migration_test` (janitor budget, health progress / warning / done, backoff,
-convergence ≥ 5×), `erasure_test` (an erase requested mid-recompaction), `txbackup_test` (a
+then resume; a truncated source, a missing or damaged SEAL, trailing bytes, a corrupted middle
+record and a damaged recovered prefix each refused with the source untouched, a recovered source
+with an uncommitted tail accepted), `migration_test` (janitor budget, health progress / warning /
+done, backoff, convergence ≥ 5×; repeated late failures and CAS refusals charged within each pass,
+the debt of an oversized attempt, the attempt ceiling; a corrupt source alarmed, named, never
+retried, the others recompacted), `erasure_test` (an erase requested mid-recompaction), `txbackup_test` (a
 recompaction under a running backup snapshot, v2 members restored byte-identical).
 
 ## Appendix: Test vectors (v1)

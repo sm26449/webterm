@@ -726,6 +726,120 @@ async def g_recompaction(st):
     return st
 
 
+def _file_state(sid):
+    out = {}
+    for n in sorted(os.listdir(TD)):
+        if n.startswith(sid):
+            with open(os.path.join(TD, n), "rb") as f:
+                out[n] = f.read()
+    return out
+
+
+async def g_recompaction_guards(st):
+    print("== §12.11.14 Codex M1/M2: a corrupt source is left alone; the pass budget counts attempts ==")
+    mg.reset()
+    await wipe()
+    sids, data = [sid_new() for _ in range(4)], {}
+    for i, x in enumerate(sids):
+        data[x] = (term_like(300000 + i * 100000, 20 + i), b'{"version": 2}\n' + term_like(50000, 30 + i))
+        write(TD, x + ".out", data[x][0])
+        write(TD, x + ".cast", data[x][1])
+        await add_session(x, "closed")
+    st = await reboot(st)
+    st.write_ver = 1
+    await mg.run_once(st)
+    st.write_ver = 2
+    cands = await st.recompact_candidates(with_cost=True)
+    work = {x: w for x, _n, w in cands}
+    check("candidates with cost: work ≥ 2 × the v1 bytes (verification + copy) for every sid",
+          len(cands) == 4 and all(w >= 2 * n for _x, n, w in cands), cands)
+    calls = []
+    orig = st.recompact
+
+    async def counting(sid):
+        calls.append(sid)
+        return await orig(sid)
+    st.recompact = counting
+
+    # M2: eşecuri târzii repetate (după copiere, verificare şi read-back): fiecare trecere rămâne în buget
+    def late_fail(p):
+        if p == "rc-verified":
+            raise OSError(5, "Input/output error (test)")
+    st.fault = late_fail
+    big = max(work.values())
+    budget = big                                   # exact o încercare (cea mai mare) încape
+    per_pass, now = [], time.time()
+    for i in range(4):
+        calls.clear()
+        await mg.recompact_once(st, now=now + i * (mg.RETRY_SECS + 1), budget=budget)
+        per_pass.append(list(calls))
+    check("repeated late failures: every pass attempts work ≤ its budget (one recording here, not the cohort)",
+          all(sum(work[x] for x in p) <= budget and len(p) == 1 for p in per_pass), per_pass)
+    # refuzuri târzii (CAS) costă la fel
+    def late_cas(p):
+        if p == "rc-verified":
+            raise ts.Refused("cas", "moved (test)")
+    st.fault = late_cas
+    calls.clear()
+    await mg.recompact_once(st, now=now + 9 * mg.RETRY_SECS, budget=budget)
+    check("late CAS refusals are charged too (no free retries inside the pass)", len(calls) == 1, calls)
+    # o încercare peste buget rulează singură, iar surplusul e plătit de trecerile următoare
+    st.fault = late_fail
+    half = big * 6 // 10
+    seq, t0 = [], now + 20 * mg.RETRY_SECS
+    for i in range(3):
+        calls.clear()
+        await mg.recompact_once(st, now=t0 + i * (mg.RETRY_SECS + 1), budget=half)
+        seq.append(list(calls))
+    check("an attempt larger than the pass runs alone; its excess is a debt the next pass pays first",
+          len(seq[0]) == 1 and work[seq[0][0]] > half and seq[1] == [] and len(seq[2]) >= 1
+          and sum(work[x] for x in seq[2]) <= max(half, big), (seq, half, mg._s.rc_debt))
+    mg._s.rc_debt = 0
+    calls.clear()
+    await mg.recompact_once(st, now=t0 + 9 * mg.RETRY_SECS, budget=10 * big, max_attempt=big - 1)
+    check("above RECOMPACT_MAX_ATTEMPT: never attempted in the background, counted in the status",
+          max(work, key=work.get) not in calls and mg.recompact_status()["oversize"] == 1, (calls, mg.recompact_status()))
+    st.fault = None
+    mg._s.rc_backoff.clear()
+    mg._s.rc_failed.clear()
+    mg._s.rc_oversize.clear()
+    mg._s.rc_debt = 0
+    check("…and the budget logic leaves every recording served, unchanged", await all_same(st, data))
+
+    # M1: o sursă stricată (un octet după SEAL) nu e recompactată, nu e atinsă, e numită în System health
+    victim = min(work, key=work.get)
+    g0 = (await desc(st, victim, "out")).generations[0]
+    gname = ts.gen_name(victim, "out", g0.gen_id.hex())
+    with open(os.path.join(TD, gname), "ab") as f:
+        f.write(b"\0")
+    before = _file_state(victim)
+    vdesc = await db.fetchall("SELECT kind, blob, version, status FROM tx_descriptors WHERE sid=? ORDER BY kind", victim)
+    st.alarms.clear()
+    calls.clear()
+    await mg.recompact_once(st, now=t0 + 30 * mg.RETRY_SECS, budget=10 * big)
+    res = await syshealth.c_crypto_migration()
+    check("corrupt source: refused, files byte-identical, descriptors and status unchanged, no quarantine",
+          victim in calls and _file_state(victim) == before
+          and await db.fetchall("SELECT kind, blob, version, status FROM tx_descriptors WHERE sid=? ORDER BY kind", victim) == vdesc
+          and not await db.fetchall("SELECT 1 FROM tx_quarantine WHERE sid=?", victim)
+          and not await open_ledger(victim), (calls, res))
+    check("…an alarm names it", any(c == "transcript.recompactSourceCorrupt" and victim in d for c, d in st.alarms),
+          st.alarms)
+    check("…System health warns and names the session",
+          res.severity == "warning" and res.key == "recompaction_corrupt" and victim[:8] in res.params["sessions"]
+          and "trailing" in res.params["error"], res)
+    check("…the other recordings are recompacted in the same pass",
+          all(g.ver == 2 for g in await all_gens(st, [x for x in sids if x != victim])))
+    calls.clear()
+    await mg.recompact_once(st, now=t0 + 90 * mg.RETRY_SECS, budget=10 * big)
+    check("…and it is not retried by later passes (left for investigation)", calls == [] and _file_state(victim) == before,
+          calls)
+    st.recompact = orig
+    check("…its old generations are still served", await read_all(st, victim, "cast") == data[victim][1])
+    mg.reset()
+    return st
+
+
 async def g_real_volume():
     print("== real protected volume: boot, erase pending, migrate, same bytes ==")
     await wipe()
@@ -869,6 +983,7 @@ async def main():
         st = await g_residual(st)
         st = await g_rules(st)
         st = await g_recompaction(st)
+        st = await g_recompaction_guards(st)
         mg.reset()
         st.close()
         st = None

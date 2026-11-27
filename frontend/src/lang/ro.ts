@@ -4295,6 +4295,8 @@ const ro: Lang = {
     'health.msg.migration_progress': "Înregistrările se migrează în stocarea criptată: {done} din {total} gata, {mb} MB rămași ({one_kind} cu un singur flux, {orphans} orfane)",
     'health.msg.recompaction_progress': "Înregistrările criptate se comprimă: {done} gata, {left} rămase ({mb} MB), {saved} MB economisiți până acum",
     'health.msg.recompaction_failed': "{failed} înregistrări criptate nu au putut fi comprimate și rămân în formatul vechi, în continuare citibile ({error})",
+    'health.msg.recompaction_corrupt': "{failed} înregistrare(ări) criptată(e) nu au trecut verificarea de integritate și au fost lăsate neatinse pentru investigație ({error}). Sesiuni: {sessions}",
+    'health.msg.recompaction_oversize': "{count} înregistrare(ări) criptată(e) sunt prea mari pentru comprimarea în fundal și rămân în formatul vechi, în continuare citibile",
     'health.msg.migration_failed': "{failed} fișier(e) de înregistrare nu au putut fi migrate și {stray} sunt în afara inventarului; textul lor clar e păstrat ({error}). Sesiuni: {sessions}",
     'health.msg.ctl_socket_ok': "Backup-urile live ale hostului trec prin socket-ul de control al gateway-ului",
     'health.msg.ctl_socket_unavailable': "Socket-ul de control pentru backup nu e disponibil, deci backup-urile live ale hostului (backup.sh cu aplicația pornită) sunt refuzate: {error}",

@@ -245,6 +245,8 @@ MESSAGES = {
     "migration_progress": "Migrating recordings to encrypted storage: {done} of {total} done, {mb} MB left ({one_kind} one-kind, {orphans} orphans)",
     "recompaction_progress": "Compressing encrypted recordings: {done} done, {left} left ({mb} MB), {saved} MB saved so far",
     "recompaction_failed": "{failed} encrypted recordings could not be compressed and stay in the older format, still readable ({error})",
+    "recompaction_corrupt": "{failed} encrypted recording(s) failed their integrity check and were left untouched for investigation ({error}). Sessions: {sessions}",
+    "recompaction_oversize": "{count} encrypted recording(s) are too large to compress in the background and stay in the older format, still readable",
     "migration_failed": "{failed} recording file(s) could not be migrated and {stray} are outside the inventory; their plaintext is kept ({error}). Sessions: {sessions}",
     "ctl_socket_ok": "Host live backups go through the gateway's backup control socket",
     "ctl_socket_unavailable": "The backup control socket is not available, so host live backups (backup.sh with the app running) are refused: {error}",
@@ -1088,13 +1090,21 @@ async def c_crypto_migration() -> Optional[Result]:
             "one_kind": d["one_kind"], "orphans": d["orphans"]}, doc="encryption")
     # §12.11.14: rescrierea comprimată a generaţiilor v1 (niciodată critică: v1 rămâne citibil)
     rc = d.get("recompaction") or {}
+    if rc.get("corrupt"):
+        # Codex M1: sursa n-a trecut verificarea completă; recompactarea a refuzat-o şi n-a
+        # schimbat nimic (stare, carantină, fişiere): Owner-ul o investighează, pe nume.
+        return Result("warning", "recompaction_corrupt", {
+            "failed": rc["corrupt"], "error": rc.get("corrupt_error") or "?",
+            "sessions": ", ".join(x[:8] for x in rc.get("corrupt_sids") or []) or "-"}, doc="encryption")
     if rc.get("failed"):
         return Result("warning", "recompaction_failed", {"failed": rc["failed"], "error": rc["error"] or "?"},
                       doc="encryption")
-    if rc.get("left"):
+    if rc.get("left", 0) > rc.get("oversize", 0):
         return Result("info", "recompaction_progress", {
             "done": rc["done"], "left": rc["left"], "mb": round(rc["left_bytes"] / 1048576, 1),
             "saved": round(rc["saved_bytes"] / 1048576, 1)}, doc="encryption")
+    if rc.get("oversize"):
+        return Result("info", "recompaction_oversize", {"count": rc["oversize"]}, doc="encryption")
     return Result("ok", "migration_done", {"converted": d["converted"]})
 
 

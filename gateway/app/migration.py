@@ -39,9 +39,12 @@ Active only with encrypted recordings on (`txhub.boot` → `boot(st)` after the 
 * **Recompaction** (§12.11.14, `recompact_once`, every janitor pass after the plaintext
   migration): closed recordings that still hold WTX1 version-1 generations are rewritten into one
   compressed generation per kind (`Store.recompact`, under the sid's lease), at most
-  RECOMPACT_PASS_BYTES of old generations per pass, largest first. A sid with a running writer,
-  in quarantine or erased is skipped; an error leaves the old generations served and retries
-  after RETRY_SECS. No operator command: it starts on its own once compression is on.
+  RECOMPACT_PASS_BYTES of estimated work per pass (`txstore.recompact_work`, charged BEFORE each
+  attempt, failures and refusals included), largest first. A sid with a running writer, in
+  quarantine or erased is skipped; an error leaves the old generations served and retries after
+  RETRY_SECS. A source that fails its full integrity check is left exactly as it is, alarmed,
+  named in System health and not retried until a restart. No operator command: it starts on its
+  own once compression is on.
 """
 import asyncio
 import contextlib
@@ -66,7 +69,10 @@ PINNED_RETRY_SECS = 60.0          # unlink amânat cât un backup copiază textu
 FAILED_LIST_MAX = 20              # System health: câte sesiuni cu rânduri eşuate se numesc
 INTERVAL = 60.0
 LIVE_CONCURRENCY = 2              # conversii simultane la pornirea writer-elor (reconcile la boot)
-RECOMPACT_PASS_BYTES = 256 * 1024 * 1024    # §12.11.14: generaţii v1 rescrise pe trecere (~1/min)
+RECOMPACT_PASS_BYTES = 256 * 1024 * 1024    # §12.11.14: lucru (I/O estimat) pe trecere (~1/min)
+# Codex M2: o încercare mai mare decât o trecere rulează doar singură, iar surplusul e o datorie
+# plătită de trecerile următoare; peste plafonul ăsta nu rulează deloc în fundal (rămâne v1, citibilă).
+RECOMPACT_MAX_ATTEMPT = 4 * RECOMPACT_PASS_BYTES
 WORK_STATES = ("pending", "orphan", "converted")
 BLOCKING = ("pending", "orphan", "failed", "converted")     # ţin flag-ul global jos
 _MAX_ERR = 300
@@ -87,6 +93,9 @@ class _State:
     # §12.11.14 recompactare: progres de la boot (System health), erori pe sid, backoff propriu
     rc_backoff: dict = field(default_factory=dict)
     rc_failed: dict = field(default_factory=dict)
+    rc_corrupt: dict = field(default_factory=dict)  # M1: sursă care a picat verificarea completă
+    rc_oversize: dict = field(default_factory=dict)  # M2: sid → lucru estimat peste RECOMPACT_MAX_ATTEMPT
+    rc_debt: int = 0                                 # M2: lucru peste bugetul trecerii, de plătit
     rc_done: int = 0
     rc_before: int = 0
     rc_after: int = 0
@@ -632,28 +641,50 @@ async def run_once(st, now=None):
 # ── recompaction (§12.11.14) ─────────────────────────────────────────────────
 
 
-async def recompact_once(st, now=None, budget=RECOMPACT_PASS_BYTES):
-    """One pass: closed recordings with version-1 generations, largest first, until `budget`
-    bytes of old generations were rewritten (the first one always runs). Returns the number of
-    sids rewritten."""
+async def recompact_once(st, now=None, budget=RECOMPACT_PASS_BYTES, max_attempt=RECOMPACT_MAX_ATTEMPT):
+    """One pass: closed recordings with version-1 generations, largest first. Codex M2: each
+    attempt is charged its estimated work (`txstore.recompact_work`) BEFORE it runs, whatever its
+    outcome (success, failure, late refusal), and the pass stops charging at `budget`. An attempt
+    larger than `budget` runs only alone, in a pass that owes nothing, and its excess becomes a
+    debt the next passes pay first (so over n passes the work is ≤ n·budget + max_attempt); one
+    above `max_attempt` never runs in the background (System health counts it; it stays version 1,
+    readable). Returns the number of sids rewritten."""
     s = _s
     if getattr(st, "write_ver", None) != txformat.VERSION_Z:
         return 0
     now = time.time() if now is None else now
-    cands = await st.recompact_candidates()
-    left = {sid: n for sid, n in cands}
+    cands = await st.recompact_candidates(with_cost=True)
+    left = {sid: n for sid, n, _w in cands}
+    allowance = budget - s.rc_debt
+    s.rc_debt = max(0, -allowance)
     spent = done = 0
-    for sid, n in cands:
-        if spent and spent + n > budget:
+    for sid, n, work in cands:
+        if allowance <= 0:
+            break                                   # trecerea asta doar plăteşte datoria
+        if sid in s.rc_corrupt:
+            continue                                # M1: lăsată intactă pentru investigaţie, nu se reîncearcă
+        if work > max_attempt:
+            s.rc_oversize[sid] = work
+            continue
+        s.rc_oversize.pop(sid, None)
+        if spent + work > allowance and (spent or allowance < budget):
             continue
         rec = st.recorders.get(sid)
         if sid in st._starting or (rec is not None and rec.state == "running"):
             continue                               # o sesiune cu writer: reluată după închidere
         if s.rc_backoff.get(sid, 0) > now:
             continue
+        spent += work                              # M2: încercarea costă, oricum s-ar termina
         try:
             async with st.lease(sid):
                 res = await st.recompact(sid)
+        except txstore.RecompactSourceCorrupt as e:
+            # M1: nimic scris, nimic schimbat (stare, carantină, fişiere); Owner-ul investighează.
+            s.rc_corrupt[sid] = _err(e)
+            s.rc_failed.pop(sid, None)
+            log.error("recompaction refused, source failed its integrity check: %s", e)
+            st.alarm("transcript.recompactSourceCorrupt", "%s: %s" % (sid, e))
+            continue
         except Exception as e:                      # noqa: BLE001 — un sid nu opreşte trecerea
             reason = getattr(e, "reason", "")
             if reason in ("erased", "cas"):
@@ -668,15 +699,15 @@ async def recompact_once(st, now=None, budget=RECOMPACT_PASS_BYTES):
         s.rc_failed.pop(sid, None)
         s.rc_backoff.pop(sid, None)
         left.pop(sid, None)
-        before = sum(a for a, _b in res.values())
         s.rc_done += 1
-        s.rc_before += before
+        s.rc_before += sum(a for a, _b in res.values())
         s.rc_after += sum(b for _a, b in res.values())
-        spent += before
         done += 1
-        if spent >= budget:
-            break
+    if allowance > 0:
+        s.rc_debt = max(0, spent - allowance)
     s.rc_failed = {k: v for k, v in s.rc_failed.items() if k in left}
+    s.rc_corrupt = {k: v for k, v in s.rc_corrupt.items() if k in left}
+    s.rc_oversize = {k: v for k, v in s.rc_oversize.items() if k in left}
     s.rc_left = (len(left), sum(left.values()))
     return done
 
@@ -685,7 +716,10 @@ def recompact_status():
     s = _s
     return {"left": s.rc_left[0], "left_bytes": s.rc_left[1], "done": s.rc_done,
             "saved_bytes": max(0, s.rc_before - s.rc_after), "failed": len(s.rc_failed),
-            "error": next(iter(s.rc_failed.values()), "")}
+            "error": next(iter(s.rc_failed.values()), ""),
+            "corrupt": len(s.rc_corrupt), "corrupt_sids": sorted(s.rc_corrupt)[:FAILED_LIST_MAX],
+            "corrupt_error": next(iter(s.rc_corrupt.values()), ""),
+            "oversize": len(s.rc_oversize)}
 
 
 async def _scan(st):

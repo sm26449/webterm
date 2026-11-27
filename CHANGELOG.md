@@ -62,7 +62,11 @@ back.
   context reset at every seek point): encrypted data does not compress, so with recording
   encryption on, the nightly backup had grown from 274 MB to 4.1 GB on a real installation and the
   volume paid the full plaintext size; recordings encrypted by earlier 3.8 builds are rewritten in
-  the background, byte-identical on replay (`WEBTERM_TX_COMPRESS=0` turns it off).
+  the background, byte-identical on replay (`WEBTERM_TX_COMPRESS=0` turns it off). Before an old
+  recording is replaced it is verified whole, so a damaged one is never swapped for a clean copy
+  that would hide the damage: it is left exactly as it is and named in System health. Each
+  background pass is bounded by the work it attempts, failures included, so a batch of damaged or
+  repeatedly refused recordings cannot saturate the disk in one pass.
 - **A refused deploy leaves the installation as it was.** `deploy.sh <version>` used to write the
   new image into `.env` and the rollback target into `.prev-image` before its checks; when the 3.8
   guard then refused (for example a pre-3.8 image on a migrated volume), the next plain

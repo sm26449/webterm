@@ -2947,6 +2947,90 @@ async def g_recompact():
     lg = await ledger(sid4)
     check("a pinned old generation is unlinked only after its unpin", held and lg[old4[0]] == "gone", lg)
     check("after the recompaction: replay identical", await read_all(st, sid4) == out and await read_all(st, sid4, "cast") == cast)
+
+    # Codex M1: sursa e verificată ÎNTREG înainte de a fi înlocuită; una stricată rămâne exact cum e.
+    def tamper_trunc(b, g):
+        return b[:g.phys_len - 1000]
+
+    def tamper_noseal(b, g):
+        return b[:g.phys_len - tx.SEAL_PHYS_LEN]
+
+    def tamper_seal(b, g):
+        return b[:g.phys_len - 3] + bytes([b[g.phys_len - 3] ^ 1]) + b[g.phys_len - 2:]
+
+    def tamper_trailing(b, g):
+        return b + b"\0"
+
+    def tamper_middle(b, g):
+        m = g.phys_len // 2
+        return b[:m] + bytes([b[m] ^ 0x40]) + b[m + 1:]
+
+    def file_state(x):
+        return {n: open(os.path.join(config.TRANSCRIPT_DIR, n), "rb").read() for n in names(x)}
+    for label, fn in (("truncated", tamper_trunc), ("missing SEAL", tamper_noseal), ("damaged SEAL", tamper_seal),
+                      ("trailing bytes after SEAL", tamper_trailing), ("corrupted middle record", tamper_middle)):
+        x = new_sid()
+        await add_session(x)
+        await v1_recording(st, x, out[:120000], cast[:90000])
+        g = (await desc(st, x)).generations[0]
+        p = os.path.join(config.TRANSCRIPT_DIR, ts.gen_name(x, "out", g.gen_id.hex()))
+        with open(p, "rb") as f:
+            b = f.read()
+        with open(p, "wb") as f:
+            f.write(fn(b, g))
+        before = file_state(x)
+        rows = await db.fetchall("SELECT kind, blob, version, status FROM tx_descriptors WHERE sid=? ORDER BY kind", x)
+        lg0 = await ledger(x)
+        async with st.lease(x):
+            ok = await araises(st.recompact(x), ts.RecompactSourceCorrupt, "sourceCorrupt")
+        check(f"recompaction of a source with {label} → refused; files, descriptors, ledger, quarantine untouched",
+              ok and file_state(x) == before and await ledger(x) == lg0
+              and await db.fetchall("SELECT kind, blob, version, status FROM tx_descriptors WHERE sid=? ORDER BY kind", x) == rows
+              and not await db.fetchall("SELECT 1 FROM tx_quarantine WHERE sid=?", x), (label, lg0, await ledger(x)))
+        check(f"…a full verify of that source still fails ({label}): the evidence is kept",
+              not (await st.verify(x))["ok"])
+    # Generaţia recuperată (abandonată de o eroare de scriere): se verifică exact prefixul ei comis
+    # (numărători, lungime logică, capăt fizic), cu semantica de recuperare: octeţii de după nu contează.
+    async def v1_with_recovered(x):
+        st.write_ver = tx.VERSION
+        rec = await st.start_recorder(x)
+        feed_at(rec, out[:30000])
+        cast_at(rec, cast[:20000])
+        await rec.checkpoint()
+        feed_at(rec, out[30000:31000])
+        st.fault = faults({"write"}, exc=OSError)
+        await araises(rec.checkpoint(), ts.TxStoreError, "writeFailed")
+        st.fault = None
+        await rec.resume()
+        feed_at(rec, out[30000:60000])
+        await rec.checkpoint()
+        await rec.close()
+        st.write_ver = tx.VERSION_Z
+        d = await desc(st, x)
+        return d, next(g for g in d.generations if g.state == td.STATE_RECOVERED)
+    x = new_sid()
+    await add_session(x)
+    d, g = await v1_with_recovered(x)
+    with open(os.path.join(config.TRANSCRIPT_DIR, ts.gen_name(x, "out", g.gen_id.hex())), "ab") as f:
+        f.write(b"uncommitted tail")
+    async with st.lease(x):
+        res = await st.recompact(x)
+    check("a recovered v1 source with bytes past its committed prefix recompacts (recovered semantics)",
+          res and await read_all(st, x) == out[:60000] and (await desc(st, x)).generations[0].ver == 2, res)
+    x = new_sid()
+    await add_session(x)
+    d, g = await v1_with_recovered(x)
+    p = os.path.join(config.TRANSCRIPT_DIR, ts.gen_name(x, "out", g.gen_id.hex()))
+    with open(p, "r+b") as f:
+        f.seek(g.phys_len - 5)
+        last = f.read(1)
+        f.seek(g.phys_len - 5)
+        f.write(bytes([last[0] ^ 1]))
+    before = file_state(x)
+    async with st.lease(x):
+        ok = await araises(st.recompact(x), ts.RecompactSourceCorrupt, "sourceCorrupt")
+    check("a recovered source whose committed prefix is damaged → refused, untouched",
+          ok and file_state(x) == before and (await desc(st, x)).version == d.version)
     st.close()
 
     # crash la fiecare pas, apoi reluare (recover + încă o trecere)

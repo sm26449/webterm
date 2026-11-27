@@ -1845,17 +1845,18 @@ class Store:
 
     # ── recompaction of version-1 generations (§12.11.14, orchestration: migration.py) ──
 
-    async def recompact_candidates(self):
+    async def recompact_candidates(self, *, with_cost=False):
         """[(sid, v1 bytes)] of closed recordings that still hold a version-1 generation: every
         descriptor of the sid authentic, `ok`, out of quarantine, without a live generation, and
-        the sid not erased. Cheap enough for every janitor pass (one HMAC per descriptor)."""
+        the sid not erased. Cheap enough for every janitor pass (one HMAC per descriptor).
+        `with_cost`: [(sid, v1 bytes, work)], work = recompact_work() of every kind it rewrites."""
         def load(c):
             return (c.execute("SELECT sid, kind, blob, version, status FROM tx_descriptors").fetchall(),
                     dict(c.execute("SELECT sid, envelope FROM session_keys").fetchall()),
                     {r[0] for r in c.execute("SELECT sid FROM tx_quarantine").fetchall()},
                     {r[0] for r in c.execute("SELECT sid FROM tx_erase_intents").fetchall()})
         rows, envs, held, intents = await self.read(load)
-        per, bad = {}, set()
+        per, work, bad = {}, {}, set()
         for s, k, blob, v, status in rows:
             if s in bad:
                 continue
@@ -1871,7 +1872,25 @@ class Store:
                 bad.add(s)
                 continue
             per[s] = per.get(s, 0) + sum(g.phys_len for g in d.generations if g.ver == txformat.VERSION)
-        return sorted(((s, n) for s, n in per.items() if s not in bad and n), key=lambda x: (-x[1], x[0]))
+            if any(g.ver == txformat.VERSION for g in d.generations):
+                work[s] = work.get(s, 0) + recompact_work(d.generations)
+        out = sorted(((s, n) for s, n in per.items() if s not in bad and n), key=lambda x: (-x[1], x[0]))
+        return [(s, n, work[s]) for s, n in out] if with_cost else out
+
+    def _verify_source_sync(self, sid, kind, snap):
+        """Full check of every source generation of `snap` on its own (pinned) fds: a sealed one
+        whole (header, records, counts, SEAL, nothing after it), a recovered one exactly its
+        committed prefix. Raises RecompactSourceCorrupt; an OSError stays a fault (retried)."""
+        def check():
+            if snap.cancel.is_set():
+                raise TxStoreError("closed", "snapshot closed")
+        with snap._using():
+            for g, fd, _start in snap.gens:
+                try:
+                    verify_generation_fd(fd, sid, kind, g, snap.rk, check=check)
+                except GenCorrupt as e:
+                    raise RecompactSourceCorrupt(
+                        "sourceCorrupt", f"{sid}.{kind}.{g.gen_id.hex()}: {e.detail or e.reason}") from None
 
     def _copy_snapshot_sync(self, snap, writer):
         """The reader's plaintext of `snap` (verified parse) into `writer`, hashed on the way.
@@ -1889,7 +1908,9 @@ class Store:
     async def recompact(self, sid):
         """§12.11.14: rewrites a closed recording that still holds version-1 generations into one
         compressed (version-2) generation per kind. Caller holds the sid's lease. Steps: pin the
-        old generations; per kind, a reader snapshot → Writer v2 (plaintext only in memory),
+        old generations; a reader snapshot per kind, and every source generation fully verified on
+        its fds (RecompactSourceCorrupt before anything is written: the source stays as it is);
+        per kind, the snapshot → Writer v2 (plaintext only in memory),
         hashed; SEAL + fsync file and directory; verify_full on a new fd of the same inode; the
         new descriptor read back through the reader must hash to the same bytes and length; then
         ONE transaction (barrier) with a CAS on every descriptor (blob and version), the RK
@@ -1932,12 +1953,27 @@ class Store:
             raise TxStoreError("disk", f"needs {need} bytes free")
         rk = self.rk_for(sid, env)
         pins = [g.gen_id.hex() for d, _b in todo.values() for g in d.generations]
-        built, sha, new = {}, {}, {}
+        built, sha, new, snaps = {}, {}, {}, {}
         with self.pinned(pins):
             try:
+                # Codex M1: sursa e verificată ÎNTREG (SEAL, EOF fizic exact, numărători; prefixul comis
+                # al unei generaţii recuperate) pe fd-urile fixate din care se şi copiază, ÎNAINTE de
+                # orice fişier nou. Citirea pe interval autentifică doar octeţii ceruţi: fără asta, o
+                # generaţie cu SEAL stricat / octeţi după SEAL ar fi înlocuită de o copie v2 validă şi
+                # dovada coruperii ar dispărea. O sursă care pică NU se atinge (stare, carantină).
                 for k, (d, _b) in todo.items():
-                    snap = await self._make_snapshot(Snapshot, sid, k, d, rk, 0, None,
-                                                     nfds=len(d.generations), force=True)
+                    try:
+                        snaps[k] = await self._make_snapshot(Snapshot, sid, k, d, rk, 0, None,
+                                                             nfds=len(d.generations), force=True)
+                    except TxStoreError as e:
+                        if e.reason in ("corrupt", "damaged"):
+                            raise RecompactSourceCorrupt("sourceCorrupt", f"{sid}.{k}: {e}") from None
+                        raise
+                for k, snap in snaps.items():
+                    await self.io(self._verify_source_sync, sid, k, snap)
+                self._fault("rc-source-verified")
+                for k, (d, _b) in todo.items():
+                    snap = snaps[k]
                     try:
                         gid, fd, dev, ino, name = await self.reserve_and_create(sid, k)
                         built[k] = g = _Gen(k, gid, name, fd, None, dev, ino)
@@ -1987,6 +2023,8 @@ class Store:
                             await self.retire(sid, k, hexid)
                 raise
             finally:
+                for snap in snaps.values():
+                    snap.close()
                 for g in built.values():
                     if g.fd is not None:
                         with contextlib.suppress(OSError):
@@ -4310,8 +4348,23 @@ class BackupChanged(TxStoreError):
         self.sid = sid
 
 
+def recompact_work(generations):
+    """Codex M2: estimated I/O of recompacting one kind made of `generations` (ALL of them: a kind
+    holding one v1 generation is copied whole, v2 included). The source's physical bytes are read
+    twice (full verification, then the copy); the new generation is written once and read back
+    twice (verify_full, reader hash), each at most ~ its decoded size (incompressible worst case),
+    so the decoded bytes count three times. An upper bound, charged before the attempt."""
+    return sum(2 * g.phys_len + 3 * g.plain_len for g in generations)
+
+
 class GenCorrupt(TxStoreError):
     """A generation failed its authentication / structure check (corruption, never an I/O fault)."""
+
+
+class RecompactSourceCorrupt(TxStoreError):
+    """§12.11.14 (Codex M1): a source generation of a recompaction failed its full integrity
+    check. Nothing was written or changed: the recording keeps its status, quarantine state and
+    files for investigation; the janitor raises an alarm and System health names the session."""
 
 
 def set_backup_source(store, loop):
