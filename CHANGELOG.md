@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-11-27 · agent (61)
+
 ### Fixed
 - **A terminal on a host that requires 2FA no longer loses its tab a few minutes after you open
   it.** The session list hides a 2FA host's sessions once your 5-minute step-up window closes, and
