@@ -905,7 +905,8 @@ class BrowserClient:
         self.user_id: Optional[int] = None
         # sha256 al cookie-ului de sesiune web cu care s-a ataşat (None la invitaţi): excepţia din
         # lista de sesiuni (`attached_unlocked_sids`) ţine de ACEASTĂ autentificare, nu de cont —
-        # un cookie furat, în alt browser, nu vede metadatele terminalului ataşat de victimă
+        # altă autentificare a aceluiaşi cont nu vede metadatele terminalului ataşat; o copie furată
+        # a ACESTUI cookie e aceeaşi autentificare (rezidual mărginit, documentat la INV-04)
         self.web_tok_hash: Optional[str] = None
         self._sent_since_ping = 0
         self._ping_seq = 0

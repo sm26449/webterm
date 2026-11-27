@@ -103,8 +103,11 @@ whoever answers first receives it.
   attached, unlocked, from this sign-in, as an authenticated (non-guest) client
   (`core.attached_unlocked_sids`, matched on the web-session cookie's hash): they already see
   that terminal live, and hiding it made its tab vanish 5 minutes after the passkey. The exception
-  belongs to the sign-in, not the account: a stolen cookie in another browser does not see the
-  victim's attached sessions. The host's other sessions stay hidden; automation tokens see none.
+  belongs to the sign-in, not the account: another sign-in of the same account (another device, a
+  password-only login) does not see these sessions. A stolen copy of THIS sign-in's cookie is the
+  same sign-in and does see them, until the hub idle-locks or reaches the 60-minute cap — bounded,
+  metadata only, and less than the unlocked attach such a cookie already gets inside the 5-minute
+  window. The host's other sessions stay hidden; automation tokens see none.
 - A password alone is never a second factor.
 - An SSO step-up needs a fresh `auth_time` from the identity provider.
 - Granting durable access (deploy keys and similar) needs a fresh factor even on hosts without

@@ -176,7 +176,7 @@ async def main():
             check("client ne-owner (cli owner=False) al contului → ascunsă", s_guest not in ids, str(ids))
             r = await c2.get("/api/sessions")
             ids2 = {s["id"] for s in r.json()} if r.status_code == 200 else {"?"}
-            check("alt login al aceluiaşi cont (cookie furat): nicio sesiune 2FA ataşată",
+            check("altă autentificare a aceluiaşi cont: nicio sesiune 2FA ataşată",
                   r.status_code == 200 and not ids2 & set(all_sids), r.text[:160])
             check("attached_unlocked_sids fără hash → nimic (fail-closed)",
                   core.attached_unlocked_sids(uid, None) == set())
