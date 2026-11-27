@@ -4,7 +4,7 @@ import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
-import { newTabRetention, retainOpenTabs } from '../lib/tabRetention'
+import { markAlive, markGone, newTabRetention, retainOpenTabs } from '../lib/tabRetention'
 import { notifyError, registerToast, upsertToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
 import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
@@ -36,6 +36,7 @@ export default function PopoutView(props: { sid: string }) {
   useEffect(() => {
     let active = true
     const load = async () => {
+      const pollStart = Date.now()
       try {
         const [sessions, hosts, state] = await Promise.all([
           api<Session[]>('/api/sessions'),
@@ -49,7 +50,8 @@ export default function PopoutView(props: { sid: string }) {
           setWebauthn(!!state.webauthn_available)
           setStepupMethod(state.stepup_method ?? null)
         }
-        const s = retainOpenTabs(sessions, [props.sid], retention.current, true)
+        const gatedHosts = new Set(hosts.filter((x) => x.require_2fa).map((x) => x.id))
+        const s = retainOpenTabs(sessions, [props.sid], retention.current, true, { gatedHosts, pollStart })
           .sessions.find((x) => x.id === props.sid) ?? null
         if (!s) {
           setGone(true)
@@ -178,7 +180,8 @@ export default function PopoutView(props: { sid: string }) {
         onMenu={() => {}}
         onChanged={() => {}}
         onDeleted={() => window.close()}
-        onGone={() => { retention.current.gone.add(session.id) }}
+        onGone={() => markGone(retention.current, session.id)}
+        onAlive={() => markAlive(retention.current, session.id)}
       />
       {secretReq && (
         <SecretPromptModal

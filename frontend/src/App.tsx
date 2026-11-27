@@ -65,7 +65,7 @@ import { loadSeen, noticeKey, pendingIdleNotices, saveSeen } from './lib/idleSes
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
 import { byText } from './lib/sortText'
-import { newTabRetention, retainOpenTabs } from './lib/tabRetention'
+import { markAlive, markGone, newTabRetention, retainOpenTabs } from './lib/tabRetention'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -710,6 +710,8 @@ function MainApp() {
     // 3.6: permisiunile contului (gating cosmetic) — reîmprospătate odată cu lista de hosturi,
     // ca o schimbare de rol să se vadă fără reload; un eşec lasă starea veche
     void loadPerms()
+    // L1: un `gone` raportat după pornirea acestui poll nu e şters de o citire „vie" mai veche
+    const pollStart = Date.now()
     try {
       const [hr, sr, sv] = await Promise.all([
         api<Host[]>('/api/hosts').then((v) => ({ status: 'fulfilled', value: v }) as const,
@@ -731,8 +733,9 @@ function MainApp() {
       const h = f.hosts
       // 3.8.1: taburile deschise a căror sesiune lipseşte temporar din listă (host 2FA cu fereastra
       // de step-up închisă) rămân, randate din ultimul Session văzut — vezi lib/tabRetention.ts
+      const gatedHosts = new Set(h.filter((x) => x.require_2fa).map((x) => x.id))
       const s = retainOpenTabs(f.sessions, openTabsRef.current, tabRetentionRef.current,
-        sr.status === 'fulfilled').sessions
+        sr.status === 'fulfilled', { gatedHosts, pollStart }).sessions
       const prev = onlineRef.current
       const next = new Map(h.map((host) => [host.id, host.online]))
       if (prev) {
@@ -1456,7 +1459,8 @@ function MainApp() {
       onJournal={openJournal}
       onOpenConnection={openConnection}
       onDeleted={() => { closeTab(s.id); void refresh() }}
-      onGone={() => { tabRetentionRef.current.gone.add(s.id) }}
+      onGone={() => markGone(tabRetentionRef.current, s.id)}
+      onAlive={() => markAlive(tabRetentionRef.current, s.id)}
     />
   )
 

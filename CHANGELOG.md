@@ -14,12 +14,15 @@ back.
   it.** The session list hides a 2FA host's sessions once your 5-minute step-up window closes, and
   typing in the terminal does not keep that window open, so about 5 minutes after the passkey the
   tab of the terminal you were using disappeared and you had to reopen it from the host page. The
-  list now keeps the sessions you are attached to right now (unlocked); the host's other sessions
-  stay hidden until you verify again, and automation tokens still see none of them. The same rule
-  keeps those panes in an active split view. The app also no longer drops an open tab just because
-  its session is briefly missing from the list: it keeps the tab (for example while the terminal is
-  locked at the 60-minute limit and waits for your passkey) and closes it only when the session has
-  ended or is gone. A pop-out window no longer switches to "session gone" in the same situation.
+  list now keeps the sessions you are attached to right now, unlocked, from this same sign-in; the
+  host's other sessions stay hidden until you verify again, a sign-in of the same account in another
+  browser does not see them, and automation tokens still see none of them. The same rule keeps
+  those panes in an active split view. On a 2FA host, the app also no longer drops an open tab just
+  because its session is briefly missing from the list: it keeps the tab (for example while the
+  terminal is locked at the 60-minute limit and waits for your passkey) for at most about an hour,
+  and closes it as soon as the session has ended, is gone or refuses the connection. Tabs on other
+  hosts close as before when their session disappears. A pop-out window no longer switches to
+  "session gone" in the same situation.
 
 ## [3.8.0] — 2026-11-27 · agent (61)
 

@@ -168,6 +168,9 @@ export default function SessionView(props: {
   /** sesiunea s-a încheiat / nu mai există / accesul a fost revocat: tabul poate fi închis dacă
       sesiunea lipseşte şi din listă (lib/tabRetention.ts). Chemat ÎNAINTE de onChanged. */
   onGone?: () => void
+  /** socketul s-a deschis: un `onGone` anterior (ex. handshake refuzat cât gateway-ul era jos) nu
+      mai e valabil */
+  onAlive?: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
       vorbeşte despre el când tunelul agentului lui a căzut */
   viaHost?: Host
@@ -2164,6 +2167,7 @@ export default function SessionView(props: {
     ws.onopen = () => {
       retryRef.current.delay = 1000
       everOpenRef.current = true
+      props.onAlive?.()
       petWatchdog()
       expectTailRef.current = true
       setReplaying(true)
@@ -2413,6 +2417,10 @@ export default function SessionView(props: {
         props.onChanged()
         return
       }
+      // 3.8.1 (review M2): refuzul de dinainte de accept() (sesiune ştearsă/revocată) ajunge ca 1006,
+      // nu 4403/4404. La PRIMA conectare a acestui tab îl raportăm ca „gone": retenţia îl închide
+      // doar dacă lipseşte şi din lista proaspătă, iar o deschidere ulterioară îl anulează (onAlive).
+      if (!everOpenRef.current) props.onGone?.()
       setConn((prev) => {
         if (prev === 'ended') return prev
         // backoff exponențial + jitter: la eșec persistent (ex. host offline)
