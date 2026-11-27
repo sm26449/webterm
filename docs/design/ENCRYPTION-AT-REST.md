@@ -1419,7 +1419,14 @@ encrypted copy) in memory and was capped at 2 GiB unpacked — production volume
 transcripts could not be backed up (`encrypted backup too large (unpacked-budget)`), a regression
 from 3.7's streaming `tar`. The host archive (`scripts/backup.sh` → `hostops backup`, read by
 `hostops verify` / `stage-restore` from `scripts/restore.sh`) is now `WTBK2(portable WTS1)`, written
-and read in bounded memory (two 1 MiB chunks), whatever the volume's size. Implemented in
+and read with a bounded **payload buffer** whatever the volume's size: the codec holds less than two
+1 MiB chunks of plaintext (plus one ciphertext chunk), and every caller of the host path reads and
+writes fixed-size blocks (`Writer.write` also consumes a larger argument in 1 MiB blocks). This is
+not a bound on the process's total RSS, which also includes scrypt's working memory (64 MiB for the
+writer's parameters, up to the reader's 256 MiB cap before the header MAC), transient copies of a
+chunk in the AEAD and gzip layers, the member inventory and content manifest (≤ 200 000 members,
+manifest ≤ 4 MiB) and SQLite's own memory while the database is copied and checked; no total RSS
+figure is published until one is measured with those included. Implemented in
 `gateway/app/wtbk.py`; tested in `tests/snapshot_test.py` (codec, vector, tamper, memory),
 `tests/backup_protected_test.py` (`host_stream_tests`: a 256 MiB volume streamed, lies refused,
 memory bounded), `tests/host_backup_script_test.py` and `tests/txbackup_test.py` (the control
@@ -1444,8 +1451,10 @@ EOF            nothing after chunk n − 1
   (64 MiB, stronger than WTBK1's 2^15); a reader accepts `15 ≤ log2_n ≤ 20`, `1 ≤ p ≤ 4`,
   `128·r·N ≤ 256 MiB`, `chunk_log2 = 20`, `content = 1`, reserved zero — checked **before** the
   KDF runs, so a hostile header cannot buy gigabytes or minutes of scrypt. Salt and nonce prefix
-  are random per archive (the key is per archive already; the prefix makes a nonce collision across
-  archives under one passphrase-and-salt impossible too).
+  are random per archive. The key is per archive already (a fresh 16-byte salt); the 8-byte random
+  prefix only lowers the probability of a nonce reuse if a salt were ever repeated under the same
+  passphrase (two such archives would then need the same prefix as well: about 2^-64 per pair). That
+  probability is small, not zero; the design relies on the salt for key uniqueness.
 - A wrong passphrase or any header byte changed fails the header MAC before any body byte is
   read ("wrong passphrase, or the file is corrupt"). Every chunk's length follows from the
   authenticated `plain_len`, and its index and final flag are in the AAD, so a truncated,
@@ -1469,16 +1478,60 @@ last chunk only after the SHA-256 of everything read matched (no second copy on 
 `backup.sh` then hashes the temp file, runs `hostops verify` on it (the full restore check) and
 publishes it with `ln -T` only when both pass; any failure deletes the temp file.
 
-**Size budget of the host path.** No fixed cap. Writing: `hostops estimate` (an upper bound: the
-DB, its WAL and every regular file under `transcripts/`, uncompressed, plus tar headers and 1 %)
-must fit the backup directory's free space, else `backup.sh` refuses before writing anything;
-`hostops backup` needs the same on the data volume for its work copy (not with the socket: the
-gateway checks its own spool, §12.11.3). Reading: the restore check needs no space beyond the
-database; `stage-restore` refuses unless the data volume has `2 × unpacked_len` + 64 MiB free
-(the staged copy, then the copy the apply makes at the next boot); `restore.sh` refuses when its
-private copy (`TMPDIR`) cannot hold the archive. Stored `.wts` snapshots and the pre-restore
-safety copy are written without the in-app cap too (a large volume's safety copy used to fail the
-apply) and read back with their own size and the free disk as budgets.
+**Format limits of the host path.** No fixed aggregate cap (the in-app 2 GiB unpacked ceiling does
+not apply), but two format limits remain. WTBK2 counts chunks with a u32 (`plain_len` ≤ 2^32 MiB,
+4 PiB). A USTAR member is below 8 GiB (an 11-digit octal size field): a database (with its WAL) or
+a single recording of 8 GiB or more cannot be archived even when the disk has room.
+`backup.member_preflight` refuses such a volume before anything is written, naming the file, and
+the tar writer refuses an oversize member itself (`member-too-large`).
+
+**Size budget of the host path** (Codex M2, rc6). Space is counted per filesystem and per phase, and
+every host operation keeps a **reserve** free for the gateway on the filesystem it writes:
+`backup.headroom` = max(1 GiB, 5 % of that filesystem). The checks before an operation are
+estimates; the writes themselves are metered as well (`backup.write_budget`: statvfs every 8 MiB,
+and a reservation before sqlite's `VACUUM INTO`), so a writer that would cross the reserve stops
+with `NoSpace` and removes what it wrote (the work dir, the spool, the staging dir).
+
+- *Backup without the socket* (`hostops backup`): the work copy (`hostops estimate`: the DB, its WAL
+  and every regular file under `transcripts/`, uncompressed, plus tar headers and 1 %) and the DB
+  copy taken for the snapshot, then extracted to verify it (one at a time, each ≤ DB + WAL) — plus
+  the reserve, on the data volume.
+- *Backup through the socket*: the gateway admits a spool only when the volume has the estimate
+  + 10 %, the DB copy and the reserve free (and ready spools + the new estimate ≤ half the
+  filesystem); its worker writes under the same budget (§12.11.3).
+- *Destination*: `backup.sh` needs the archive's estimate free in `WEBTERM_BACKUP_DIR`; when that
+  directory is on the **same filesystem** as the data volume (`hostops estimate` reports the
+  volume's device; an unknown device counts as the same), it also needs the work copy and the
+  reserve, because the archive grows while the work copy (or spool) still exists.
+- *Verify* (`hostops verify`, the staging's acceptance, §12.10.1 "Pinned digest" below): its scratch
+  holds only what the checks read — the DB, the keys, the signing pair, the erasure journal and the
+  WTX generations; 3.7 plaintext recordings are hashed and checked by name only — under the reserve
+  of the scratch's filesystem.
+- *Restore*: `stage-restore` refuses unless the data volume has, besides the reserve, the peak of
+  the whole restore: the staged set (≤ `unpacked_len`), the copy the apply makes of it at the next
+  boot (≤ `unpacked_len`), the pre-restore safety copy of the current data (≤ its estimate) and that
+  copy's verification scratch (≤ DB + WAL). `restore.sh` runs `hostops verify --for-restore` with
+  the same rule **before it stops the app** (a restore test only prints a note); `restore.sh` also
+  refuses when its private copy (`TMPDIR`) cannot hold the archive.
+- *Apply* (boot): before the safety copy, and again after it and before the flag says `applying`,
+  the boot checks the room it still needs (the copy of the staged set, and the safety copy) + 64 MiB.
+  Short → a clean refusal: nothing changed, the current data stays, the staged set stays staged, a
+  safety copy made by that attempt is removed (a restart loop does not accumulate copies); the boot
+  stops until space is freed.
+
+Stored `.wts` snapshots and the pre-restore safety copy are written without the in-app cap too (a
+large volume's safety copy used to fail the apply) and read back with their own size and the free
+disk as budgets.
+
+**One acceptance for verify and stage** (Codex M1, rc6). `hostops verify` runs the staging's own
+acceptance (`backup._preflight_wts`, shared with `_stage_wts`): the structural and database checks
+**and** the target's recording and erasure rules of §12.11.4 at stage — the flag policy (a tracked
+archive, or any encrypted-recording artefact, on a flag-off target is refused), recording membership
+against the manifest and the DB, every included WTX generation in full, the journal against the
+manifest, the DB and the live head. The live target is only read (`live_root`); the checks run in
+the verify's private scratch. So an archive the staging would refuse is refused by verify, and
+`restore.sh` refuses it before it stops the app. (The in-app verify route keeps its structural
+check; its staging still applies these rules.)
 
 **Pinned digest** (M5, `hostops verify|stage-restore --sha256`): stdin is hashed as it is read; the
 digest is compared when the input ends, which the WTBK2 reader reaches before it accepts the last
@@ -3081,8 +3134,9 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
 - **Control socket** (`ctlsock.py`), as the protocol above. The socket is bound through
   `/proc/self/fd/<.ctl fd>/backup.sock`. `profile` accepts `portable` only (the WTS1 of the in-app
   download; hostops adds the passphrase layer itself, so no passphrase crosses the socket). Since
-  rc5 the spool has no size cap (hostops streams it into WTBK2, §12.10.1); free space is checked
-  as before. The SO_PEERCRED refusal is tested
+  rc5 the spool has no size cap (hostops streams it into WTBK2, §12.10.1); free space counts the
+  spool, the DB copy that coexists with it and the gateway's reserve, and the worker writes under a
+  hard budget (§12.10.1 "Size budget"). The SO_PEERCRED refusal is tested
   through `ctlsock.peer_ok` (the suite runs as root, which the rule admits). `hostops backup --live`
   uses the socket whenever the flag is set, the socket exists or the shared inventory finds any
   encrypted-recording artefact; no answer → exit 3, and `backup.sh` prints the refusal. System
@@ -3154,7 +3208,8 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   unlink never removes copies made elsewhere (backups, filesystem snapshots).
 - **Control socket budgets (M3).** The in-flight slot is taken synchronously before the first
   await and released by the worker's completion callback on every path; at most 2 ready spools,
-  and ready spools + the new estimate ≤ half the filesystem; an unknown free space refuses.
+  and ready spools + the new estimate ≤ half the filesystem; an unknown free space refuses. The
+  free space must hold the estimate + 10 %, the DB copy and the reserve (§12.10.1 "Size budget").
 - **Flag off (M4).** A flag-off backup takes the boot's decision: any shared-inventory entry
   refuses, generation files without ledger rows included (reported as orphans). Other flag-off
   differences, by design: restore refuses a v2 archive or any encrypted-recording artefact in the

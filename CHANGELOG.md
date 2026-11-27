@@ -93,6 +93,22 @@ back.
   and `restore.sh` reads it the same way, in a few MiB of memory whatever the volume's size; both
   refuse early, with the sizes, when the backup directory or the data volume lacks the space.
   Archives written by earlier 3.8 release candidates still restore.
+- **A restore that would be refused is refused before the app is stopped.** `restore.sh`'s check
+  covered the archive's structure and database but not the rules the staging applies to encrypted
+  recordings, so an archive with encrypted recordings restored onto an installation without them, or
+  one whose recording list did not match its database, passed the check, cost a stop of the app, and
+  was then refused. The check now runs the staging's own acceptance, and a restore test reports the
+  same verdict.
+- **Host backups and restores no longer fill the disk.** The space checks counted one copy where
+  several exist at once (the work copy and the database copy, the archive next to the work copy on
+  the same disk, the previous data's safety copy during a restore), so a large database or a small
+  archive replacing a large dataset could pass the check and then run the shared disk out of space,
+  or leave the app unable to apply the restore at its next start. Every phase is now counted, at
+  least max(1 GiB, 5 %) of the disk is kept free for the gateway, a writer that would cross that
+  stops and cleans up, `restore.sh` refuses before stopping the app, and the start checks the space
+  again before it touches anything (the old data stays). A single file of 8 GiB or more (a very
+  large database), which the archive format cannot hold, is now refused at once with its name
+  instead of failing partway.
 
 ## [3.7.1] — 2026-11-22 · agent (61)
 
