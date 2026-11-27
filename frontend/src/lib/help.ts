@@ -28,6 +28,8 @@ export const HELP = {
   taskNotify: { doc: 'docs/ALERTS.md#task-notifications' },
   forwardDomain: { doc: 'docs/PORT-FORWARDING.md#configurable-domain-settings' },
   directBackup: { doc: 'docs/RUNBOOK.md#backuprestore-from-the-application-v1061-no-shell-on-the-server' },
+  // 3.8: Setări → Backup → Encryption at rest (carantină, dovada ştergerilor, migrare)
+  encryption: { doc: 'docs/INSTALL.md#encryption-at-rest' },
   updatesBadge: { doc: 'docs/HOSTS.md#os-updates-badge' },
   autostart: { doc: 'docs/HOSTS.md#starting-at-boot' },
   mtls: { doc: 'docs/HOSTS.md#client-certificates-mtls' },

@@ -32,7 +32,7 @@ import TransfersWidget from './components/TransfersWidget'
 import Toasts, { ToastItem } from './components/Toasts'
 import CopyToast from './components/CopyToast'
 import { initialFleet, settleFleet, type FleetState, type FleetStatus } from './lib/fleetLoad'
-import { errText, api, ApiError, AppState, Host, isSessionLive, SETTINGS_RETURN_KEY, Session, Snippet, SplitView, setStepupHandler, withStepup } from './lib/api'
+import { errText, api, ApiError, AppState, Host, isSessionLive, SETTINGS_RETURN_KEY, Session, Snippet, SplitView, setStepupCredentialProvider, setStepupHandler, withStepup } from './lib/api'
 import { hostAt, hostColor } from './lib/host'
 import { resolveSettingsTarget, type SettingsTarget } from './lib/settingsIndex'
 import { stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from './lib/stepup'
@@ -1322,7 +1322,9 @@ function MainApp() {
         return false
       }
     })
-    return () => setStepupHandler(null)
+    // 3.8: aceeaşi ceremonie pentru acţiunile care cer factorul ÎN CORP (lib/api.ts withFreshFactor)
+    setStepupCredentialProvider(stepupCredential)
+    return () => { setStepupHandler(null); setStepupCredentialProvider(null) }
   }, [stepupCredential])
 
   // Întoarcerea de la un forward pe host cu 2FA. `forward_auth` nu poate rula ceremonia passkey

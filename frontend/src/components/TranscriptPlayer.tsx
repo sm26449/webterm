@@ -11,6 +11,7 @@ import { CastEvent, parseCast } from '../lib/replay'
 import { Button } from './ui'
 import { CloseIcon, PauseIcon, PlayIcon, ShareIcon } from './Icons'
 import ReplayLinkDialog from './ReplayLinkDialog'
+import EraseRecordingAction from './EraseRecordingAction'
 
 type Cmd = { text: string; exitCode?: number; time: number }
 
@@ -304,6 +305,11 @@ export default function TranscriptPlayer(props: {
               data-testid="replay-share" aria-haspopup="dialog">
               <ShareIcon size={12} /> {t('replay.shareButton')}
             </Button>
+          )}
+          {/* 3.8: „Erase permanently" — doar Owner, sesiune închisă, înregistrare criptată */}
+          {props.shareHostId !== undefined && !props.source && (
+            <EraseRecordingAction sid={props.sid} hostId={props.shareHostId} live={false} variant="button"
+              onErased={onClose} />
           )}
           {!props.source && (
             <a

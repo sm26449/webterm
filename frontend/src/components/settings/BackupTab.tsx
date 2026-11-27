@@ -11,6 +11,7 @@ import NotLoaded from './NotLoaded'
 import { useConfirm } from '../../lib/confirm'
 import { askSecret } from '../../lib/secretPrompt'
 import HelpTip from '../HelpTip'
+import EncryptionSection from './EncryptionSection'
 
 // Backup & restore: arhivă criptată descărcabilă, backup automat programat, copii stocate pe
 // server, copie off-host (OAuth Google Drive/Dropbox sau SFTP/FTPS direct) şi restore din .wtbk.
@@ -758,6 +759,9 @@ export default function BackupTab(props: { onAccountChanged: () => void }) {
           <Switch checked={bkTx} onChange={setBkTx} label={t('settings.backup.includeTranscripts')} />
         </div>
       </SettingsSection>
+
+      {/* 3.8: criptarea la repaus — starea şi acţiunile Owner (carantină, destinaţii, conflict, migrări) */}
+      <EncryptionSection data-setting-id="backupEncryption" hidden={!vis('backupEncryption')} />
 
       {/* restaurarea: ultima, în zona periculoasă, cu confirmarea ei (ConfirmModal) neschimbată (audit Me3) */}
       <SettingsSection data-setting-id="backupRestore" hidden={!vis('backupRestore')} tone="danger"

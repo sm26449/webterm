@@ -1,6 +1,6 @@
 import type { HostMtls } from './mtls'
 import { askSecret } from './secretPrompt'
-import { ssoStepupRedirect } from './stepup'
+import { ssoStepupRedirect, type StepupCred } from './stepup'
 import type { ConnType } from './conntypes'
 
 export interface WatermarkConfig {
@@ -514,6 +514,58 @@ export async function withStepup<T>(hostId: number, fn: () => Promise<T>): Promi
     const code = e instanceof ApiError ? e.code : ''
     if (isStepupError(e) && (await ensureStepup(hostId, code))) return fn()
     throw e
+  }
+}
+
+/* 3.8, acţiunile Owner pe înregistrări criptate (ştergere, recuperare, retry/discard, retragere de
+   destinaţie, rezolvarea unui conflict): serverul cere `stepup.require_fresh_factor(real_factor=True)`
+   cu factorul ÎN CORPUL cererii (`stepup_grant` / `stepup_totp`), legat de hostul sesiunii sau de
+   hostul 0 (acţiuni fără sesiune). `withStepup` nu ajunge: el deschide fereastra prin
+   POST /api/hosts/{id}/stepup, care nu există pentru hostul 0, iar pe un host fără 2FA fereastra
+   deschisă de parolă nu e primită de un factor REAL. Aici refolosim ACEEAŞI ceremonie (App o
+   înregistrează: passkey / TOTP / „n-ai factor" / SSO) şi trimitem credenţialul în corp, o singură
+   reîncercare. SSO: redirect la IdP pentru hostul cerut, cu ţinta Setărilor reţinută. */
+type CredentialProvider = (hostId: number, code?: string) => Promise<StepupCred | null>
+let credentialProvider: CredentialProvider | null = null
+export function setStepupCredentialProvider(fn: CredentialProvider | null): void {
+  credentialProvider = fn
+}
+
+export type FreshFactorOpts = {
+  /** panoul Setărilor de redeschis după întoarcerea de la IdP */
+  returnTo?: SettingsReturn
+  /** teste: ceremonia (implicit cea înregistrată de App) şi redirectul SSO */
+  credential?: CredentialProvider
+  redirect?: (hostId: number) => void
+}
+
+/** `send(cred)`: la un refuz de factor proaspăt (403 `stepup.*` / `host.needs2faSso`) cere factorul
+    şi retrimite O dată. `null` = omul a renunţat sau a plecat la IdP; orice altă eroare trece mai
+    departe (apelantul o arată cu `errText`). Serverul rămâne singurul care decide. */
+export async function withFreshFactor<T>(hostId: number, send: (cred: StepupCred) => Promise<T>,
+                                         opts: FreshFactorOpts = {}): Promise<T | null> {
+  const redirect = opts.redirect ?? ((h: number) => {
+    ssoStepupRedirect(h)
+    rememberSettingsReturn(opts.returnTo)    // după: ssoStepupRedirect o şterge pentru un host ≠ 0
+  })
+  const isFactorRefusal = (e: unknown): e is ApiError =>
+    e instanceof ApiError && e.status === 403 && (e.code === 'host.needs2faSso' || e.code.startsWith('stepup.'))
+  try {
+    return await send({})
+  } catch (e) {
+    if (!isFactorRefusal(e)) throw e
+    if (e.code === 'host.needs2faSso') { redirect(hostId); return null }
+    const provider = opts.credential ?? credentialProvider
+    if (!provider) throw e
+    const cred = await provider(hostId, e.code)
+    if (cred === null) return null
+    try {
+      return await send(cred)
+    } catch (e2) {
+      // planul s-a dovedit SSO abia la reîncercare (ceremonia SSO întoarce un credenţial gol)
+      if (isFactorRefusal(e2) && e2.code === 'host.needs2faSso') { redirect(hostId); return null }
+      throw e2
+    }
   }
 }
 

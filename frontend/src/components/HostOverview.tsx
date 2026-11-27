@@ -21,6 +21,7 @@ import { menuLabel } from '../lib/alerts'
 import SessionPreview from './SessionPreview'
 import Sparkline from './Sparkline'
 import TranscriptPlayer from './TranscriptPlayer'
+import EraseRecordingAction from './EraseRecordingAction'
 import HelpTip from './HelpTip'
 import type { HelpId } from '../lib/help'
 
@@ -476,6 +477,8 @@ export default function HostOverview(props: {
                           }
                         }} label={t('host.deleteTitle')}><TrashIcon /></IconButton>
                     )}
+                    {/* 3.8: ştergere definitivă (Owner, înregistrare criptată); rândul rămâne, conţinutul nu */}
+                    <EraseRecordingAction sid={sel.id} hostId={sel.host_id} live={selLive} />
                     <Button variant="primary" onClick={() => props.onOpenSession(sel.id)} className="wt-touch ml-1">
                       {selLive ? t('host.openTerminal') : t('host.viewHistory')}
                     </Button>

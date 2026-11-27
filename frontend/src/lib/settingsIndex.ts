@@ -175,6 +175,10 @@ export const SETTINGS_INDEX: readonly SettingSection[] = [
     keywords: 'cloud google drive dropbox offsite off-host external destination destinatie externa', perm: 'backups.manage' },
   { id: 'backupRestore', cat: 'backup', titleKey: 'settings.backup.restoreTitle',
     keywords: 'restore import recover restaurare recuperare', perm: 'backups.manage' },
+  { id: 'backupEncryption', cat: 'backup', titleKey: 'enc.title', hintKey: 'enc.desc',
+    keywords: 'encryption at rest master key erase erasure quarantine recovery recordings migration journal destination '
+      + 'conflict criptare cheie stergere definitiva carantina recuperare inregistrari migrare jurnal destinatie conflict',
+    perm: 'backups.manage' },
   // ── Actualizări ──
   { id: 'appUpdate', cat: 'actualizari', titleKey: 'settings.update.title', hintKey: 'settings.update.hint',
     keywords: 'version update new release github versiune actualizare', perm: 'settings.manage' },
