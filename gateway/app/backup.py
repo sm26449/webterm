@@ -751,9 +751,10 @@ def apply_pending_restore(keys=None, force_without_safety_copy: bool = False) ->
                 with contextlib.suppress(Exception):
                     f = _read_flag()
                     state = f["state"] if isinstance(f, dict) else str(f)
-                raise ValueError("the data volume ran out of room while applying the restore (%s); the "
-                                 "restore journal is kept (state `%s`): no half-applied data is served. "
-                                 "Free some space, then restart — the apply resumes" % (e, state)) from None
+                # acţiunea întâi: describe_refusal taie linia de log la 300 de caractere
+                raise ValueError("the data volume ran out of room while applying the restore: free some space, "
+                                 "then restart — the apply resumes (journal kept, state `%s`; nothing "
+                                 "half-applied is served). %s" % (state, e)) from None
     if not flag.exists() or not (rd / "webterm.db").exists():
         return False
     # Plasă de siguranță: snapshot al stării CURENTE înainte de a o suprascrie. Sufix
@@ -3367,9 +3368,8 @@ def _apply_space(need: int, what: str, nothing: str = "nothing was changed (the 
                          "%s" % (e.strerror, nothing)) from None
     total = need + keep + BUDGET_STEP
     if free < total:
-        raise ValueError("the data volume has %d MiB free; %s needs %d MiB (%d MiB of them kept free for "
-                         "the gateway) — the restore is refused and %s. Free some space, then restart"
-                         % (free >> 20, what, total >> 20, keep >> 20, nothing))
+        raise ValueError("the data volume has %d MiB free; %s needs %d MiB (with a %d MiB reserve) — refused, "
+                         "%s. Free some space, then restart" % (free >> 20, what, total >> 20, keep >> 20, nothing))
 
 
 def _on_disk(size: int) -> int:
@@ -3492,9 +3492,8 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
             # minus temporarele pe care paşii le şterg înainte de a copia. Lipsă → refuz ÎNAINTE de
             # orice scriere; flagul rămâne `applying`, următorul boot reia
             _apply_space(max(0, sum(_on_disk(e["size"]) for e in doc["files"]) - _partial_bytes()),
-                         "resuming this restore (the rest of the copy of the staged set)",
-                         nothing="nothing more was written (the restore stays `applying` and resumes at the "
-                                 "next start)")
+                         "resuming this restore (the rest of its copy)",
+                         nothing="nothing more was written (still `applying`, resumes at the next start)")
         if current != staged:
             _publish_keys(staged)
         _step("apply:keys")

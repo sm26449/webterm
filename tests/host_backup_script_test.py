@@ -1401,7 +1401,7 @@ def test_rm2(e):
     check("R-M2: space falls during the apply → a clean refusal (journal kept `applying`, no partial "
           "temporaries, a clear message)",
           str(mode).startswith("refused") and "ran out of room while applying the restore" in str(mode)
-          and "state `applying`" in str(mode) and _flag_state(tgt) == "applying" and _leftovers(tgt) == []
+          and "state `applying`" in str(mode) and "free some space" in str(mode)[:200] and _flag_state(tgt) == "applying" and _leftovers(tgt) == []
           and not os.path.lexists(os.path.join(tgt, "transcripts.restoring")), (mode, _leftovers(tgt)))
     safety = [n for n in os.listdir(kdir) if n.startswith("pre-restore-") and n.endswith(".keep")]
     check("R-M2: …the safety copy made before `applying` stays (the journal's recovery point)",
