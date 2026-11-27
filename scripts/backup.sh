@@ -77,6 +77,15 @@ lifecycle_lock "$(cd "$BK_SELF_DIR/.." && pwd -P)"
 VOLUME="${WEBTERM_VOLUME:-webterm_webterm-data}"
 OUT="${WEBTERM_BACKUP_DIR:-/var/backups/webterm}"
 KEEP="${WEBTERM_BACKUP_KEEP:-14}"
+# Întreg zecimal fără semn, cel mult 18 cifre (încape în aritmetica pe 64 de biţi a bash-ului)
+is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 18 ]; }
+# R-M1: KEEP e un NUMĂR DE ARHIVE; o valoare nenumerică sau 0 făcea `tail -n +1` → rotaţia
+# ştergea toate arhivele, inclusiv pe cea nouă. Refuz înainte de a scrie ceva.
+if ! is_uint "$KEEP" || [ "$KEEP" -lt 1 ]; then
+  echo "✗ WEBTERM_BACKUP_KEEP must be a whole number of archives, at least 1 (got '$KEEP') — nothing was written." >&2
+  exit 2
+fi
+KEEP=$((10#$KEEP))   # „014" rămâne 14, nu octal
 # `WEBTERM_IMAGE` numea şi imaginea asta, dar în restul proiectului (.env, compose,
 # deploy.sh, upgrade.sh) el înseamnă IMAGINEA GATEWAY-ULUI. Iar `upgrade.sh` sursează
 # `.env` înainte să cheme backupul — deci containerul de backup primea imaginea aplicaţiei
@@ -334,34 +343,37 @@ case "$VOLKIND" in
     # superioară (datele necomprimate + antetele tar); o arhivă mai mică decât ea încape oricum
     rc=0
     EST_OUT=$(hostops "$VMODE" estimate 2>&1) || rc=$?
+    # R-L1: fiecare câmp validat SEPARAT — concatenate, un câmp lipsă trecea testul de cifre
+    # dacă celălalt era numeric, iar bash îl socotea apoi 0
     EST=$(printf '%s\n' "$EST_OUT" | sed -n 's/^estimate: //p')
-    if [ "$rc" != 0 ] || [ -z "$EST" ] || [ -n "${EST//[0-9]/}" ]; then
+    WORK=$(printf '%s\n' "$EST_OUT" | sed -n 's/^work: //p')
+    # R-M1: rezerva gateway-ului are variabila EI; KEEP rămâne numărul de arhive păstrate
+    # (WEBTERM_BACKUP_KEEP) — reatribuit din `headroom:`, rotaţia păstra ~10⁹ arhive
+    HEADROOM=$(printf '%s\n' "$EST_OUT" | sed -n 's/^headroom: //p')
+    VDEV=$(printf '%s\n' "$EST_OUT" | sed -n 's/^device: //p')
+    if [ "$rc" != 0 ] || ! is_uint "$EST"; then
       bk_refuse "the backup size could not be estimated" "$(printf '%s' "$EST_OUT" | tail -n3)" \
         "REFUSING: the gateway could not estimate the backup's size (exit $rc) — nothing was written."
     fi
+    if ! is_uint "$WORK" || ! is_uint "$HEADROOM"; then
+      bk_refuse "the backup size could not be estimated" \
+        "REFUSING: the gateway did not report its work space and reserve (an app image older than this script?) — nothing was written."
+    fi
     FREE=$(df -B1 --output=avail -- "$OUT" 2>/dev/null | tail -n1 | tr -d ' ') || FREE=""
-    case "$FREE" in
-      ''|*[!0-9]*) bk_refuse "the free space of the backup directory is unknown" \
-                     "REFUSING: cannot read the free space of $OUT (df) — nothing was written." ;;
-    esac
+    is_uint "$FREE" || bk_refuse "the free space of the backup directory is unknown" \
+                         "REFUSING: cannot read the free space of $OUT (df) — nothing was written."
     # Codex M2: destinaţia pe ACELAŞI sistem de fişiere cu volumul (în producţie de obicei da: ambele pe
     # discul maşinii) → arhiva creşte cât copia de lucru a gateway-ului (sau spool-ul lui) încă există,
-    # şi gateway-ul îşi păstrează rezerva: nevoia e suma. Dispozitivul necunoscut = presupus comun.
-    WORK=$(printf '%s\n' "$EST_OUT" | sed -n 's/^work: //p')
-    KEEP=$(printf '%s\n' "$EST_OUT" | sed -n 's/^headroom: //p')
-    VDEV=$(printf '%s\n' "$EST_OUT" | sed -n 's/^device: //p')
+    # şi gateway-ul îşi păstrează rezerva: nevoia e suma. R-L1: un dispozitiv lipsă SAU nenumeric (de
+    # oricare parte) = presupus comun — varianta strictă
     ODEV=$(stat -c %d -- "$OUT" 2>/dev/null || true)
-    case "$WORK$KEEP" in
-      ''|*[!0-9]*) bk_refuse "the backup size could not be estimated" \
-                     "REFUSING: the gateway did not report its work space (an app image older than this script?) — nothing was written." ;;
-    esac
-    if [ -z "$VDEV" ] || [ -z "$ODEV" ] || [ "$VDEV" = "$ODEV" ]; then
-      NEED=$((EST + WORK + KEEP))
+    if ! is_uint "$VDEV" || ! is_uint "$ODEV" || [ "$VDEV" = "$ODEV" ]; then
+      NEED=$((EST + WORK + HEADROOM))
       if [ "$FREE" -lt "$NEED" ]; then
         bk_refuse "not enough free space in the backup directory" \
           "REFUSING: $OUT is on the same filesystem as the data volume: it has $((FREE >> 20)) MiB free; this" \
           "          backup can take up to $((EST >> 20)) MiB, while the gateway's work copy ($((WORK >> 20)) MiB)" \
-          "          still exists and $((KEEP >> 20)) MiB stay free for the gateway — nothing was written." \
+          "          still exists and $((HEADROOM >> 20)) MiB stay free for the gateway — nothing was written." \
           "          Free some space, or point WEBTERM_BACKUP_DIR at another disk."
       fi
     fi

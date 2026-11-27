@@ -229,6 +229,12 @@ class Env:
             f.write('#!/bin/sh\nif [ -f "$FAKE_DIR/df_avail" ]; then echo Avail; cat "$FAKE_DIR/df_avail"; exit 0; fi\n'
                     'PATH=/usr/bin:/bin exec df "$@"\n')
         os.chmod(df, 0o755)
+        st = os.path.join(self.fake, "bin", "stat")
+        with open(st, "w") as f:
+            # R-M1/R-L1: dispozitivul destinaţiei fals doar când testul îl cere (out_dev)
+            f.write('#!/bin/sh\nif [ -f "$FAKE_DIR/out_dev" ] && [ "$1" = "-c" ] && [ "$2" = "%d" ]; then '
+                    'cat "$FAKE_DIR/out_dev"; exit 0; fi\nPATH=/usr/bin:/bin exec stat "$@"\n')
+        os.chmod(st, 0o755)
         s = os.path.join(self.fake, "bin", "sleep")
         with open(s, "w") as f:
             f.write("#!/bin/sh\nexit 0\n")
@@ -271,7 +277,7 @@ class Env:
         if mounts is None:
             mounts = "bind||%s|%s\n" % (self.keys, self.keys)   # cheia: aceeaşi cale „în container"
         self.put("app_mounts", mounts)
-        for n in ("others", "ps_fail", "stage_crash", "stage_fsync_fail", "hostops_pre", "df_avail"):
+        for n in ("others", "ps_fail", "stage_crash", "stage_fsync_fail", "hostops_pre", "df_avail", "out_dev"):
             self.put(n, None)
 
     def state(self, name):
@@ -1310,6 +1316,89 @@ def test_m2(e):
           and not (os.path.isdir(e.out) and os.listdir(e.out)), out[-500:])
 
 
+def _est_pre(lines):
+    """hostops_pre: `estimate` answers exactly `lines` (a broken / old image)."""
+    return ("from app import hostops as _h\n"
+            "def _est(a):\n    print(%r)\n    return 0\n"
+            "_h.cmd_estimate = _est\n") % "\n".join(lines)
+
+
+def test_rm1(e):
+    """Codex R-M1 / R-L1: rotation keeps WEBTERM_BACKUP_KEEP archives (not the reserve in bytes);
+    every estimate field validated on its own; an unparseable device counts as shared."""
+    print("── Codex R-M1 / R-L1: protected rotation and the estimate protocol")
+    kf = e.key_file("rm1.key")
+    protected_volume(e, "rm1src", kf, email="rm1@x")
+    e.app("rm1src", ["WEBTERM_MASTER_KEY_FILE=" + kf], running=False)
+    x = dict(PE, WEBTERM_VOLUME="rm1src", WEBTERM_BACKUP_KEEP="2")
+    for label, dev in (("shared filesystem", None), ("distinct filesystem", "987654321")):
+        if os.path.isdir(e.out):
+            shutil.rmtree(e.out)
+        os.makedirs(e.out)
+        old = []
+        for i, stamp in enumerate(("20200101-000000", "20200102-000000")):
+            p = os.path.join(e.out, "webterm-%s.wtbk" % stamp)
+            open(p, "wb").write(b"WTBK2 old")
+            os.utime(p, (1577836800 + i * 86400,) * 2)
+            old.append(p)
+        e.put("out_dev", dev)
+        try:
+            rc, out = e.run("backup.sh", extra=x)
+        finally:
+            e.put("out_dev", None)
+        arcs = sorted(n for n in os.listdir(e.out) if n.startswith("webterm-") and n.endswith(".wtbk"))
+        check("R-M1: %s — 3 protected archives with retention 2 → exactly 2 kept (the oldest removed)" % label,
+              rc == 0 and len(arcs) == 2 and not os.path.exists(old[0]) and os.path.exists(old[1])
+              and "keeping newest 2" in out, (rc, arcs, out[-400:]))
+    for bad in ("0", "abc", "-1"):
+        if os.path.isdir(e.out):
+            shutil.rmtree(e.out)
+        rc, out = e.run("backup.sh", extra=dict(x, WEBTERM_BACKUP_KEEP=bad))
+        check("R-M1: WEBTERM_BACKUP_KEEP=%r refused before writing" % bad,
+              rc == 2 and "WEBTERM_BACKUP_KEEP must be" in out
+              and not (os.path.isdir(e.out) and os.listdir(e.out)), out[-300:])
+
+    # R-L1: fiecare câmp al estimării, separat
+    good = ["estimate: 1000", "work: 1000", "headroom: 1048576", "device: 7"]
+    cases = [
+        ("work: missing", [good[0], good[2], good[3]], "work space and reserve"),
+        ("headroom: missing", [good[0], good[1], good[3]], "work space and reserve"),
+        ("work: garbled", [good[0], "work: 12a", good[2], good[3]], "work space and reserve"),
+        ("headroom: garbled", [good[0], good[1], "headroom: 1 048 576", good[3]], "work space and reserve"),
+        ("estimate: garbled", ["estimate: 1e3"] + good[1:], "could not estimate"),
+        ("estimate: missing", good[1:], "could not estimate"),
+        ("device: garbled → shared", good[:3] + ["device: 7x"], "same filesystem"),
+        ("device: missing → shared", good[:3], "same filesystem"),
+    ]
+    for label, lines, want in cases:
+        if os.path.isdir(e.out):
+            shutil.rmtree(e.out)
+        e.put("hostops_pre", _est_pre(lines))
+        e.put("df_avail", "3000")          # ≥ estimarea, < estimare + lucru + rezervă
+        e.put("out_dev", "8")              # alt dispozitiv decât cel raportat (7)
+        try:
+            rc, out = e.run("backup.sh", extra=x)
+        finally:
+            for n in ("hostops_pre", "df_avail", "out_dev"):
+                e.put(n, None)
+        check("R-L1: %s → refused before writing" % label,
+              rc != 0 and want in out and not (os.path.isdir(e.out) and
+                                               [n for n in os.listdir(e.out) if not n.startswith(".")]),
+              out[-400:])
+    # controlul: câmpuri valide, dispozitive diferite → regula „distinct" (doar estimarea) trece
+    if os.path.isdir(e.out):
+        shutil.rmtree(e.out)
+    e.put("hostops_pre", _est_pre(good))
+    e.put("out_dev", "8")
+    try:
+        rc, out = e.run("backup.sh", extra=x)
+    finally:
+        for n in ("hostops_pre", "out_dev"):
+            e.put(n, None)
+    check("R-L1: control — valid fields on a distinct device → the backup is written",
+          rc == 0 and any(n.endswith(".wtbk") for n in os.listdir(e.out)), out[-400:])
+
+
 def main():
     global FOREIGN_DB
     FOREIGN_DB = _foreign_db()
@@ -1329,6 +1418,7 @@ def main():
         test_rcm1(e)
         test_m1(e)
         test_m2(e)
+        test_rm1(e)
     finally:
         shutil.rmtree(e.base, ignore_errors=True)
         shutil.rmtree(_BOOT_DIR, ignore_errors=True)
