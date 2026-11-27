@@ -296,6 +296,20 @@ def wtbk2_tests():
         tracemalloc.stop()
     check("256 MiB prin WTBK2: memorie mărginită (vârf < 8 MiB la scriere şi la citire)",
           got == total_n and peak_w < 8 << 20 and peak_r < 8 << 20, (got, peak_w >> 10, peak_r >> 10))
+    # Codex L1: un singur write() cu tot argumentul (32 MiB) se consumă în blocuri — tamponul writerului
+    # nu-l copiază întreg (înainte: vârf ≥ 32 MiB)
+    big = os.urandom(32 << 20)
+    with tempfile.TemporaryFile() as f:
+        tracemalloc.start()
+        w = wtbk.Writer(f, WP, plain_len=len(big), unpacked_len=0, **FAST)
+        w.write(big)
+        w.close()
+        _cur, peak_one = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        f.seek(0)
+        same = wtbk2_read(f.read(), n=1 << 20) == big
+    check("L1: Writer.write(32 MiB at once) → bounded buffer (peak < 8 MiB), same archive content",
+          same and peak_one < 8 << 20, peak_one >> 10)
 
 
 def main():

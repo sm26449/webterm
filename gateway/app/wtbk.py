@@ -168,15 +168,19 @@ class Writer:
     def write(self, data):
         self._enter()
         try:
-            if self._done + len(self._buf) + len(data) > self._len:
+            view = memoryview(data).cast("B")
+            if self._done + len(self._buf) + len(view) > self._len:
                 self._state = "broken"
                 raise WtbkError("more-than-declared")
-            self._buf += data
-            # ultimul chunk (cel cu final = 1) aşteaptă close(): numai acolo ştim că nu mai vine nimic
-            while len(self._buf) >= CHUNK and self._done + CHUNK < self._len:
-                self._chunk(self._buf[:CHUNK])
-                del self._buf[:CHUNK]
-            return len(data)
+            # Codex L1: argumentul se consumă în blocuri de cel mult CHUNK — tamponul rămâne < 2 chunk-uri
+            # oricât de mare e un singur write() (un apelant care dă tot fişierul deodată nu-l mai copiază)
+            for off in range(0, len(view), CHUNK):
+                self._buf += view[off:off + CHUNK]
+                # ultimul chunk (cel cu final = 1) aşteaptă close(): numai acolo ştim că nu mai vine nimic
+                while len(self._buf) >= CHUNK and self._done + CHUNK < self._len:
+                    self._chunk(self._buf[:CHUNK])
+                    del self._buf[:CHUNK]
+            return len(view)
         finally:
             self._lock.release()
 
