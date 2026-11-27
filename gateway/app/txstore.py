@@ -1,6 +1,7 @@
 """Encrypted recordings: publication (Recorder) and readers (ENCRYPTION-AT-REST.md §12.11).
 
-PR5a: implemented and tested in isolation, **not wired** into core.py. A `Store` refuses to exist
+Wired since PR5b/PR6b: `txhub.boot` opens the live Store on a protected volume (`real_volume=True`)
+when `WEBTERM_TX_RECORDINGS=1`. Any other `Store` (tests) refuses to exist
 unless `WEBTERM_TX_RECORDINGS=1`, `WEBTERM_TEST_GATE=1` (both checked before anything is opened)
 *and* the volume is a test-fixture volume: an existing DB (opened `mode=rw`, never created) and a
 transcripts dir, both in one private harness dir under the system temp dir, whose
