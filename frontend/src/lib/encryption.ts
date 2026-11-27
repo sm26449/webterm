@@ -94,8 +94,10 @@ export function isEncryptionOwner(p: MyPerms | null): boolean {
 
 /** „Erase permanently" se oferă doar pentru o sesiune închisă cu înregistrare CRIPTATĂ. */
 export function canErase(p: MyPerms | null, rec: EncryptionStatus['recording'] | null | undefined,
-                         live: boolean): boolean {
-  return isEncryptionOwner(p) && !live && !!rec && rec.encrypted && !rec.tombstoned
+                         live: boolean, sid: string): boolean {
+  // L1: starea încărcată trebuie să fie a sesiunii afişate (după schimbarea selecţiei, un render
+  // încă ţine starea celei vechi)
+  return isEncryptionOwner(p) && !live && !!rec && rec.sid === sid && rec.encrypted && !rec.tombstoned
 }
 
 export function protectionView(p: Protection | null | undefined): { tone: Tone; key: string } {

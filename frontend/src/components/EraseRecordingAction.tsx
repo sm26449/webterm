@@ -38,7 +38,7 @@ export default function EraseRecordingAction(props: {
     return () => { alive = false }
   }, [props.sid, props.live, owner])
 
-  if (!canErase(perms, rec, props.live)) return null
+  if (!canErase(perms, rec, props.live, props.sid)) return null
 
   const run = async () => {
     const word = eraseWord(props.sid)
@@ -54,7 +54,7 @@ export default function EraseRecordingAction(props: {
     if (typed === null) return
     setBusy(true)
     try {
-      const res = await eraseRecording(props.sid, props.hostId, typed.trim())
+      const res = await eraseRecording(props.sid, props.hostId, word)
       if (res === null) return
       notifyToast(res.attested ? t('enc.erase.done') : t('enc.erase.doneUnattested'), 'info', 'erase-' + props.sid)
       setRec(null)

@@ -68,6 +68,8 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
       setBusy('')
     }
   }
+  // L3: după ce textul tastat s-a potrivit, se trimite cuvântul canonic (exact ce compară serverul),
+  // nu varianta tastată (spaţii multiple, majuscule) pe care serverul ar refuza-o.
   const typed = (title: string, message: string, word: string, confirmLabel: string, danger = false) => promptText({
     title, message, label: t('enc.typeLabel', { word }), placeholder: word, confirmLabel, danger,
     validate: (v) => (typedMatches(v, word) ? null : t('enc.typeMismatch', { word })),
@@ -79,7 +81,7 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
     const v = await typed(t('enc.q.recoverTitle'),
       t(it.recovery === 'journal' ? 'enc.q.recoverJournalBody' : 'enc.q.recoverBody'), word, t('enc.q.recover'))
     if (v === null) return
-    await act('rec-' + it.sid, () => recoverRecording(it.sid, it.host_id ?? 0, v.trim(), { returnTo: RETURN }),
+    await act('rec-' + it.sid, () => recoverRecording(it.sid, it.host_id ?? 0, word, { returnTo: RETURN }),
       'enc.q.recovered')
   }
   const release = async (it: QuarantineItem) => {
@@ -93,13 +95,13 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
   const retire = async (d: EraseDestination) => {
     const v = await typed(t('enc.d.retireTitle'), t('enc.d.retireBody'), d.id, t('enc.d.retire'), true)
     if (v === null) return
-    await act('ret-' + d.id, () => retireDestination(d.id, v.trim(), { returnTo: RETURN }), 'enc.d.retired')
+    await act('ret-' + d.id, () => retireDestination(d.id, d.id, { returnTo: RETURN }), 'enc.d.retired')
   }
   const resolve = async (h: ConflictHead) => {
     const word = conflictWord(h)
     const v = await typed(t('enc.c.resolveTitle'), t('enc.c.resolveBody'), word, t('enc.c.resolve'), true)
     if (v === null) return
-    await act('res-' + h.n, () => resolveConflict(h, v.trim().toLowerCase(), { returnTo: RETURN }), 'enc.c.resolved')
+    await act('res-' + h.n, () => resolveConflict(h, word, { returnTo: RETURN }), 'enc.c.resolved')
   }
   const retry = async (f: FailedMigration) => {
     if (!(await confirm({ title: t('enc.m.retryTitle'), message: t('enc.m.retryBody'), confirmLabel: t('enc.m.retry') }))) return
@@ -108,7 +110,7 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
   const discard = async (f: FailedMigration) => {
     const v = await typed(t('enc.m.discardTitle'), t('enc.m.discardBody'), eraseWord(f.sid), t('enc.m.discard'), true)
     if (v === null) return
-    await act('dis-' + f.sid, () => discardMigration(f.sid, f.host_id ?? 0, v.trim(), { returnTo: RETURN }), 'enc.m.discarded')
+    await act('dis-' + f.sid, () => discardMigration(f.sid, f.host_id ?? 0, eraseWord(f.sid), { returnTo: RETURN }), 'enc.m.discarded')
   }
 
   const er = st?.erasure ?? null
