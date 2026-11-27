@@ -1267,8 +1267,32 @@ BUSY_RETRY_SECS = 5.0
 _BUSY_FAST = 0.5          # un refuz mai lent a aşteptat deja busy_timeout: nu-l mai repetăm
 
 
+SQLITE_BUSY = 5
+SQLITE_LOCKED = 6
+# Fără cod (o excepţie construită de mână, nu ridicată de SQLite): doar mesajele primare exacte.
+_CONTENTION_MSG = {SQLITE_BUSY: "database is locked", SQLITE_LOCKED: "database table is locked"}
+
+
+def _primary_code(e, codes) -> bool:
+    if not isinstance(e, sqlite3.OperationalError):
+        return False
+    # Codul rezultatului SQLite (Python ≥ 3.11), primar = octetul de jos (BUSY_SNAPSHOT 517 → 5).
+    # Mesajul poate fi tradus / schimbat între versiuni; codul nu.
+    code = getattr(e, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in codes
+    return any(str(e).startswith(_CONTENTION_MSG[c]) for c in codes)
+
+
 def _is_busy(e) -> bool:
-    return isinstance(e, sqlite3.OperationalError) and str(e).startswith("database is locked")
+    """SQLITE_BUSY: the statement was refused because another connection holds the lock."""
+    return _primary_code(e, (SQLITE_BUSY,))
+
+
+def is_contention(e) -> bool:
+    """A genuine busy / locked refusal (SQLITE_BUSY or SQLITE_LOCKED, by primary result code).
+    Schema, I/O, full-disk, corrupt… OperationalErrors are NOT contention."""
+    return _primary_code(e, (SQLITE_BUSY, SQLITE_LOCKED))
 
 
 async def _write(step):

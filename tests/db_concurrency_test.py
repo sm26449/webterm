@@ -149,8 +149,90 @@ async def main():
             await asyncio.to_thread(th.join)
         check("a refusal that does not clear is still raised after the budget (bounded, nothing applied)",
               bounded and (await db.fetchone("SELECT COUNT(*) n FROM uniq_t WHERE x=12"))["n"] == 0)
+        await _agent_loop_classifies_operational_errors()
     finally:
         await db.close()
+
+
+def _genuine_errors():
+    """(busy, schema) OperationalErrors ridicate de SQLite însuşi (cu sqlite_errorcode)."""
+    path = os.path.join(os.environ["WEBTERM_DATA_DIR"], "codes.db")
+    a = sqlite3.connect(path, isolation_level=None)
+    b = sqlite3.connect(path, isolation_level=None, timeout=0)
+    try:
+        a.execute("CREATE TABLE IF NOT EXISTS t (x)")
+        a.execute("BEGIN IMMEDIATE")
+        try:
+            b.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as e:
+            busy = e
+        try:
+            b.execute("SELECT * FROM no_such_table")
+        except sqlite3.OperationalError as e:
+            schema = e
+        a.execute("ROLLBACK")
+    finally:
+        a.close()
+        b.close()
+    return busy, schema
+
+
+async def _agent_loop_classifies_operational_errors():
+    # Codex L2 (2026-11-27): bucla de recepţie a agentului trata ORICE OperationalError drept
+    # „database busy". Doar busy/locked (codul primar SQLite) e non-fatal; restul se comportă ca
+    # înainte de 10e7bcb (urcă din run(), conexiunea se închide, eroarea se vede).
+    from app import core
+    busy, schema = _genuine_errors()
+    check("genuine SQLite errors carry their result code",
+          getattr(busy, "sqlite_errorcode", None) == db.SQLITE_BUSY
+          and getattr(schema, "sqlite_errorcode", 0) & 0xFF not in (db.SQLITE_BUSY, db.SQLITE_LOCKED),
+          (getattr(busy, "sqlite_errorcode", None), getattr(schema, "sqlite_errorcode", None)))
+    check("is_contention: busy yes, schema / disk I/O / non-sqlite no",
+          db.is_contention(busy) and not db.is_contention(schema)
+          and db.is_contention(sqlite3.OperationalError("database is locked"))
+          and db.is_contention(sqlite3.OperationalError("database table is locked"))
+          and not db.is_contention(sqlite3.OperationalError("disk I/O error (test)"))
+          and not db.is_contention(ValueError("database is locked")))
+    # Un mesaj „database is locked" pe o eroare al cărei COD spune altceva nu e busy (codul decide).
+    fake = sqlite3.OperationalError("database is locked")
+    fake.sqlite_errorcode = 10                     # SQLITE_IOERR
+    check("the result code wins over the message", not db.is_contention(fake) and not db._is_busy(fake))
+
+    class _WS:
+        def __init__(self, frames):
+            self.frames = list(frames)
+
+        async def receive_bytes(self):
+            if self.frames:
+                return self.frames.pop(0)
+            raise ConnectionError("agent gone (test)")
+
+    async def drive(err):
+        seen = []
+        conn = core.AgentConnection(_WS([core.FRAME_CTRL + b'{"event":"a"}',
+                                         core.FRAME_CTRL + b'{"event":"b"}']), 987654)
+
+        async def on_ctrl(msg):
+            seen.append(msg["event"])
+            if len(seen) == 1:
+                raise err
+        conn._on_ctrl = on_ctrl
+        core.sources[987654] = conn
+        try:
+            await conn.run()
+            out = None
+        except BaseException as e:                 # noqa: BLE001
+            out = e
+        finally:
+            core.sources.pop(987654, None)
+        return seen, out
+
+    seen, out = await drive(busy)
+    check("busy in control-frame bookkeeping: the link stays, the next frame is processed",
+          seen == ["a", "b"] and isinstance(out, ConnectionError), (seen, repr(out)))
+    seen, out = await drive(schema)
+    check("a non-busy OperationalError keeps its old behaviour: it ends run(), nothing after it",
+          seen == ["a"] and out is schema, (seen, repr(out)))
 
 
 asyncio.run(main())

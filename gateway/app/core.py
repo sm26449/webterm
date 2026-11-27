@@ -2805,6 +2805,11 @@ class AgentConnection(SessionSource):
                         # evenimente, ultimul diagnostic) e contabilitate, nu protocol. Un DB ocupat
                         # peste bugetul lui db.execute nu are voie să închidă conexiunea şi cu ea
                         # toate sesiunile hostului; următorul heartbeat reconciliază oricum.
+                        # DOAR busy/locked (codul primar SQLite): o eroare de schemă, I/O sau disc
+                        # plin nu e trecătoare şi păstrează comportamentul de dinainte (urcă la
+                        # run() → _shutdown(), vizibilă), nu se ascunde sub eticheta „busy".
+                        if not db.is_contention(e):
+                            raise
                         log.warning("host %s: control frame bookkeeping skipped (database busy): %s",
                                     self.host_id, e)
         finally:
