@@ -48,7 +48,9 @@ hdr_mac) and two DATA types instead of type 1: 3 ZSTART (a fresh raw-deflate con
 4 ZCONT (continues the previous record's context). A DATA plaintext is `ulen u32 ‖ z`, where z is
 the deflate output of the record's `ulen` bytes (1..65 536) ended by a Z_SYNC_FLUSH, at most
 ulen + 64 bytes. Seq 0, every index entry and at least every 1 MiB of plaintext are ZSTART, so a
-reader starting at any of them decodes on its own. SEAL, plain_len (decompressed), the tag hash,
+reader starting at any of them decodes on its own: a ZCONT is valid only while its block holds
+fewer than Z_BLOCK (1 MiB) plaintext bytes since the last ZSTART, so a block holds at most
+Z_BLOCK + 65 535 bytes (readers refuse more, `bad-block`). SEAL, plain_len (decompressed), the tag hash,
 the nonces and the keys are those of version 1; phys_len is no longer a function of plain_len
 (the descriptor carries it, within `phys_bounds`). The index of a version-2 generation has
 `ver = 2`. Readers keep reading version 1.
@@ -96,6 +98,9 @@ Z_SLACK = 64                       # ieşirea deflate a unui record: cel mult ul
 MIN_ZREC_LEN = Z_PREFIX + 1
 MAX_ZREC_LEN = Z_PREFIX + MAX_DATA_LEN + Z_SLACK
 Z_BLOCK = 1 << 20                  # contextul se resetează cel târziu la 1 MiB de text clar
+# Invariant al cititorului (Codex L1): un ZCONT e acceptat doar cât blocul are < Z_BLOCK octeţi în
+# clar de la ultimul ZSTART, deci un bloc ţine cel mult Z_BLOCK + MAX_DATA_LEN − 1 octeţi.
+Z_BLOCK_MAX = Z_BLOCK + MAX_DATA_LEN - 1
 Z_LEVEL = 6
 Z_WBITS = -15                      # deflate brut, fereastră de 32 KiB
 # Cel mai rău caz fizic per record v2, peste octeţii lui în clar (bugete, limitele descriptorului).
@@ -404,19 +409,27 @@ class _Inflate:
     inflated in the current block's context (ZSTART opens a fresh one; a ZCONT with no open
     context, i.e. a parse that did not start at a block start, is corrupt). Output is capped at
     `ulen` (≤ 64 KiB) per record before inflating: z must yield exactly ulen bytes, be consumed
-    whole and never end the deflate stream."""
+    whole and never end the deflate stream. The reset bound is enforced, not only scheduled by
+    the writer: a ZCONT once the block already holds Z_BLOCK plaintext bytes is corrupt, so no
+    block decodes more than Z_BLOCK_MAX bytes in one context."""
 
     def __init__(self, ver):
         self.ver = ver
         self._d = None
+        self._block = 0
 
     def data(self, rtype, pt):
         if self.ver == VERSION:
             return pt
         if rtype == TYPE_ZSTART:
             self._d = zlib.decompressobj(Z_WBITS)
+            self._block = 0
         elif self._d is None:
             raise CorruptError("bad-block", "a continuation record where a block must start")
+        elif self._block >= Z_BLOCK:
+            # Aceeaşi regulă ca Writer._compress (start când blocul are ≥ Z_BLOCK): orice fişier v2
+            # scris de el trece; unul care continuă contextul peste limită nu (fail closed).
+            raise CorruptError("bad-block", "a continuation record past the reset bound")
         (ulen,) = _ZLEN.unpack_from(pt, 0)
         z = pt[Z_PREFIX:]
         if not 1 <= ulen <= MAX_DATA_LEN or not 1 <= len(z) <= ulen + Z_SLACK:
@@ -430,6 +443,7 @@ class _Inflate:
             raise CorruptError("bad-deflate") from None
         if len(out) != ulen or extra or d.unconsumed_tail or d.eof or d.unused_data:
             raise CorruptError("bad-zlen", f"{len(out)} != {ulen}")
+        self._block += ulen
         return out
 
 

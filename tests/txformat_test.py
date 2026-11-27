@@ -764,6 +764,42 @@ check("seq 0, every reset=True record and every 1 MiB block start are ZSTART",
 blocks = [r for r in recs if r.reset]
 gap = max(b.logical_offset - a.logical_offset for a, b in zip(blocks, blocks[1:]))
 check("no block holds more than Z_BLOCK + one record of plaintext", gap <= tx.Z_BLOCK + tx.MAX_DATA_LEN)
+
+# Codex L1: limita de reset e un invariant al cititorului, nu doar programarea writer-ului.
+# Cel mai lung bloc legal: 65535 + 15 × 65536 = Z_BLOCK − 1 octeţi, apoi încă un ZCONT întreg.
+_full = [term_like(65535)] + [term_like(65536) for _ in range(16)] + [b"tail"]
+bmax, wmax, _i = make2(_full)
+rmax, cmax = all2(bmax, wmax.data_count, plain_len=sum(map(len, _full)))
+check("reader accepts the longest legal block (Z_BLOCK_MAX bytes in one context)",
+      [r.reset for r in rmax] == [True] + [False] * 16 + [True]
+      and rmax[17].logical_offset == tx.Z_BLOCK_MAX
+      and b"".join(r.data for r in rmax) == b"".join(_full)
+      and tx.verify_full(io.BytesIO(bmax), RK, kind=1, sid=SID, gen_id=GEN, ver=2).plain_len
+      == sum(map(len, _full)))
+
+
+def _no_reset_writer(payloads):
+    # Un writer (cu cheia) care NU resetează la 1 MiB: înregistrări autentice, peste limită.
+    old = tx.Z_BLOCK
+    tx.Z_BLOCK = 1 << 40
+    try:
+        return make2(payloads)
+    finally:
+        tx.Z_BLOCK = old
+
+
+for label, pl in (("one byte past the bound", _full[:17] + [b"x"]),
+                  ("a ZCONT at exactly Z_BLOCK bytes", [term_like(65536) for _ in range(16)] + [b"y"]),
+                  ("a 3 MiB block", [term_like(65536) for _ in range(48)])):
+    bo, wo, _i = _no_reset_writer(pl)
+    check(f"reader refuses a continuation chain past the reset bound ({label}): cursor → bad-block",
+          raises(lambda: all2(bo, wo.data_count), tx.CorruptError, "bad-block"))
+    check(f"…and verify_full → bad-block ({label})",
+          raises(lambda: tx.verify_full(io.BytesIO(bo), RK, kind=1, sid=SID, gen_id=GEN, ver=2),
+                 tx.CorruptError, "bad-block"))
+_ok, _wok, _i = _no_reset_writer(_full[:17])
+check("the same unscheduled writer within the bound still reads (the rule is the bound, not the schedule)",
+      b"".join(r.data for r in all2(_ok, _wok.data_count)[0]) == b"".join(_full[:17]))
 ents = [tx.IndexEntry(r.seq, r.logical_offset, r.file_offset) for r in blocks]
 ix = tx.encode_index(RK, kind=1, gen_id=GEN, data_count=w3.data_count, entries=ents, ver=2)
 ents = tx.verify_index(ix, RK, kind=1, gen_id=GEN, data_count=w3.data_count, ver=2)

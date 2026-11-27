@@ -3461,6 +3461,16 @@ there decodes on its own; inside a block, one streaming context with a sync flus
 the ratio (small records still compress against the 32 KiB window). An index rebuilt by a verified
 parse only records `ZSTART`s.
 
+The reset bound is a **reader-enforced invariant**, not only the writer's schedule: a `ZCONT` is
+valid only while its block holds fewer than `Z_BLOCK` plaintext bytes since the last `ZSTART`; a
+continuation once the block has reached 1 MiB is corrupt (`bad-block`, every reader path: cursor,
+seek from an index entry, `verify_full`). A record may cross the threshold, so one block holds at
+most `Z_BLOCK + 65 535` bytes (`Z_BLOCK_MAX`: the threshold minus one, plus one full record).
+Compatibility: this is exactly the rule every version-2 writer has applied since the format
+existed (start a block when it holds ≥ `Z_BLOCK`), so every version-2 file a 3.8 build wrote reads
+unchanged; only a file whose authenticated records continue a context past the bound (a key holder
+writing it on purpose) is refused.
+
 **Bounds against decompression bombs.** Per record: the output is capped at `ulen` ≤ 64 KiB before
 inflating, and `z` ≤ ulen + 64 — at most 64 KiB of output per authenticated record, ~65 KiB of
 input. Per generation: the running decoded total is checked against the descriptor's `plain_len`
@@ -3485,7 +3495,8 @@ window compress better. Weighed:
   session printed in that interval, which blurs the signal but does not remove it.
 - **No compression across sessions, kinds or generations:** each (sid, kind) generation has its own
   writer, its own context and its own keys; nothing of one session influences another's length.
-- **The context resets at least every 1 MiB and at every index point**, so the mixing is bounded to
+- **The context resets once a block reaches 1 MiB (at most 1 MiB + 65 535 bytes per block,
+  enforced by the reader) and at every index point**, so the mixing is bounded to
   one block (and in practice to the 32 KiB window).
 - Terminals rarely echo secrets typed by the user (passwords are not echoed); secrets *printed*
   (`cat .env`) are the exposed case.
@@ -3546,7 +3557,8 @@ generations keep serving, retried after 1 h).
 
 Tests (§12.11.7 style): `txformat_test` (vectors, round trips at every reset, seeking from every
 index entry, tamper cases: flipped byte, truncated record, output past `ulen`, short output,
-BFINAL, a continuation at a block start, a version byte stripped, cross-version record types and
+BFINAL, a continuation at a block start, a continuation chain past the reset bound (and the
+longest legal block accepted), a version byte stripped, cross-version record types and
 indexes; ratio ≥ 5× on terminal-like output), `keyring_test` (descriptor version nibble),
 `txstore_test` (v2 live / sealed reads and index seeks, recompaction byte-identical and idempotent,
 live / quarantined / erased / intent / CAS refusals, a pinned old generation, a crash at every step
