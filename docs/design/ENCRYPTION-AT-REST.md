@@ -1570,6 +1570,313 @@ chunk, so a different file is refused before anything is published. WTBK1 and 3.
 still read whole (≤ 2 GiB, as before): every WTBK1 written by earlier 3.8 release candidates
 restores unchanged.
 
+### 12.10.2 Incremental host backups: backup sets `WTBS1` (3.8, step A)
+
+Normative design, **no code yet**. Host path only (`scripts/backup.sh` → `hostops`, `restore.sh`).
+The in-app routes (download, scheduled `.wts`, cloud / SFTP / FTPS upload, pre-restore safety copy)
+and the single-file host archive of §12.10.1 stay byte for byte as they are. Where §12.10.1 or
+§12.11.3 differ for a set, this section wins.
+
+*Why.* The nightly host archive copies every recording. A sealed WTX generation never changes
+(§12.11.0: never renamed, truncated or rewritten; only `retire` removes it), so after the first
+night almost every byte copied is a copy already held. Production: 274 recordings, ~4 GB before
+recompaction (§12.11.14), `WEBTERM_BACKUP_KEEP=2`, the destination on the volume's filesystem: two
+full copies of every recording, rewritten every night.
+
+**Model (decision).** A **backup set**: a content-addressed store of sealed generations plus, per
+night, one **self-contained index archive** that references them. Rejected: full + incremental
+chain (restore must replay a chain, retention must keep a full and every link, one bad link breaks
+every later backup, and erasure would have to be reasoned per link). Properties of the chosen model:
+
+- Every index is a complete backup on its own: DB, keys, journal, every non-sealed generation inline,
+  and the exact list (gen id, SHA-256, length) of the sealed generations it needs. Restore = one
+  index + the objects it names, verified before anything is applied; no other index is read.
+- Objects are immutable and named by content (gen id + SHA-256). An object is kept while **any**
+  retained index references it, and deleted after that by a garbage collection that only needs the
+  references. Deleting an index never breaks another one.
+- Only **sealed** generations become objects. Live and recovered generations, legacy plaintext, the
+  DB, `keys.wtk`, the signing pair and `erasures.wtj` stay members of the index, as today.
+- Step A saves writes and space, not reads: the gateway's verify pass still reads and checks every
+  generation each night (§12.11.3 step 3; it also computes the SHA-256 the index records). A hash
+  cache that skips unchanged sealed generations is out of scope (owner question 4 below).
+
+#### Layout
+
+```
+WEBTERM_BACKUP_DIR/                         (0700, as today; single-file archives keep living here)
+  webterm-<stamp>.wtbk | .tar.gz(.enc)      single-file archives (fallback, older runs)
+  .webterm-backup.lock                      flock: set writer exclusive, set restore shared
+  set-<set_id hex32>/                       one backup set (0700)
+    SET                                     WTBS1 set header (below)
+    webterm-<stamp>.wtbi                    index archive: WTBK2 with content = 2 (below)
+    webterm-<stamp>.wtbr                    references of that index: WTBR1 (below)
+    objects/<gg>/<gen hex32>.<sha256 hex64>.wtbo    sealed generation, WTBO1; gg = first 2 hex of gen
+    .tmp/                                   writer temporaries (O_EXCL, deleted on every exit path)
+```
+
+Every file is created 0600 with `O_EXCL|O_NOFOLLOW` and opened relative to the set's directory fd;
+a symlink, a non-regular file or a name outside these patterns anywhere in the set is refused by
+every reader and never deleted by GC (named in the report instead). Generation files of the volume
+are **never** hardlinked or reflinked into the store (the reader's `st_nlink == 1` rule, §12.11.0,
+and the outer layer below make the bytes differ anyway).
+
+#### Formats (integers little-endian unless marked BE; vectors in the appendix "v3")
+
+**`SET` (WTBS1, 100 B):** `"WTBS1" | ver u8 = 1 | kdf u8 = 1 (scrypt) | log2_n u8 | r u8 | p u8 |
+reserved 2 B = 0 | set_id 16 B | installation_id 16 B | created u64 ms | salt 16 B | mac 32 B`,
+`mac = HMAC-SHA-256(HKDF(K_set, "wt/v1/wtbs-hdr"), all bytes before)`, `K_set = scrypt(passphrase,
+salt, N, r, p, 32 B)` with the writer parameters and the reader limits of WTBK2 (§12.10.1), checked
+before the KDF. One scrypt per run, not per object. `set_id`, `salt`: random at set creation.
+
+**Object (WTBO1):** header `"WTBO1" | ver u8 = 1 | chunk_log2 u8 = 20 | reserved u8 = 0 | set_id
+16 B | gen_id 16 B | sha256 32 B | plain_len u64 | obj_salt 16 B` (96 B), then `hdr_mac 32 B =
+HMAC-SHA-256(HKDF(K_obj, "wt/v1/wtbo-hdr"), header)`, then the WTBK2 chunk layer unchanged (§12.10.1:
+1 MiB chunks, AES-256-GCM, `AAD = hdr_mac ‖ i u32 BE ‖ final u8`, nothing after the last chunk) with
+`key = HKDF(K_obj, "wt/v1/wtbo-body")`, `nonce = 8 zero bytes ‖ i u32 BE`. `K_obj = HKDF(K_set,
+"wt/v1/wtbo" ‖ set_id ‖ obj_salt)`; `obj_salt` random per object write, so the key is unique per
+file and a rewrite after a crash never reuses a key. Plaintext = exactly the generation's
+`phys_len` bytes; `sha256` = their SHA-256; the file name repeats `gen_id` and `sha256` and must
+match the header. The codec is `wtbk.py`'s chunk layer, shared, not copied.
+
+**References (WTBR1):** `"WTBR1" | ver u8 = 1 | reserved 2 B = 0 | set_id 16 B | index_sha256
+32 B | count u32 | count × (gen_id 16 B | sha256 32 B | plain_len u64)`, sorted by gen_id, unique,
+then `mac = HMAC-SHA-256(HKDF(K_set, "wt/v1/wtbr"), all bytes before)`. `index_sha256` = SHA-256 of
+the `.wtbi` file. Refs exist so retention and GC need only the passphrase (never the master key);
+they are not the restore's authority (the index is).
+
+**Index (`.wtbi`):** a WTBK2 (§12.10.1) whose header has `content u8 = 2`: the inner WTS1 carries
+content manifest `wts-content-3` = `wts-content-2` (§12.11.3) + generation state `external`
+(`{gen, phys_len, sha256}`, never a member) + `set: {set_id, external_count, external_bytes}`.
+`unpacked_len` stays the size of the inner tar (members only). The manifest is bound under the
+master key like every WTS1 manifest; its `external` entries must equal the refs entries exactly
+(same set, same sha256 and length) and `set_id` must equal `SET`'s and every object's. A generation
+is `external` iff its pair is `included` and its state in the authentic descriptor of the VACUUM
+copy is `sealed`; everything else follows §12.11.3 unchanged.
+
+#### Writer
+
+`hostops backup --set DIR` (in the app image, the backup directory mounted at `DIR`), under
+`.webterm-backup.lock` exclusive (non-blocking: taken → refused, exit 3) and backup.sh's lifecycle
+lock as today.
+
+- *Live app:* the snapshot is the gateway's (§12.11.3, the "never read a live volume directly" rule
+  stands). The helper runs as `docker run` of the app image, `--network none`, `--user` the gateway
+  uid, with the backup directory mounted rw and the data volume mounted **read-only, only to reach
+  the control socket** (SHOULD be `volume-subpath=.ctl` where the engine supports it); it opens
+  nothing else under `/data` (a test asserts it). If the real-container test shows the socket cannot
+  be reached through a read-only mount, the implementation stops and returns here: a second
+  container never gets the live volume read-write.
+- *App stopped:* as today (`docker run`, boot lock, `backup_snapshot` in process); the backup
+  directory is mounted as well.
+
+Control socket, two additions (allowlisted keys; a request without them is the rc6 protocol, byte
+for byte): `snapshot.start {…, layout: "set"}` emits only non-external members into the spool and
+answers, besides size / SHA-256 / unpacked, `external: n, external_bytes: b`;
+`snapshot.objects {snap, after, limit ≤ 256}` pages the external list (gen, phys_len, sha256);
+`snapshot.object {snap, gen, offset, length ≤ 1 MiB}` reads an external generation from its
+**pinned** fd, never past `phys_len`. In set layout the pins of external generations last until
+`snapshot.release`, bounded by an object phase of ≤ 60 min in total and ≤ 60 s between requests
+(then the snapshot is aborted, pins released). The barrier is held only in step 1, as today; a
+`retire` deferred by these pins (an erasure meanwhile) runs at release.
+
+Order (each step durable before the next; any failure before 5 → nothing published, temporaries
+deleted, exit 3):
+
+1. Open or create the set: an existing `set-*` whose `SET` verifies under the passphrase and holds
+   this installation id is the current set; none, a MAC failure (passphrase changed) or another
+   installation → a **new set** (full copy; old sets age out whole, below). A `SET` that is not a
+   valid WTBS1 → new set and a warning.
+2. Snapshot (`snapshot.start` layout `set`); the core spool is streamed into `.tmp/` as a WTBK2
+   content 2, exactly as §12.10.1 wraps it.
+3. **Budget** (exact, before the first object byte): new objects = external entries with no object of
+   that name; need = core + Σ (their plain_len + WTBO overhead) in the backup directory, plus, when
+   it is on the volume's filesystem (`hostops estimate` device rule, unknown = same), the spool and
+   `backup.headroom` of that filesystem (§12.10.1). Short → refused. Every write to the set is
+   metered (`backup.write_budget`) with that reserve.
+4. For each new object: `.tmp/` file, streamed from `snapshot.object`, hashed while written (must
+   equal the listed sha256 and length, else the run fails `backup.changed`), fsync, rename into
+   `objects/<gg>/`, fsync the directory. An object that already exists is never rewritten.
+5. Verify (below, nightly level) the index temp against the set; release the snapshot.
+6. Publish: refs temp → fsync → rename to `webterm-<stamp>.wtbr` → fsync dir; then the index with
+   `ln -T` (as §12.10.1) → fsync dir. Refs are published first, so a crash between the two leaves
+   protected objects and no index (cleaned at the next run), never an index whose objects GC may
+   delete.
+7. Retention and GC (below), only after 6 succeeded.
+
+`backup.sh` keeps its contract: one host-health record (`archive` = the index name, plus `set`,
+`objects_new`, `bytes_new`, `objects_reused`), exit 0 only after 6. Its early `estimate` check is
+replaced in set mode by the helper's exact check in step 3, still before anything is written to
+the backup directory.
+
+#### Verification
+
+- **Nightly** (step 5): the core exactly as §12.10.1 (`preflight_wts`, the staging's acceptance);
+  every object written this run **deep**; every reused object **shallow**: present under its name,
+  regular, header MAC, `set_id` / `gen_id` / `sha256` / `plain_len` equal to the manifest entry,
+  file size consistent with `plain_len`. A failure fails the run.
+- **Deep** (every referenced object): shallow + every chunk tag, the final chunk, nothing after it,
+  SHA-256 of the plaintext, then `verify_full` of the generation with the RK and descriptor of the
+  index's DB (version from the descriptor, state sealed, exact `phys_len`). One object at a time;
+  scratch ≤ the largest object + the DB, under the scratch filesystem's reserve.
+- **Deep runs at:** `hostops verify --for-restore` (restore.sh, before the app is stopped), the
+  staging, `restore.sh --verify <index>`, and backup.sh on the newest index every
+  `WEBTERM_BACKUP_DEEP_DAYS` (default 7; owner question 2). An object that fails a deep check is
+  moved to `objects/.bad/` (never deleted), every index that references it is reported not
+  restorable in host health, and the next run writes it again from the live volume if the
+  generation still exists.
+
+#### Restore
+
+`restore.sh <set>/webterm-<stamp>.wtbi`: a `.wtbi` whose directory holds a `SET` is the set route;
+any other file is today's route. Under `.webterm-backup.lock` **shared** for the whole run (GC
+cannot run meanwhile). The index alone is copied into the private pinned copy and pinned by SHA-256
+(M5); objects are read in place, which is safe because each is bound by name, header and plaintext
+hash to the pinned index's manifest and re-verified at stage. `verify --for-restore` and
+`stage-restore` take `--set DIR` (mounted read-only) and:
+
+- refuse before anything else when: the `SET` does not verify, `set_id` differs between `SET`, the
+  manifest, the refs and any object; the manifest's `external` list ≠ the refs; any referenced
+  object is missing, duplicated, misnamed, a symlink or fails a deep check. **Refused, never
+  partial:** stage runs the shallow pass over every referenced object before its first write, then
+  streams the core and each object (deep) into the staged set; a failure after the first write is
+  the staging's existing path (exit 4, the flag is never committed, nothing is ever applied).
+- space: `restore_space_need(unpacked_len + external_bytes)` (§12.10.1), same rules for verify and
+  stage.
+- everything after staging (apply, continuity, erasure re-apply, `rebind_restored_sync`) is §12.10 /
+  §12.11.3 unchanged: an external generation lands as `transcripts/<sid>.<k>.<gen>.wtx`, exactly the
+  member a single-file archive would have carried.
+
+#### Retention and garbage collection
+
+Under the exclusive lock, after a successful publish:
+
+1. Backups = top-level single-file archives (today's patterns) + every `set-*/webterm-*.wtbi` that has
+   its `.wtbr`, ordered by the stamp in the name. `KEEP` counts all of them together; the newest `KEEP`
+   are kept (the index just published is always among them, `KEEP ≥ 1`).
+2. Delete each older index: `.wtbi` first, then its `.wtbr`, fsync the directory. Also delete, in
+   every set: a `.wtbi` without `.wtbr`, a `.wtbr` without `.wtbi` (crashed runs: the lock rules
+   out a concurrent writer), and `.tmp/` entries.
+3. GC of the current set: roots = the entries of every remaining `.wtbr` (MAC verified). If any refs
+   file of the set fails its MAC or cannot be read, **GC is skipped** this run (never delete on
+   uncertain roots) and host health warns. Otherwise every object not in the roots is unlinked,
+   then the directories fsynced. `objects/.bad/` is kept until no index references its objects.
+4. A set with no index left is deleted whole (no key needed). An older set (passphrase or
+   installation changed) is never GC'd object by object; it goes when its last index ages out.
+
+Local rotation and the off-host `*_KEEP_DAYS` deletions (`find -mtime`, `rclone --min-age`) MUST NOT
+touch set directories: objects keep old modification times while new indexes reference them.
+
+#### Erasure (INV-14) and quarantine
+
+- **Bound.** An erased recording survives in a set only through indexes taken before the erasure
+  (their DB copy holds its RK, their manifest its objects). Indexes taken after it reference none of
+  its generations (descriptors and RK are deleted in erase step 2, before any later VACUUM copy).
+  Once the last earlier index is pruned, GC deletes its objects in the same run: at most `KEEP`
+  runs after the erasure, plus the runs in which GC was skipped (each warned). This is the existing
+  promise for backups (§12.11.4 "copies in backups expire with their retention"), not a new one.
+- **A leftover object matters.** An unreferenced object is ciphertext under an RK that no retained
+  index and no volume holds, so it is crypto-erased; it MUST still be deleted (an exported or
+  off-host copy of an old index could hold the RK). Host health counts unreferenced objects and
+  warns when one survives two runs.
+- **Restore of an old index after erasures** is §12.11.4 "Continuity at restore" unchanged: the
+  index carries its own journal; J_v, the destinations, the threshold and the intents decide;
+  tombstoned sids lose their RK before any reader and their generations are retired at boot. A set
+  adds no erasure source and is never consulted as one.
+- Erase intents, quarantine rows and recording status live in the DB copy and restore as they do
+  today; externalization does not change a pair's status or exclusion.
+
+#### Metadata visible without the passphrase
+
+| Seen by whoever reads the backup directory | single file (today) | set |
+|---|---|---|
+| total size, backup times | yes | yes |
+| number of sealed generations, each one's size (≈ its compressed size), when it was first backed up | no | yes |
+| gen ids (random, equal to the volume's file names) | no | yes |
+| when a sealed generation stops being referenced (erasure, purge, recompaction: indistinguishable) | no | yes, from successive states |
+| sid, kind, created time, contents | no | no (inside WTBO1 and the index) |
+| installation id | no | yes (`SET`; already in the off-host journal's object names) |
+
+Accepted for step A: the same set of facts is already visible to whoever reads the volume (§2 N4),
+the backup directory is 0700, and sealed objects never change, so repeated observation gives the
+§12.11.14 length oracle nothing beyond a single one (live generations stay inside the passphrase
+layer). The new exposure is to off-host storage, which used to see one blob per night; the operator
+guide says so.
+
+#### Portability and off-host
+
+- A set directory is self-contained (`SET`, indexes, refs, objects): copy it whole (`rsync -a`) and
+  restore on any host with `restore.sh <copy>/webterm-<stamp>.wtbi`, the passphrase and the master
+  key, as today.
+- **Single-file export:** `hostops export --set DIR` (restore.sh `--export <index> <out.wtbk>`) deep
+  verifies the index, then writes the host WTBK2 with `content = 1` that a non-set run would have
+  written at that moment (external generations inlined as members, new content key, wts-content-2),
+  and checks it like §12.10.1 before publishing. It restores with any 3.8 build that reads WTBK2
+  (rc5+) and through the in-app restore within that route's caps. The in-app download stays the
+  single-file format.
+- **Off-host by backup.sh:** a set is mirrored only to destinations that can delete, in this order:
+  objects (no delete) → `SET`, refs, then indexes → delete remote indexes and refs that are not
+  local → delete remote objects that are not local. rsync (`-a`, then `--delete` passes) and rclone
+  (`copy`, then `sync`) qualify. FTPS does not in step A: with `WEBTERM_BACKUP_FTPS` set, backup.sh
+  stays in single-file mode and says why (owner question 3). The in-app SFTP / cloud destination is
+  untouched (DB-only by default).
+
+#### Compatibility
+
+- **Reading:** WTBK1, WTBK2 `content = 1` and 3.7 `.tar.gz(.enc)` restore exactly as today.
+- **Mode:** `WEBTERM_BACKUP_LAYOUT=set|single`; set mode applies only to protected volumes (legacy
+  volumes keep the 3.7 tar). Default: owner question 1.
+- **Script / image pairing:** both scripts ask the image `hostops capabilities` (new; prints
+  `set: 1`). An image without it: backup.sh writes a single file with a note; restore.sh refuses a
+  set index ("this app image cannot restore a backup set; export it to a single file with a newer
+  image"). An rc6 backup.sh with a new image: single-file mode, unchanged (`hostops backup` without
+  `--set` and the socket without `layout` are byte-identical to rc6).
+- **Downgrade:** an rc5 / rc6 reader refuses a `.wtbi` at the WTBK2 header (`content ≠ 1`,
+  `bad-content-type`), before the KDF and before any byte is staged; rc6 restore.sh prints its
+  standard refusal. The new reader, given a `.wtbi` without its set directory, says "a backup-set
+  index: restore it with its set directory, or export it to a single file". To go back to an older
+  build, export a single file first (INSTALL documents it).
+
+#### Tests and real-container plan (implementation phase)
+
+Unit (`tests/backupset_test.py`, new: `CI_TESTS` + the CONTRIBUTING count in the same commit):
+vectors and tamper per field for WTBS1 / WTBO1 / WTBR1 / WTBK2 content 2, parameter limits before
+the KDF; a second run writes only new objects; erasure between runs → no reference in the next
+index and the objects gone after `KEEP` runs; passphrase / installation change → new set, old set
+deleted whole; `KEEP` 1–3 across single files and sets; a crash injected at every writer and
+retention step (object temp, object rename, index temp, refs, index publish, each unlink, GC) → the
+next run converges and every published index restores; GC skipped on a bad refs MAC; lock
+contention (writer vs writer, writer vs restore). Restore: missing, truncated, bit-flipped,
+misnamed, symlinked, other-set and swapped objects, manifest ≠ refs → refused with nothing staged;
+`verify --for-restore` deep before the stop. `txbackup_test`: `layout: "set"`, paging, object reads
+from pinned fds while an erasure's retire is deferred, the object-phase limits, disconnect; a request
+without `layout` byte-identical to rc6. `erasure_test`: restore of an old index after an erasure
+(the continuity cases through the set route). `host_backup_script_test`: set mode, fallback on an
+image without the capability, FTPS fallback, mirror order (fake rsync / rclone), `KEEP_DAYS` never
+touching a set. Compatibility: the existing WTBK1 / WTBK2 / 3.7 vectors unchanged; export →
+restore gives the same DB and byte-identical recordings.
+
+Real containers (disposable stack and volume, never production, no Traefik labels): (1) a volume with
+≥ 300 recordings (v1 and v2, sealed and one live, ~1 GB); (2) three set runs with `KEEP=2` and
+recording in between: objects and bytes written per run, GC on the third, time and disk against
+single-file mode; (3) live mode through the read-only (and subpath) mount, the helper's opens under
+`/data` traced; (4) `kill -9` of the helper at each step, re-run; (5) the backup directory on a small
+size-limited filesystem, and on the volume's filesystem (reserve kept); (6) restore of the newest and
+the oldest index on the same volume and on a fresh volume with the key; an erasure between runs,
+then the old index restored → erased (J_v) or quarantined (fresh host); (7) a corrupted object →
+refused before the stop, moved to `.bad` by the deep check, re-copied by the next run; (8) the set
+rsync'd elsewhere and restored; an exported single file restored by an rc6 image, and rc6
+restore.sh refusing the index; (9) the `ci-local.sh backup` gate extended with the set path.
+
+#### Owner questions (open)
+
+1. Default layout for protected volumes: `set` (recommended) or opt-in.
+2. Deep-verify cadence of the backup set: every 7 days (proposed) or every night (reads every
+   object in the set each night).
+3. FTPS off-host: single-file fallback (proposed) or a `DELE`-based set mirror.
+4. A later gateway-side hash cache so the nightly snapshot stops re-reading unchanged sealed
+   generations (an additive `tx_files` column; it would also drop the nightly scrub of the volume).
+5. Which off-host destinations production's backup.sh uses (decides what step A must support first).
+
 ### 12.11 Recordings: publication, readers, backup coherence, erasure (PR5 design)
 
 Normative design, **no code yet**. Closes, for review, the descriptor part of §12.8 contract 1 and
@@ -3650,3 +3957,22 @@ these.
 | SEAL seq 2 (count 2, plain_len 13) | `023000000002000000ecf2a2207beb5e68abd6e36b09d2357ad3da2733712fa18e39c627b63c5e20d8a67b3c1f05fcb3b7eee7d733e5e0a56858543e78cf7f6d64a7c5f820a938c43a` |
 | index `WTI1` ver 2 (kind 1, data_count 2, entry (0, 0, 96), whole file) | `5754493102010000101112131415161718191a1b1c1d1e1f020000000000000001000000000000000000000000000000600000000000000049d125530ea11ec7d6e08a784a97b75ce7803fb8b5534e54de6fd37eb69177fb` |
 | descriptor generation state byte (sealed, version 2) | `12` |
+
+## Appendix: Test vectors (v3, backup sets, §12.10.2)
+
+Placeholders: the values are filled in, and asserted in `tests/backupset_test.py`, by the
+implementation PR; until then no writer exists. Inputs: passphrase `"correct horse battery
+staple"`, log2_n 15, r 8, p 1, salt `000102…0f`, set_id `101112…1f`, installation id `a0a1…af`,
+created 1795305600000 ms; object: gen_id `202122…2f`, obj_salt `303132…3f`, plaintext = the v1
+sealed generation of the appendix v1 (header ‖ DATA 0 ‖ DATA 1 ‖ SEAL); index: the `WTBK2` vector
+inputs above with `content = 2`.
+
+| Value | Bytes |
+|---|---|
+| `K_set` | TBD |
+| `SET` (WTBS1, whole file) | TBD |
+| `K_obj` | TBD |
+| WTBO1 header ‖ hdr_mac | TBD |
+| WTBO1 object (whole file) | TBD |
+| WTBR1 refs (one entry: the object above; index_sha256 = SHA-256 of the index vector) | TBD |
+| WTBK2 `content = 2` header ‖ header MAC | TBD |
