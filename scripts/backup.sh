@@ -565,7 +565,11 @@ fi
 # cu nimic (tipic: toate arhivele sunt deja criptate, deci `webterm-*.tar.gz` rămâne
 # neexpandat), `ls` iese cu 2 şi ar rupe scriptul DUPĂ ce arhiva a fost deja făcută —
 # backup raportat ca eşuat şi, mai rău, rotaţia nu s-ar mai executa niciodată.
-{ ls -1t "$OUT"/webterm-*.wtbk "$OUT"/webterm-*.tar.gz.enc "$OUT"/webterm-*.tar.gz 2>/dev/null || true; } \
-  | tail -n +"$((KEEP + 1))" | xargs -r rm -f
+# Codex L2: căi cu spaţii/ghilimele — lista NUL-delimitată, sortată după mtime, fiecare cale exactă.
+mapfile -d '' -t BK_OLD < <(
+  find "$OUT" -maxdepth 1 -type f \( -name 'webterm-*.wtbk' -o -name 'webterm-*.tar.gz.enc' \
+       -o -name 'webterm-*.tar.gz' \) -printf '%T@ %p\0' 2>/dev/null \
+    | sort -z -rn | tail -z -n +"$((KEEP + 1))" | cut -z -d' ' -f2- || true)
+for f in "${BK_OLD[@]}"; do rm -f -- "$f"; done
 
 echo "backup: $ARCHIVE (keeping newest $KEEP)"
