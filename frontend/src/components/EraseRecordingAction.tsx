@@ -48,6 +48,7 @@ export default function EraseRecordingAction(props: {
       label: t('enc.erase.typeLabel', { word }),
       placeholder: word,
       confirmLabel: t('enc.erase.confirm'),
+      danger: true,
       validate: (v) => (typedMatches(v, word) ? null : t('enc.typeMismatch', { word })),
     })
     if (typed === null) return

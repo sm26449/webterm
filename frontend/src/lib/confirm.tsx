@@ -33,6 +33,7 @@ export type PromptOptions = {
   confirmLabel?: string
   cancelLabel?: string
   secret?: boolean          // type=password
+  danger?: boolean          // acţiune distructivă: buton de confirmare roşu (ca ConfirmModal)
   validate?: (v: string) => string | null   // mesaj de eroare sau null când e valid
 }
 
@@ -111,6 +112,10 @@ export function useConfirm(): Ctx {
   return ctx
 }
 
+// butonul de trimitere: acţiunea principală a dialogului (nu o stare „ales”); roşu când e distructivă
+const SUBMIT_PRIMARY = 'bg-sky-600 text-on-accent hover:bg-sky-700'
+const SUBMIT_DANGER = 'bg-rose-600 text-white hover:bg-rose-700'
+
 function PromptModal(props: { o: PromptOptions; onSubmit: (v: string) => void; onCancel: () => void }) {
   const { t } = useI18n()
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -156,7 +161,7 @@ function PromptModal(props: { o: PromptOptions; onSubmit: (v: string) => void; o
             {props.o.cancelLabel ?? t('common.cancel')}
           </button>
           <button type="submit"
-            className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-accent hover:bg-sky-700">
+            className={`rounded-md px-3 py-1.5 text-sm font-medium ${props.o.danger ? SUBMIT_DANGER : SUBMIT_PRIMARY}`}>
             {props.o.confirmLabel ?? t('common.confirm')}
           </button>
         </div>

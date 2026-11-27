@@ -68,8 +68,8 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
       setBusy('')
     }
   }
-  const typed = (title: string, message: string, word: string, confirmLabel: string) => promptText({
-    title, message, label: t('enc.typeLabel', { word }), placeholder: word, confirmLabel,
+  const typed = (title: string, message: string, word: string, confirmLabel: string, danger = false) => promptText({
+    title, message, label: t('enc.typeLabel', { word }), placeholder: word, confirmLabel, danger,
     validate: (v) => (typedMatches(v, word) ? null : t('enc.typeMismatch', { word })),
   })
 
@@ -91,13 +91,13 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
     await act('req-' + it.sid, () => requarantineRecording(it.sid), 'enc.q.requarantined')
   }
   const retire = async (d: EraseDestination) => {
-    const v = await typed(t('enc.d.retireTitle'), t('enc.d.retireBody'), d.id, t('enc.d.retire'))
+    const v = await typed(t('enc.d.retireTitle'), t('enc.d.retireBody'), d.id, t('enc.d.retire'), true)
     if (v === null) return
     await act('ret-' + d.id, () => retireDestination(d.id, v.trim(), { returnTo: RETURN }), 'enc.d.retired')
   }
   const resolve = async (h: ConflictHead) => {
     const word = conflictWord(h)
-    const v = await typed(t('enc.c.resolveTitle'), t('enc.c.resolveBody'), word, t('enc.c.resolve'))
+    const v = await typed(t('enc.c.resolveTitle'), t('enc.c.resolveBody'), word, t('enc.c.resolve'), true)
     if (v === null) return
     await act('res-' + h.n, () => resolveConflict(h, v.trim().toLowerCase(), { returnTo: RETURN }), 'enc.c.resolved')
   }
@@ -106,7 +106,7 @@ export default function EncryptionSection(props: Omit<HTMLAttributes<HTMLElement
     await act('try-' + f.sid, () => retryMigration(f.sid, f.host_id ?? 0, { returnTo: RETURN }), 'enc.m.retried')
   }
   const discard = async (f: FailedMigration) => {
-    const v = await typed(t('enc.m.discardTitle'), t('enc.m.discardBody'), eraseWord(f.sid), t('enc.m.discard'))
+    const v = await typed(t('enc.m.discardTitle'), t('enc.m.discardBody'), eraseWord(f.sid), t('enc.m.discard'), true)
     if (v === null) return
     await act('dis-' + f.sid, () => discardMigration(f.sid, f.host_id ?? 0, v.trim(), { returnTo: RETURN }), 'enc.m.discarded')
   }
