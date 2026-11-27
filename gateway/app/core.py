@@ -903,6 +903,10 @@ class BrowserClient:
         # contul clientului owner (None la invitaţi): plafonul de step-up al hub-ului
         # (sweep_stepup_caps) se re-autorizează doar din ferestrele userilor ATAŞAŢI
         self.user_id: Optional[int] = None
+        # sha256 al cookie-ului de sesiune web cu care s-a ataşat (None la invitaţi): excepţia din
+        # lista de sesiuni (`attached_unlocked_sids`) ţine de ACEASTĂ autentificare, nu de cont —
+        # un cookie furat, în alt browser, nu vede metadatele terminalului ataşat de victimă
+        self.web_tok_hash: Optional[str] = None
         self._sent_since_ping = 0
         self._ping_seq = 0
         self._pong_fut: Optional[asyncio.Future] = None
@@ -3906,19 +3910,26 @@ async def sweep_idle_locks() -> None:
 
 
 # INV-04 (docs/design/INVARIANTS.md): lista arată sesiunea 2FA la care contul e atașat deblocat, chiar după fereastra de 5 min.
-def attached_unlocked_sids(user_id: int) -> Set[str]:
-    """Sesiunile la care contul `user_id` are ACUM un client-owner ataşat şi deblocat, pe un hub
-    deblocat şi deschis. Fereastra de step-up (5 min) glisează doar pe acţiuni sensibile, nu pe
+def attached_unlocked_sids(user_id: int, web_tok_hash: Optional[str]) -> Set[str]:
+    """Sesiunile la care contul `user_id` are ACUM un client-owner (autentificat, nu invitat)
+    ataşat şi deblocat DIN ACEEAŞI autentificare web (`web_tok_hash` = sha256 al cookie-ului
+    cererii), pe un hub deblocat şi deschis. Legat de autentificare, nu de cont: altfel un cookie
+    furat, din alt browser, vedea până la 60 min metadatele (titluri OSC live) terminalelor 2FA la
+    care victima e ataşată. Fără hash (cerere fără cookie) → nimic (fail-closed). Fereastra de step-up (5 min) glisează doar pe acţiuni sensibile, nu pe
     tastarea în terminal, aşa că lista de sesiuni (`/api/sessions`, citire pasivă) ascundea după
     5 minute exact terminalul pe care omul îl folosea, şi tabul dispărea (3.8.1). Cine e ataşat
     deblocat primeşte deja output-ul live, deci titlul/starea acelei sesiuni nu-i spun nimic în
     plus; restul sesiunilor hostului rămân ascunse. Plafonul de 60 min blochează hub-ul
     (`sweep_stepup_caps`) şi atunci sesiunea iese din nou din listă."""
     out: Set[str] = set()
+    if not web_tok_hash:
+        return out
     for sid, hub in list(hubs.items()):
         if hub.locked or hub.closed:
             continue
         if any(c.is_owner and c.user_id is not None and c.user_id == user_id and not c.locked
+               and getattr(c, "web_tok_hash", None) is not None
+               and security.tokens_equal(c.web_tok_hash, web_tok_hash)
                for c in list(hub.clients)):
             out.add(sid)
     return out

@@ -99,10 +99,12 @@ whoever answers first receives it.
 - A terminal opened inside the window is **not** re-checked against the 5-minute idle window.
   This is by design (documented in HOSTS.md and THREAT-MODEL.md), not a bug.
 - The session list (`/api/sessions`, a passive read) hides a `require_2fa` host's sessions once
-  that user's window has closed, **except** the sessions that user is attached to right now,
-  unlocked, as an owner client (`core.attached_unlocked_sids`): they already see that terminal
-  live, and hiding it made its tab vanish 5 minutes after the passkey. The host's other sessions
-  stay hidden; automation tokens see none of them.
+  that user's window has closed, **except** the sessions that user is attached to right now:
+  attached, unlocked, from this sign-in, as an authenticated (non-guest) client
+  (`core.attached_unlocked_sids`, matched on the web-session cookie's hash): they already see
+  that terminal live, and hiding it made its tab vanish 5 minutes after the passkey. The exception
+  belongs to the sign-in, not the account: a stolen cookie in another browser does not see the
+  victim's attached sessions. The host's other sessions stay hidden; automation tokens see none.
 - A password alone is never a second factor.
 - An SSO step-up needs a fresh `auth_time` from the identity provider.
 - Granting durable access (deploy keys and similar) needs a fresh factor even on hosts without

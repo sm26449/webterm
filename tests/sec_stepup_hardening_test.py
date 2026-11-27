@@ -140,28 +140,74 @@ async def main():
         from types import SimpleNamespace as NS
         from app import core
         s_mine, s_other, s_locked, s_foreign = ("b" * 32, "c" * 32, "d" * 32, "e" * 32)
-        for s in (s_mine, s_other, s_locked, s_foreign):
+        s_watch, s_guest = "f" * 32, "1" * 32
+        all_sids = (s_mine, s_other, s_locked, s_foreign, s_watch, s_guest)
+        for s in all_sids:
             await db.execute("INSERT INTO sessions(id,host_id,title,state,created,rows,cols)"
                              " VALUES(?,?,?,?,?,?,?)", s, hid2fa, "t-" + s[0], "live",
                              time.time(), 24, 80)
 
-        def cli(user_id, locked=False, owner=True):
-            return NS(is_owner=owner, user_id=user_id, locked=locked)
+        # excepţia e legată de AUTENTIFICARE (hash-ul cookie-ului), nu de cont (review M1)
+        th_mine = security.sha256_hex(c.cookies.get(security.COOKIE_NAME))
+        tok2 = await security.create_web_session(uid)        # al doilea login al ACELUIAŞI cont
+        th_other = security.sha256_hex(tok2)
+
+        def cli(user_id, locked=False, owner=True, th=th_mine, writable=True):
+            return NS(is_owner=owner, user_id=user_id, locked=locked, web_tok_hash=th,
+                      writable=writable)
 
         def hub(clients, locked=False, closed=False):
             return NS(locked=locked, closed=closed, clients=list(clients), agent_offset=0, last_output_at=None)
         core.hubs[s_mine] = hub([cli(uid)])
         core.hubs[s_locked] = hub([cli(uid)], locked=True)          # plafonul de 60 min a lovit
         core.hubs[s_foreign] = hub([cli(uid + 999), cli(None, owner=False)])
+        core.hubs[s_watch] = hub([cli(uid, writable=False)])     # watcher read-only: inclus
+        core.hubs[s_guest] = hub([cli(uid, owner=False)])        # client ne-autentificat: exclus
+        c2 = httpx.AsyncClient(transport=transport, base_url="http://t", headers=_ORIGIN,
+                               cookies={security.COOKIE_NAME: tok2})
         try:
             security.clear_stepup_for(uid)
             ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
             check("fără fereastră: sesiunea ataşată deblocată rămâne în listă", s_mine in ids, str(ids))
             check("fără fereastră: restul sesiunilor hostului 2FA rămân ascunse",
-                  not ids & {s_other, s_locked, s_foreign}, str(ids))
-            acc = await api._split_pane_access({"id": uid}, [s_mine, s_other, s_locked])
+                  not ids & {s_other, s_locked, s_foreign, s_guest}, str(ids))
+            check("fără fereastră: watcher read-only al aceluiaşi login rămâne în listă",
+                  s_watch in ids, str(ids))
+            check("client ne-owner (cli owner=False) al contului → ascunsă", s_guest not in ids, str(ids))
+            r = await c2.get("/api/sessions")
+            ids2 = {s["id"] for s in r.json()} if r.status_code == 200 else {"?"}
+            check("alt login al aceluiaşi cont (cookie furat): nicio sesiune 2FA ataşată",
+                  r.status_code == 200 and not ids2 & set(all_sids), r.text[:160])
+            check("attached_unlocked_sids fără hash → nimic (fail-closed)",
+                  core.attached_unlocked_sids(uid, None) == set())
+            acc = await api._split_pane_access({"id": uid}, [s_mine, s_other, s_locked], th_mine)
             check("split-view: panoul ataşat deblocat rămâne vizibil, restul nu",
                   acc == {s_mine: True, s_other: False, s_locked: False}, str(acc))
+            acc = await api._split_pane_access({"id": uid}, [s_mine, s_watch], th_other)
+            check("split-view, alt login: panourile ataşate de primul login rămân ascunse",
+                  acc == {s_mine: False, s_watch: False}, str(acc))
+            # rutele: POST şi PATCH cu fereastra închisă
+            r = await c.post("/api/split-views", json={"name": "sv", "panes": [s_mine, s_watch]})
+            check("split-view POST fără fereastră, acelaşi login, panouri ataşate → 200",
+                  r.status_code == 200 and r.json().get("panes") == [s_mine, s_watch], r.text[:160])
+            sv_id = r.json().get("id") if r.status_code == 200 else None
+            r = await c2.post("/api/split-views", json={"name": "sv2", "panes": [s_mine, s_watch]})
+            check("split-view POST fără fereastră, alt login → refuzat", r.status_code >= 400, r.text[:160])
+            r = await c.patch(f"/api/split-views/{sv_id}", json={"ratio": 0.4})
+            check("split-view PATCH fără fereastră, acelaşi login → 200", r.status_code == 200, r.text[:160])
+            r = await c.post("/api/split-views", json={"name": "sv3", "panes": [s_mine, s_other]})
+            check("split-view POST cu un panou neataşat al hostului 2FA → refuzat",
+                  r.status_code >= 400, r.text[:160])
+            # acelaşi split-view, văzut din alt login: panourile sunt ascunse → PATCH refuzat (409)
+            await db.execute("UPDATE split_views SET user_id=? WHERE id=?", uid, sv_id)
+            r = await c2.patch(f"/api/split-views/{sv_id}", json={"ratio": 0.3})
+            check("split-view PATCH fără fereastră, alt login → 409 splitview.hiddenPanes",
+                  r.status_code == 409 and r.json().get("code") == "splitview.hiddenPanes", r.text[:160])
+            r = await c2.get("/api/split-views")
+            svs = r.json().get("split_views", []) if r.status_code == 200 else []
+            check("split-view GET, alt login: panourile ataşate de primul login ascunse",
+                  all(not (set(v["panes"]) & {s_mine, s_watch}) for v in svs), r.text[:160])
+            await db.execute("DELETE FROM split_views WHERE id=?", sv_id)
             core.hubs[s_mine] = hub([cli(uid, locked=True)])         # clientul propriu blocat
             ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
             check("client propriu blocat → ascunsă", s_mine not in ids, str(ids))
@@ -172,7 +218,7 @@ async def main():
             security.open_stepup_window(uid, hid2fa)
             ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
             check("cu fereastră: toate sesiunile hostului (comportament neschimbat)",
-                  {s_mine, s_other, s_locked, s_foreign} <= ids, str(ids))
+                  set(all_sids) <= ids, str(ids))
             # crearea tokenului cere TOTP (codul de mai sus e deja consumat): oprit doar pe durata
             # creării, repornit imediat (fix 11 de mai jos are nevoie de el)
             await db.execute("UPDATE users SET totp_enabled=0 WHERE id=?", uid)
@@ -186,12 +232,13 @@ async def main():
                 r = await t.get("/api/sessions")
                 ids = {s["id"] for s in r.json()} if r.status_code == 200 else {"?"}
             check("token: nicio sesiune a hostului 2FA, nici cea ataşată de creator",
-                  not ids & {s_mine, s_other, s_locked, s_foreign}, r.text[:160])
+                  not ids & set(all_sids), r.text[:160])
         finally:
-            for s in (s_mine, s_locked, s_foreign):
+            await c2.aclose()
+            for s in all_sids:
                 core.hubs.pop(s, None)
-            await db.execute("DELETE FROM sessions WHERE id IN (?,?,?,?)",
-                             s_mine, s_other, s_locked, s_foreign)
+            await db.execute("DELETE FROM sessions WHERE id IN (%s)" % ",".join("?" * len(all_sids)),
+                             *all_sids)
 
         # ── fix 6: /api/audit redactează comenzile de pe hosturi 2FA fără fereastră ──
         await db.execute(

@@ -3902,7 +3902,14 @@ def _split_view_json(row, panes=None, hidden=0):
             "broadcast": bool(row["broadcast"]), "position": row["position"] or 0}
 
 
-async def _split_pane_access(user, sids) -> dict:
+def _web_tok_hash(conn) -> Optional[str]:
+    """sha256 al cookie-ului de sesiune web al cererii/socketului (None fără cookie): leagă excepţia
+    INV-04 din lista de sesiuni de AUTENTIFICAREA care e ataşată, nu doar de cont."""
+    tok = conn.cookies.get(security.COOKIE_NAME)
+    return security.sha256_hex(tok) if tok else None
+
+
+async def _split_pane_access(user, sids, web_tok_hash: Optional[str] = None) -> dict:
     """sid → vizibil ACUM pentru cont: sesiunea există, rolul dă `session.watch`/`session.open` pe
     hostul ei şi — pe un host `require_2fa` — fereastra de step-up e deschisă (aceeaşi regulă ca
     /api/sessions: metadata unei sesiuni 2FA cere step-up). Un sid absent din dict = inexistent.
@@ -3927,12 +3934,12 @@ async def _split_pane_access(user, sids) -> dict:
         open_win[h] = h not in gated or security.stepup_window_is_open(user["id"], h)
     # INV-04 (docs/design/INVARIANTS.md): ca în /api/sessions, panoul la care contul e ataşat deblocat rămâne vizibil după fereastra de 5 min (altfel split-view-ul activ se dezactiva).
     is_token = isinstance(user, dict) and user.get("is_token")
-    mine = core.attached_unlocked_sids(user["id"]) if gated and not is_token else set()
+    mine = core.attached_unlocked_sids(user["id"], web_tok_hash) if gated and not is_token else set()
     return {r["id"]: ok_host[r["host_id"]] and (open_win[r["host_id"]] or r["id"] in mine)
             for r in rows}
 
 
-async def _validate_split_panes(panes, user) -> list:
+async def _validate_split_panes(panes, user, web_tok_hash: Optional[str] = None) -> list:
     """2-4 sid-uri DISTINCTE, fiecare o sesiune pe care contul o vede ACUM. Aceeaşi sesiune de
     două ori = doi clienţi tmux la două dimensiuni (război de resize) → respins, ca invariantul
     primary≠second. Inexistentă / fără drept / 2FA blocat = acelaşi 400 (fără oracol)."""
@@ -3942,7 +3949,7 @@ async def _validate_split_panes(panes, user) -> list:
         raise ApiError(400, "splitview.badPane", "invalid session id")
     if len(set(panes)) != len(panes):
         raise ApiError(400, "splitview.dupPane", "the same session cannot appear twice")
-    access = await _split_pane_access(user, panes)
+    access = await _split_pane_access(user, panes, web_tok_hash)
     if not all(access.get(sid) for sid in panes):
         raise ApiError(400, "splitview.badPane", "unknown session in split view")
     return panes
@@ -3974,16 +3981,16 @@ class SplitViewIn(BaseModel):
     position: Optional[int] = None
 
 
-async def _split_view_out(user, row) -> dict:
+async def _split_view_out(user, row, web_tok_hash: Optional[str] = None) -> dict:
     cur = _split_panes_of(row)
-    access = await _split_pane_access(user, cur)
+    access = await _split_pane_access(user, cur, web_tok_hash)
     alive = [s for s in cur if s in access]
     visible = [s for s in alive if access[s]]
     return _split_view_json(row, visible, len(alive) - len(visible))
 
 
 @router.get("/api/split-views")
-async def list_split_views(user=Depends(security.require_user)):
+async def list_split_views(request: Request, user=Depends(security.require_user)):
     # 3.6.12: GET nu mai SCRIE (curăţarea panourilor moarte e în reaper şi la ştergerea unei
     # sesiuni/host — core.prune_split_views) şi interoghează doar sesiunile referite. Un panou pe
     # care contul nu-l poate vedea ACUM (rol schimbat, host 2FA fără step-up) e ASCUNS, nu şters:
@@ -3991,7 +3998,8 @@ async def list_split_views(user=Depends(security.require_user)):
     rows = await db.fetchall(
         "SELECT * FROM split_views WHERE user_id=? ORDER BY position, id", user["id"])
     panes_of = {r["id"]: _split_panes_of(r) for r in rows}
-    access = await _split_pane_access(user, [s for p in panes_of.values() for s in p])
+    access = await _split_pane_access(user, [s for p in panes_of.values() for s in p],
+                                      _web_tok_hash(request))
     out = []
     for r in rows:
         alive = [s for s in panes_of[r["id"]] if s in access]
@@ -4003,7 +4011,8 @@ async def list_split_views(user=Depends(security.require_user)):
 
 
 @router.post("/api/split-views")
-async def create_split_view(body: SplitViewIn, user=Depends(security.require_user)):
+async def create_split_view(body: SplitViewIn, request: Request, user=Depends(security.require_user)):
+    th = _web_tok_hash(request)
     name = (body.name or "").strip()[:80]
     if not name:
         raise ApiError(400, "splitview.noName", "a split view needs a name")
@@ -4012,7 +4021,7 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
     n = await db.fetchone("SELECT COUNT(*) AS n FROM split_views WHERE user_id=?", user["id"])
     if n and n["n"] >= SPLIT_MAX_PER_USER:
         raise ApiError(400, "splitview.tooMany", "too many split views — delete one first")
-    panes = await _validate_split_panes(body.panes or [], user)
+    panes = await _validate_split_panes(body.panes or [], user, th)
     layout = (_split_layout_arg(body.layout, len(panes)) if body.layout is not None
               else SPLIT_DEFAULT_LAYOUT[len(panes)])
     sizes = _split_sizes(layout, body.sizes) if body.sizes is not None else None
@@ -4035,11 +4044,13 @@ async def create_split_view(body: SplitViewIn, user=Depends(security.require_use
     if not ins:
         raise ApiError(400, "splitview.tooMany", "too many split views — delete one first")
     new_id = ins["id"]
-    return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", new_id))
+    return await _split_view_out(user, await db.fetchone("SELECT * FROM split_views WHERE id=?", new_id), th)
 
 
 @router.patch("/api/split-views/{sv_id}")
-async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security.require_user)):
+async def update_split_view(sv_id: int, body: SplitViewIn, request: Request,
+                            user=Depends(security.require_user)):
+    th = _web_tok_hash(request)
     row = await db.fetchone("SELECT * FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
     if not row:
         raise ApiError(404, "splitview.missing", "no such split view")
@@ -4054,12 +4065,12 @@ async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security
         # Un client care NU vede toate panourile (2FA fără step-up, rol restrâns) ar rescrie
         # layout-ul doar cu ce vede şi ar pierde tăcut panourile ascunse → refuzat până la deblocare.
         cur = _split_panes_of(row)
-        access = await _split_pane_access(user, cur)
+        access = await _split_pane_access(user, cur, th)
         alive = [s for s in cur if s in access]
         if any(not access[s] for s in alive):
             raise ApiError(409, "splitview.hiddenPanes",
                            "some sessions of this split view are hidden right now — unlock them first")
-        panes = await _validate_split_panes(body.panes, user) if body.panes is not None else alive
+        panes = await _validate_split_panes(body.panes, user, th) if body.panes is not None else alive
         if len(panes) < 2:
             raise ApiError(400, "splitview.badCount", "a split view needs 2 to 4 sessions")
         count_changed = len(panes) != len(alive)
@@ -4094,7 +4105,7 @@ async def update_split_view(sv_id: int, body: SplitViewIn, user=Depends(security
     row = await db.fetchone("SELECT * FROM split_views WHERE id=? AND user_id=?", sv_id, user["id"])
     if not row:     # şters între timp (DELETE concurent / prune) → 404, nu 500
         raise ApiError(404, "splitview.missing", "no such split view")
-    return await _split_view_out(user, row)
+    return await _split_view_out(user, row, th)
 
 
 @router.delete("/api/split-views/{sv_id}")
@@ -4904,7 +4915,7 @@ async def list_sessions(request: Request,
         allowed = set() if is_token else {
             hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
         # INV-04 (docs/design/INVARIANTS.md): fereastra de 5 min nu glisează pe tastare, deci fără asta tabul terminalului 2FA folosit dispărea; doar sesiunile la care contul e ataşat deblocat, nu restul hostului.
-        mine = set() if is_token else core.attached_unlocked_sids(user["id"])
+        mine = set() if is_token else core.attached_unlocked_sids(user["id"], _web_tok_hash(request))
         rows = [r for r in rows
                 if r["host_id"] not in gated or r["host_id"] in allowed or r["id"] in mine]
     is_token = isinstance(user, dict) and user.get("is_token")
@@ -6636,6 +6647,8 @@ async def browser_ws(ws: WebSocket, sid: str):
         client.writable = access == "rw"
         client.label = "self"           # idem
         client.user_id = user["id"]
+        # INV-04: excepţia din /api/sessions e legată de această autentificare (cookie), nu de cont
+        client.web_tok_hash = _web_tok_hash(ws)
         client.remote_addr = security.client_ip(ws)
         client.user_agent = ws.headers.get("user-agent", "")
         client.attached_at = time.time()
@@ -6741,62 +6754,77 @@ async def browser_ws(ws: WebSocket, sid: str):
             await ws.close(code=4410, reason=IDLE_CLOSING_REASON)
             return
         hub.clients.add(client)
-        hub.note_presence()       # igiena sesiunilor (3.7.1)
-        await _send_osc133(client, hub, osc_span if replay_sent else None)
-        client.sender_task = asyncio.create_task(client.sender())
-        if not start_locked:
-            # F5 / al doilea dispozitiv cu aceeași mărime: tail-ul redă doar diff-urile
-            # transmise, deci chenarele statice ale unui TUI pot lipsi, iar resize-ul
-            # dedupat (aceeași dimensiune) nu declanșează niciun repaint tmux. Cerem
-            # explicit unul, ca la resume — altfel simptomul „linii lipsă până la A±"
-            # rămânea exact pe calea cea mai comună: reload-ul de pagină.
-            hub.request_redraw()
-        await hub.broadcast_roster()             # cine e conectat (owner + invitați)
-        # Cine era deja ataşat AFLĂ că ai venit; dacă locul e nou, pleacă şi un email — ca să
-        # afli şi când nu te uitai. E singurul efect al lui `known`: volum de alertă.
-        await hub.announce_attach(client)
-        # Atribuire „cine a ajuns pe ce host": reataşarea pe WS NU trece prin middleware-ul de
-        # audit (nu e o cerere HTTP care schimbă ceva), deci o consemnăm explicit aici. Crearea
-        # unei sesiuni noi e deja auditată (POST /api/hosts/{id}/sessions). Împreună, jurnalul
-        # răspunde la „userul X, pe ce hosturi/sesiuni a fost" — util la debug şi pentru SSO.
-        await audit.record(time.time(), user["email"], client.remote_addr, "WS",
-                           "/ws/sessions/%s" % sid, 200,
-                           "ataşat la sesiune pe host %s" % row["host_id"])
-        if not client.known:
-            email_alerts.notify_session_attach(
-                row["title"], client.remote_addr, client.user_agent, user["email"],
-                user_id=user["id"])
-        if start_locked:
-            # alt cont lucrează deja DEBLOCAT pe terminal → blocăm doar acest client (OPEN1): un al
-            # doilea cont fără fereastră nu are voie să închidă terminalul celui care lucrează
-            others_working = any(
-                c is not client and c.is_owner and c.writable and not c.locked
-                and c.user_id != user["id"] for c in hub.clients)
-            if not hub.locked and client.writable and not others_working:
-                await hub.lock("stepup")         # fără fereastră → blochează toţi clienţii + broadcast
-            else:
-                # hub deja blocat, SAU un watcher read-only fără fereastră (3.6): blocăm DOAR acest
-                # client — un cont care nu poate tasta nu are voie să închidă terminalul celui care
-                # lucrează (DoS), iar output-ul nu-i ajunge până nu-şi prezintă propriul factor
-                client.lock()
-                await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason}))
-        # un operator verificat tocmai a sosit → invitaţii blocaţi în lipsa lui se deblochează
-        await hub.sync_guests()
-        conn = core.sources.get(row["host_id"])
-        # sesiune SSH live fără sursă = gateway repornit; re-dial cu creds stocate
-        # și re-atașează tmux-ul remote (persistență peste restart)
-        if conn is None:
-            host = await db.fetchone("SELECT * FROM hosts WHERE id=?", row["host_id"])
-            if host and host["connection_type"] == "ssh" and host["credential_encrypted"]:
-                try:
-                    cred = hostmodel.decode_credential(host["credential_encrypted"])
-                    conn = await core.dial_ssh(host, cred)
-                    await conn.create(sid, row["rows"], row["cols"], "xterm-256color")
-                except Exception as e:
-                    log.warning("re-dial ssh %s: %s", sid, e)
-                    conn = None
-        if conn:
-            await hub.ensure_attached(conn)
+        # L2 (3.8.1): clientul e deja în hub; un await care aruncă de aici până la try/finally-ul
+        # buclei (ex. dial_ssh, audit) lăsa un client fantomă în `hub.clients` — care ţinea
+        # invitaţii deblocaţi şi sesiunea în /api/sessions (attached_unlocked_sids). Îl scoatem.
+        try:
+            hub.note_presence()       # igiena sesiunilor (3.7.1)
+            await _send_osc133(client, hub, osc_span if replay_sent else None)
+            client.sender_task = asyncio.create_task(client.sender())
+            if not start_locked:
+                # F5 / al doilea dispozitiv cu aceeași mărime: tail-ul redă doar diff-urile
+                # transmise, deci chenarele statice ale unui TUI pot lipsi, iar resize-ul
+                # dedupat (aceeași dimensiune) nu declanșează niciun repaint tmux. Cerem
+                # explicit unul, ca la resume — altfel simptomul „linii lipsă până la A±"
+                # rămânea exact pe calea cea mai comună: reload-ul de pagină.
+                hub.request_redraw()
+            await hub.broadcast_roster()             # cine e conectat (owner + invitați)
+            # Cine era deja ataşat AFLĂ că ai venit; dacă locul e nou, pleacă şi un email — ca să
+            # afli şi când nu te uitai. E singurul efect al lui `known`: volum de alertă.
+            await hub.announce_attach(client)
+            # Atribuire „cine a ajuns pe ce host": reataşarea pe WS NU trece prin middleware-ul de
+            # audit (nu e o cerere HTTP care schimbă ceva), deci o consemnăm explicit aici. Crearea
+            # unei sesiuni noi e deja auditată (POST /api/hosts/{id}/sessions). Împreună, jurnalul
+            # răspunde la „userul X, pe ce hosturi/sesiuni a fost" — util la debug şi pentru SSO.
+            await audit.record(time.time(), user["email"], client.remote_addr, "WS",
+                               "/ws/sessions/%s" % sid, 200,
+                               "ataşat la sesiune pe host %s" % row["host_id"])
+            if not client.known:
+                email_alerts.notify_session_attach(
+                    row["title"], client.remote_addr, client.user_agent, user["email"],
+                    user_id=user["id"])
+            if start_locked:
+                # alt cont lucrează deja DEBLOCAT pe terminal → blocăm doar acest client (OPEN1): un al
+                # doilea cont fără fereastră nu are voie să închidă terminalul celui care lucrează
+                others_working = any(
+                    c is not client and c.is_owner and c.writable and not c.locked
+                    and c.user_id != user["id"] for c in hub.clients)
+                if not hub.locked and client.writable and not others_working:
+                    await hub.lock("stepup")         # fără fereastră → blochează toţi clienţii + broadcast
+                else:
+                    # hub deja blocat, SAU un watcher read-only fără fereastră (3.6): blocăm DOAR acest
+                    # client — un cont care nu poate tasta nu are voie să închidă terminalul celui care
+                    # lucrează (DoS), iar output-ul nu-i ajunge până nu-şi prezintă propriul factor
+                    client.lock()
+                    await client.send_text(json.dumps({"type": "locked", "reason": hub.lock_reason}))
+            # un operator verificat tocmai a sosit → invitaţii blocaţi în lipsa lui se deblochează
+            await hub.sync_guests()
+            conn = core.sources.get(row["host_id"])
+            # sesiune SSH live fără sursă = gateway repornit; re-dial cu creds stocate
+            # și re-atașează tmux-ul remote (persistență peste restart)
+            if conn is None:
+                host = await db.fetchone("SELECT * FROM hosts WHERE id=?", row["host_id"])
+                if host and host["connection_type"] == "ssh" and host["credential_encrypted"]:
+                    try:
+                        cred = hostmodel.decode_credential(host["credential_encrypted"])
+                        conn = await core.dial_ssh(host, cred)
+                        await conn.create(sid, row["rows"], row["cols"], "xterm-256color")
+                    except Exception as e:
+                        log.warning("re-dial ssh %s: %s", sid, e)
+                        conn = None
+            if conn:
+                await hub.ensure_attached(conn)
+        except BaseException:
+            hub.clients.discard(client)
+            hub.note_presence()
+            if client.sender_task:
+                client.sender_task.cancel()
+            try:
+                await hub.sync_guests()
+                await hub.broadcast_roster()
+            except Exception:                    # noqa: BLE001
+                pass
+            raise
 
     # revalidare periodică: WS-ul e autorizat DOAR la handshake. Fără asta, un terminal deschis
     # supravieţuieşte logout-ului/idle-expiry (tokenul e revocat server-side de destroy_web_session,
