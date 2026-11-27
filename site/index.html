@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverShell — Close the tab. Keep the shell.</title>
+<meta name="description" content="Self-hosted terminal sessions that keep running on your machines. Open a shell from any browser, phone included, and come back to the same process and the same scrollback.">
+<link rel="canonical" href="https://evershell.dev/">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="EverShell — Close the tab. Keep the shell.">
+<meta property="og:description" content="Self-hosted terminal sessions that keep running on your machines.">
+<meta property="og:url" content="https://evershell.dev/">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell home"><img src="assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="tour.html">Tour</a>
+      <a href="security.html">Security</a>
+      <a href="install.html">Install</a>
+      <a href="about.html">About</a>
+      <a class="lang" href="ro/" hreflang="ro" lang="ro">RO</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" aria-labelledby="hero-title">
+  <div class="wrap">
+    <p class="eyebrow">self-hosted · open source · MIT</p>
+    <h1 id="hero-title">Close the tab.<br><b>Keep the shell.</b><span class="cursor" aria-hidden="true"></span></h1>
+    <p class="lede">Self-hosted terminal sessions that keep running on your machines. Open a shell from any browser, phone included, and come back hours later to the same process and the same scrollback.</p>
+    <div class="ctas">
+      <a class="btn btn-primary" href="install.html">Install on your server</a>
+      <a class="btn btn-ghost" href="tour.html">Take the tour</a>
+    </div>
+    <div class="hero-media">
+      <div class="window">
+        <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>term.example.com</span></div>
+        <div class="video-frame" data-video data-mp4="assets/video/tour.mp4" data-label="EverShell product tour, 83 seconds">
+          <img src="assets/video/tour-poster.png" alt="" width="1440" height="900">
+          <button class="play" type="button" aria-label="Play the 83-second product tour">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>
+          </button>
+          <span class="play-label" aria-hidden="true">Product tour · 1:23</span>
+        </div>
+        <nav class="chapters" data-chapters aria-label="Tour chapters">
+          <ol>
+            <li><button type="button" data-t="0"><time>0:00</time> Your fleet</button></li>
+            <li><button type="button" data-t="3.2"><time>0:03</time> Persistent sessions</button></li>
+            <li><button type="button" data-t="18.8"><time>0:18</time> New session launcher</button></li>
+            <li><button type="button" data-t="27.3"><time>0:27</time> Files</button></li>
+            <li><button type="button" data-t="31.9"><time>0:31</time> Split view</button></li>
+            <li><button type="button" data-t="55.7"><time>0:55</time> Run on hosts</button></li>
+            <li><button type="button" data-t="67.7"><time>1:07</time> Share link</button></li>
+            <li><button type="button" data-t="74.5"><time>1:14</time> Settings search</button></li>
+          </ol>
+        </nav>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="proof" aria-label="Why EverShell"><div class="wrap"><ul><li><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.7"/><path d="M20 4v4.7h-4.7"/><path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.3"/><path d="M4 20v-4.7h4.7"/></svg></span><span><b>Agent sessions keep running</b>Reconnect after closing the browser, losing Wi-Fi, or restarting the gateway or agent.</span></li><li><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg></span><span><b>Nothing to open on your servers</b>The agent dials out. No inbound port, no stored login.</span></li><li><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18h2"/></svg></span><span><b>A real terminal on your phone</b>Install it as an app, with a key bar for Esc, Tab and Ctrl.</span></li><li><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11 12 4l8.5 7"/><path d="M5.5 9.5V20h13V9.5"/><path d="M10 20v-5h4v5"/></svg></span><span><b>Yours, end to end</b>Self-hosted, MIT licensed, one container. No telemetry.</span></li></ul></div></section>
+
+<section aria-labelledby="how-title">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2 id="how-title">The session lives on <b>your machine</b>, not in the browser.</h2>
+    <p class="sub">Sessions opened through the agent keep running in tmux on the host when the browser disconnects or the gateway restarts.</p>
+    <div class="grid">
+      <article class="card">
+        <p class="step-no">01</p>
+        <h3>Start something long</h3>
+        <p>A build, a migration, a log you are watching. It runs on the host, inside tmux.</p>
+        <pre><code><span class="c-dim">web-02 ~ $</span> ./deploy.sh --all
+[1/14] syncing assets…</code></pre>
+      </article>
+      <article class="card">
+        <p class="step-no">02</p>
+        <h3>Close the tab</h3>
+        <p>Close the laptop, lose the Wi-Fi, restart or upgrade the gateway. The host does not notice.</p>
+        <pre><code><span class="c-dim">browser</span>  disconnected
+<span class="c-dim">host   </span>  <span class="c-ok">still running</span></code></pre>
+      </article>
+      <article class="card">
+        <p class="step-no">03</p>
+        <h3>Come back anywhere</h3>
+        <p>Open it from your phone or another desk: same process, same scrollback, several devices at once.</p>
+        <pre><code>[14/14] done
+<span class="c-dim">web-02 ~ $</span> <span class="blink">█</span></code></pre>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="tight" aria-labelledby="reach-title">
+  <div class="wrap rule">
+    <h2 id="reach-title">Three ways to reach a machine</h2>
+    <ul class="list">
+      <li><b>Agent <span class="tag">recommended</span></b><p>One stdlib-only Python file that dials <strong>out</strong> to the gateway. Nothing listens on your server, and a machine behind NAT works like one with a public IP.</p></li>
+      <li><b>SSH</b><p>For machines where you cannot install anything. Host keys are pinned, jump hosts are supported.</p></li>
+      <li><b>Telnet</b><p>Switches, PDUs and older gear, reached directly or through an agent inside the network.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="more-title">
+  <div class="wrap">
+    <h2 id="more-title">More than a shell, <b>from the same pane.</b></h2>
+    <div class="grid">
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></span><h3>Files and editor</h3><p>Browse and edit files, resume interrupted transfers, and check repository status in the Git panel.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M12 12h9"/></svg></span><h3>Split views</h3><p>Two to four sessions side by side, in five layouts, saved by name.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4 7 4 4-4 4"/><path d="M11 16h9"/><path d="M14 7h6M14 11.5h6"/></svg></span><h3>Run on hosts</h3><p>One command on many machines, with exit code and output per host.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.3 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.3-3.5-8.5S9.6 5.9 12 3.5z"/></svg></span><h3>Port forwards</h3><p>An internal web UI, such as Grafana or Proxmox, on its own subdomain, behind your login.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></span><h3>Share and replay</h3><p>Expiring links to watch or type in a live session; recordings you can replay, share and, from 3.8, keep encrypted.</p></div>
+      <div class="card"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></span><h3>Docker, systemd, serial</h3><p>Containers, services and RS232/USB consoles on the host, without leaving the browser.</p></div>
+    </div>
+    <a class="more" href="tour.html">See every feature, with screenshots →</a>
+  </div>
+</section>
+
+<section aria-labelledby="gal-title"><div class="wrap"><h2 id="gal-title">See it <b>in action.</b></h2><p class="sub">Real screens from the app, on a fictional demo fleet.</p><div class="gallery"><a href="tour.html#sessions"><picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/02-terminal-light.png"><img src="assets/shots/02-terminal-dark.png" alt="" width="1440" height="900" loading="lazy"></picture><span>Sessions with commands as objects<small>Exit code, duration and output for every command.</small></span></a><a href="tour.html#split"><picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/09-split-light.png"><img src="assets/shots/09-split-dark.png" alt="" width="1440" height="900" loading="lazy"></picture><span>Split views<small>Three hosts side by side, typed into at once if you want.</small></span></a><a href="tour.html#run"><picture><source media="(prefers-color-scheme: light)" srcset="assets/shots/07-run-on-hosts-light.png"><img src="assets/shots/07-run-on-hosts-dark.png" alt="" width="1440" height="900" loading="lazy"></picture><span>Run on hosts<small>One command, a result per machine.</small></span></a></div><a class="more" href="tour.html">The full tour →</a></div></section>
+
+<section class="alt" aria-labelledby="cmp-title"><div class="wrap"><h2 id="cmp-title">Why not just <b>SSH and tmux?</b></h2><p class="sub">You can, and EverShell keeps tmux at its core. What it adds is everything around the session.</p><div class="compare-wrap" tabindex="0" role="region" aria-labelledby="cmp-title"><table class="compare"><thead><tr><th scope="col"><span class="sr-only">Feature</span></th><th scope="col">SSH + tmux</th><th scope="col">EverShell</th></tr></thead><tbody><tr><th scope="row">Session survives a dropped connection</th><td><span class="yes">With tmux, if you remember to start it</span></td><td><span class="yes">With the agent, sessions keep running in tmux on the host</span></td></tr><tr><th scope="row">Open port on every server</th><td><span class="no">Port 22, keys to distribute</span></td><td><span class="yes">None: the agent dials out, works behind NAT</span></td></tr><tr><th scope="row">From a phone or a borrowed laptop</th><td><span class="no">Needs an SSH client and your key</span></td><td><span class="yes">Any browser, passkey sign-in</span></td></tr><tr><th scope="row">Files, uploads, an editor</th><td><span class="no">scp, sftp, vim</span></td><td><span class="yes">In the same pane, following your cd</span></td></tr><tr><th scope="row">Show a colleague a live session</th><td><span class="no">Share a tmux socket or a screen</span></td><td><span class="yes">An expiring link, read-only or writable</span></td></tr><tr><th scope="row">Who did what, and when</th><td><span class="no">Scattered across each host's logs</span></td><td><span class="yes">One audit log, alerts on what matters</span></td></tr></tbody></table></div></div></section>
+
+<section class="dark" id="security" aria-labelledby="sec-title">
+  <div class="wrap split2">
+    <div>
+      <p class="eyebrow">Security</p>
+      <h2 id="sec-title">Built to sit on <b>the internet.</b></h2>
+      <p class="sub">Whoever gets past the login gets, on every host, the access of the user its agent runs as. So that is where the work goes.</p>
+      <a class="more" href="security.html">How EverShell is protected →</a>
+      <div style="margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line)">
+        <p class="eyebrow" style="margin-bottom: 8px">New in 3.8</p>
+        <p class="sub" style="margin-top: 0"><b>Encryption at rest.</b> Stored credentials and every backup are locked with a master key you keep outside the data volume. Session recordings can be encrypted too, compressed first so they stay small, and an erased recording stays erased after a restore. Host backups now stream at any size.</p>
+        <a class="more" href="security.html#at-rest">What it covers, and what not →</a>
+      </div>
+    </div>
+    <ul class="list" style="margin-top: 8px">
+      <li><b>Passkeys and 2FA</b><p>And a fresh second factor before a shell on the hosts you flag.</p></li>
+      <li><b>Roles and SSO</b><p>Which hosts each account reaches, and whether it gets a shell. OIDC and SCIM.</p></li>
+      <li><b>Signed agent updates</b><p>Agents only run an update signed with your own key.</p></li>
+      <li><b>Audit log and backups</b><p>Who did what, from where. Encrypted daily backups that, from 3.8, open only with a master key you keep apart.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="install-title">
+  <div class="wrap split2">
+    <div>
+      <h2 id="install-title">Your server, <b>one installer.</b></h2>
+      <p class="sub">Any Linux server with Docker and a domain pointing at it. On a fresh Ubuntu or Debian server, one installer sets up Docker, HTTPS, the firewall, a daily encrypted backup and the master key that protects your data.</p>
+      <a class="more" href="install.html">Requirements and adding hosts →</a>
+    </div>
+    <pre><code><span class="c-dim">$</span> git clone https://github.com/sm26449/webterm.git
+<span class="c-dim">$</span> cd webterm &amp;&amp; git checkout v3.8.0
+<span class="c-dim">$</span> less install.sh   <span class="c-dim"># meant to be read: it runs as root</span>
+<span class="c-dim">$</span> sudo ./install.sh --domain term.example.com \
+      --email you@example.com</code></pre>
+  </div>
+</section>
+<section class="alt" aria-labelledby="faq-title"><div class="wrap" style="max-width: 860px"><h2 id="faq-title">Questions</h2><div class="faq"><details><summary>Is it free?</summary><p>Yes. EverShell is open source under the MIT license, and you run it on your own server. There is no paid tier and no telemetry.</p></details><details><summary>What happens if the gateway goes down?</summary><p>Sessions on agent hosts keep running in tmux on the host, and are picked up again when the gateway comes back. SSH and telnet sessions live in the gateway, so those end when it restarts.</p></details><details><summary>Does the agent need root?</summary><p>No. By default it runs as a dedicated, unprivileged <code>webterm</code> user, and you decide what that user may do.</p></details><details><summary>What can I connect?</summary><p>Linux hosts with Python 3.6 or newer for the agent (older ones get a portable Python), plus anything that speaks SSH or telnet: switches, PDUs, a customer's box.</p></details><details><summary>Can a team use it?</summary><p>Yes: roles per host or folder, time-bound access, passkeys and 2FA, single sign-on via OIDC and account provisioning via SCIM, and an audit log.</p></details><details><summary>Where is my data?</summary><p>On your server: sessions, recordings and the database never leave it, and backups are encrypted before they go anywhere. From 3.8, stored credentials and backups are also locked with a master key kept outside the data, and recordings can be encrypted too.</p></details></div></div></section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · MIT licensed · Self-hosted</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentation</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Made by <a href="about.html#a-team">Stefan, Claude and Codex</a>, much of it written inside an EverShell session.</p>
+</footer>
+</body>
+</html>

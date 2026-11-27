@@ -11,8 +11,18 @@
 #   WEBTERM_IMAGE=…   image to capture (default: ghcr.io/sm26449/webterm:v<GATEWAY_VERSION>)
 #   PW_MODULES=…      a node_modules dir holding the `playwright` package (default: frontend/node_modules)
 #   ONLY=a,b          capture only these steps (dashboard,terminal,host,files,security,fleet,phone,
-#                     split,themes;
+#                     split,themes; website captures 11–16: addhost,forward,updates,diagnostics,
+#                     upload,share,settingsphone;
 #                     opt-in, never in the default run: copy — the folder-copy UI, for review)
+#   VIDEO=1           opt-in, never in the default run: record the captioned product tour
+#                     (1440×900) on a fresh fleet → tour.mp4 (H.264, cut to the first frame with
+#                     the fleet on screen), tour-poster.png and tour-chapters.json ([{t, label}],
+#                     seconds into tour.mp4). Screenshot steps then run only if named in ONLY.
+#   CLIPS=1           opt-in: short muted feature loops (1440×900) → clip-<name>.mp4 + .jpg poster
+#                     (ONLY=clip-launcher,clip-split… picks some). Same ONLY rule as VIDEO.
+#   CLIP_WEBM=1       also a VP9 clip-<name>.webm per clip (slow on this VM; off by default)
+#   SHOT_THEMES=a,b   the dark,light theme prefs of the screenshots (default dark,macos =
+#                     Midnight/Aurora; the 3.7.1 site uses evershell:dark,evershell:light)
 #   KEEP=1            leave the demo container running afterwards (iterate on shots.mjs)
 #   REUSE=1           reuse a container left by KEEP=1 instead of seeding a new one
 #   OPTIMIZE=0        skip the pngquant pass
@@ -35,6 +45,12 @@ EMAIL="demo@example.com"
 PASSWORD="parola-demo-123456"
 
 say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
+# will shots.mjs run this step? (same rule as its `want`: default run = all but opt-in / VIDEO)
+wants() {
+  if [ -z "${ONLY:-}" ]; then [ "${VIDEO:-0}" != 1 ] && [ "${CLIPS:-0}" != 1 ]; return; fi
+  case ",$ONLY," in *",$1,"*) return 0 ;; esac
+  return 1
+}
 pyrun() { docker exec -i "$APP" python3 - "$@"; }   # run python from stdin inside the container
 
 cleanup() {
@@ -65,7 +81,7 @@ docker run -d --name "$APP" --network "$NET" --hostname web-01 \
   "$IMAGE" >/dev/null
 
 # wait for health (python urllib, not curl — the runtime image has no curl)
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if pyrun <<'PY' 2>/dev/null
 import urllib.request
 urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2)
@@ -78,12 +94,12 @@ say "── account + demo fleet (seed.py in the container) ──"
 docker cp "$ROOT/scripts/screenshots/seed.py" "$APP:/tmp/seed.py"
 AGENTS=$(docker exec "$APP" python3 /tmp/seed.py "$EMAIL" "$PASSWORD" "$TOKEN")
 
-say "── host polish: tmux (persistent sessions), procps (top/vmstat for the split view) + an @reboot entry ──"
+say "── host polish: tmux (persistent sessions), procps (top/vmstat for the split view), iproute2 (listening ports) + an @reboot entry ──"
 # Without tmux the host page shows a "sessions do not survive" banner; without a boot entry
 # every host carries a "won't come back after a reboot" warning. Both are true of this
 # throwaway container, and both would distract from what the screenshots are about.
 docker exec "$APP" sh -c 'apt-get update -qq >/dev/null 2>&1 &&
-  apt-get install -y -qq --no-install-recommends tmux procps >/dev/null 2>&1' \
+  apt-get install -y -qq --no-install-recommends tmux procps iproute2 >/dev/null 2>&1' \
   || say "   (tmux not installed — sessions will show as not persistent)"
 # drop the package lists again, or every host gets the same "N OS updates pending" badge
 docker exec "$APP" sh -c 'rm -rf /var/lib/apt/lists/*'
@@ -196,6 +212,9 @@ docker exec "$APP" sh -c 'for d in 03 04 05 06; do for i in 1 2 3 4 5 6; do
 docker exec "$APP" sh -c 'head -c 180000 /dev/urandom > /root/project/static/bundle.js.gz; head -c 42000 /dev/urandom > /root/project/static/logo.png'
 # a symbolic link inside a folder: copying the folder (ONLY=copy) lists it as "not copied"
 docker exec "$APP" ln -sf bundle.js.gz /root/project/static/latest.js.gz
+# a real web service on web-01 for the Port forwards capture (and the listening ports in
+# Diagnostics): python's http.server on 127.0.0.1:8080, serving the demo project
+docker exec -d "$APP" python3 -m http.server 8080 --bind 127.0.0.1 --directory /root/project
 
 say "── waiting for the hosts to come online ──"
 # one login, then poll /api/hosts (logging in on every poll would trip the login rate limit)
@@ -217,6 +236,27 @@ print(f"   {n} hosts online")
 op.open(urllib.request.Request(B + "/api/logout", method="POST", headers={"Origin": B}), timeout=10)
 PY
 sleep 8   # a few heartbeats → metrics/sparkline
+
+if wants updates; then
+  say "── OS updates: three packages back to the release's own version (real pending updates) ──"
+  # The image ships fully upgraded, so nothing is pending. Re-installing the original release
+  # version of three packages makes their updates genuinely pending (two from -security).
+  # Only now, after every agent has run (and cached for 6 h) its first check with no package
+  # lists: the `updates` step asks web-01 alone for a fresh snapshot, so only it shows a badge.
+  docker exec -i "$APP" sh -s <<'SH' || say "   (no pending updates could be set up — the updates step will fail)"
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null 2>&1
+for p in tzdata ca-certificates liblzma5; do
+  # the version from "<release>/main" (not -updates / -security)
+  v=$(apt-cache madison "$p" | awk -F'|' '$3 ~ / [a-z]+\/main / { gsub(/ /, "", $2); print $2; exit }')
+  cur=$(dpkg-query -W -f '${Version}' "$p" 2>/dev/null || true)
+  [ -n "$v" ] && [ "$v" != "$cur" ] || continue
+  apt-get install -y -qq --allow-downgrades --no-install-recommends "$p=$v" >/dev/null 2>&1
+done
+echo "   $(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep -c '^Inst ') package updates pending on the demo hosts"
+SH
+fi
 fi
 
 say "── Playwright: capturing the screens (dark + light, + phone) ──"
@@ -233,8 +273,20 @@ docker run --rm --network "$NET" \
   -v "$ROOT/scripts/screenshots:/work:ro" \
   -v "$PW_MODULES:/node_modules:ro" \
   -v "$OUT:/out" \
-  -e BASE="http://$APP:8000" -e EMAIL="$EMAIL" -e PASSWORD="$PASSWORD" -e ONLY="${ONLY:-}" -e DBG="${DBG:-}" \
+  -e BASE="http://$APP:8000" -e EMAIL="$EMAIL" -e PASSWORD="$PASSWORD" -e ONLY="${ONLY:-}" -e DBG="${DBG:-}" -e VIDEO="${VIDEO:-}" \
+  -e CLIPS="${CLIPS:-}" -e SHOT_THEMES="${SHOT_THEMES:-}" \
   "$PW_IMAGE" node /work/shots.mjs
+
+if [ "${VIDEO:-0}" = 1 ] || [ "${CLIPS:-0}" = 1 ] || [ -f "$OUT/.clips.json" ]; then
+  say "── video: H.264 mp4 + posters (ffmpeg, in the Playwright image) ──"
+  # Ubuntu's ffmpeg in a throwaway container: no extra image to pull and keep. Playwright's own
+  # ffmpeg build only writes VP8, hence the install. The raw recordings (.NAME.raw.webm) start
+  # with the page loading: .tour-cut / .clips.json (written by shots.mjs) say where each one
+  # really starts and ends, and where its poster frame is. Raw files are deleted afterwards.
+  docker run --rm -v "$OUT:/out" -v "$ROOT/scripts/screenshots:/work:ro" \
+    -e OWNER="$(id -u):$(id -g)" -e CLIP_WEBM="${CLIP_WEBM:-0}" "$PW_IMAGE" sh /work/encode.sh \
+    || say "   (ffmpeg step failed — see above)"
+fi
 
 if [ "${OPTIMIZE:-1}" = 1 ]; then
   say "── shrinking the PNGs (pngquant, in the Playwright image) ──"
@@ -246,7 +298,7 @@ if [ "${OPTIMIZE:-1}" = 1 ]; then
     cd /out && for f in *.png; do
       pngquant --quality=70-92 --speed 1 --strip --skip-if-larger --force --output "$f" -- "$f" || true
     done
-    chown '"$(id -u):$(id -g)"' /out/*.png'
+    chown '"$(id -u):$(id -g)"' /out/*.png 2>/dev/null || true'
 fi
 
 say "✓ screenshots in $OUT"

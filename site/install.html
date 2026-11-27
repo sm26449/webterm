@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install — EverShell</title>
+<meta name="description" content="Install EverShell on your own server: requirements, the installer, the first account, adding hosts, and upgrading from 3.7 to encryption at rest.">
+<link rel="canonical" href="https://evershell.dev/install.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/install.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/install.html">
+<meta property="og:title" content="Install EverShell">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell home"><img src="assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="tour.html">Tour</a>
+      <a href="security.html">Security</a>
+      <a href="install.html" aria-current="page">Install</a>
+      <a href="about.html">About</a>
+      <a class="lang" href="ro/install.html" hreflang="ro" lang="ro">RO</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="i-title">
+  <div class="wrap">
+    <p class="eyebrow">Install</p>
+    <h1 id="i-title" style="font-size: clamp(40px, 6vw, 72px)">Your server, <b>your sessions.</b></h1>
+    <p class="lede">EverShell runs as one Docker container behind Traefik, on a server you own. The installer does the rest.</p>
+  </div>
+</section>
+
+<section aria-labelledby="i-need">
+  <div class="wrap split2">
+    <div>
+      <h2 id="i-need">What you need</h2>
+      <ul class="list" style="grid-template-columns: 1fr">
+        <li><b>A Linux server with Docker</b><p>Any distribution that runs Docker Compose, with ports 80 and 443 free. The one-command installer below is for a fresh Ubuntu or Debian server; elsewhere, <code>deploy.sh</code> uses the Docker you already have. The published image is amd64; on ARM, build it from source.</p></li>
+        <li><b>A domain pointing at it</b><p>For HTTPS. A Cloudflare token adds a wildcard certificate, which covers port-forward subdomains and the agents name. Without one, also point <code>agents.</code>&lt;your domain&gt; at the server.</p></li>
+        <li><b>Hosts to reach</b><p>For the agent: Linux with Python 3.6+ and, ideally, tmux. Older hosts get a portable Python. Anything else: SSH or telnet.</p></li>
+      </ul>
+    </div>
+    <div>
+      <h2>Install on Ubuntu or Debian</h2>
+      <pre><code><span class="c-dim">$</span> git clone https://github.com/sm26449/webterm.git
+<span class="c-dim">$</span> cd webterm
+<span class="c-dim">$</span> git checkout v3.8.0
+<span class="c-dim">$</span> less install.sh    <span class="c-dim"># it runs as root: read it</span>
+<span class="c-dim">$</span> sudo ./install.sh --domain term.example.com \
+      --email you@example.com</code></pre>
+      <p class="sub" style="font-size: 16px">It sets up Docker, the stack in <code>/opt/webterm</code>, a Let's Encrypt certificate, the firewall and a daily encrypted backup, then prints the URL and a one-time setup token. From 3.8 it also creates the master key that encrypts your data at rest: copy it off the machine right away, because without it the installation and its backups cannot be opened.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="i-first">
+  <div class="wrap">
+    <h2 id="i-first">The first ten minutes</h2>
+    <div class="grid">
+      <article class="card">
+        <p class="step-no">01</p>
+        <h3>Create your account</h3>
+        <p>Open the URL, use the setup token, and add a passkey in <b>Settings → Sign-in &amp; 2FA</b>.</p>
+      </article>
+      <article class="card">
+        <p class="step-no">02</p>
+        <h3>Add a host</h3>
+        <p><b>+ Add host</b> gives you a one-line command. Run it on the server: it creates an unprivileged <code>webterm</code> user, and the host comes online.</p>
+      </article>
+      <article class="card">
+        <p class="step-no">03</p>
+        <h3>Open a session</h3>
+        <p>Start something, close the tab, and open it again from your phone.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="i-other">
+  <div class="wrap">
+    <h2 id="i-other">Other ways in</h2>
+    <ul class="list">
+      <li><b>Other Linux distributions with Docker</b><p>Copy <code>.env.prod.example</code> to <code>.env</code>, fill it in, run <code>./deploy.sh</code>.</p></li>
+      <li><b>Single sign-on</b><p>With Authentik, bundled or your own: <code>deploy.sh --with-authentik</code>.</p></li>
+      <li><b>Many hosts at once</b><p>A group enrollment token: one command, run on every machine.</p></li>
+      <li><b>Upgrades</b><p><code>sudo ./upgrade.sh vX.Y.Z</code> in <code>/opt/webterm</code>, with a rollback if you need it. Once a volume has moved to encryption at rest, the rollback stays within 3.8.</p></li>
+    </ul>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md">The full installation guide →</a>
+  </div>
+</section>
+<section class="alt" id="from-37" aria-labelledby="i-up">
+  <div class="wrap">
+    <p class="eyebrow">Upgrading to 3.8</p>
+    <h2 id="i-up">From 3.7, <b>a one-way step.</b></h2>
+    <p class="sub">Upgrading to 3.8 changes nothing on its own: with no master key configured, a 3.7 volume runs exactly as before. Adding a key turns on encryption at rest and migrates the volume once, after checking that the old key really opens the database. After that, there is no way back to 3.7 on the same volume.</p>
+    <ul class="list">
+      <li><b>Back up first</b><p>Upgrade, check that 3.8 is healthy, then download a backup from <strong>Settings → Backup</strong> before you add the key. That backup, restored into a new volume, is the only way back to 3.7.</p></li>
+      <li><b>Keep the key off the machine</b><p>Create the key file, copy it to a password manager or a recovery kit, add one line to <code>.env</code> and run <code>sudo ./deploy.sh</code>. Without the key, the installation and every backup it makes cannot be opened.</p></li>
+      <li><b>Recordings are a separate choice</b><p>Encrypting session recordings stays off until you turn it on. It needs a protected volume, an SFTP or FTPS destination, a fresh backup and free disk the size of the recordings.</p></li>
+    </ul>
+    <p style="display: flex; flex-wrap: wrap; gap: 0 28px; margin: 18px 0 0">
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Encryption at rest, step by step →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encrypting-session-recordings">Encrypting session recordings →</a>
+      <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#going-back-to-37">Going back to 3.7 →</a>
+    </p>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · MIT licensed · Self-hosted</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentation</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Made by <a href="about.html#a-team">Stefan, Claude and Codex</a>, much of it written inside an EverShell session.</p>
+</footer>
+</body>
+</html>

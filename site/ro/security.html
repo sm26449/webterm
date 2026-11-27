@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Securitate — EverShell</title>
+<meta name="description" content="Cum e protejat EverShell: passkey-uri, al doilea factor pe host, roluri și SSO, update-uri semnate pentru agent, jurnal de audit, criptare la repaus cu o cheie principală ținută separat și un model de amenințări cinstit.">
+<link rel="canonical" href="https://evershell.dev/ro/security.html">
+<link rel="alternate" hreflang="en" href="https://evershell.dev/security.html">
+<link rel="alternate" hreflang="ro" href="https://evershell.dev/ro/security.html">
+<meta property="og:title" content="EverShell — securitate">
+<meta property="og:image" content="https://evershell.dev/assets/brand/banner.png">
+<meta name="theme-color" content="#0D3640">
+<link rel="icon" href="../assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../assets/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script src="../assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Sari la conținut</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="EverShell, prima pagină"><img src="../assets/brand/logo-pe-petrol.svg" alt="EverShell" width="138" height="25"></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Meniu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <nav class="nav" id="nav" aria-label="Principal">
+      <a href="tour.html">Tur</a>
+      <a href="security.html" aria-current="page">Securitate</a>
+      <a href="install.html">Instalare</a>
+      <a href="about.html">Despre</a>
+      <a class="lang" href="../security.html" hreflang="en" lang="en">EN</a>
+      <a class="gh" href="https://github.com/sm26449/webterm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" style="padding-bottom: 88px" aria-labelledby="s-title">
+  <div class="wrap">
+    <p class="eyebrow">Securitate</p>
+    <h1 id="s-title" style="font-size: clamp(40px, 6vw, 72px)">Făcut să stea <b>pe internet.</b></h1>
+    <p class="lede">Un terminal în browser pentru serverele tale e un lucru puternic de pus online. Iată ce îl protejează și de ce nu te poate proteja.</p>
+  </div>
+</section>
+
+<section aria-labelledby="s-honest">
+  <div class="wrap">
+    <h2 id="s-honest">Începem cu <b>partea cinstită.</b></h2>
+    <div class="callout">
+      <strong>Cine trece complet de login primește, pe fiecare host la care ajunge contul, accesul utilizatorului sub care rulează agentul</strong>, cam ca și cum ar avea o cheie SSH pentru acel utilizator. Rolurile limitează la ce hosturi ajunge un cont și dacă primește shell acolo, nu ce poate face un shell. De aceea toată munca merge în a face greu acel „complet”: mai jos e ce <em>nu</em> obține cineva care are doar parola.
+    </div>
+    <p class="sub">De aceea setările implicite sunt stricte: HTTPS pe un domeniu real, passkey-uri și un agent care rulează sub un utilizator dedicat, neprivilegiat, <code>webterm</code>, dacă nu decizi altfel.</p>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/THREAT-MODEL.md">Modelul complet de amenințări (în engleză) →</a>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="s-pw">
+  <div class="wrap">
+    <h2 id="s-pw">O parolă furată <b>nu ajunge.</b></h2>
+    <ul class="list">
+      <li><b>Conturile cu 2FA</b><p>Autentificarea cere și codul din aplicația de autentificare, sau se face cu un passkey. Un passkey nou nu se poate adăuga fără acel al doilea factor, deci parola nu poate fi transformată într-o cheie proprie.</p></li>
+      <li><b>Hosturile marcate „Require 2FA”</b><p>Orice sesiune, acțiune pe fișiere, comandă sau update acolo cere o verificare recentă prin passkey, cod de autentificare sau reautentificare SSO; parola contului singură e refuzată. Tokenurile de automatizare sunt refuzate din start.</p></li>
+      <li><b>Fereastra rămâne scurtă</b><p>După al doilea factor, hostul rămâne deschis 5 minute de inactivitate și cel mult 60 de minute în total; apoi terminalul se blochează, inclusiv pentru invitați, până prezinți din nou un factor.</p></li>
+      <li><b>Ce nu poate acoperi</b><p>Un cont fără niciun al doilea factor și hosturile fără marcaj sunt protejate doar de parolă; cardul de securitate din panoul principal le semnalează pe amândouă. Cât timp verificarea suplimentară rămâne valabilă, cine are acces la dispozitivul tău autentificat poate acționa în numele tău.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="s-login">
+  <div class="wrap">
+    <h2 id="s-login">Intrarea</h2>
+    <ul class="list">
+      <li><b>Passkey-uri</b><p>Autentificare WebAuthn, cu TOTP și coduri de recuperare ca alternative.</p></li>
+      <li><b>Al doilea factor pe host</b><p>Marchezi un host și tot ce faci acolo cere un al doilea factor proaspăt, niciodată doar parola.</p></li>
+      <li><b>Single sign-on</b><p>OIDC (Authentik inclus sau al tău) și provisioning SCIM; grupuri mapate pe roluri.</p></li>
+      <li><b>Blocare și alerte</b><p>Încercările eșuate sunt frânate; autentificările noi și schimbările de securitate vin pe email.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt" aria-labelledby="s-after">
+  <div class="wrap">
+    <h2 id="s-after">După login</h2>
+    <ul class="list">
+      <li><b>Roluri și scope-uri</b><p>Owner, Admin, Operator, Viewer sau rolurile tale; pe host sau pe folder; acces limitat în timp; hosturi critice.</p></li>
+      <li><b>Bariera de comenzi</b><p>Reguli de admin care blochează o comandă sau cer confirmare înainte să ruleze, inclusiv în ecranele împărțite și la rularea pe hosturi.</p></li>
+      <li><b>Partajări care nu te depășesc</b><p>Un link de partajare sau de replay nu dă niciodată mai mult decât mai are cel care l-a creat și moare când accesul acela se termină.</p></li>
+      <li><b>Jurnal de audit</b><p>Cine ce a făcut și de la ce IP. Tokenurile și secretele nu ajung în el.</p></li>
+      <li><b>Cardul de securitate</b><p>Panoul principal îți spune ce cere atenție: un passkey lipsă, o partajare deschisă, un agent vechi.</p></li>
+      <li><b>Tokenuri de automatizare limitate</b><p>Doar citire sau rulare, cu expirare, plafonate de un rol și de o listă de hosturi, refuzate pe hosturile cu 2FA.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="dark" aria-labelledby="s-hosts">
+  <div class="wrap">
+    <h2 id="s-hosts">Pe hosturile tale</h2>
+    <ul class="list">
+      <li><b>Nimic de expus</b><p>Agentul se conectează el spre gateway. Pe server nu se deschide niciun port, iar gateway-ul nu păstrează niciun login pentru el.</p></li>
+      <li><b>Un token pe mașină</b><p>Legat de acel host și revocabil separat. Reinstalarea agentului emite unul nou.</p></li>
+      <li><b>Un certificat de client pentru fiecare agent</b><p>De la 3.7.0, fiecare agent se legitimează și cu un certificat emis de autoritatea proprie a instalării tale, verificat în handshake-ul TLS. Un client fără el nu ajunge la gateway, iar un token copiat nu mai deschide nimic singur.</p></li>
+      <li><b>Update-uri semnate</b><p>Un agent rulează doar un update semnat cu cheia ta.</p></li>
+      <li><b>Chei SSH de host fixate</b><p>O cheie schimbată declanșează o alarmă în loc de conectare.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt" id="at-rest" aria-labelledby="s-rest">
+  <div class="wrap">
+    <p class="eyebrow">Nou în 3.8</p>
+    <h2 id="s-rest">Criptare la repaus, <b>cu o cheie ținută separat.</b></h2>
+    <p class="sub">Până la 3.7, cheia care criptează fiecare credențială salvată (tokenurile agenților, parolele și cheile SSH, secretele TOTP, conturile SMTP și cloud) stătea în același volum de date cu credențialele. Din 3.8 e încuiată cu o cheie principală ținută în afara volumului, așa că o copie a volumului sau a unui backup nu le mai dă pe mână.</p>
+    <ul class="list">
+      <li><b>O cheie principală în afara datelor</b><p>Instalările noi primesc un fișier-cheie în afara volumului de date, montat doar pentru citire. Păstrează o copie în afara serverului: fără ea, instalarea și backup-urile ei nu mai pot fi deschise. O cheie lipsă sau greșită oprește gateway-ul înainte să atingă ceva; nu revine niciodată la cheia veche.</p></li>
+      <li><b>Backup-uri care nu conțin cheia</b><p>Fiecare backup și snapshot scris de gateway e un container criptat pe care îl deschide doar cheia principală, iar cheia nu e niciodată în el. Scriptul de backup de pe host face la fel.</p></li>
+      <li><b>Backup-uri pe host de orice mărime</b><p>Backup-ul de pe host scrie volumul în flux, în bucăți mici autentificate, așa că câțiva gigaocteți de înregistrări nu mai sunt o problemă, iar restaurarea îl citește la fel. Amândouă verifică întâi spațiul liber și lasă mereu o rezervă pentru gateway: cel puțin 1 GiB sau 5% din disc, cât e mai mult.</p></li>
+      <li><b>Înregistrări de sesiune criptate</b><p>Opțional. Fiecare înregistrare are cheia ei. Înregistrările existente sunt convertite în fundal, iar textul în clar se șterge doar după ce copia criptată e verificată. Un upgrade nu pornește niciodată asta în locul tău.</p></li>
+      <li><b>Comprimate înainte de criptare</b><p>Datele criptate nu se mai comprimă, așa că înregistrările se comprimă întâi: pe disc și în backup-uri rămân aproape de mărimea textului în clar trecut prin gzip, de obicei de câteva ori mai mici. Înregistrările criptate fără comprimare sunt recompactate în fundal și se redau exact ca înainte. Pornită implicit; <code>WEBTERM_TX_COMPRESS=0</code> o oprește.</p></li>
+      <li><b>Ștergerea unei înregistrări e definitivă</b><p>Ștergerea făcută de un Owner distruge cheia înregistrării și scrie ștergerea într-un jurnal copiat pe destinația ta SFTP sau FTPS și citit înapoi. Restaurarea unui backup mai vechi nu aduce înregistrarea înapoi.</p></li>
+      <li><b>Carantină în loc de ghicit</b><p>Când o restaurare nu poate dovedi ce ștergeri au avut loc după backup, înregistrările restaurate sunt ținute deoparte. Se eliberează când destinația dovedește istoricul; până atunci un Owner le poate deschide una câte una, cu un al doilea factor proaspăt, iar accesul e auditat.</p></li>
+      <li><b>Vizibilă în System health</b><p>Dacă volumul e protejat, cu protecție redusă sau încă în modul vechi, cum avansează criptarea și comprimarea înregistrărilor și ce backup-uri mai vechi încă țin cheia veche în clar, ca să le poți șterge.</p></li>
+      <li><b>O mutare fără întoarcere de la 3.7</b><p>Upgrade-ul nu schimbă nimic până nu adaugi o cheie. Următoarea pornire verifică întâi că vechea cheie chiar deschide baza de date, apoi migrează o singură dată. Descarcă un backup înainte: după migrare nu mai există drum înapoi la 3.7 pe același volum, iar scripturile de deploy, rollback și upgrade refuză să pornească pe el o imagine mai veche.</p></li>
+    </ul>
+    <div class="callout">
+      <strong>Ce nu acoperă.</strong> Fișierul bazei de date nu e încă criptat: numele hosturilor, conturile și jurnalul de audit rămân lizibile în volum. Criptarea la repaus te apără de un disc furat, de un volum copiat sau de un backup. Nu apără un server care rulează și e compromis, pentru că gateway-ul pornit ține cheia. Și pentru că mărimea după comprimare depinde de conținut, cine poate atât să scrie într-o sesiune, cât și să urmărească repetat mărimea salvată a înregistrării ei ar putea afla ceva despre ce s-a afișat lângă textul lui; oprește comprimarea dacă asta contează pentru tine.
+    </div>
+    <a class="more" href="https://github.com/sm26449/webterm/blob/main/docs/INSTALL.md#encryption-at-rest">Cum o pornești, pas cu pas (în engleză) →</a>
+  </div>
+</section>
+
+<section aria-labelledby="s-ops">
+  <div class="wrap">
+    <h2 id="s-ops">În exploatare</h2>
+    <ul class="list">
+      <li><b>Backup-uri criptate</b><p>Zilnice, criptate și, opțional, în afara serverului: Google Drive, Dropbox, SFTP sau FTPS. Din 3.8, cu o cheie principală configurată, un backup se deschide doar cu acea cheie și nu o conține niciodată: păstrează o copie a cheii în afara serverului, altfel backup-urile nu pot fi restaurate.</p></li>
+      <li><b>Versiuni fixate</b><p>Scriptul de upgrade primește un tag de versiune, nu <code>latest</code>, și îl fixează pe un digest de imagine imuabil înainte să comute.</p></li>
+      <li><b>Verificări înainte de publicare</b><p>Publicarea imaginii depinde de testele unitare, de browser și de accesibilitate, de o scanare de secrete și de auditul dependențelor Python. Scanările imaginii și ale pachetelor npm rulează săptămânal, separat.</p></li>
+      <li><b>Raportarea unei vulnerabilități</b><p>Privat, prin GitHub. Vezi <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">politica de securitate</a>.</p></li>
+    </ul>
+  </div>
+</section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span class="foot-brand"><i aria-hidden="true"></i><b>evershell.dev</b> · licență MIT · găzduit de tine</span>
+    <nav aria-label="Subsol">
+      <a href="https://github.com/sm26449/webterm">GitHub</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/sm26449/webterm/blob/main/SECURITY.md">Politica de securitate</a>
+      <a href="https://github.com/sm26449/webterm/tree/main/docs">Documentație</a>
+    </nav>
+  </div>
+  <p class="foot-story">© 2026 · Creat de <a href="about.html#a-team">Stefan, Claude și Codex</a>. O mare parte din proiect a fost scrisă chiar într-o sesiune EverShell.</p>
+</footer>
+</body>
+</html>
