@@ -313,6 +313,8 @@ These rules close the review's open points. Where an earlier section is vaguer, 
   descriptor and the records they return, and rebuild by a bounded length scan when it is missing
   or stale.
 - **Test vectors** (fixed RK, gen_id, plaintexts → exact bytes) are part of the first PR.
+- **Version 2 (compressed records, 3.8 rc6):** the same file with header `ver = 2` and deflate
+  records; normative in §12.11.14. Readers accept version 1 forever.
 - **Implementation notes (first PR, `gateway/app/txformat.py`):** the AAD's record fields are the
   9 record-header bytes exactly as written (type u8, len u32 LE, seq u32 LE). SEAL integers are
   u64 LE; a generation with zero DATA records is valid and sealed with count 0, length 0 and
@@ -3402,6 +3404,156 @@ PR6c ships the remaining pieces before activation, still behind `WEBTERM_TX_RECO
   after the real migration, so it errs towards warning) or with no date in the name; a destination
   that does not answer adds nothing.
 
+#### 12.11.14 Compressed records: `WTX1` version 2, and the recompaction of version 1 (3.8 rc6)
+
+*Why.* AES-GCM output does not compress. With recordings encrypted (production since rc5: 274
+recordings, 3.9 GB), the nightly host backup grew from 274 MB (gzip of the plaintext) to 4.1 GB,
+and the volume pays the full plaintext size too. Terminal output typically compresses 10–15×. So
+the records are compressed **before** they are encrypted. Normative; where §12.1 or §12.11.0–13 say
+otherwise for a version-2 generation, this section wins.
+
+**Encoding (header version bump, not a flag).**
+
+- *Header:* exactly §12.1 with `ver u8 = 2`. The byte is under `hdr_mac` (HMAC-SHA-256 under
+  K_hdr), so changing it breaks the header MAC. The expected version comes from the descriptor
+  (below), never from the file: a reader called with version 1 refuses a version-2 header
+  (`bad-version`) and the reverse, before any record is read. Keys, labels, nonces (8 × 0 ‖ seq
+  u32 BE), AAD (hdr_mac ‖ the 9 record-header bytes), seq succession and the SEAL are those of
+  version 1. Version 1 is not deprecated: every reader keeps reading it.
+- *Record types:* in a version-2 generation the DATA types are **3 `ZSTART`** (a fresh
+  raw-deflate context starts with this record) and **4 `ZCONT`** (continues the context of the
+  previous record); type 1 is refused there (`bad-type`), and 3 / 4 are refused in a version-1
+  generation. SEAL stays type 2, len 48. The type is in the AAD.
+- *DATA plaintext (what AES-GCM encrypts):* `ulen u32 LE ‖ z`. `ulen` = the record's plaintext
+  length, 1..65 536 (the §12.1 DATA limit, now on the uncompressed bytes); `z` = raw deflate
+  (RFC 1951, window 2^15, zlib `wbits = −15`) of exactly those bytes, ended by a `Z_SYNC_FLUSH`,
+  1 ≤ len(z) ≤ ulen + 64 (`Z_SLACK`). Record `len` is therefore 5..65 604 and is checked from the
+  record header before the body is read. The deflate bytes are not normative (any valid encoding
+  is accepted; the writer uses level 6): the reader's rules are.
+- *Reader rule per record* (after the tag verifies): with the block's context, inflate `z` with
+  the output capped at `ulen` (`decompressobj.decompress(z, ulen)`); it must yield exactly `ulen`
+  bytes, consume `z` whole (any leftover input must yield no byte), and must not end the deflate
+  stream (no BFINAL block). Anything else → `bad-zlen` / `bad-deflate`. A `ZCONT` with no open
+  context (the parse did not start at a block start) → `bad-block`.
+- *SEAL:* `data_count ‖ plain_len ‖ SHA-256(DATA tags)` as in version 1; `plain_len` is the sum
+  of the `ulen`s (decompressed).
+- *Physical length:* no longer a function of `plain_len`. The descriptor carries `phys_len`
+  (authenticated) and checks it within `phys_bounds`: 96 + 30·n (+ 73 sealed) ≤ phys_len ≤ 96 +
+  plain_len + 93·n (+ 73), n = data_count.
+- *Descriptor (WTD1, `ver` unchanged):* the generation's `state u8` carries the file version in its
+  high nibble: `state | (ver − 1) << 4` (0x01–0x03 = version 1, so every existing descriptor encodes
+  byte-identically; 0x11–0x13 = version 2; any other nibble → `bad-state`). It is under the
+  descriptor MAC: a reader knows from authenticated data which parser a generation needs before it
+  opens the file, and stripping the version (descriptor or header) is refused. The list may mix
+  versions (a session that started before the upgrade).
+- *Index (`WTI1`):* the header `ver` byte is the generation's version (1 or 2); a reader refuses an
+  index of the other version. For version 2 every entry must name a `ZSTART` (the reader checks
+  the record it starts at), and the offset rule becomes the per-record bounds: 96 + 30·seq ≤ file
+  offset ≤ 96 + logical + 93·seq, with the same bounds on the step between entries. The index stays
+  HMAC'd under K_idx and is still only a cache.
+
+**Where the context resets (seekability).** A block = the records from one `ZSTART` to the next.
+The writer starts a block at seq 0 (every generation and every segment: a new generation is a new
+writer), at every index point it records (`Writer.append(…, reset=True)`, the hub's 1 MiB
+`INDEX_STRIDE`), and at the latest once a block holds 1 MiB (`Z_BLOCK`) of plaintext; nothing
+follows a SEAL. A reader may start only at seq 0 or at an index entry, i.e. at a `ZSTART`, and from
+there decodes on its own; inside a block, one streaming context with a sync flush per record keeps
+the ratio (small records still compress against the 32 KiB window). An index rebuilt by a verified
+parse only records `ZSTART`s.
+
+**Bounds against decompression bombs.** Per record: the output is capped at `ulen` ≤ 64 KiB before
+inflating, and `z` ≤ ulen + 64 — at most 64 KiB of output per authenticated record, ~65 KiB of
+input. Per generation: the running decoded total is checked against the descriptor's `plain_len`
+record by record (`plain-len-mismatch` as soon as it would pass it, and at the watermark), the
+SEAL's `plain_len` must match, and readers' budgets (`Budget.total`) are charged on decoded bytes.
+The physical budget (`PHYS_PER_PLAIN`) is raised to the version-2 worst case (94 B per plaintext
+byte for a 1-byte record). Every byte is authenticated (AES-GCM) before it reaches the inflater,
+so only a key holder can craft a bomb; the caps hold anyway.
+
+**Length side channel at rest (decision).** Version 1 already stores exact record lengths, and §2
+N4 lists sizes, mtimes and write rhythm as metadata that survives encryption. Compression makes
+the stored length of a record depend on its *content*: an attacker who (a) can inject bytes into a
+session's output (a log line printed in a tailed file, a crafted file name in an `ls`), and (b) can
+observe the stored size of that recording repeatedly at rest (successive backups, a live copy of the
+volume), can mount a CRIME-style oracle: guesses that match a secret shown in the same deflate
+window compress better. Weighed:
+
+- The oracle needs both an injection point and *repeated* at-rest observations of the same
+  recording, plus the secret on screen within 32 KiB of the guess and in the same block. A single
+  copy of the volume (§2's main capture) gives one observation per record.
+- Records are batches of a checkpoint (often many writes): a guess mixes with whatever else the
+  session printed in that interval, which blurs the signal but does not remove it.
+- **No compression across sessions, kinds or generations:** each (sid, kind) generation has its own
+  writer, its own context and its own keys; nothing of one session influences another's length.
+- **The context resets at least every 1 MiB and at every index point**, so the mixing is bounded to
+  one block (and in practice to the 32 KiB window).
+- Terminals rarely echo secrets typed by the user (passwords are not echoed); secrets *printed*
+  (`cat .env`) are the exposed case.
+
+Decision: accept the residual risk for the 10–15× saving, document it here and in INSTALL, and
+give the operator an off switch: `WEBTERM_TX_COMPRESS=0` makes every new generation version 1 again
+(writer, cap, migration) and stops the recompaction; readers keep reading both. Padding record
+lengths to buckets was considered and rejected for now (it costs most of the ratio on small records
+and does not remove a repeated-observation oracle).
+
+**Writers.** Every new generation is version 2 (`Store.write_ver`, from `WEBTERM_TX_COMPRESS`): the
+recorder's live and rolled generations, the cap / merge generation T, the plaintext migration
+(§12.11.5) and the recompaction below. A writer that fails after compressing a record is broken for
+good, as for an I/O error (§12.1): the deflate context has moved on. Tiny records cost ~9 bytes
+more than in version 1 (4 for `ulen`, ~5 for the flush); production's records average ~60 KiB.
+
+**Recompaction of version-1 recordings** (`Store.recompact`, orchestrated by the migration janitor,
+`migration.recompact_once`, every pass after the plaintext migration). Production's existing
+recordings shrink without an operator command:
+
+1. *Candidates* (`recompact_candidates`): every descriptor of the sid authentic, status `ok`, no
+   quarantine row, no erase intent, not tombstoned, no `live` generation, at least one version-1
+   generation. Largest first; at most `RECOMPACT_PASS_BYTES` (256 MiB) of version-1 generations per
+   pass (≈ 4 GB in ~16 passes of one minute), the first candidate always. A sid with a running or
+   starting writer is skipped (only its coordinator publishes, §12.11.1); it is taken after it
+   closes. Compression off → nothing.
+2. *Under the sid's lease:* the eligibility is re-read; free space ≥ the old generations + 64 MiB
+   (else postponed); every old generation is **pinned** (§12.11.3, `retire` defers).
+3. *Per kind:* a reader snapshot of the whole recording (the reader path: verified parse) is copied
+   into **one** new version-2 generation through `reserve_and_create` (ledger `reserved` →
+   `created`, `O_EXCL`, inode recorded) and hashed (SHA-256, length) on the way. Plaintext exists
+   only in memory: nothing but encrypted records is ever written to disk.
+4. SEAL, fsync of the file and of the directory; `verify_full` on a new read-only fd of the same
+   inode; then the new generation is read back **through the reader** (a probe descriptor) and must
+   hash to the same SHA-256 and length as the source — byte-identical replay, or nothing is
+   published (`readback`, the new files retired).
+5. *One transaction under the barrier* (`_recompact_txn`): refuses (INV-14) when the sid is
+   tombstoned in memory or has an erase intent; CAS on the RK envelope, on every descriptor (exact
+   blob and version, status `ok`) and on the quarantine; then each descriptor becomes `(T,)` with
+   version + 1 (flags, `list_epoch`, `committed_at`, `archived_at` unchanged: the logical content
+   is identical, offsets and gap markers stay valid), T `created` → `published` (identity checked),
+   the old generations `published` → `retired`. An uncertain COMMIT is resolved by re-reading the
+   descriptors on a fresh connection.
+6. *After the commit:* the old generations are retired (unlinked once no reader, cache or backup
+   pins them). Readers that opened before keep reading their fds (§12.11.2).
+
+Crash and restart: before the commit only `created` rows exist (`recover()` unlinks them at boot;
+the old generations still serve); after it the old rows are `retired` (unlinked the same way). Each
+pass re-derives the candidates from the descriptors, so the job is idempotent: a recording already
+version 2 is never touched again. Erasure: `erase` takes the same lease, so it runs before or after
+a recompaction, never in the middle; a tombstone or an intent appearing by any other path (boot,
+restore, journal adoption) is caught by the in-transaction check, and an erasure after the commit
+retires T like any published generation. Backups: a snapshot taken before the commit lists and pins
+the old generations (copied whole, then unlinked at release); one taken after lists T. System
+health (`crypto.migration`): *Compressing encrypted recordings: n done, m left (MB), saved MB* while
+candidates remain; a failed sid → warning *could not be compressed … still readable* (its old
+generations keep serving, retried after 1 h).
+
+Tests (§12.11.7 style): `txformat_test` (vectors, round trips at every reset, seeking from every
+index entry, tamper cases: flipped byte, truncated record, output past `ulen`, short output,
+BFINAL, a continuation at a block start, a version byte stripped, cross-version record types and
+indexes; ratio ≥ 5× on terminal-like output), `keyring_test` (descriptor version nibble),
+`txstore_test` (v2 live / sealed reads and index seeks, recompaction byte-identical and idempotent,
+live / quarantined / erased / intent / CAS refusals, a pinned old generation, a crash at every step
+then resume), `migration_test` (janitor budget, health progress / warning / done, backoff,
+convergence ≥ 5×), `erasure_test` (an erase requested mid-recompaction), `txbackup_test` (a
+recompaction under a running backup snapshot, v2 members restored byte-identical).
+
 ## Appendix: Test vectors (v1)
 
 The same values are asserted in `tests/txformat_test.py` and `tests/keyring_test.py`; a change to
@@ -3439,3 +3591,22 @@ KWK = `606162…7f`; FK = `808182…9f`; installation id = `a0a1…af`.
 | `WTBK2` archive (§12.10.1; passphrase `"correct horse battery staple"`, salt `000102…0f`, nonce prefix `f0f1…f7`, log2_n 15, r 8, p 1, plaintext `"hello"`, unpacked_len 10240; asserted in `tests/snapshot_test.py` `V_WTBK2`) | `5754424b3201010f08011401000102030405060708090a0b0c0d0e0ff0f1f2f3f4f5f6f705000000000000000028000000000000000000006f879dccc79bf7cac9f88138ec8481e1847f42d8b7aad2d37eb78009b94c818993ac6db5c855d1971ac4d8e9a6f1b4788470ce0776` |
 
 The manifest and descriptor bytes in full are in `tests/keyring_test.py` (`V_MANIFEST`, `V_DESC`).
+
+## Appendix: Test vectors (v2, compressed records, §12.11.14)
+
+Asserted in `tests/txformat_test.py` (`V2_*`). Same inputs as v1 (RK, gen_id, sid, created, kind
+1, DATA 0 = `"hello\r\n"`, DATA 1 = `"$ ls\r\n"`), header `ver = 2`. The deflate bytes `z` are one
+valid encoding (zlib 1.3, level 6, raw, `Z_SYNC_FLUSH`), not normative: a writer whose zlib emits
+other valid bytes produces other records, and the test then checks only that the reader decodes
+these.
+
+| Value | Bytes |
+|---|---|
+| header ‖ hdr_mac | `5754583102010000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff00748d00a201000000000000000000000000000000000000dda37ab88527feb900800c264bee47f9ae79f022ba61d8b3ce05aea584fb31e7` |
+| z of DATA 0 (seq 0, new context) | `ca48cdc9c9e7e502000000ffff` |
+| z of DATA 1 (same context) | `5251c829e6e502000000ffff` |
+| ZSTART seq 0 (plaintext `07000000` ‖ z0) | `0311000000000000001758e319d5f8a4775ec94fccae0688673cb85e492f82b4c6c2f883a643d76e12f0` |
+| ZCONT seq 1 (plaintext `06000000` ‖ z1) | `041000000001000000748e1947fab51f3bace0012ab87070c690dad18b9389712dff3a700b0e2b5af0` |
+| SEAL seq 2 (count 2, plain_len 13) | `023000000002000000ecf2a2207beb5e68abd6e36b09d2357ad3da2733712fa18e39c627b63c5e20d8a67b3c1f05fcb3b7eee7d733e5e0a56858543e78cf7f6d64a7c5f820a938c43a` |
+| index `WTI1` ver 2 (kind 1, data_count 2, entry (0, 0, 96), whole file) | `5754493102010000101112131415161718191a1b1c1d1e1f020000000000000001000000000000000000000000000000600000000000000049d125530ea11ec7d6e08a784a97b75ce7803fb8b5534e54de6fd37eb69177fb` |
+| descriptor generation state byte (sealed, version 2) | `12` |
