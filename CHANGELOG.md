@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-11-27 · agent (61)
+
 ### Upgrade notes (3.7 → 3.8)
 - **Upgrading changes nothing in the data volume.** With no master key configured, 3.8 boots a 3.7
   volume exactly as 3.7 left it, and rolling back to 3.7 still works. Encryption at rest is a
