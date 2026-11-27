@@ -165,6 +165,9 @@ export default function SessionView(props: {
   onPopout?: () => void
   onChanged: () => void
   onDeleted: () => void
+  /** sesiunea s-a încheiat / nu mai există / accesul a fost revocat: tabul poate fi închis dacă
+      sesiunea lipseşte şi din listă (lib/tabRetention.ts). Chemat ÎNAINTE de onChanged. */
+  onGone?: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
       vorbeşte despre el când tunelul agentului lui a căzut */
   viaHost?: Host
@@ -2226,6 +2229,7 @@ export default function SessionView(props: {
             : { status: null, reason: msg.reason })
           setConn('ended')
           exitedRef.current = true
+          props.onGone?.()
           props.onChanged()
           // secvența de moarte a clientului tmux tocmai a șters ecranul;
           // reconectăm O SINGURĂ DATĂ ca să primim istoricul filtrat pentru sesiuni închise
@@ -2397,6 +2401,7 @@ export default function SessionView(props: {
       if (ev.code === 4403) {
         setWsDenied('forbidden')
         setConn('ended')
+        props.onGone?.()
         return
       }
       if (ev.code === 4404) {
@@ -2404,6 +2409,7 @@ export default function SessionView(props: {
         setExited({ status: null, reason: 'session_gone' })
         setConn('ended')
         exitedRef.current = true
+        props.onGone?.()
         props.onChanged()
         return
       }

@@ -65,6 +65,7 @@ import { loadSeen, noticeKey, pendingIdleNotices, saveSeen } from './lib/idleSes
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
 import { byText } from './lib/sortText'
+import { newTabRetention, retainOpenTabs } from './lib/tabRetention'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -442,6 +443,10 @@ function MainApp() {
   const [openTabs, setOpenTabs] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('wt_tabs') || '[]') } catch { return [] }
   })
+  // pentru poll (refresh e useCallback): taburile curente + ce reţinem pentru ele (lib/tabRetention)
+  const openTabsRef = useRef<string[]>(openTabs)
+  openTabsRef.current = openTabs
+  const tabRetentionRef = useRef(newTabRetention())
   // Ordonarea taburilor DESCHISE: 'manual' (ordinea de deschidere, stabilă) sau 'activity'
   // (după ultima folosire — daily-driver-ele sus). Opt-in; NU atinge arborele de hosturi.
   const [tabSort, setTabSort] = useState<'manual' | 'activity'>(() =>
@@ -724,7 +729,10 @@ function MainApp() {
       // amândouă picate = gateway-ul nu răspunde → acelaşi traseu ca înainte (banner + verificarea sesiunii)
       if (hr.status === 'rejected' && sr.status === 'rejected') throw hr.reason
       const h = f.hosts
-      const s = f.sessions
+      // 3.8.1: taburile deschise a căror sesiune lipseşte temporar din listă (host 2FA cu fereastra
+      // de step-up închisă) rămân, randate din ultimul Session văzut — vezi lib/tabRetention.ts
+      const s = retainOpenTabs(f.sessions, openTabsRef.current, tabRetentionRef.current,
+        sr.status === 'fulfilled').sessions
       const prev = onlineRef.current
       const next = new Map(h.map((host) => [host.id, host.online]))
       if (prev) {
@@ -741,7 +749,8 @@ function MainApp() {
       const sj = JSON.stringify(s)
       if (sj !== lastSessionsRef.current) { lastSessionsRef.current = sj; setSessions(s) }
       // drop tabs whose session was deleted (reconcile against fresh data) — doar pe date PROASPETE:
-      // o listă de sesiuni veche (încărcarea a picat) n-are voie să închidă tab-uri
+      // o listă de sesiuni veche (încărcarea a picat) n-are voie să închidă tab-uri. `s` conţine
+      // şi sesiunile reţinute, deci un tab cade doar când sesiunea e ştiută încheiată/dispărută.
       if (sr.status === 'fulfilled') setOpenTabs((prev) => {
         const valid = prev.filter((sid) => s.some((x) => x.id === sid))
         return valid.length === prev.length ? prev : valid
@@ -1447,6 +1456,7 @@ function MainApp() {
       onJournal={openJournal}
       onOpenConnection={openConnection}
       onDeleted={() => { closeTab(s.id); void refresh() }}
+      onGone={() => { tabRetentionRef.current.gone.add(s.id) }}
     />
   )
 

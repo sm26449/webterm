@@ -3921,13 +3921,15 @@ async def _split_pane_access(user, sids) -> dict:
         gated = {r["id"] for r in await db.fetchall(
             "SELECT id FROM hosts WHERE require_2fa=1 AND id IN (%s)" % ",".join("?" * len(hosts)), *hosts)}
     grants = await authz.grants_for_user(user["id"])
-    ok_host = {}
+    ok_host, open_win = {}, {}
     for h in hosts:
-        vis = bool(await authz.perms_on(grants, h) & _SPLIT_PANE_PERMS)
-        if vis and h in gated:
-            vis = security.stepup_window_is_open(user["id"], h)
-        ok_host[h] = vis
-    return {r["id"]: ok_host[r["host_id"]] for r in rows}
+        ok_host[h] = bool(await authz.perms_on(grants, h) & _SPLIT_PANE_PERMS)
+        open_win[h] = h not in gated or security.stepup_window_is_open(user["id"], h)
+    # INV-04 (docs/design/INVARIANTS.md): ca în /api/sessions, panoul la care contul e ataşat deblocat rămâne vizibil după fereastra de 5 min (altfel split-view-ul activ se dezactiva).
+    is_token = isinstance(user, dict) and user.get("is_token")
+    mine = core.attached_unlocked_sids(user["id"]) if gated and not is_token else set()
+    return {r["id"]: ok_host[r["host_id"]] and (open_win[r["host_id"]] or r["id"] in mine)
+            for r in rows}
 
 
 async def _validate_split_panes(panes, user) -> list:
@@ -4901,7 +4903,10 @@ async def list_sessions(request: Request,
         is_token = isinstance(user, dict) and user.get("is_token")
         allowed = set() if is_token else {
             hid for hid in gated if security.stepup_window_is_open(user["id"], hid)}
-        rows = [r for r in rows if r["host_id"] not in gated or r["host_id"] in allowed]
+        # INV-04 (docs/design/INVARIANTS.md): fereastra de 5 min nu glisează pe tastare, deci fără asta tabul terminalului 2FA folosit dispărea; doar sesiunile la care contul e ataşat deblocat, nu restul hostului.
+        mine = set() if is_token else core.attached_unlocked_sids(user["id"])
+        rows = [r for r in rows
+                if r["host_id"] not in gated or r["host_id"] in allowed or r["id"] in mine]
     is_token = isinstance(user, dict) and user.get("is_token")
     show_share: object = False
     if not is_token:

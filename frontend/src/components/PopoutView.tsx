@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { sessionTitle } from '../lib/sessionTitle'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
+import { newTabRetention, retainOpenTabs } from '../lib/tabRetention'
 import { notifyError, registerToast, upsertToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
 import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
@@ -29,6 +30,9 @@ export default function PopoutView(props: { sid: string }) {
   const [webauthn, setWebauthn] = useState(false)
   const [stepupMethod, setStepupMethod] = useState<StepupMethod | null>(null)
 
+  // 3.8.1: pe un host 2FA sesiunea poate lipsi temporar din listă (fereastra de step-up închisă,
+  // hub blocat la plafon); fereastra nu trece pe „gone" cât sesiunea nu e ştiută încheiată
+  const retention = useRef(newTabRetention())
   useEffect(() => {
     let active = true
     const load = async () => {
@@ -45,7 +49,8 @@ export default function PopoutView(props: { sid: string }) {
           setWebauthn(!!state.webauthn_available)
           setStepupMethod(state.stepup_method ?? null)
         }
-        const s = sessions.find((x) => x.id === props.sid) ?? null
+        const s = retainOpenTabs(sessions, [props.sid], retention.current, true)
+          .sessions.find((x) => x.id === props.sid) ?? null
         if (!s) {
           setGone(true)
           return
@@ -173,6 +178,7 @@ export default function PopoutView(props: { sid: string }) {
         onMenu={() => {}}
         onChanged={() => {}}
         onDeleted={() => window.close()}
+        onGone={() => { retention.current.gone.add(session.id) }}
       />
       {secretReq && (
         <SecretPromptModal

@@ -11,6 +11,9 @@ Acoperă:
   · fix 6 — meta-leak: `/api/sessions` cu token ascunde sesiunile hosturilor 2FA; host_sessions
             cere step-up; `/api/audit` redactează detaliul comenzilor de pe hosturi 2FA fără fereastră.
   · fix 11 — `totp/disable` închide ferestrele de step-up (clear_stepup_for).
+  · 3.8.1 — după fereastra de 5 min, `/api/sessions` şi split-view-urile păstrează DOAR sesiunile la
+            care contul e ataşat deblocat (tabul nu mai dispare); restul hostului, alt cont, un hub
+            blocat şi un token rămân ascunse.
 """
 import asyncio
 import os
@@ -130,6 +133,65 @@ async def main():
         security.open_stepup_window(uid, hid2fa)
         r = await c.get(f"/api/hosts/{hid2fa}/sessions")
         check("host_sessions cu fereastră → 200", r.status_code == 200, r.text[:120])
+
+        # ── 3.8.1: tabul terminalului 2FA nu dispare după fereastra de 5 min ──
+        # Fereastra nu glisează pe tastare; lista păstrează DOAR sesiunile la care contul e ataşat
+        # deblocat (client-owner), nu restul hostului, nu pentru alt cont şi nu pentru un token.
+        from types import SimpleNamespace as NS
+        from app import core
+        s_mine, s_other, s_locked, s_foreign = ("b" * 32, "c" * 32, "d" * 32, "e" * 32)
+        for s in (s_mine, s_other, s_locked, s_foreign):
+            await db.execute("INSERT INTO sessions(id,host_id,title,state,created,rows,cols)"
+                             " VALUES(?,?,?,?,?,?,?)", s, hid2fa, "t-" + s[0], "live",
+                             time.time(), 24, 80)
+
+        def cli(user_id, locked=False, owner=True):
+            return NS(is_owner=owner, user_id=user_id, locked=locked)
+
+        def hub(clients, locked=False, closed=False):
+            return NS(locked=locked, closed=closed, clients=list(clients), agent_offset=0, last_output_at=None)
+        core.hubs[s_mine] = hub([cli(uid)])
+        core.hubs[s_locked] = hub([cli(uid)], locked=True)          # plafonul de 60 min a lovit
+        core.hubs[s_foreign] = hub([cli(uid + 999), cli(None, owner=False)])
+        try:
+            security.clear_stepup_for(uid)
+            ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
+            check("fără fereastră: sesiunea ataşată deblocată rămâne în listă", s_mine in ids, str(ids))
+            check("fără fereastră: restul sesiunilor hostului 2FA rămân ascunse",
+                  not ids & {s_other, s_locked, s_foreign}, str(ids))
+            acc = await api._split_pane_access({"id": uid}, [s_mine, s_other, s_locked])
+            check("split-view: panoul ataşat deblocat rămâne vizibil, restul nu",
+                  acc == {s_mine: True, s_other: False, s_locked: False}, str(acc))
+            core.hubs[s_mine] = hub([cli(uid, locked=True)])         # clientul propriu blocat
+            ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
+            check("client propriu blocat → ascunsă", s_mine not in ids, str(ids))
+            core.hubs[s_mine] = hub([cli(uid)], closed=True)
+            ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
+            check("hub închis → ascunsă", s_mine not in ids, str(ids))
+            core.hubs[s_mine] = hub([cli(uid)])
+            security.open_stepup_window(uid, hid2fa)
+            ids = {s["id"] for s in (await c.get("/api/sessions")).json()}
+            check("cu fereastră: toate sesiunile hostului (comportament neschimbat)",
+                  {s_mine, s_other, s_locked, s_foreign} <= ids, str(ids))
+            # crearea tokenului cere TOTP (codul de mai sus e deja consumat): oprit doar pe durata
+            # creării, repornit imediat (fix 11 de mai jos are nevoie de el)
+            await db.execute("UPDATE users SET totp_enabled=0 WHERE id=?", uid)
+            r = await c.post("/api/tokens", json={"name": "lista", "scopes": ["read"], "days": 1,
+                                                  "current_password": "parolabuna1"})
+            await db.execute("UPDATE users SET totp_enabled=1 WHERE id=?", uid)
+            tok = r.json().get("token", "") if r.status_code == 200 else ""
+            check("token de citire creat", bool(tok), r.text[:140])
+            async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                         headers={"Authorization": "Bearer " + tok}) as t:
+                r = await t.get("/api/sessions")
+                ids = {s["id"] for s in r.json()} if r.status_code == 200 else {"?"}
+            check("token: nicio sesiune a hostului 2FA, nici cea ataşată de creator",
+                  not ids & {s_mine, s_other, s_locked, s_foreign}, r.text[:160])
+        finally:
+            for s in (s_mine, s_locked, s_foreign):
+                core.hubs.pop(s, None)
+            await db.execute("DELETE FROM sessions WHERE id IN (?,?,?,?)",
+                             s_mine, s_other, s_locked, s_foreign)
 
         # ── fix 6: /api/audit redactează comenzile de pe hosturi 2FA fără fereastră ──
         await db.execute(

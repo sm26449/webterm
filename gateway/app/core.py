@@ -3905,6 +3905,25 @@ async def sweep_idle_locks() -> None:
             await hub.lock()
 
 
+# INV-04 (docs/design/INVARIANTS.md): lista arată sesiunea 2FA la care contul e atașat deblocat, chiar după fereastra de 5 min.
+def attached_unlocked_sids(user_id: int) -> Set[str]:
+    """Sesiunile la care contul `user_id` are ACUM un client-owner ataşat şi deblocat, pe un hub
+    deblocat şi deschis. Fereastra de step-up (5 min) glisează doar pe acţiuni sensibile, nu pe
+    tastarea în terminal, aşa că lista de sesiuni (`/api/sessions`, citire pasivă) ascundea după
+    5 minute exact terminalul pe care omul îl folosea, şi tabul dispărea (3.8.1). Cine e ataşat
+    deblocat primeşte deja output-ul live, deci titlul/starea acelei sesiuni nu-i spun nimic în
+    plus; restul sesiunilor hostului rămân ascunse. Plafonul de 60 min blochează hub-ul
+    (`sweep_stepup_caps`) şi atunci sesiunea iese din nou din listă."""
+    out: Set[str] = set()
+    for sid, hub in list(hubs.items()):
+        if hub.locked or hub.closed:
+            continue
+        if any(c.is_owner and c.user_id is not None and c.user_id == user_id and not c.locked
+               for c in list(hub.clients)):
+            out.add(sid)
+    return out
+
+
 # INV-04 (docs/design/INVARIANTS.md): terminalul nu e re-verificat la 5 min (intenționat), dar se blochează la plafonul de 60 min.
 async def sweep_stepup_caps() -> None:
     """Plafonul ABSOLUT de step-up pe terminalele 2FA (3.5.13). Un terminal ţinut în uz nu se

@@ -98,6 +98,11 @@ whoever answers first receives it.
   60 minutes** (`STEPUP_WINDOW_MAX`). At 60 minutes, open terminals lock (`core.sweep_stepup_caps`).
 - A terminal opened inside the window is **not** re-checked against the 5-minute idle window.
   This is by design (documented in HOSTS.md and THREAT-MODEL.md), not a bug.
+- The session list (`/api/sessions`, a passive read) hides a `require_2fa` host's sessions once
+  that user's window has closed, **except** the sessions that user is attached to right now,
+  unlocked, as an owner client (`core.attached_unlocked_sids`): they already see that terminal
+  live, and hiding it made its tab vanish 5 minutes after the passkey. The host's other sessions
+  stay hidden; automation tokens see none of them.
 - A password alone is never a second factor.
 - An SSO step-up needs a fresh `auth_time` from the identity provider.
 - Granting durable access (deploy keys and similar) needs a fresh factor even on hosts without
@@ -109,8 +114,8 @@ whoever answers first receives it.
 - "A password re-entry counts as step-up." It was refused in 3.5.13.
 
 **Enforced in**: `security.py` (grant and window mechanics); `stepup.py` `require_host_stepup`,
-`require_fresh_factor`, `consume_factor`; `core.py` `sweep_stepup_caps`; `oidc.py` `_check_stepup_auth_time`.
-**Tests**: `stepup`, `sec_stepup_factor`, `forward_stepup`.
+`require_fresh_factor`, `consume_factor`; `core.py` `sweep_stepup_caps`, `attached_unlocked_sids`; `api.py` `list_sessions`; `oidc.py` `_check_stepup_auth_time`.
+**Tests**: `stepup`, `sec_stepup_factor`, `sec_stepup_hardening`, `forward_stepup`.
 
 <a id="inv-05"></a>
 ## INV-05: shared access never outlives or exceeds the person who shared
