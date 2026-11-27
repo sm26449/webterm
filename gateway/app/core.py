@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import socket
+import sqlite3
 import ssl
 import struct
 import threading
@@ -2799,6 +2800,13 @@ class AgentConnection(SessionSource):
                         await self._on_ctrl(msg)
                     except (ValueError, TypeError, KeyError, AttributeError) as e:
                         log.warning("host %s: invalid control frame ignored: %s", self.host_id, e)
+                    except sqlite3.OperationalError as e:
+                        # 3.8 (producţie, rc5): evidenţa unui hello / diagnostics (jurnalul de
+                        # evenimente, ultimul diagnostic) e contabilitate, nu protocol. Un DB ocupat
+                        # peste bugetul lui db.execute nu are voie să închidă conexiunea şi cu ea
+                        # toate sesiunile hostului; următorul heartbeat reconciliază oricum.
+                        log.warning("host %s: control frame bookkeeping skipped (database busy): %s",
+                                    self.host_id, e)
         finally:
             self._shutdown()
 

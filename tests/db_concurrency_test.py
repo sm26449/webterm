@@ -86,6 +86,69 @@ async def main():
         except sqlite3.OperationalError:
             after = False
         check("the gateway writes again after an external commit", after)
+
+        # 3.8 (producţie, rc5): un SELECT al altei corutine, între `execute` şi `fetchone`, ţine un
+        # snapshot pe conexiunea partajată; cât timp alt conector (Store-ul) ţine lock-ul de scriere,
+        # o scriere a gateway-ului era refuzată PE LOC („database is locked", fără busy_timeout) şi
+        # agentul care scria la hello era deconectat. Acum scrierea aşteaptă şi reuşeşte.
+        import threading
+        import time as _t
+        hold = threading.Event()
+
+        def store_txn(v=10, secs=0.3):
+            con = sqlite3.connect(str(config.DB_PATH), isolation_level=None, timeout=5)
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("INSERT INTO uniq_t VALUES(?)", (v,))
+            finally:
+                hold.set()
+            _t.sleep(secs)
+            con.execute("COMMIT")
+            con.close()
+        th = threading.Thread(target=store_txn)
+        th.start()
+        await asyncio.to_thread(hold.wait, 5)
+        reader = await db._conn.execute("SELECT id FROM conc_t")     # snapshot deschis (cursor activ)
+        await reader.fetchone()
+
+        async def finish_reader():
+            await asyncio.sleep(0.1)
+            await reader.fetchall()
+            await reader.close()
+        fin = asyncio.ensure_future(finish_reader())
+        t0 = _t.monotonic()
+        try:
+            await db.execute("INSERT INTO uniq_t VALUES(11)")         # o scriere de hello / reconcile
+            busy_ok, err = True, ""
+        except sqlite3.OperationalError as e:
+            busy_ok, err = False, repr(e)
+        await fin
+        await asyncio.to_thread(th.join)
+        check("a write racing another connection's lock while a read snapshot is open waits and succeeds",
+              busy_ok and (await db.fetchone("SELECT COUNT(*) n FROM uniq_t WHERE x IN (10, 11)"))["n"] == 2
+              and not db._conn.in_transaction, err)
+        check("…within the retry budget", _t.monotonic() - t0 < db.BUSY_RETRY_SECS)
+        reader = await db._conn.execute("SELECT id FROM conc_t")
+        await reader.fetchone()
+        try:
+            hold.clear()
+            th = threading.Thread(target=store_txn, args=(20, 0.6))
+            th.start()
+            await asyncio.to_thread(hold.wait, 5)
+            old = db.BUSY_RETRY_SECS
+            db.BUSY_RETRY_SECS = 0.2
+            try:
+                await db.execute("INSERT INTO uniq_t VALUES(12)")
+                bounded = False
+            except sqlite3.OperationalError:
+                bounded = True
+            finally:
+                db.BUSY_RETRY_SECS = old
+        finally:
+            await reader.close()
+            await asyncio.to_thread(th.join)
+        check("a refusal that does not clear is still raised after the budget (bounded, nothing applied)",
+              bounded and (await db.fetchone("SELECT COUNT(*) n FROM uniq_t WHERE x=12"))["n"] == 0)
     finally:
         await db.close()
 

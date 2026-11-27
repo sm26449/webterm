@@ -1,5 +1,6 @@
 """SQLite access layer (aiosqlite, no ORM)."""
 
+import asyncio
 import contextlib
 import contextvars
 import json
@@ -1254,23 +1255,63 @@ async def _end_dangling() -> None:
             log.exception("db: could not end a dangling transaction")
 
 
-async def execute(sql: str, *args) -> int:
+# 3.8 (producţie, rc5, 2026-11-27 07:03: „agent ws error host=9: database is locked" la 17 ms după
+# connect; 07:22 la fel în reconcile): conexiunea PARTAJATĂ e folosită de multe corutine. Un SELECT
+# al alteia, între `execute` şi `fetchone` (două await-uri), ţine deschis un snapshot de citire pe
+# aceeaşi conexiune; o scriere a noastră trebuie atunci să-l ridice la scriere, iar dacă alt
+# conector (Store-ul txstore, BEGIN IMMEDIATE pe conexiunea lui) ţine sau tocmai a eliberat lock-ul
+# de scriere, SQLite refuză PE LOC (fără busy_timeout: altfel ar fi deadlock) cu „database is
+# locked". Instrucţiunea nu s-a aplicat; cititorul termină în câteva ms. Reîncercăm doar acest caz
+# (refuz rapid al instrucţiunii, NU al commit-ului), cu pauze scurte care lasă bucla să ruleze.
+BUSY_RETRY_SECS = 5.0
+_BUSY_FAST = 0.5          # un refuz mai lent a aşteptat deja busy_timeout: nu-l mai repetăm
+
+
+def _is_busy(e) -> bool:
+    return isinstance(e, sqlite3.OperationalError) and str(e).startswith("database is locked")
+
+
+async def _write(step):
+    """Run `step()` (the statement) then commit; the statement is retried while SQLite refuses it
+    at once as busy (see above). Outside `transaction()` only: inside it the CLI holds BEGIN
+    IMMEDIATE and a refusal is the caller's."""
     joined = await _joined()
-    # 3.8 (repetiţia e2e a activării, 2026-11-26): o scriere eşuată (BUSY, „SQL statements in
-    # progress" la commit, constrângere) lăsa tranzacţia implicită a conexiunii PARTAJATE deschisă;
-    # citirile următoare fixau un snapshot în ea, iar după primul commit al conexiunii Store-ului
-    # (txstore, alt conector pe acelaşi DB) ORICE scriere a gateway-ului pica pe loc cu „database is
-    # locked" (SQLITE_BUSY_SNAPSHOT), pentru totdeauna: login 500, health/janitor/reaper eşuate.
-    # Închidem tranzacţia la eşec, ca prima eroare să rămână una singură.
-    try:
-        cur = await _conn.execute(sql, args)
-        if not joined:
-            await _conn.commit()
-    except BaseException:
-        if not joined:
-            await _end_dangling()
-        raise
-    return cur.lastrowid
+    deadline, delay = None, 0.01
+    while True:
+        t0 = time.monotonic()
+        try:
+            res = await step()
+        except BaseException as e:
+            if not joined:
+                await _end_dangling()
+            now = time.monotonic()
+            deadline = deadline or now + BUSY_RETRY_SECS
+            if joined or not _is_busy(e) or now - t0 > _BUSY_FAST or now >= deadline:
+                raise
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 0.2)
+            continue
+        # 3.8 (repetiţia e2e a activării, 2026-11-26): o scriere eşuată (BUSY, „SQL statements in
+        # progress" la commit, constrângere) lăsa tranzacţia implicită a conexiunii PARTAJATE deschisă;
+        # citirile următoare fixau un snapshot în ea, iar după primul commit al conexiunii Store-ului
+        # (txstore, alt conector pe acelaşi DB) ORICE scriere a gateway-ului pica pe loc cu „database is
+        # locked" (SQLITE_BUSY_SNAPSHOT), pentru totdeauna: login 500, health/janitor/reaper eşuate.
+        # Închidem tranzacţia la eşec, ca prima eroare să rămână una singură. Un commit eşuat NU se
+        # reîncearcă: instrucţiunea poate fi deja aplicată.
+        try:
+            if not joined:
+                await _conn.commit()
+        except BaseException:
+            if not joined:
+                await _end_dangling()
+            raise
+        return res
+
+
+async def execute(sql: str, *args) -> int:
+    async def step():
+        return (await _conn.execute(sql, args)).lastrowid
+    return await _write(step)
 
 
 async def execute_returning(sql: str, *args):
@@ -1289,16 +1330,9 @@ async def execute_returning(sql: str, *args):
 async def execute_returning_all(sql: str, *args) -> list:
     """`execute_returning` for a write that may touch several rows: every RETURNING row, in the
     same single serialized step (used where the caller must act on EXACTLY the rows it changed)."""
-    joined = await _joined()
-    try:
-        rows = await _conn.execute_fetchall(sql, args)
-        if not joined:
-            await _conn.commit()
-    except BaseException:
-        if not joined:
-            await _end_dangling()          # ca la `execute`: nicio tranzacţie lăsată deschisă
-        raise
-    return list(rows)
+    async def step():
+        return list(await _conn.execute_fetchall(sql, args))
+    return await _write(step)          # ca la `execute`: nicio tranzacţie lăsată deschisă
 
 
 # 3.6 (roluri): id-ul unui cont e cheia de proprietate pentru audit (`actor_id`), sesiuni,

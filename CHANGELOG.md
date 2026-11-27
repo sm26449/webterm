@@ -52,6 +52,11 @@ back.
   longer needed.
 
 ### Changed
+- **An agent is no longer dropped by a busy database at connect.** With encrypted recordings on, a
+  write on the shared connection racing another coroutine's open read and the recording store's
+  write lock was refused at once ("database is locked", no busy wait), so the hello bookkeeping
+  disconnected the agent; such writes now wait and retry, and a busy DB in control-frame
+  bookkeeping never closes the connection.
 - **Encrypted recordings are compressed before encryption** (WTX1 version 2, raw deflate with a
   context reset at every seek point): encrypted data does not compress, so with recording
   encryption on, the nightly backup had grown from 274 MB to 4.1 GB on a real installation and the
