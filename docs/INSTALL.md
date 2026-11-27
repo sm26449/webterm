@@ -882,27 +882,36 @@ design note, §12.11.14, weighs this). To turn compression off, set `WEBTERM_TX_
 recordings are then written uncompressed and the background rewrite stops; both forms stay
 readable.
 
+**The Owner panel.** **Settings → Backup → Encryption at rest** shows the volume's protection
+state, whether recordings are encrypted, the migration and recompaction progress and the
+encryption alarms, and holds every Owner action below. Each one asks for a confirmation (a typed
+one for anything that cannot be undone) and then a fresh second factor (passkey, authenticator
+code or SSO); each is audited and most send a security e-mail. Accounts without the Owner role do
+not see the panel. The same actions exist as API routes (listed in
+[design/ROLES-AND-SSH.md](design/ROLES-AND-SSH.md), Appendix A) for automation.
+
 **Failed migrations.** A file that cannot be converted keeps its plaintext and is named (first 8
-characters of the session) in System health. An Owner, with a fresh second factor, can retry it
-(`POST /api/recordings/migration/<sid>/retry`) or delete the plaintext and erase the session
-(`POST /api/recordings/migration/<sid>/discard`, typed confirmation: the first 8 characters of the
-session id).
+characters of the session) in System health and in the panel's *Failed migrations* list. An Owner
+can **Retry** it (the file now under that name is converted) or **Discard** it (the plaintext is
+deleted and the session erased; typed confirmation: the first 8 characters of the session id).
 
 **Erase, quarantine and recovery** (Owner only, fresh second factor, audited, a security e-mail):
 
-- `POST /api/sessions/<sid>/erase` (confirm = the first 8 characters of the session id) erases a
-  closed session's recording on this volume at once; the answer says whether the destination has
-  attested it yet.
+- **Erase permanently**, on a closed session in the host's session list or in the replay player
+  (shown only for an encrypted recording; typed confirmation: the first 8 characters of the session
+  id), erases the recording on this volume at once. The message says whether the destination has
+  attested the erasure yet.
 - After a restore that cannot prove which erasures happened since the backup, the restored
   recordings are **quarantined** (System health: *Erasures after the backup of … cannot be
   proven*). The janitor lifts the quarantine by itself once the destination proves the history.
-  Until then, `GET /api/recordings/quarantine` lists them, `POST /api/sessions/<sid>/recovery`
-  (confirm = the backup date) opens one for Owners only, and `…/recovery/release` or
-  `…/recovery/requarantine` close it.
+  Until then the panel's *Quarantine* list shows them: **Recover** (typed confirmation: the backup
+  date) opens one for Owners only, its download is an audited read, and **Release** or
+  **Quarantine again** close it.
 - If the destination holds an erasure journal that cannot be verified, or two journals disagree
   (*Two erasure journals disagree*, critical), every recording stays quarantined until an Owner
-  resolves it: `POST /api/recordings/continuity/conflict/resolve` adopts the branch that holds every
-  erasure seen, or `POST /api/recordings/continuity/destinations/<id>/retire` drops a destination
+  resolves it in the panel: *Erasure journal conflict* → **Adopt this branch** (typed: the entry
+  number and the first 16 characters of its MAC) adopts the branch that holds every erasure seen,
+  or *Erasure proof destinations* → **Retire** (typed: the destination name) drops a destination
   that is gone for good (its erasures are kept). A second server of the same installation that
   shares the destination (for example an old copy still running) picks up the newer server's
   erasures on its next janitor pass.

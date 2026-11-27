@@ -63,8 +63,8 @@ back.
   erasure it can see (in the backup, on the volume, at the destination, on any branch of a
   disagreement), and a server that shares the destination with a newer one picks up its erasures on
   its next pass, so an erased recording does not reappear on an old copy either. Google Drive and
-  Dropbox cannot hold the attestation yet. In 3.8.0 erase, quarantine and recovery are API
-  endpoints for Owners (listed in docs/INSTALL.md), with no Settings screen yet.
+  Dropbox cannot hold the attestation yet. An Owner erases a recording with **Erase permanently**
+  in the host's session list or the replay player (offered only for an encrypted recording).
 - **Quarantine instead of guessing after a restore.** When a restore cannot prove which erasures
   happened since the backup (no destination, a destination that does not answer, a journal that
   cannot be verified, two journals that disagree), the restored recordings are quarantined instead
@@ -73,6 +73,13 @@ back.
   disagreement by adopting the branch that holds every erasure, or retire a destination that is gone
   for good. System health says which of these applies, and docs/RUNBOOK.md (*Encryption at rest:
   alarms and what to do*) has the operator action for every message.
+- **An Owner panel for encryption at rest** (Settings → Backup → *Encryption at rest*). Until now
+  quarantine, recovery, retiring a destination, resolving a journal conflict and failed migrations
+  were reachable only through the API, so an Owner who saw the System health alarm had to write
+  HTTP requests to act on it. The panel shows the protection and recordings state, migration and
+  recompaction progress and the alarms, and every action asks for a confirmation (typed for what
+  cannot be undone) and a fresh second factor, as the API does. One new read-only route feeds it:
+  `GET /api/recordings/encryption` (Owner only, metadata only).
 - **Host backups of a running gateway with encrypted recordings go through the gateway.** A copy of
   the live volume taken from outside would catch the database and the recordings at different
   moments. `scripts/backup.sh` now asks the gateway over a local control socket (root or the app

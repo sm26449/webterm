@@ -16,7 +16,7 @@ implementation notes of every PR; §12 is normative and wins over any earlier wo
 | Host archives `WTBK2` (`scripts/backup.sh`): streamed, any size, free-space reserve, scratch in `backups/.work` | implemented | §12.10.1 |
 | Encrypted recordings `WTX1` (opt-in, `WEBTERM_TX_RECORDINGS=1`) and the background migration of plaintext ones | implemented | §12.1, §12.11, §12.11.5 |
 | Compressed records (`WTX1` v2, on by default) and the recompaction of v1 recordings | implemented | §12.11.14 |
-| Erasure journal `WTJ1`, off-host attestation (SFTP / FTPS only), quarantine, Owner recovery / release, conflict resolution, retiring a destination | implemented (API only, no Settings screen yet) | §12.5, §12.11.4, §12.11.8 |
+| Erasure journal `WTJ1`, off-host attestation (SFTP / FTPS only), quarantine, Owner recovery / release, conflict resolution, retiring a destination | implemented (Owner panel in Settings → Backup, and the API) | §12.5, §12.11.4, §12.11.8 |
 | Control socket for host backups of a running gateway with encrypted recordings | implemented | §12.11.3 |
 | Downgrade guard in `deploy.sh` / `rollback.sh` / `upgrade.sh` | implemented | §12.9, INV-14 |
 | Incremental host backups (backup sets `WTBS1`) | **planned for 3.8.1**, design only | §12.10.2 |
@@ -3395,7 +3395,9 @@ refused at boot because the Store opens only test-fixture volumes until PR6b bri
   a tombstone), `…/recovery/release` (fresh factor), `…/recovery/requarantine`, and the audited read
   `GET /api/sessions/{sid}/recovery/transcript` through an `Access` for `OWNER_RECOVERY_ROUTE`
   (`txhub.recovery_authorizer`, re-checking the cookie and Owner status on every re-authorization).
-  Every mutation is audited and sends a security e-mail. No UI yet.
+  Every mutation is audited and sends a security e-mail. The Owner UI (3.8): Settings → Backup →
+  *Encryption at rest*, fed by `GET /api/recordings/encryption` (metadata only), and **Erase
+  permanently** in the host's session list and the replay player.
 - **Inventory.** `txstore.inventory(data_dir, db_path)` is the one list of encrypted-recording
   artefacts (non-empty `session_keys`, `tx_descriptors`, `tx_files`, `tx_gaps`, `tx_migration`,
   `tx_quarantine`; the `erasure_head` / `attested_heads` / `continuity` keys; `erasures.wtj*` at the
