@@ -840,6 +840,43 @@ async def g_diagnostics(st, host_id):
 # ── 5. cap ───────────────────────────────────────────────────────────────────
 
 
+async def g_recompact_erase(st, host_id):
+    print("== §12.11.14: erasure and recompaction (INV-14: an erased recording never comes back) ==")
+    big = b"".join(b"line %06d: ls -la /var/log; total 48\r\n" % i for i in range(6000))
+    st.write_ver = 1
+    sid, _ = await make_rec(st, host_id, data=big)
+    early, _ = await make_rec(st, host_id, data=big)
+    st.write_ver = 2
+    # ştergerea cerută în timpul recompactării aşteaptă lease-ul şi câştigă după publicare
+    task = {}
+
+    def hook(p):
+        if p == "rc-written" and "t" not in task:
+            task["t"] = asyncio.ensure_future(er.erase(st, sid))
+    st.fault = hook
+    async with st.lease(sid):
+        res = await st.recompact(sid)
+    st.fault = None
+    out = await task["t"]
+    await asyncio.sleep(0.05)
+    lg = {r["gen_id"]: r["state"] for r in await db.fetchall("SELECT gen_id, state FROM tx_files WHERE sid=?", sid)}
+    check("erase requested mid-recompaction waits for the lease, then destroys the new generation too",
+          res and out.get("state") == "destroyed" and not gen_files(sid) and set(lg.values()) == {"gone"}
+          and await db.fetchone("SELECT 1 FROM tx_descriptors WHERE sid=?", sid) is None, (res, out, lg, gen_files(sid)))
+    check("…unreadable, and never a recompaction candidate again",
+          await _refused(read_all(st, sid)) and sid not in dict(await st.recompact_candidates()))
+    # ştergere înainte: recompactarea nu are ce rescrie
+    await er.erase(st, early)
+    async with st.lease(early):
+        none = await st.recompact(early)
+    check("erased before the pass → recompact does nothing", none == {} and not gen_files(early))
+    st = await reboot()
+    check("after a restart: both stay erased (no descriptor, no RK, no file)",
+          all([await db.fetchone("SELECT 1 FROM session_keys WHERE sid=?", x) is None and not gen_files(x)
+               for x in (sid, early)]))
+    return st
+
+
 async def g_cap(st, host_id):
     print("== journal cap ==")
     n = er._s.parsed.n
@@ -2843,6 +2880,7 @@ async def main():
         st = await g_intents(st, host_id)
         st = await g_cancel(st, host_id)
         st, keep = await g_diagnostics(st, host_id)
+        st = await g_recompact_erase(st, host_id)
         await g_cap(st, host_id)
         await g_attest(st, host_id)
         DESTS[:] = []

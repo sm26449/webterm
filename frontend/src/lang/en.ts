@@ -4207,6 +4207,8 @@ const en: Lang = {
     'health.msg.erasure_ok': "Erased recordings are journalled and attested off-host",
     'health.msg.migration_done': "Every recording is encrypted ({converted} migrated from plaintext)",
     'health.msg.migration_progress': "Migrating recordings to encrypted storage: {done} of {total} done, {mb} MB left ({one_kind} one-kind, {orphans} orphans)",
+    'health.msg.recompaction_progress': "Compressing encrypted recordings: {done} done, {left} left ({mb} MB), {saved} MB saved so far",
+    'health.msg.recompaction_failed': "{failed} encrypted recordings could not be compressed and stay in the older format, still readable ({error})",
     'health.msg.migration_failed': "{failed} recording file(s) could not be migrated and {stray} are outside the inventory; their plaintext is kept ({error}). Sessions: {sessions}",
     'health.msg.ctl_socket_ok': "Host live backups go through the gateway's backup control socket",
     'health.msg.ctl_socket_unavailable': "The backup control socket is not available, so host live backups (backup.sh with the app running) are refused: {error}",

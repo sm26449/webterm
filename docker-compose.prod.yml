@@ -196,6 +196,8 @@ services:
       # SFTP/FTPS destination is attested (docs/INSTALL.md → Encrypting session recordings).
       # Empty = off: recordings stay as in 3.7.
       WEBTERM_TX_RECORDINGS: ${WEBTERM_TX_RECORDINGS:-}
+      # 0 = encrypted recordings are written uncompressed (§12.11.14); empty = compressed.
+      WEBTERM_TX_COMPRESS: ${WEBTERM_TX_COMPRESS:-}
       # the per-browser-WS backlog cap before a forced resync
       WEBTERM_CLIENT_BUFFER: ${WEBTERM_CLIENT_BUFFER:-}
       # Secretele: valoarea din .env (fallback, gol = nesetat) SAU fişierul montat de `secrets:`.

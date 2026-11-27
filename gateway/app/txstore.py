@@ -320,8 +320,17 @@ IDX_MAX_FILE = txformat.IDX_FIXED + txformat.DEFAULT_MAX_INDEX_ENTRIES * txforma
     + txformat.MAC_LEN
 SHUTDOWN_SECS = 5.0
 OWNER_RECOVERY_ROUTE = "owner-recovery"
-# Cel mai rău caz fizic per octet în clar: un DATA de 1 octet = antet + tag + 1.
-PHYS_PER_PLAIN = txformat.REC_HDR_LEN + txformat.TAG_LEN + 1
+# Cel mai rău caz fizic per octet în clar: un DATA de 1 octet = antet + tag + 1 (v1), sau
+# antet + tag + ulen + 1 + 64 (v2, §12.11.14). Bugetul fizic acoperă ambele versiuni.
+PHYS_PER_PLAIN = max(txformat.REC_HDR_LEN + txformat.TAG_LEN + 1, txformat.ZREC_MAX_EXTRA + 1)
+# §12.11.14: versiunea scrisă de generaţiile noi (writer, cap, conversie, recompactare). Implicit
+# comprimat; WEBTERM_TX_COMPRESS=0 scrie din nou v1 (şi opreşte recompactarea), cititorii citesc ambele.
+COMPRESS_ENV = "WEBTERM_TX_COMPRESS"
+
+
+def write_version(env=None):
+    env = os.environ if env is None else env
+    return txformat.VERSION if env.get(COMPRESS_ENV, "").strip() == "0" else txformat.VERSION_Z
 REPRESENTATIONS = ("raw", "redacted")
 
 _NAME_RE = re.compile(r"^([0-9a-f]{32})\.(out|cast)\.([0-9a-f]{32})\.(wtx|idx)$")
@@ -635,6 +644,7 @@ class Store:
         self.max_bytes = config.TRANSCRIPT_MAX_BYTES if max_bytes is None else max_bytes
         self.keep_bytes = config.TRANSCRIPT_KEEP_BYTES if keep_bytes is None else keep_bytes
         self.gen_limits = gen_limits or (txformat.MAX_DATA_RECORDS, txformat.MAX_PLAIN_BYTES)
+        self.write_ver = write_version(env)
         self.op_gen_cap = op_gen_cap
         self.pending_cap = pending_cap
         self.total_cap = total_cap
@@ -1134,7 +1144,7 @@ class Store:
             if gens and gens[-1].state == txdesc.STATE_LIVE:
                 last = gens[-1]
                 gens[-1] = txdesc.Generation(last.gen_id, txdesc.STATE_RECOVERED, last.data_count,
-                                             last.plain_len, last.phys_len, last.hdr_mac)
+                                             last.plain_len, last.phys_len, last.hdr_mac, last.ver)
                 nd = txdesc.Descriptor(d.installation_id, d.sid, d.kind, d.version + 1, d.rk_hash,
                                        tuple(gens), d.flags)
                 nb = self.encode(nd)
@@ -1655,7 +1665,8 @@ class Store:
                 raise TxStoreError("corrupt", "migrated generation replaced under us")
             txformat.verify_full(_PRead(fd, 0, limit=w.phys_len), rk, kind=KINDS[kind],
                                  sid=_sid_bytes(sid), gen_id=g.gen_id, data_count=w.data_count,
-                                 plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac)
+                                 plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac,
+                                 ver=w.ver)
         finally:
             os.close(fd)
 
@@ -1732,7 +1743,8 @@ class Store:
                 gid, fd, dev, ino, name = await self.reserve_and_create(sid, k)
                 built[k] = g = _Gen(k, gid, name, fd, None, dev, ino)
                 g.writer = await self.io(txformat.Writer, _File(fd, self), rk, kind=KINDS[k], sid=sidb,
-                                         gen_id=gid, created_ms=int(self.clock() * 1000))
+                                         gen_id=gid, created_ms=int(self.clock() * 1000),
+                                         ver=self.write_ver)
                 sha[k] = await self.io(self._encrypt_plain_sync, fds[k], g.writer, rows[k][2][2])
             self._fault("mig-written")
             await self.io(self._seal_sync, built)
@@ -1741,7 +1753,7 @@ class Store:
             for k, g in built.items():
                 w = g.writer
                 gens[k] = txdesc.Generation(g.gen_id, txdesc.STATE_SEALED, w.data_count, w.plain_len,
-                                            w.phys_len, w.hdr_mac)
+                                            w.phys_len, w.hdr_mac, w.ver)
                 await self.io(self._verify_gen_file_sync, sid, k, g, rk)
                 d = txdesc.Descriptor(self.inst, sidb, KINDS[k], 0, b"\0" * 32, (gens[k],))
                 got, n = await self.decrypted_digest(sid, k, d, rk)
@@ -1829,6 +1841,195 @@ class Store:
                 c.execute("UPDATE tx_migration SET state='converted', sha256=?, error=NULL "
                           "WHERE sid=? AND kind=?", (sha[k], sid, k))
                 self._fault("mig-txn-between")
+        return fn
+
+    # ── recompaction of version-1 generations (§12.11.14, orchestration: migration.py) ──
+
+    async def recompact_candidates(self):
+        """[(sid, v1 bytes)] of closed recordings that still hold a version-1 generation: every
+        descriptor of the sid authentic, `ok`, out of quarantine, without a live generation, and
+        the sid not erased. Cheap enough for every janitor pass (one HMAC per descriptor)."""
+        def load(c):
+            return (c.execute("SELECT sid, kind, blob, version, status FROM tx_descriptors").fetchall(),
+                    dict(c.execute("SELECT sid, envelope FROM session_keys").fetchall()),
+                    {r[0] for r in c.execute("SELECT sid FROM tx_quarantine").fetchall()},
+                    {r[0] for r in c.execute("SELECT sid FROM tx_erase_intents").fetchall()})
+        rows, envs, held, intents = await self.read(load)
+        per, bad = {}, set()
+        for s, k, blob, v, status in rows:
+            if s in bad:
+                continue
+            if status != "ok" or s in held or s in intents or s in self.tombstoned or s not in envs:
+                bad.add(s)
+                continue
+            try:
+                d = self.decode((blob, v), s, k, bytes(envs[s]))
+            except TxStoreError:
+                bad.add(s)
+                continue
+            if any(g.state == txdesc.STATE_LIVE for g in d.generations):
+                bad.add(s)
+                continue
+            per[s] = per.get(s, 0) + sum(g.phys_len for g in d.generations if g.ver == txformat.VERSION)
+        return sorted(((s, n) for s, n in per.items() if s not in bad and n), key=lambda x: (-x[1], x[0]))
+
+    def _copy_snapshot_sync(self, snap, writer):
+        """The reader's plaintext of `snap` (verified parse) into `writer`, hashed on the way.
+        Nothing is written to disk but the writer's records. → (SHA-256 hex, length)."""
+        big = Budget(1 << 62, pre_first=1 << 62)
+        h = hashlib.sha256()
+        n = 0
+        with snap._using():
+            for piece in snap._chunks(0, snap.length, big, CAP_CHUNK):
+                h.update(piece)
+                writer.write(piece)
+                n += len(piece)
+        return h.hexdigest(), n
+
+    async def recompact(self, sid):
+        """§12.11.14: rewrites a closed recording that still holds version-1 generations into one
+        compressed (version-2) generation per kind. Caller holds the sid's lease. Steps: pin the
+        old generations; per kind, a reader snapshot → Writer v2 (plaintext only in memory),
+        hashed; SEAL + fsync file and directory; verify_full on a new fd of the same inode; the
+        new descriptor read back through the reader must hash to the same bytes and length; then
+        ONE transaction (barrier) with a CAS on every descriptor (blob and version), the RK
+        envelope, the status, the quarantine and the erasure state (INV-14: an erased sid is
+        refused), publishing T and retiring the old generations; last, the old files are retired
+        (deferred while a backup or reader pins them). A crash before the commit leaves `created`
+        rows (`recover()` unlinks them), after it `retired` rows (unlinked the same way).
+        Returns {kind: (old phys, new phys)}; {} when the sid is not (or no longer) eligible."""
+        if self.write_ver != txformat.VERSION_Z or sid in self.tombstoned:
+            return {}
+        sidb = _sid_bytes(sid)
+
+        def load(c):
+            return (c.execute("SELECT kind, blob, version, status FROM tx_descriptors WHERE sid=? "
+                              "ORDER BY kind", (sid,)).fetchall(),
+                    c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone(),
+                    c.execute("SELECT 1 FROM tx_quarantine WHERE sid=?", (sid,)).fetchone(),
+                    c.execute("SELECT 1 FROM tx_erase_intents WHERE sid=?", (sid,)).fetchone())
+        drows, krow, held, intent = await self.read(load)
+        if krow is None or not drows or held or intent:
+            return {}
+        env = bytes(krow[0])
+        descs = {}
+        for k, blob, v, status in drows:
+            if status != "ok" or k not in KINDS:
+                return {}
+            descs[k] = (self.decode((blob, v), sid, k, env), bytes(blob))
+        if any(g.state == txdesc.STATE_LIVE for d, _b in descs.values() for g in d.generations):
+            return {}                             # o sesiune vie: doar coordonatorul ei publică
+        todo = {k: db for k, db in descs.items()
+                if any(g.ver == txformat.VERSION for g in db[0].generations)}
+        if not todo:
+            return {}
+        for k, (d, _b) in todo.items():
+            if sum(g.plain_len for g in d.generations) > txformat.MAX_PLAIN_BYTES * 9 // 10:
+                raise TxStoreError("tooLarge", f"{sid}.{k}: above one generation's limit")
+        need = sum(g.phys_len for d, _b in todo.values() for g in d.generations) + MIG_FREE_SLACK
+        vfs = await self.io(os.fstatvfs, self.dir_fd)
+        if vfs.f_bavail * vfs.f_frsize < need:
+            raise TxStoreError("disk", f"needs {need} bytes free")
+        rk = self.rk_for(sid, env)
+        pins = [g.gen_id.hex() for d, _b in todo.values() for g in d.generations]
+        built, sha, new = {}, {}, {}
+        with self.pinned(pins):
+            try:
+                for k, (d, _b) in todo.items():
+                    snap = await self._make_snapshot(Snapshot, sid, k, d, rk, 0, None,
+                                                     nfds=len(d.generations), force=True)
+                    try:
+                        gid, fd, dev, ino, name = await self.reserve_and_create(sid, k)
+                        built[k] = g = _Gen(k, gid, name, fd, None, dev, ino)
+                        g.writer = await self.io(txformat.Writer, _File(fd, self), rk, kind=KINDS[k],
+                                                 sid=sidb, gen_id=gid, created_ms=int(self.clock() * 1000),
+                                                 ver=txformat.VERSION_Z)
+                        sha[k] = await self.io(self._copy_snapshot_sync, snap, g.writer)
+                    finally:
+                        snap.close()
+                    if sha[k][1] != sum(x.plain_len for x in d.generations):
+                        raise TxStoreError("readback", f"{sid}.{k}: source length differs")
+                self._fault("rc-written")
+                await self.io(self._seal_sync, built)
+                self._fault("rc-sealed")
+                for k, g in built.items():
+                    w = g.writer
+                    t = txdesc.Generation(g.gen_id, txdesc.STATE_SEALED, w.data_count, w.plain_len,
+                                          w.phys_len, w.hdr_mac, w.ver)
+                    await self.io(self._verify_gen_file_sync, sid, k, g, rk)
+                    probe = txdesc.Descriptor(self.inst, sidb, KINDS[k], 0, b"\0" * 32, (t,))
+                    if await self.decrypted_digest(sid, k, probe, rk) != sha[k]:
+                        raise TxStoreError("readback", f"{sid}.{k}: recompacted copy differs")
+                    old = todo[k][0]
+                    nd = txdesc.Descriptor(old.installation_id, old.sid, old.kind, old.version + 1,
+                                           old.rk_hash, (t,), old.flags)
+                    new[k] = (nd, self.encode(nd))
+                self._fault("rc-verified")
+                fn = self._recompact_txn(sid, env, todo, new, built)
+                try:
+                    await self.txn(fn)
+                except Uncertain:
+                    got = await self.fresh_read(lambda c: [c.execute(
+                        "SELECT blob FROM tx_descriptors WHERE sid=? AND kind=?", (sid, k)).fetchone()
+                        for k in new])
+                    if not all(r is not None and bytes(r[0]) == new[k][1] for r, k in zip(got, new)):
+                        raise TxStoreError("uncertain", "recompaction commit not confirmed") from None
+                for g in built.values():
+                    g.published = True
+                self._fault("rc-committed")
+            except Exception:
+                for k, g in built.items():
+                    if not g.published:
+                        hexid = g.gen_id.hex()
+                        with contextlib.suppress(Exception):
+                            await self.txn(lambda c, h=hexid: c.execute(
+                                "UPDATE tx_files SET state='retired' WHERE gen_id=? AND state='created'", (h,)))
+                            await self.retire(sid, k, hexid)
+                raise
+            finally:
+                for g in built.values():
+                    if g.fd is not None:
+                        with contextlib.suppress(OSError):
+                            os.close(g.fd)
+                        g.fd = None
+        # Cititorii deschişi înainte păstrează fd-urile vechi; backup-ul în curs le-a fixat (amânat).
+        for k, (d, _b) in todo.items():
+            for g in d.generations:
+                await self.retire(sid, k, g.gen_id.hex())
+        return {k: (sum(g.phys_len for g in todo[k][0].generations), new[k][0].generations[0].phys_len)
+                for k in todo}
+
+    def _recompact_txn(self, sid, env, todo, new, built):
+        def fn(c):
+            # INV-14 (docs/design/INVARIANTS.md): o înregistrare ştearsă nu revine niciodată. Tombstone-ul
+            # din memorie şi intenţia durabilă se reverifică AICI, sub barieră, în tranzacţia publicării.
+            if sid in self.tombstoned:
+                raise Refused("erased", f"{sid}: erased during recompaction")
+            if c.execute("SELECT 1 FROM tx_erase_intents WHERE sid=?", (sid,)).fetchone():
+                raise Refused("erased", f"{sid}: erase intent pending")
+            r = c.execute("SELECT envelope FROM session_keys WHERE sid=?", (sid,)).fetchone()
+            if r is None or bytes(r[0]) != env:
+                raise Refused("cas", f"{sid}: RK changed")
+            if c.execute("SELECT 1 FROM tx_quarantine WHERE sid=?", (sid,)).fetchone():
+                raise Refused("cas", f"{sid}: quarantined")
+            for k, (d, blob) in todo.items():
+                r = c.execute("SELECT blob, version, status FROM tx_descriptors WHERE sid=? AND kind=?",
+                              (sid, k)).fetchone()
+                if r is None or bytes(r[0]) != blob or r[1] != d.version or r[2] != "ok":
+                    raise Refused("cas", f"{sid}.{k}: descriptor moved")
+            for k, (nd, nb) in new.items():
+                c.execute("UPDATE tx_descriptors SET blob=?, version=? WHERE sid=? AND kind=? AND version=?",
+                          (nb, nd.version, sid, k, todo[k][0].version))
+                g = built[k]
+                n = c.execute("UPDATE tx_files SET state='published' WHERE gen_id=? AND sid=? AND kind=? "
+                              "AND dev=? AND ino=? AND state='created'",
+                              (g.gen_id.hex(), sid, k, g.dev, g.ino)).rowcount
+                if n != 1:
+                    raise Refused("ledger", f"{g.gen_id.hex()} not created by us")
+                for old in todo[k][0].generations:
+                    c.execute("UPDATE tx_files SET state='retired' WHERE gen_id=? AND sid=? AND kind=? "
+                              "AND state='published'", (old.gen_id.hex(), sid, k))
+                self._fault("rc-txn-between")
         return fn
 
     # step 6: identity-checked unlink (renameat2 NOREPLACE → fstatat → unlinkat → dir fsync)
@@ -1976,11 +2177,13 @@ class Store:
             fp = _PRead(fd, 0, limit=g.phys_len)
             try:
                 txformat.verify_header(fp.read(txformat.PREFIX_LEN), txformat.generation_keys(
-                    rk, KINDS[kind], g.gen_id), kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id)
+                    rk, KINDS[kind], g.gen_id), kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id,
+                    ver=g.ver)
                 if not hmac.compare_digest(os.pread(fd, 32, 64), g.hdr_mac):
                     return "hdr-mac-mismatch", None
                 cur = txformat.RecordCursor(fp, rk, kind=KINDS[kind], gen_id=g.gen_id,
-                                            hdr_mac=g.hdr_mac, data_count=g.data_count)
+                                            hdr_mac=g.hdr_mac, data_count=g.data_count, ver=g.ver,
+                                            plain_len=g.plain_len)
                 while cur.next() is not None:
                     pass
                 if cur.logical_offset != g.plain_len:
@@ -2122,7 +2325,8 @@ class Snapshot(_FdOwner):
             keys_ = txformat.generation_keys(rk, KINDS[kind], g.gen_id)
             try:
                 h = txformat.verify_header(os.pread(fd, txformat.PREFIX_LEN, 0), keys_,
-                                           kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id)
+                                           kind=KINDS[kind], sid=_sid_bytes(sid), gen_id=g.gen_id,
+                                           ver=g.ver)
             except txformat.CorruptError as e:
                 raise TxStoreError("corrupt", e.reason) from None
             if not hmac.compare_digest(h.hdr_mac, g.hdr_mac):
@@ -2154,7 +2358,7 @@ class Snapshot(_FdOwner):
             os.close(fd)
         try:
             ents = txformat.verify_index(blob, self.rk, kind=KINDS[self.kind], gen_id=g.gen_id,
-                                         data_count=g.data_count)
+                                         data_count=g.data_count, ver=g.ver)
         except txformat.TxFormatError:
             return None                           # alt gen / alt watermark / fals: se reconstruieşte
         if any(e.logical_offset >= g.plain_len or e.file_offset >= g.phys_len for e in ents):
@@ -2181,7 +2385,8 @@ class Snapshot(_FdOwner):
         fp = _PRead(fd, foff, limit=g.phys_len, budget=budget, hook=self._hook)
         cur = txformat.RecordCursor(fp, self.rk, kind=KINDS[self.kind],
                                     gen_id=g.gen_id, hdr_mac=g.hdr_mac, data_count=g.data_count,
-                                    seq=seq, logical_offset=log, file_offset=foff)
+                                    seq=seq, logical_offset=log, file_offset=foff, ver=g.ver,
+                                    plain_len=g.plain_len)
         return cur, pre, start is None
 
     def _maybe_write_index(self, g, entries):
@@ -2196,7 +2401,7 @@ class Snapshot(_FdOwner):
         name = gen_name(self.sid, self.kind, g.gen_id.hex(), "idx")
         tmp = f"{self.sid}.{self.kind}.{g.gen_id.hex()}.t{secrets.token_hex(8)}.idx"
         blob = txformat.encode_index(self.rk, kind=KINDS[self.kind], gen_id=g.gen_id,
-                                     data_count=g.data_count, entries=entries)
+                                     data_count=g.data_count, entries=entries, ver=g.ver)
         try:
             fd = os.open(tmp, _CREATE, 0o600, dir_fd=self.store.dir_fd)
         except OSError:
@@ -2230,12 +2435,13 @@ class Snapshot(_FdOwner):
                 while True:
                     if self.cancel.is_set():
                         raise TxStoreError("aborted")
-                    if rebuilt is not None and cur.logical_offset >= next_entry:
-                        rebuilt.append(txformat.IndexEntry(cur.seq, cur.logical_offset, cur.file_offset))
-                        next_entry = cur.logical_offset + INDEX_STRIDE
                     rec = cur.next()
                     if rec is None:
                         break
+                    # §12.11.14: o intrare doar la un record de la care se poate începe (v2: ZSTART).
+                    if rebuilt is not None and rec.reset and rec.logical_offset >= next_entry:
+                        rebuilt.append(txformat.IndexEntry(rec.seq, rec.logical_offset, rec.file_offset))
+                        next_entry = rec.logical_offset + INDEX_STRIDE
                     rs, re_ = rec.logical_offset, rec.logical_offset + len(rec.data)
                     budget.spend(len(rec.data))
                     if re_ <= lo:
@@ -2701,7 +2907,8 @@ class Recorder:
         try:
             g.writer = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind],
                                    sid=self.sidb, gen_id=gid, created_ms=int(st.clock() * 1000),
-                                   max_records=st.gen_limits[0], max_plain=st.gen_limits[1])
+                                   max_records=st.gen_limits[0], max_plain=st.gen_limits[1],
+                                   ver=st.write_ver)
             st._fault("header")
         except Exception:
             # Generaţia e a noastră (O_EXCL + inode în registru): retrasă acum, nu lăsată la boot.
@@ -3307,7 +3514,7 @@ class Recorder:
     def _entry(g):
         w = g.writer
         return txdesc.Generation(g.gen_id, txdesc.STATE_SEALED if w.sealed else txdesc.STATE_LIVE,
-                                 w.data_count, w.plain_len, w.phys_len, w.hdr_mac)
+                                 w.data_count, w.plain_len, w.phys_len, w.hdr_mac, w.ver)
 
     def _writers(self, k):
         return [g for g in self.done[k] + [self.cur[k]]
@@ -3371,10 +3578,12 @@ class Recorder:
             if w.data_count >= w.max_records or room <= 0:
                 return pos
             piece = piece[:room]
+            reset = False
             if w.plain_len >= g.next_index_at:
                 g.index.append(txformat.IndexEntry(w.data_count, w.plain_len, w.phys_len))
                 g.next_index_at = w.plain_len + INDEX_STRIDE
-            w.append(piece)
+                reset = True                  # v2: intrarea de index numeşte un început de bloc
+            w.append(piece, reset=reset)
             self.store._fault("append")
             pos += len(piece)
         return pos
@@ -3454,7 +3663,7 @@ class Recorder:
             for i, e in enumerate(gens):
                 if e.gen_id in self.to_recover[k] and e.state == txdesc.STATE_LIVE:
                     gens[i] = txdesc.Generation(e.gen_id, txdesc.STATE_RECOVERED, e.data_count,
-                                                e.plain_len, e.phys_len, e.hdr_mac)
+                                                e.plain_len, e.phys_len, e.hdr_mac, e.ver)
             for g in self._writers(k):
                 ent = self._entry(g)
                 idx = next((i for i, e in enumerate(gens) if e.gen_id == g.gen_id), None)
@@ -3767,7 +3976,8 @@ class Recorder:
         g = _Gen(kind, gid, name, fd, None, dev, ino)
         try:
             g.writer = await st.io(txformat.Writer, _File(fd, st), self.rk, kind=KINDS[kind],
-                                   sid=self.sidb, gen_id=gid, created_ms=int(st.clock() * 1000))
+                                   sid=self.sidb, gen_id=gid, created_ms=int(st.clock() * 1000),
+                                   ver=st.write_ver)
         except Exception:
             self._drop_gen_fd(g)
             with contextlib.suppress(Exception):
@@ -3811,7 +4021,8 @@ class Recorder:
                     raise TxStoreError("corrupt", "compacted generation replaced under us")
                 txformat.verify_full(_PRead(fd, 0, limit=w.phys_len), self.rk, kind=KINDS[k],
                                      sid=self.sidb, gen_id=g.gen_id, data_count=w.data_count,
-                                     plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac)
+                                     plain_len=w.plain_len, phys_len=w.phys_len, hdr_mac=w.hdr_mac,
+                                     ver=w.ver)
             finally:
                 os.close(fd)
 
@@ -3841,7 +4052,7 @@ class Recorder:
             L = old.generations[len(P):]
             w = built[k].writer
             T = txdesc.Generation(built[k].gen_id, txdesc.STATE_SEALED, w.data_count, w.plain_len,
-                                  w.phys_len, w.hdr_mac)
+                                  w.phys_len, w.hdr_mac, w.ver)
             d = txdesc.Descriptor(old.installation_id, old.sid, old.kind, old.version + 1, old.rk_hash,
                                   (T,) + tuple(L), old.flags)
             start[k] = (old.version, self.store.encode(old))
@@ -4050,14 +4261,14 @@ def _check_extends(old, new):
     if len(ng) < len(og):
         raise Refused("regress", "fewer generations")
     for a, b in zip(og, ng):
-        if a.gen_id != b.gen_id or a.hdr_mac != b.hdr_mac:
+        if a.gen_id != b.gen_id or a.hdr_mac != b.hdr_mac or a.ver != b.ver:
             raise Refused("regress", "generation list reordered")
         if a.state in (txdesc.STATE_SEALED, txdesc.STATE_RECOVERED) and a != b:
             raise Refused("regress", "a closed generation changed")
         if (b.data_count < a.data_count or b.plain_len < a.plain_len or b.phys_len < a.phys_len):
             raise Refused("regress", "a committed prefix would shrink")
         if a.state == txdesc.STATE_LIVE and b.state == txdesc.STATE_RECOVERED and a != txdesc.Generation(
-                b.gen_id, a.state, b.data_count, b.plain_len, b.phys_len, b.hdr_mac):
+                b.gen_id, a.state, b.data_count, b.plain_len, b.phys_len, b.hdr_mac, b.ver):
             raise Refused("regress", "recovered must keep the committed counts")
     if new.flags != (old.flags if old else new.flags):
         raise Refused("regress", "flags changed")
@@ -4149,11 +4360,11 @@ def verify_generation_fd(fd, sid, kind, g, rk, *, exact_size=False, check=None):
     fp = _HashPRead(fd, g.phys_len, check)
     try:
         hdr = txformat.verify_header(fp.read(txformat.PREFIX_LEN), txformat.generation_keys(
-            rk, kb, g.gen_id), kind=kb, sid=_sid_bytes(sid), gen_id=g.gen_id)
+            rk, kb, g.gen_id), kind=kb, sid=_sid_bytes(sid), gen_id=g.gen_id, ver=g.ver)
         if not hmac.compare_digest(hdr.hdr_mac, g.hdr_mac):
             raise GenCorrupt("corrupt", "hdr-mac-mismatch")
         cur = txformat.RecordCursor(fp, rk, kind=kb, gen_id=g.gen_id, hdr_mac=g.hdr_mac,
-                                    data_count=g.data_count)
+                                    data_count=g.data_count, ver=g.ver, plain_len=g.plain_len)
         while cur.next() is not None:
             pass
         if cur.logical_offset != g.plain_len:

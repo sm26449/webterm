@@ -36,6 +36,12 @@ Active only with encrypted recordings on (`txhub.boot` → `boot(st)` after the 
   and no unexplained private name; then an empty `arhiva/` is removed.
 * **Health** (`status`): migrated n / N, bytes left, one-kind, orphans, failed, stray plaintext (a
   file that appeared after the inventory: never served), leftover private names, last error.
+* **Recompaction** (§12.11.14, `recompact_once`, every janitor pass after the plaintext
+  migration): closed recordings that still hold WTX1 version-1 generations are rewritten into one
+  compressed generation per kind (`Store.recompact`, under the sid's lease), at most
+  RECOMPACT_PASS_BYTES of old generations per pass, largest first. A sid with a running writer,
+  in quarantine or erased is skipped; an error leaves the old generations served and retries
+  after RETRY_SECS. No operator command: it starts on its own once compression is on.
 """
 import asyncio
 import contextlib
@@ -48,7 +54,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 
-from . import keys, txstore
+from . import keys, txformat, txstore
 
 log = logging.getLogger("webterm.migration")
 
@@ -60,6 +66,7 @@ PINNED_RETRY_SECS = 60.0          # unlink amânat cât un backup copiază textu
 FAILED_LIST_MAX = 20              # System health: câte sesiuni cu rânduri eşuate se numesc
 INTERVAL = 60.0
 LIVE_CONCURRENCY = 2              # conversii simultane la pornirea writer-elor (reconcile la boot)
+RECOMPACT_PASS_BYTES = 256 * 1024 * 1024    # §12.11.14: generaţii v1 rescrise pe trecere (~1/min)
 WORK_STATES = ("pending", "orphan", "converted")
 BLOCKING = ("pending", "orphan", "failed", "converted")     # ţin flag-ul global jos
 _MAX_ERR = 300
@@ -77,6 +84,13 @@ class _State:
     stray: list = field(default_factory=list)
     leftovers: list = field(default_factory=list)
     format_block: str = ""        # M2: de ce nu e publicat recordings_format (rows | residual | leftovers)
+    # §12.11.14 recompactare: progres de la boot (System health), erori pe sid, backoff propriu
+    rc_backoff: dict = field(default_factory=dict)
+    rc_failed: dict = field(default_factory=dict)
+    rc_done: int = 0
+    rc_before: int = 0
+    rc_after: int = 0
+    rc_left: tuple = (0, 0)
 
 
 _s = _State()
@@ -612,6 +626,66 @@ async def run_once(st, now=None):
         await process(st, sid)
     await _scan(st)
     await maybe_publish_format(st)
+    await recompact_once(st, now)
+
+
+# ── recompaction (§12.11.14) ─────────────────────────────────────────────────
+
+
+async def recompact_once(st, now=None, budget=RECOMPACT_PASS_BYTES):
+    """One pass: closed recordings with version-1 generations, largest first, until `budget`
+    bytes of old generations were rewritten (the first one always runs). Returns the number of
+    sids rewritten."""
+    s = _s
+    if getattr(st, "write_ver", None) != txformat.VERSION_Z:
+        return 0
+    now = time.time() if now is None else now
+    cands = await st.recompact_candidates()
+    left = {sid: n for sid, n in cands}
+    spent = done = 0
+    for sid, n in cands:
+        if spent and spent + n > budget:
+            continue
+        rec = st.recorders.get(sid)
+        if sid in st._starting or (rec is not None and rec.state == "running"):
+            continue                               # o sesiune cu writer: reluată după închidere
+        if s.rc_backoff.get(sid, 0) > now:
+            continue
+        try:
+            async with st.lease(sid):
+                res = await st.recompact(sid)
+        except Exception as e:                      # noqa: BLE001 — un sid nu opreşte trecerea
+            reason = getattr(e, "reason", "")
+            if reason in ("erased", "cas"):
+                continue                            # şters / schimbat între timp: trecerea următoare decide
+            s.rc_backoff[sid] = now + RETRY_SECS
+            if reason != "disk":
+                s.rc_failed[sid] = _err(e)
+                st.alarm("transcript.recompactRetry", "%s: %s" % (sid, e))
+            continue
+        if not res:
+            continue
+        s.rc_failed.pop(sid, None)
+        s.rc_backoff.pop(sid, None)
+        left.pop(sid, None)
+        before = sum(a for a, _b in res.values())
+        s.rc_done += 1
+        s.rc_before += before
+        s.rc_after += sum(b for _a, b in res.values())
+        spent += before
+        done += 1
+        if spent >= budget:
+            break
+    s.rc_failed = {k: v for k, v in s.rc_failed.items() if k in left}
+    s.rc_left = (len(left), sum(left.values()))
+    return done
+
+
+def recompact_status():
+    s = _s
+    return {"left": s.rc_left[0], "left_bytes": s.rc_left[1], "done": s.rc_done,
+            "saved_bytes": max(0, s.rc_before - s.rc_after), "failed": len(s.rc_failed),
+            "error": next(iter(s.rc_failed.values()), "")}
 
 
 async def _scan(st):
@@ -740,4 +814,5 @@ async def status():
         "error": (err[0] if err else "") or _s.last_error,
         "format_block": _s.format_block,
         "failed_sids": await failed_sessions(st),
+        "recompaction": recompact_status(),
     }

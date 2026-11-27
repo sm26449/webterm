@@ -593,6 +593,240 @@ c = cur(data_count=1)
 c.next()
 check("seal() at a watermark below the real count → DATA where SEAL expected", raises(lambda: c.seal(), tx.CorruptError))
 
+# ── version 2: compressed records (§12.11.14, Appendix "Test vectors (v2)") ──
+print("== v2: compressed records ==")
+import random  # noqa: E402
+import zlib  # noqa: E402
+
+V2_PREFIX = ("5754583102010000101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff"
+             "00748d00a201000000000000000000000000000000000000"
+             "dda37ab88527feb900800c264bee47f9ae79f022ba61d8b3ce05aea584fb31e7")
+V2_REC0 = "0311000000000000001758e319d5f8a4775ec94fccae0688673cb85e492f82b4c6c2f883a643d76e12f0"
+V2_REC1 = "041000000001000000748e1947fab51f3bace0012ab87070c690dad18b9389712dff3a700b0e2b5af0"
+V2_SEAL = ("023000000002000000ecf2a2207beb5e68abd6e36b09d2357ad3da2733712fa18e39c627b63c5e20d8"
+           "a67b3c1f05fcb3b7eee7d733e5e0a56858543e78cf7f6d64a7c5f820a938c43a")
+V2_INDEX = ("5754493102010000101112131415161718191a1b1c1d1e1f02000000000000000100000000000000"
+            "0000000000000000600000000000000049d125530ea11ec7d6e08a784a97b75ce7803fb8b5534e54de6fd37eb69177fb")
+# z-ul vectorilor (o codare deflate validă, nu normativă: alt zlib poate da alţi octeţi, la fel de valizi)
+V2_Z0, V2_Z1 = "ca48cdc9c9e7e502000000ffff", "5251c829e6e502000000ffff"
+VB2 = bytes.fromhex(V2_PREFIX + V2_REC0 + V2_REC1 + V2_SEAL)
+HM2 = VB2[64:96]
+keys = tx.generation_keys(RK, 1, GEN)
+aes = AESGCM(keys.rec)
+
+
+def make2(payloads=(P0, P1), seal=True, resets=(), gen=GEN, **kw):
+    f = io.BytesIO()
+    w = tx.Writer(f, RK, kind=1, sid=SID, gen_id=GEN if gen is None else gen, created_ms=CREATED,
+                  ver=tx.VERSION_Z, **kw)
+    for i, p in enumerate(payloads):
+        w.append(p, reset=i in resets)
+    info = w.seal() if seal else None
+    return f.getvalue(), w, info
+
+
+def rec2(rtype, seq, ulen, z, hm=HM2):
+    return tx._encode_record(aes, hm, rtype, seq, struct.pack("<I", ulen) + z)
+
+
+def cur2(blob, data_count, **kw):
+    a = dict(kind=1, gen_id=GEN, hdr_mac=blob[64:96], data_count=data_count, ver=tx.VERSION_Z)
+    a.update(kw)
+    fp = io.BytesIO(blob)
+    fp.seek(a.get("file_offset", tx.PREFIX_LEN))
+    return tx.RecordCursor(fp, RK, **a)
+
+
+def all2(blob, data_count, **kw):
+    c = cur2(blob, data_count, **kw)
+    out = []
+    while True:
+        r = c.next()
+        if r is None:
+            return out, c
+        out.append(r)
+
+
+# vectori: cititorul îi decodează mereu; writer-ul îi reproduce când zlib-ul local dă acelaşi z
+check("v2 header vector (ver byte 2 under hdr_mac)", VB2[:96].hex() == V2_PREFIX)
+c = zlib.compressobj(tx.Z_LEVEL, zlib.DEFLATED, tx.Z_WBITS)
+same_z = (c.compress(P0) + c.flush(zlib.Z_SYNC_FLUSH)).hex() == V2_Z0 and \
+    (c.compress(P1) + c.flush(zlib.Z_SYNC_FLUSH)).hex() == V2_Z1
+b2, w2, i2 = make2()
+if same_z:
+    check("v2 writer reproduces the vectors byte for byte (same deflate output)", b2 == VB2)
+else:
+    print("  NOTE local zlib emits other (valid) deflate bytes; writer vector skipped")
+check("v2 vector: record plaintexts are ulen ‖ z (raw deflate, Z_SYNC_FLUSH)",
+      aes.decrypt(tx.nonce(0), VB2[105:105 + 17 + 16], HM2 + VB2[96:105]) == struct.pack("<I", 7) + bytes.fromhex(V2_Z0))
+recs, c = all2(VB2, 2, plain_len=13)
+check("v2 vector decodes: ZSTART then ZCONT, logical offsets on plaintext",
+      [(r.data, r.logical_offset, r.reset) for r in recs] == [(P0, 0, True), (P1, 7, False)])
+check("v2 vector: SEAL counts the decompressed length", (c.seal().plain_len, c.seal.__self__.file_offset) == (13, len(VB2)))
+check("v2 vector: verify_full with the descriptor's values", tx.verify_full(
+    io.BytesIO(VB2), RK, kind=1, sid=SID, gen_id=GEN, data_count=2, plain_len=13, phys_len=len(VB2),
+    hdr_mac=HM2, ver=2).phys_len == 252)
+check("v2 index vector", tx.encode_index(RK, kind=1, gen_id=GEN, data_count=2,
+                                         entries=[tx.IndexEntry(0, 0, 96)], ver=2).hex() == V2_INDEX)
+check("v2 index vector verifies (ver 2 expected)", tx.verify_index(bytes.fromhex(V2_INDEX), RK, kind=1, gen_id=GEN,
+                                                                   data_count=2, ver=2) == [tx.IndexEntry(0, 0, 96)])
+check("v2 index refused where a v1 index is expected (and the reverse)",
+      raises(lambda: tx.verify_index(bytes.fromhex(V2_INDEX), RK, kind=1, gen_id=GEN, data_count=2), tx.CorruptError)
+      and raises(lambda: tx.verify_index(bytes.fromhex(V_INDEX), RK, kind=1, gen_id=GEN, data_count=2, ver=2), tx.CorruptError))
+check("Reader (whole generation) reads v2", [r.data for r in tx.Reader(io.BytesIO(VB2), RK, kind=1, sid=SID, gen_id=GEN,
+                                                                     data_count=2, ver=2).records()] == [P0, P1])
+
+# versiunea: header şi descriptor, ambele autentificate
+check("v2 file read as v1 → bad-version (expected version from the descriptor)",
+      raises(lambda: tx.verify_full(io.BytesIO(VB2), RK, kind=1, sid=SID, gen_id=GEN), tx.CorruptError, "bad-version"))
+check("v1 file read as v2 → bad-version", raises(lambda: tx.verify_full(io.BytesIO(VB), RK, kind=1, sid=SID, gen_id=GEN, ver=2),
+                                                 tx.CorruptError, "bad-version"))
+t = bytearray(VB2)
+t[4] = 1
+check("header version byte stripped 2 → 1 → bad-hdr-mac (even when v1 is expected)",
+      raises(lambda: tx.verify_full(io.BytesIO(bytes(t)), RK, kind=1, sid=SID, gen_id=GEN), tx.CorruptError, "bad-hdr-mac"))
+check("unknown version (3) refused as an argument", raises(lambda: tx.Writer(
+    io.BytesIO(), RK, kind=1, sid=SID, gen_id=GEN, created_ms=0, ver=3), tx.StateError))
+check("bool version refused", raises(lambda: tx.verify_header(VB2[:96], keys, kind=1, sid=SID, gen_id=GEN, ver=True), tx.StateError))
+
+# tipuri de record încrucişate: refuz înainte de decriptare
+v1_in_v2 = VB2[:96] + tx._encode_record(aes, HM2, tx.TYPE_DATA, 0, P0)
+check("a v1 DATA record inside a v2 generation → bad-type", raises(lambda: cur2(v1_in_v2, 1).next(), tx.CorruptError, "bad-type"))
+z0 = bytes.fromhex(V2_Z0)
+v2_in_v1 = VB[:96] + tx._encode_record(AESGCM(keys.rec), HM, tx.TYPE_ZSTART, 0, struct.pack("<I", 7) + z0)
+check("a v2 ZSTART record inside a v1 generation → bad-type",
+      raises(lambda: tx.RecordCursor(io.BytesIO(v2_in_v1[96:]), RK, kind=1, gen_id=GEN, hdr_mac=HM, data_count=1).next(),
+             tx.CorruptError, "bad-type"))
+
+# alterări
+for pos, what in ((96 + 9 + 3, "ciphertext"), (96 + 1, "length field"), (96, "type byte"), (len(VB2) - 1, "SEAL tag")):
+    t = bytearray(VB2)
+    t[pos] ^= 1
+    check(f"flipped byte ({what}) → refused", raises(lambda t=t: tx.verify_full(io.BytesIO(bytes(t)), RK, kind=1, sid=SID,
+                                                                               gen_id=GEN, ver=2), tx.CorruptError))
+check("truncated record → short-record", raises(lambda: all2(VB2[:96 + 30], 1), tx.CorruptError, "short-record"))
+big = zlib.compressobj(6, zlib.DEFLATED, -15)
+zb = big.compress(b"A" * 5000) + big.flush(zlib.Z_SYNC_FLUSH)
+check("oversize output (z inflates past ulen) → bad-zlen, output capped at ulen",
+      raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 100, zb), 1), tx.CorruptError, "bad-zlen"))
+check("short output (ulen above what z yields) → bad-zlen",
+      raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 8, z0), 1), tx.CorruptError, "bad-zlen"))
+fin = zlib.compressobj(6, zlib.DEFLATED, -15)
+zf = fin.compress(P0) + fin.flush(zlib.Z_FINISH)
+check("a record that ends the deflate stream (BFINAL) → bad-zlen",
+      raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 7, zf), 1), tx.CorruptError, "bad-zlen"))
+check("ulen 0 → bad-zlen", raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 0, z0), 1), tx.CorruptError, "bad-zlen"))
+check("ulen above 65 536 → bad-zlen", raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 65537, z0), 1), tx.CorruptError, "bad-zlen"))
+check("z longer than ulen + 64 → bad-zlen (before inflating)",
+      raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 7, z0 + b"\x00" * 60), 1), tx.CorruptError, "bad-zlen"))
+check("garbage deflate → bad-deflate", raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZSTART, 0, 7, b"\xff" * 12), 1),
+                                              tx.CorruptError, "bad-deflate"))
+check("a continuation record at seq 0 (no block open) → bad-block",
+      raises(lambda: all2(VB2[:96] + rec2(tx.TYPE_ZCONT, 0, 7, z0), 1), tx.CorruptError, "bad-block"))
+check("descriptor plain_len below the decoded total → refused while reading",
+      raises(lambda: all2(VB2, 2, plain_len=12), tx.CorruptError, "plain-len-mismatch"))
+check("descriptor plain_len above the decoded total → refused at the watermark",
+      raises(lambda: all2(VB2, 2, plain_len=14), tx.CorruptError, "plain-len-mismatch"))
+check("record length past the v2 maximum → bad-len before the body is read",
+      raises(lambda: all2(VB2[:96] + struct.pack("<BII", tx.TYPE_ZSTART, tx.MAX_ZREC_LEN + 1, 0), 1), tx.CorruptError, "bad-len"))
+check("writer refuses a record length the reader would refuse (encoder bound)",
+      raises(lambda: tx._encode_record(aes, HM2, tx.TYPE_ZSTART, 0, b"\x00" * 4), tx.StateError))
+
+# reseturi şi căutare de la fiecare intrare de index
+rng = random.Random(7)
+words = [b"ls -la", b"drwxr-xr-x", b"root", b"stefan", b"\x1b[0;32m", b"\x1b[0m", b"total 48", b"Makefile",
+         b"README.md", b"gateway", b"frontend", b"$ ", b"\r\n", b"  ", b"2026-11-27", b"12:00", b"4096"]
+
+
+def term_like(n):
+    out = bytearray()
+    while len(out) < n:
+        out += b" ".join(rng.choice(words) for _ in range(rng.randint(3, 12))) + b"\r\n"
+    return bytes(out[:n])
+
+
+data = term_like(3 * 1024 * 1024 + 12345)
+pieces = []
+pos = 0
+while pos < len(data):
+    n = rng.choice((1, 7, 300, 4096, 65536, 20000))
+    pieces.append(data[pos:pos + n])
+    pos += n
+starts = {i for i in range(len(pieces)) if i % 37 == 5}
+b3, w3, i3 = make2(pieces, resets=starts)
+recs, c = all2(b3, w3.data_count, plain_len=len(data))
+check("v2 round trip of 3 MiB terminal-like output in mixed record sizes",
+      b"".join(r.data for r in recs) == data and c.seal().plain_len == len(data))
+check("seq 0, every reset=True record and every 1 MiB block start are ZSTART",
+      recs[0].reset and all(recs[i].reset for i in starts)
+      and all(any(r.reset for r in recs if lo <= r.logical_offset < lo + tx.Z_BLOCK + tx.MAX_DATA_LEN)
+              for lo in range(0, len(data) - tx.Z_BLOCK - tx.MAX_DATA_LEN, tx.Z_BLOCK)))
+blocks = [r for r in recs if r.reset]
+gap = max(b.logical_offset - a.logical_offset for a, b in zip(blocks, blocks[1:]))
+check("no block holds more than Z_BLOCK + one record of plaintext", gap <= tx.Z_BLOCK + tx.MAX_DATA_LEN)
+ents = [tx.IndexEntry(r.seq, r.logical_offset, r.file_offset) for r in blocks]
+ix = tx.encode_index(RK, kind=1, gen_id=GEN, data_count=w3.data_count, entries=ents, ver=2)
+ents = tx.verify_index(ix, RK, kind=1, gen_id=GEN, data_count=w3.data_count, ver=2)
+ok_all = True
+for e in ents:
+    got, _c = all2(b3, w3.data_count, seq=e.seq, logical_offset=e.logical_offset, file_offset=e.file_offset)
+    ok_all = ok_all and b"".join(r.data for r in got) == data[e.logical_offset:]
+check(f"seeking from every index entry ({len(ents)}) decodes on its own, byte-identical", ok_all and len(ents) >= 5)
+cont = next(r for r in recs if not r.reset)
+check("a cursor started at a continuation record → bad-block (index may only name block starts)",
+      raises(lambda: all2(b3, w3.data_count, seq=cont.seq, logical_offset=cont.logical_offset,
+                          file_offset=cont.file_offset), tx.CorruptError, "bad-block"))
+check("an index naming a continuation record verifies but the reader refuses it",
+      raises(lambda: (lambda e: all2(b3, w3.data_count, seq=e.seq, logical_offset=e.logical_offset,
+                                     file_offset=e.file_offset))(tx.verify_index(tx.encode_index(
+                                         RK, kind=1, gen_id=GEN, data_count=w3.data_count,
+                                         entries=[tx.IndexEntry(cont.seq, cont.logical_offset, cont.file_offset)], ver=2),
+                                         RK, kind=1, gen_id=GEN, data_count=w3.data_count, ver=2)[0]), tx.CorruptError, "bad-block"))
+check("v2 start position outside the per-record bounds refused before decrypting",
+      raises(lambda: cur2(b3, w3.data_count, seq=10, logical_offset=10, file_offset=96 + 10), tx.StateError))
+lo, hi = tx.phys_bounds(2, w3.data_count, len(data), True)
+check("phys_len of the v2 file lies within phys_bounds", lo <= len(b3) <= hi)
+check("phys_bounds v1 is exact", tx.phys_bounds(1, 2, 13, True) == (tx.phys_len(2, 13, True),) * 2)
+check("verify_full: a v2 generation with trailing bytes → refused",
+      raises(lambda: tx.verify_full(io.BytesIO(b3 + b"\x00"), RK, kind=1, sid=SID, gen_id=GEN, ver=2), tx.CorruptError, "trailing-bytes"))
+# incompresibil: o limită de 64 octeţi peste ulen ajunge (zlib alege blocuri stored)
+rnd = os.urandom(65536 * 3)
+b4, w4, _ = make2([rnd[i:i + 65536] for i in range(0, len(rnd), 65536)] + [os.urandom(1), os.urandom(2)])
+got4 = all2(b4, w4.data_count)[0]
+check("incompressible input stays within ulen + 64 per record and round-trips",
+      b"".join(r.data for r in got4[:3]) == rnd and len(b4) <= tx.phys_bounds(2, 5, len(rnd) + 3, True)[1])
+check("incompressible: verify_full passes", tx.verify_full(io.BytesIO(b4), RK, kind=1, sid=SID, gen_id=GEN, ver=2).data_count == 5)
+
+# raport de compresie pe ieşire de terminal (prompturi, ls, culori), cu recorduri de 64 KiB
+b5, w5, _ = make2([data[i:i + 65536] for i in range(0, len(data), 65536)])
+ratio = len(data) / len(b5)
+print(f"      (terminal-like ratio {ratio:.1f}x: {len(data)} → {len(b5)} bytes)")
+check("compression ratio on terminal-like output ≥ 5×", ratio >= 5)
+v1b, _w, _ = make(payloads=[data[i:i + 65536] for i in range(0, len(data), 65536)])
+check("the same stream as v1 is ≥ 5× larger", len(v1b) >= 5 * len(b5))
+
+# writer: o eroare după comprimare strică writer-ul (contextul a avansat)
+
+
+class Boom:
+    def __init__(self):
+        self.n = 0
+        self.buf = bytearray()
+
+    def write(self, b):
+        self.n += 1
+        if self.n == 3:
+            raise OSError("disk")
+        self.buf += b
+        return len(b)
+
+
+bw = tx.Writer(Boom(), RK, kind=1, sid=SID, gen_id=GEN, created_ms=0, ver=2)
+bw.append(P0)
+check("v2 writer: I/O error after compressing → raised", raises(lambda: bw.append(P1), OSError))
+check("v2 writer: broken afterwards (the deflate context moved on)", raises(lambda: bw.append(P1), tx.StateError, "broken"))
+check("v2 writer: counters describe the last full record", (bw.data_count, bw.plain_len) == (1, 7))
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 sys.exit(1 if failed else 0)

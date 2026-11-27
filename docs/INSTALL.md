@@ -838,6 +838,17 @@ compose up` by hand.
   attested off-host*; after the first erasure, a warning *Erasure n is not attested on …* means the
   destination did not accept or read back the journal yet (it is retried with backoff).
 
+**Compression.** Encrypted recordings are compressed before they are encrypted (terminal output
+usually shrinks 10–15×), so the volume and the backups stay close to the size of a gzip of the
+plaintext. Recordings encrypted by 3.8 rc5 or earlier are rewritten in the background, a few
+hundred MB per minute, and replay the same bytes afterwards; System health → **crypto.migration**
+shows *Compressing encrypted recordings: n done, m left* until it is finished. Compressed sizes
+depend on the content, so someone who can both inject text into a session and watch the stored
+size of its recording repeatedly could learn something about what was printed next to it (the
+design note, §12.11.14, weighs this). To turn compression off, set `WEBTERM_TX_COMPRESS=0`: new
+recordings are then written uncompressed and the background rewrite stops; both forms stay
+readable.
+
 **Failed migrations.** A file that cannot be converted keeps its plaintext and is named (first 8
 characters of the session) in System health. An Owner, with a fresh second factor, can retry it
 (`POST /api/recordings/migration/<sid>/retry`) or delete the plaintext and erase the session

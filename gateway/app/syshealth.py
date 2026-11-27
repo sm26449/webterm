@@ -243,6 +243,8 @@ MESSAGES = {
     "crypto_raw_copies_ok": "No stored backup contains the old vault key",
     "migration_done": "Every recording is encrypted ({converted} migrated from plaintext)",
     "migration_progress": "Migrating recordings to encrypted storage: {done} of {total} done, {mb} MB left ({one_kind} one-kind, {orphans} orphans)",
+    "recompaction_progress": "Compressing encrypted recordings: {done} done, {left} left ({mb} MB), {saved} MB saved so far",
+    "recompaction_failed": "{failed} encrypted recordings could not be compressed and stay in the older format, still readable ({error})",
     "migration_failed": "{failed} recording file(s) could not be migrated and {stray} are outside the inventory; their plaintext is kept ({error}). Sessions: {sessions}",
     "ctl_socket_ok": "Host live backups go through the gateway's backup control socket",
     "ctl_socket_unavailable": "The backup control socket is not available, so host live backups (backup.sh with the app running) are refused: {error}",
@@ -1084,6 +1086,15 @@ async def c_crypto_migration() -> Optional[Result]:
         return Result("info", "migration_progress", {
             "done": d["done"], "total": d["total"], "mb": round(d["left_bytes"] / 1048576, 1),
             "one_kind": d["one_kind"], "orphans": d["orphans"]}, doc="encryption")
+    # §12.11.14: rescrierea comprimată a generaţiilor v1 (niciodată critică: v1 rămâne citibil)
+    rc = d.get("recompaction") or {}
+    if rc.get("failed"):
+        return Result("warning", "recompaction_failed", {"failed": rc["failed"], "error": rc["error"] or "?"},
+                      doc="encryption")
+    if rc.get("left"):
+        return Result("info", "recompaction_progress", {
+            "done": rc["done"], "left": rc["left"], "mb": round(rc["left_bytes"] / 1048576, 1),
+            "saved": round(rc["saved_bytes"] / 1048576, 1)}, doc="encryption")
     return Result("ok", "migration_done", {"converted": d["converted"]})
 
 

@@ -7,15 +7,18 @@ contract 1). Canonical binary encoding, integers little-endian:
     | version u64 | rk_hash 32 B (SHA-256 of the session's wrapped-RK envelope)
     | n_gen u16 | n_gen × generation | mac 32 B = HMAC-SHA-256(K_desc, all bytes before)
 
-    generation (73 B): gen_id 16 B | state u8 (1 live, 2 sealed, 3 recovered)
-                       | data_count u64 | plain_len u64 | phys_len u64 | hdr_mac 32 B
+    generation (73 B): gen_id 16 B | state u8 (low nibble: 1 live, 2 sealed, 3 recovered;
+                       high nibble: WTX1 version − 1, §12.11.14) | data_count u64 | plain_len u64
+                       | phys_len u64 | hdr_mac 32 B
 
 K_desc = HKDF(KWK, "wt/v1/desc") (keyring.desc_key). The list keeps the recording order (oldest
 first). Rules checked on encode and decode (fail closed): gen_ids unique, at most one `live`
 generation and only as the last one, data_count / plain_len within the §12.1 limits and
 consistent with each other, flags only from KNOWN_FLAGS (bit 0 = converted: migrated from
 plaintext, §12.11.0; any other bit → refused), phys_len exact for the state: the committed prefix for live and
-recovered, the whole file including the 73-byte SEAL for sealed (txformat.phys_len).
+recovered, the whole file including the 73-byte SEAL for sealed (txformat.phys_len) for a
+version-1 generation, within txformat.phys_bounds for a version-2 (compressed) one; plain_len is
+always the decompressed length.
 
 `decode_descriptor` always needs the session's wrapped-RK envelope (from `session_keys`): its
 type must be RK and its hash must equal the descriptor's `rk_hash` before anything is returned,
@@ -62,6 +65,9 @@ class Generation:
     plain_len: int
     phys_len: int
     hdr_mac: bytes
+    # Versiunea WTX1 a fişierului (1 = clar, 2 = comprimat). Sub MAC-ul descriptorului, deci un
+    # cititor ştie din date autentice ce parser cere generaţia, înainte să deschidă fişierul.
+    ver: int = txformat.VERSION
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,8 @@ def _check(d):
         seen.add(g.gen_id)
         if not _is_int(g.state) or g.state not in STATES:
             raise DescriptorError("bad-state", f"#{i}")
+        if not _is_int(g.ver) or g.ver not in txformat.VERSIONS:
+            raise DescriptorError("bad-state", f"#{i} version")
         # O singură generaţie live, şi doar ultima: writerul scrie mereu la coada înregistrării.
         if g.state == STATE_LIVE and i != len(gens) - 1:
             raise DescriptorError("live-not-last", f"#{i}")
@@ -119,9 +127,15 @@ def _check(d):
         if (not _is_int(g.plain_len) or g.plain_len > txformat.MAX_PLAIN_BYTES
                 or not g.data_count <= g.plain_len <= g.data_count * txformat.MAX_DATA_LEN):
             raise DescriptorError("bad-plain-len", f"#{i}")
-        want = txformat.phys_len(g.data_count, g.plain_len, g.state == STATE_SEALED)
-        if not _is_int(g.phys_len) or g.phys_len != want:
-            raise DescriptorError("bad-phys-len", f"#{i}: {g.phys_len} != {want}")
+        lo, hi = txformat.phys_bounds(g.ver, g.data_count, g.plain_len, g.state == STATE_SEALED)
+        if not _is_int(g.phys_len) or not lo <= g.phys_len <= hi:
+            raise DescriptorError("bad-phys-len", f"#{i}: {g.phys_len} outside {lo}..{hi}")
+
+
+def _gen(gen_id, sv, data_count, plain_len, phys_len, hdr_mac):
+    # Nibble-ul de sus = versiune − 1: 0x0? = v1 (octeţii descriptorilor existenţi neschimbaţi),
+    # 0x1? = v2; orice altceva dă o versiune necunoscută, refuzată de _check.
+    return Generation(gen_id, sv & 0x0F, data_count, plain_len, phys_len, hdr_mac, (sv >> 4) + 1)
 
 
 def _mac(kwk, body):
@@ -133,7 +147,8 @@ def encode_descriptor(d, kwk):
     out = bytearray(_HEAD.pack(MAGIC, VERSION, d.kind, d.flags, d.installation_id, d.sid, d.version,
                                d.rk_hash, len(d.generations)))
     for g in d.generations:
-        out += _GEN.pack(g.gen_id, g.state, g.data_count, g.plain_len, g.phys_len, g.hdr_mac)
+        out += _GEN.pack(g.gen_id, g.state | (g.ver - 1) << 4, g.data_count, g.plain_len,
+                         g.phys_len, g.hdr_mac)
     return bytes(out) + _mac(kwk, bytes(out))
 
 
@@ -178,7 +193,7 @@ def decode_descriptor(blob, kwk, *, installation_id, sid, kind, rk_envelope):
         raise DescriptorError("rk-mismatch")
     if len(body) != _HEAD.size + n * _GEN.size:
         raise DescriptorError("bad-size")
-    gens = tuple(Generation(*_GEN.unpack_from(body, _HEAD.size + i * _GEN.size)) for i in range(n))
+    gens = tuple(_gen(*_GEN.unpack_from(body, _HEAD.size + i * _GEN.size)) for i in range(n))
     d = Descriptor(inst, s, k, version, rk_hash, gens, flags)
     _check(d)
     return d

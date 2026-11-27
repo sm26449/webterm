@@ -653,6 +653,79 @@ async def g_rules(st):
     return st
 
 
+def term_like(n, seed=1):
+    import random
+    rng = random.Random(seed)
+    words = [b"ls -la", b"drwxr-xr-x", b"root", b"\x1b[0;32m", b"\x1b[0m", b"total 48", b"Makefile", b"$ ", b"4096"]
+    out = bytearray()
+    while len(out) < n:
+        out += b" ".join(rng.choice(words) for _ in range(rng.randint(3, 12))) + b"\r\n"
+    return bytes(out[:n])
+
+
+async def all_gens(st, sids):
+    return [g for x in sids for k in ("out", "cast") for g in (await desc(st, x, k)).generations]
+
+
+async def all_same(st, data):
+    return all([await read_all(st, x) == o and await read_all(st, x, "cast") == c for x, (o, c) in data.items()])
+
+
+async def g_recompaction(st):
+    print("== §12.11.14: recompaction of v1 recordings by the janitor, System health ==")
+    await wipe()
+    sids, data = [sid_new() for _ in range(3)], {}
+    for i, x in enumerate(sids):
+        data[x] = (term_like(300000 + i * 100000, i), b'{"version": 2}\n' + term_like(50000, 10 + i))
+        write(TD, x + ".out", data[x][0])
+        write(TD, x + ".cast", data[x][1])
+        await add_session(x, "closed")
+    st = await reboot(st)
+    st.write_ver = 1                        # un build 3.8-rc: migrarea scrie WTX1 versiunea 1
+    await mg.run_once(st)
+    v1 = all(g.ver == 1 for g in await all_gens(st, sids))
+    check("fixture: plaintext migrated to version-1 generations; compression off → no recompaction",
+          v1 and mg.recompact_status()["done"] == 0)
+    before = sum(g.phys_len for g in await all_gens(st, sids))
+    st.write_ver = 2                        # build-ul nou: recompactarea porneşte singură
+    n = await mg.recompact_once(st, budget=1)
+    res = await syshealth.c_crypto_migration()
+    check("one pass within its budget: the largest recording first, the others left for later",
+          n == 1 and all(g.ver == 2 for g in (await desc(st, sids[2], "out")).generations), n)
+    check("System health: recompaction progress (info) while v1 generations remain",
+          res.severity == "info" and res.key == "recompaction_progress" and str(res.params["left"]) == "2", res)
+    # o eroare: generaţiile vechi rămân servite, avertizare, reîncercare după backoff
+    def boom(p):
+        if p == "rc-sealed":
+            raise OSError(28, "No space left on device")
+    st.fault = boom
+    await mg.recompact_once(st)
+    st.fault = None
+    res = await syshealth.c_crypto_migration()
+    check("a failed rewrite → warning, old generations still served, nothing left behind",
+          res.severity == "warning" and res.key == "recompaction_failed"
+          and await all_same(st, data) and not await open_ledger(sids[1])
+          and not await open_ledger(sids[0]), res)
+    n = await mg.recompact_once(st)
+    check("backoff: not retried at once", n == 0)
+    await mg.run_once(st, now=time.time() + mg.RETRY_SECS + 1)
+    after = sum(g.phys_len for g in await all_gens(st, sids))
+    res = await syshealth.c_crypto_migration()
+    check("janitor converges without an operator command: every generation v2, replay identical",
+          await all_same(st, data) and all(g.ver == 2 for g in await all_gens(st, sids)))
+    check("System health back to ok, saved bytes counted", res.severity == "ok" and res.key == "migration_done"
+          and mg.recompact_status()["saved_bytes"] > 0 and mg.recompact_status()["left"] == 0, (res, mg.recompact_status()))
+    print(f"      (v1 {before} bytes → v2 {after} bytes, {before / max(1, after):.1f}x)")
+    check("the volume shrinks ≥ 5× on terminal output", before >= 5 * after, (before, after))
+    files = {n.split(".")[2] for x in sids for n in gen_files(x)}
+    listed = {g.gen_id.hex() for g in await all_gens(st, sids)}
+    check("only the listed generations are on disk", files == listed)
+    # restart: nimic de refăcut, rămâne la v2
+    st = await reboot(st)
+    check("after a restart: no candidate left", await st.recompact_candidates() == [])
+    return st
+
+
 async def g_real_volume():
     print("== real protected volume: boot, erase pending, migrate, same bytes ==")
     await wipe()
@@ -795,6 +868,7 @@ async def main():
         st = await g_flag(st)
         st = await g_residual(st)
         st = await g_rules(st)
+        st = await g_recompaction(st)
         mg.reset()
         st.close()
         st = None

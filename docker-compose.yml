@@ -63,6 +63,8 @@ services:
       # SFTP/FTPS destination is attested (docs/INSTALL.md → Encrypting session recordings).
       # Empty = off: recordings stay as in 3.7.
       WEBTERM_TX_RECORDINGS: ${WEBTERM_TX_RECORDINGS:-}
+      # 0 = encrypted recordings are written uncompressed (§12.11.14); empty = compressed.
+      WEBTERM_TX_COMPRESS: ${WEBTERM_TX_COMPRESS:-}
       # set to 1 only if the gateway has a self-signed certificate
       WEBTERM_AGENT_INSECURE: ${WEBTERM_AGENT_INSECURE:-}
       # the per-browser-WS backlog cap before a forced resync

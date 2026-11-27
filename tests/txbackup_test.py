@@ -415,6 +415,59 @@ async def g_concurrent(st, hk):
     ts.set_backup_source(st, asyncio.get_running_loop())
 
 
+async def g_recompact_backup(st, hk):
+    print("== §12.11.14: recompaction under a concurrent backup; v2 members restored byte-identical ==")
+    st.write_ver = 1
+    sid = os.urandom(16).hex()
+    sql("INSERT INTO sessions(id, host_id, title, state, created, rows, cols) VALUES(?,?,?,?,?,?,?)",
+        sid, 1, "t", "live", time.time(), 24, 80)
+    rec = await st.start_recorder(sid, track_agent=False)
+    out = b"".join(b"%06d drwxr-xr-x 2 root root 4096 Nov 27 12:00 gateway\r\n" % i for i in range(4000))
+    cast = CAST_HDR + b"".join(json.dumps([0.1 * i, "o", "line %d\r\n" % i]).encode() + b"\n" for i in range(800))
+    rec.feed_cast_only(cast, at=rec.received)
+    for i in range(0, len(out), 40000):
+        rec.feed(out[i:i + 40000], b"", at=rec.received)
+        await rec.checkpoint()
+    await rec.close()
+    sql("UPDATE sessions SET state='closed', closed_at=? WHERE id=?", time.time(), sid)
+    st.write_ver = 2
+    old = [ts.gen_name(sid, k, g.gen_id.hex()) for k, d in descs(st, sid).items() for g in d.generations]
+    check("fixture: a closed v1 recording", all(g.ver == 1 for d in descs(st, sid).values() for g in d.generations))
+    # backup pornit înainte (pasul 1 a fixat generaţiile v1): recompactarea publică, unlink-ul aşteaptă
+    snap = await asyncio.to_thread(ts.backup_snapshot, os.path.join(BASE, "copy.db"), kwk=KWK, inst=INST)
+    try:
+        async with st.lease(sid):
+            res = await st.recompact(sid)
+        kept = all((config.TRANSCRIPT_DIR / n).exists() for n in old)
+        pair = [p for p in snap.pairs if p.sid == sid]
+        verdict = await asyncio.to_thread(lambda: [snap.verify_pair(p) for p in pair])
+        copied = b"".join(await asyncio.to_thread(lambda: [b"".join(snap.gen_chunks(p, bg)) for p in pair for bg in p.gens]))
+    finally:
+        snap.release()
+        os.unlink(os.path.join(BASE, "copy.db"))
+    for _ in range(50):
+        if not any((config.TRANSCRIPT_DIR / n).exists() for n in old):
+            break
+        await asyncio.sleep(0.02)
+    check("recompaction during a backup: published, the old generations stay pinned; the snapshot still "
+          "verifies and copies them whole", res and kept and verdict == [""]
+          and len(copied) == sum(bg.g.phys_len for p in pair for bg in p.gens), (res, kept, verdict))
+    check("…then unlinked", not any((config.TRANSCRIPT_DIR / n).exists() for n in old))
+    blob = await backup_blob(hk)
+    mem, man = archive(blob, hk)
+    d = descs(st, sid)
+    check("a backup after it carries the v2 generations at their exact phys_len",
+          all(len(mem["transcripts/" + ts.gen_name(sid, k, g.gen_id.hex())]) == g.phys_len and g.ver == 2
+              for k in d for g in d[k].generations) and recs_of(man)[(sid, "out")][0] == "included")
+    await close_store(st)
+    hk = apply(blob, hk)
+    remark()
+    st = await open_store()
+    check("restored v2 recording: replay byte-identical (both kinds)",
+          await read_all(st, sid) == out and await read_all(st, sid, "cast") == cast)
+    return st, hk
+
+
 def _install_roundtrip(st):
     saved = txhub._store
     txhub.install(st)
@@ -1034,6 +1087,7 @@ async def main():
     await g_workdir(st, hk)
     await g_purge(st)
     st, hk = await g_h2_cohort(st, hk)
+    st, hk = await g_recompact_backup(st, hk)
     await g_legacy_onto_migrated(st, hk)
 
 

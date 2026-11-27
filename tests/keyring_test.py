@@ -321,6 +321,34 @@ for bit in (1, 7, 15):
     authentic = bytes(raw_f) + hmac.new(kr.desc_key(KWK), bytes(raw_f), hashlib.sha256).digest()
     check(f"authentic descriptor with unknown flag bit {bit} → bad-flags",
           raises(lambda: td.decode_descriptor(authentic, KWK, **dec), td.DescriptorError, "bad-flags"))
+# §12.11.14: versiunea WTX1 a generaţiei în nibble-ul de sus al octetului de stare (sub MAC)
+z_lo, z_hi = tx.phys_bounds(2, 2, 13, True)
+gz = td.Generation(bytes(range(0x70, 0x80)), td.STATE_SEALED, 2, 13, 252, HDR_MAC, 2)
+dz = td.Descriptor(INST, SID, 1, 6, kr.envelope_hash(env_rk), (gen, gz))
+bz = td.encode_descriptor(dz, KWK)
+check("v2 generation: round trip, version from authenticated data", td.decode_descriptor(bz, KWK, **dec) == dz
+      and td.decode_descriptor(bz, KWK, **dec).generations[1].ver == 2)
+off = td._HEAD.size + td._GEN.size + 16
+check("v2 generation: state byte 0x12 (sealed, version 2); v1 stays 0x02", bz[off] == 0x12 and bz[off - td._GEN.size] == 0x02)
+check("v1 generations encode exactly as before (descriptor vector unchanged)", gen.ver == 1 and db.hex() == V_DESC)
+t_v = bytearray(bz)
+t_v[off] = 0x02
+check("version nibble stripped (v2 → v1) → bad-mac", raises(lambda: td.decode_descriptor(bytes(t_v), KWK, **dec), td.DescriptorError, "bad-mac"))
+for sv in (0x22, 0xF2, 0x14):
+    raw_v = bytearray(bz[:-32])
+    raw_v[off] = sv
+    auth_v = bytes(raw_v) + hmac.new(kr.desc_key(KWK), bytes(raw_v), hashlib.sha256).digest()
+    check(f"authentic descriptor with state byte {sv:#x} → bad-state",
+          raises(lambda: td.decode_descriptor(auth_v, KWK, **dec), td.DescriptorError, "bad-state"))
+check("v2 phys_len below its bounds refused", raises(lambda: td.encode_descriptor(td.Descriptor(
+    INST, SID, 1, 6, bytes(32), (td.Generation(GEN, td.STATE_SEALED, 2, 13, z_lo - 1, HDR_MAC, 2),)), KWK), td.DescriptorError, "bad-phys-len"))
+check("v2 phys_len above its bounds refused", raises(lambda: td.encode_descriptor(td.Descriptor(
+    INST, SID, 1, 6, bytes(32), (td.Generation(GEN, td.STATE_SEALED, 2, 13, z_hi + 1, HDR_MAC, 2),)), KWK), td.DescriptorError, "bad-phys-len"))
+check("v1 phys_len stays exact (a v2-plausible length is refused for v1)", raises(lambda: td.encode_descriptor(td.Descriptor(
+    INST, SID, 1, 6, bytes(32), (td.Generation(GEN, td.STATE_SEALED, 2, 13, 252, HDR_MAC),)), KWK), td.DescriptorError, "bad-phys-len"))
+check("unknown / bool version refused on encode", all(raises(lambda v=v: td.encode_descriptor(td.Descriptor(
+    INST, SID, 1, 6, bytes(32), (td.Generation(GEN, td.STATE_SEALED, 2, 13, 252, HDR_MAC, v),)), KWK), td.DescriptorError, "bad-state")
+    for v in (0, 3, True)))
 t_f = bytearray(cb)
 t_f[6] ^= 1
 check("converted bit cleared without the key → bad-mac", raises(lambda: td.decode_descriptor(bytes(t_f), KWK, **dec), td.DescriptorError, "bad-mac"))

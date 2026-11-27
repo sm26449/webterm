@@ -52,6 +52,11 @@ back.
   longer needed.
 
 ### Changed
+- **Encrypted recordings are compressed before encryption** (WTX1 version 2, raw deflate with a
+  context reset at every seek point): encrypted data does not compress, so with recording
+  encryption on, the nightly backup had grown from 274 MB to 4.1 GB on a real installation and the
+  volume paid the full plaintext size; recordings encrypted by earlier 3.8 builds are rewritten in
+  the background, byte-identical on replay (`WEBTERM_TX_COMPRESS=0` turns it off).
 - **A refused deploy leaves the installation as it was.** `deploy.sh <version>` used to write the
   new image into `.env` and the rollback target into `.prev-image` before its checks; when the 3.8
   guard then refused (for example a pre-3.8 image on a migrated volume), the next plain

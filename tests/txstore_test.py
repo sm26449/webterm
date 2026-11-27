@@ -2734,6 +2734,259 @@ async def _mk_dir(tdir, db_path=None):
                     **({"db_path": db_path} if db_path else {}))
 
 
+# ── §12.11.14: compressed generations (v2) and the recompaction of v1 ────────
+
+_WORDS = [b"ls -la", b"drwxr-xr-x", b"root", b"stefan", b"\x1b[0;32m", b"\x1b[0m", b"total 48", b"Makefile",
+          b"README.md", b"gateway", b"frontend", b"$ ", b"  ", b"2026-11-27", b"12:00", b"4096", b"-rw-r--r--"]
+
+
+def term_like(n, seed=1):
+    import random
+    rng = random.Random(seed)
+    out = bytearray()
+    while len(out) < n:
+        out += b" ".join(rng.choice(_WORDS) for _ in range(rng.randint(3, 12))) + b"\r\n"
+    return bytes(out[:n])
+
+
+async def v1_recording(st, sid, out, cast, step=7000):
+    """A closed recording written as WTX1 version 1 (a 3.8-rc build), several generations."""
+    st.write_ver = tx.VERSION
+    rec = await st.start_recorder(sid)
+    for i in range(0, max(len(out), len(cast)), step):
+        if out[i:i + step]:
+            feed_at(rec, out[i:i + step])
+        if cast[i:i + step]:
+            cast_at(rec, cast[i:i + step])
+        await rec.checkpoint()
+    await rec.close()
+    st.write_ver = tx.VERSION_Z
+
+
+def cast_stream(n, seed=2):
+    body = term_like(n, seed)
+    return b'{"version": 2, "width": 80}\n' + b"".join(
+        cast_line(i * 0.5, body[j:j + 200].decode("latin-1")) for i, j in enumerate(range(0, len(body), 200)))
+
+
+def armed(mark, point, exc=Crash):
+    """Raises `exc` at the first `point` seen after `mark` (a later step of one operation)."""
+    state = {"armed": False, "done": False}
+
+    def hook(p):
+        if p == mark:
+            state["armed"] = True
+        elif state["armed"] and not state["done"] and p == point:
+            state["done"] = True
+            raise exc(p)
+    return hook
+
+
+async def g_recompact():
+    print("== §12.11.14: v2 writer, recompaction of v1 recordings ==")
+    # writer nou: v2 implicit, recorduri comprimate, citire + căutare identice
+    st = store()
+    check("default write version is 2 (compressed); WEBTERM_TX_COMPRESS=0 → 1",
+          st.write_ver == tx.VERSION_Z and ts.write_version({"WEBTERM_TX_COMPRESS": "0"}) == tx.VERSION
+          and ts.write_version({}) == tx.VERSION_Z)
+    sid = new_sid()
+    await add_session(sid)
+    rec = await st.start_recorder(sid)
+    data = term_like(3 * 1024 * 1024 + 777)
+    for i in range(0, len(data), 300000):
+        feed_at(rec, data[i:i + 300000])
+        await rec.checkpoint()
+    d = await desc(st, sid)
+    check("live v2 generation: descriptor carries version 2", all(g.ver == 2 for g in d.generations))
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    ok = True
+    for lo in (0, 1, 1048575, 1048576, 1048577, 2 * 1048576 + 3, len(data) - 5):
+        ok = ok and await snap.read(lo, lo + 4000) == data[lo:lo + 4000]
+    snap.close()
+    check("live v2: ranges from the hub's live index decode byte-identical", ok)
+    await rec.close()
+    d = await desc(st, sid)
+    check("sealed v2 is smaller than plaintext ≥ 5×", sum(g.phys_len for g in d.generations) * 5 <= len(data),
+          sum(g.phys_len for g in d.generations))
+    check("v2 read back whole", await read_all(st, sid) == data)
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    await snap.read(0, snap.length)            # parsare completă → indexul .idx scris
+    snap.close()
+    idx = [n for n in names(sid) if n.endswith(".idx")]
+    snap = await st.open(sid, "out", access=await access(st, sid))
+    ok = True
+    for lo in range(0, len(data), 400000):
+        ok = ok and await snap.read(lo, lo + 9000, budget=ts.Budget(9000 + ts.PARSE_WITH_INDEX + 70000)) == data[lo:lo + 9000]
+    snap.close()
+    check("sealed v2: .idx written by a full parse; seeks use it within the index budget", idx and ok, idx)
+    check("verify of a v2 recording ok", (await st.verify(sid))["ok"])
+    st.close()
+
+    # recompactare: v1 → o generaţie v2 per kind, octeţi identici, generaţiile vechi retrase
+    st = store(gen_limits=(30, 1 << 30))
+    sid = new_sid()
+    await add_session(sid)
+    out, cast = term_like(400000, 3), cast_stream(300000)
+    await v1_recording(st, sid, out, cast)
+    d0, c0 = await desc(st, sid), await desc(st, sid, "cast")
+    check("fixture: a v1 recording with several generations per kind",
+          len(d0.generations) > 1 and all(g.ver == 1 for g in d0.generations + c0.generations), len(d0.generations))
+    cands = await st.recompact_candidates()
+    check("candidates: the v1 recording, with its v1 bytes", (sid, sum(g.phys_len for g in d0.generations + c0.generations)) in cands)
+    old_hex = [g.gen_id.hex() for g in d0.generations + c0.generations]
+    async with st.lease(sid):
+        res = await st.recompact(sid)
+    d1, c1 = await desc(st, sid), await desc(st, sid, "cast")
+    check("recompact: one sealed v2 generation per kind, version +1, flags kept",
+          len(d1.generations) == 1 == len(c1.generations) and d1.generations[0].ver == 2 == c1.generations[0].ver
+          and d1.version == d0.version + 1 and d1.flags == d0.flags, d1)
+    check("recompact: replay output byte-identical (both kinds)", await read_all(st, sid) == out
+          and await read_all(st, sid, "cast") == cast)
+    check("recompact: ≥ 5× smaller", res["out"][0] >= 5 * res["out"][1], res)
+    lg = await ledger(sid)
+    check("old generations retired and unlinked; files = the new ones only",
+          all(lg[h] == "gone" for h in old_hex) and not any(h in n for h in old_hex for n in names(sid)))
+    check("verify after recompaction ok", (await st.verify(sid))["ok"])
+    async with st.lease(sid):
+        again = await st.recompact(sid)
+    check("idempotent: a second pass has nothing to do", again == {} and sid not in dict(await st.recompact_candidates()))
+    # cititor deschis înainte: păstrează inode-urile vechi, citeşte la fel
+    sid2 = new_sid()
+    await add_session(sid2)
+    await v1_recording(st, sid2, out, cast)
+    old_snap = await st.open(sid2, "out", access=await access(st, sid2))
+    async with st.lease(sid2):
+        await st.recompact(sid2)
+    check("a reader opened before the recompaction still reads its snapshot", await old_snap.read(0, old_snap.length) == out)
+    old_snap.close()
+    # o sesiune vie (generaţie live) nu e atinsă
+    sid3 = new_sid()
+    await add_session(sid3)
+    st.write_ver = tx.VERSION
+    rec = await st.start_recorder(sid3)
+    feed_at(rec, out[:5000])
+    await rec.checkpoint()
+    st.write_ver = tx.VERSION_Z
+    async with st.lease(sid3):
+        r3 = await st.recompact(sid3)
+    check("a live recording is never recompacted (only its coordinator publishes)",
+          r3 == {} and sid3 not in dict(await st.recompact_candidates()))
+    await rec.close()
+    # carantină / ştergere: nu se atinge
+    await db.execute("INSERT INTO tx_quarantine(sid, kind, reason, since) VALUES(?,?,?,?)", sid3, "out", "continuity", time.time())
+    async with st.lease(sid3):
+        r3 = await st.recompact(sid3)
+    check("a quarantined recording is never recompacted", r3 == {} and sid3 not in dict(await st.recompact_candidates()))
+    await db.execute("DELETE FROM tx_quarantine WHERE sid=?", sid3)
+    st.write_ver = tx.VERSION
+    async with st.lease(sid3):
+        r3 = await st.recompact(sid3)
+    st.write_ver = tx.VERSION_Z
+    check("compression off (write version 1) → recompaction does nothing", r3 == {})
+    # INV-14: ştergerea în timpul recompactării câştigă
+    sid4 = new_sid()
+    await add_session(sid4)
+    await v1_recording(st, sid4, out, cast)
+    v4 = (await desc(st, sid4)).version
+
+    def erase_now(p):
+        if p == "rc-verified":
+            st.tombstone(sid4)
+    st.fault = erase_now
+    async with st.lease(sid4):
+        ok = await araises(st.recompact(sid4), ts.Refused, "erased")
+    st.fault = None
+    lg = await ledger(sid4)
+    check("erased while recompacting (tombstone before the commit) → refused, new generations retired, old kept",
+          ok and (await desc(st, sid4)).version == v4 and sorted(set(lg.values())) == ["gone", "published"], lg)
+    st.tombstoned.discard(sid4)
+    await db.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?,?,?)", sid4, "out,cast", time.time())
+    async with st.lease(sid4):
+        r4 = await st.recompact(sid4)
+    check("a durable erase intent blocks the recompaction (before any write)",
+          r4 == {} and sid4 not in dict(await st.recompact_candidates()))
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid=?", sid4)
+    # o intenţie apărută între verificare şi tranzacţie: refuzul vine din tranzacţie (sub barieră)
+
+    def intent_then_fail(p):
+        if p == "rc-verified":
+            con = sqlite3.connect(config.DB_PATH)
+            con.execute("INSERT INTO tx_erase_intents(sid, kinds, since) VALUES(?,?,?)", (sid4, "out,cast", time.time()))
+            con.commit()
+            con.close()
+    st.fault = intent_then_fail
+    async with st.lease(sid4):
+        ok = await araises(st.recompact(sid4), ts.Refused, "erased")
+    st.fault = None
+    check("an erase intent committed after the read-back → refused inside the publication transaction",
+          ok and (await desc(st, sid4)).version == v4)
+    await db.execute("DELETE FROM tx_erase_intents WHERE sid=?", sid4)
+    # CAS: descriptorul s-a mişcat între build şi publicare
+    def bump_desc(p):
+        if p == "rc-verified":
+            con = sqlite3.connect(config.DB_PATH)
+            con.execute("UPDATE tx_descriptors SET committed_at=committed_at WHERE sid=?", (sid4,))
+            con.execute("UPDATE tx_descriptors SET status='quarantined' WHERE sid=? AND kind='cast'", (sid4,))
+            con.commit()
+            con.close()
+    st.fault = bump_desc
+    async with st.lease(sid4):
+        ok = await araises(st.recompact(sid4), ts.Refused, "cas")
+    st.fault = None
+    await db.execute("UPDATE tx_descriptors SET status='ok' WHERE sid=?", sid4)
+    check("descriptor status changed meanwhile → CAS refused, nothing published", ok and (await desc(st, sid4)).version == v4)
+    # un pin (backup / cititor) amână unlink-ul generaţiilor vechi
+    old4 = [g.gen_id.hex() for k in ("out", "cast") for g in (await desc(st, sid4, k)).generations]
+    st.pin_gens(old4[:1])
+    async with st.lease(sid4):
+        await st.recompact(sid4)
+    lg = await ledger(sid4)
+    held = lg[old4[0]] == "retired" and any(old4[0] in n for n in names(sid4))
+    st.unpin_gens(old4[:1])
+    await asyncio.sleep(0.05)
+    lg = await ledger(sid4)
+    check("a pinned old generation is unlinked only after its unpin", held and lg[old4[0]] == "gone", lg)
+    check("after the recompaction: replay identical", await read_all(st, sid4) == out and await read_all(st, sid4, "cast") == cast)
+    st.close()
+
+    # crash la fiecare pas, apoi reluare (recover + încă o trecere)
+    steps = [("reserved", "reserved"), ("written", "rc-written"), ("sealed", "rc-sealed"),
+             ("verified", "rc-verified"), ("pre-commit", "pre-commit"), ("between", "rc-txn-between"),
+             ("post-commit", "post-commit"), ("committed", "rc-committed"), ("retire", "retire")]
+    for label, point in steps:
+        st = store(gen_limits=(30, 1 << 30))
+        sid = new_sid()
+        await add_session(sid)
+        await v1_recording(st, sid, out[:120000], cast[:90000])
+        mark = {"reserved": "reserved", "rc-written": "rc-written", "rc-sealed": "rc-sealed",
+                "rc-verified": "rc-verified"}.get(point)
+        st.fault = faults({point}) if mark else armed("rc-verified", point)
+        crashed = False
+        try:
+            async with st.lease(sid):
+                await st.recompact(sid)
+        except Crash:
+            crashed = True
+        st.fault = None
+        st.close()
+        st2 = store(gen_limits=(30, 1 << 30))
+        await st2.recover()
+        same = (await read_all(st2, sid) == out[:120000] and await read_all(st2, sid, "cast") == cast[:90000])
+        async with st2.lease(sid):
+            await st2.recompact(sid)
+        d = await desc(st2, sid)
+        lg = await ledger(sid)
+        listed = {g.gen_id.hex() for k in ("out", "cast") for g in (await desc(st2, sid, k)).generations}
+        files = {n.split(".")[2] for n in names(sid) if n.endswith(".wtx")}
+        check(f"crash at {label}: readable identical after recover, resumed to v2, no stray file or row",
+              crashed and same and d.generations[0].ver == 2 and files == listed
+              and all(v in ("gone", "published") for v in lg.values())
+              and {h for h, v in lg.items() if v == "published"} == listed
+              and await read_all(st2, sid) == out[:120000] and (await st2.verify(sid))["ok"],
+              (crashed, same, lg, files, listed))
+        st2.close()
+
+
 async def main():
     await db.connect()
     try:
@@ -2757,6 +3010,7 @@ async def main():
         await g_recheck()
         await g_recheck2()
         await g_recheck3()
+        await g_recompact()
     finally:
         await db.close()
 
