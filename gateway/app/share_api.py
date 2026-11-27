@@ -1184,7 +1184,25 @@ async def list_quarantined_recordings(user=Depends(authz.perm('backups.manage'))
     """Recordings not served pending proof, with why (Owner only; metadata, no content)."""
     await _require_owner(user)
     st = _erasure_store()
-    return await erasure.list_quarantined(st)
+    res = await erasure.list_quarantined(st)
+    await _annotate_sessions(res["items"])
+    return res
+
+
+async def _annotate_sessions(items) -> None:
+    """Titlul şi hostul sesiunii pe fiecare rând (panoul Owner): factorul proaspăt al acţiunii se leagă
+    de hostul sesiunii (_owner_fresh_factor), deci UI-ul trebuie să-l ştie; 0 = sesiune fără rând."""
+    sids = [i["sid"] for i in items]
+    meta = {}
+    for k in range(0, len(sids), 100):
+        part = sids[k:k + 100]
+        for r in await db.fetchall("SELECT id, host_id, title, state FROM sessions WHERE id IN (%s)"
+                                   % ",".join("?" * len(part)), *part):
+            meta[r["id"]] = r
+    for i in items:
+        r = meta.get(i["sid"])
+        i.update(title=r["title"] if r else "", host_id=r["host_id"] if r else 0,
+                 live=bool(r and r["state"] in ("creating", "live")))
 
 
 @router.get("/api/recordings/encryption")
@@ -1212,15 +1230,7 @@ async def recordings_encryption_status(sid: str = "", user=Depends(authz.perm('b
                                                 "stray", "leftovers", "one_kind", "orphans", "error",
                                                 "format_block", "recompaction")}
         failed = await migration.failed_details(st)
-        if failed:
-            # titlul şi hostul sesiunii, ca Owner-ul să ştie CE alege (retry / discard)
-            rows = await db.fetchall("SELECT id, host_id, title, state FROM sessions WHERE id IN (%s)"
-                                     % ",".join("?" * len(failed)), *[f["sid"] for f in failed])
-            meta = {r["id"]: r for r in rows}
-            for f in failed:
-                r = meta.get(f["sid"])
-                f.update(title=r["title"] if r else "", host_id=r["host_id"] if r else None,
-                         live=bool(r and r["state"] in ("creating", "live")))
+        await _annotate_sessions(failed)     # titlul şi hostul: Owner-ul ştie CE alege (retry / discard)
         out["failed"] = failed
     if sid:
         kinds = await erasure.status_of(st, sid)

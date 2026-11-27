@@ -925,7 +925,8 @@ async def g_owner_resolution(st, c, host_id, migrated):
     check("Owner panel (GET /api/recordings/encryption): both failed sessions, with their kinds, error and "
           "session title; migration counts present",
           set(fl) >= {f1, f2} and sorted(fl[f1]["kinds"]) == ["cast", "out"]
-          and "changed since" in fl[f1]["error"] and fl[f1]["title"] is not None and fl[f1]["live"] is False
+          and "changed since" in fl[f1]["error"] and fl[f1]["title"] is not None
+          and fl[f1]["host_id"] == host_id and fl[f1]["live"] is False
           and (r.json().get("migration") or {}).get("failed", 0) >= 4, r.text[:400])
     r = await c.post(f"/api/recordings/migration/{f1}/retry", json={})
     check("retry without a fresh factor → 403", r.status_code == 403, r.text)

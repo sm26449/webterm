@@ -1872,6 +1872,9 @@ async def g_recovery(st, c, uid, host_id, keep):
     items = {i["sid"]: i for i in r.json().get("items", [])} if r.status_code == 200 else {}
     check("list: reason and recoverable per recording",
           items.get(rec, {}).get("recoverable") is True and items.get(keep, {}).get("recoverable") is False, r.text)
+    check("list: each row carries its session's host (the fresh factor binds to it) and title",
+          items.get(rec, {}).get("host_id") == host_id and items[rec].get("title", "").startswith("t-")
+          and items[rec].get("live") is False, r.text[:300])
     r = await c.get(f"/api/sessions/{rec}/transcript?format=out")
     check("normal read of a quarantined recording → 423", r.status_code == 423, r.status_code)
     date = time.strftime("%Y-%m-%d", time.gmtime(since))
