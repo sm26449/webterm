@@ -1,8 +1,36 @@
 # Encryption at rest (design, 3.8)
 
-Status: **proposal v4**, revised after three independent reviews (Codex, 2026-11-22; reports kept
-locally in `.audit/`). §12 is normative and wins over any earlier wording. No code yet. Owner decision 2026-11-22: session recordings and everything
-about clients and users are encrypted at rest, on every installation.
+Status (2026-11-27, for the 3.8.0 release): **phase 1 is implemented**; the operator guide is
+[docs/INSTALL.md → Encryption at rest](../INSTALL.md#encryption-at-rest), the alarms and what to do
+about them are in [docs/RUNBOOK.md → Encryption at rest](../RUNBOOK.md#encryption-at-rest-alarms-and-what-to-do),
+and the rule is [INV-14](INVARIANTS.md#inv-14). This document started as proposal v4 (three
+independent reviews, Codex, 2026-11-22; reports kept locally in `.audit/`) and grew with the
+implementation notes of every PR; §12 is normative and wins over any earlier wording, including
+§1–§11, which describe the 3.7 starting point and the original plan.
+
+| Part | 3.8.0 | Where |
+|---|---|---|
+| Master key outside the volume, `keys.wtk` key manifest, boot contract (refuse before any change, no fallback), process lock | implemented | §3, §12.2, §12.9 |
+| One-way migration of a 3.7 volume (old key proven on the database first) | implemented | §12.9 |
+| `WTS1` container for every backup and snapshot the gateway writes (download, scheduled `.wts`, cloud / SFTP / FTPS, pre-restore copy); verified restore before staging | implemented | §12.10 |
+| Host archives `WTBK2` (`scripts/backup.sh`): streamed, any size, free-space reserve, scratch in `backups/.work` | implemented | §12.10.1 |
+| Encrypted recordings `WTX1` (opt-in, `WEBTERM_TX_RECORDINGS=1`) and the background migration of plaintext ones | implemented | §12.1, §12.11, §12.11.5 |
+| Compressed records (`WTX1` v2, on by default) and the recompaction of v1 recordings | implemented | §12.11.14 |
+| Erasure journal `WTJ1`, off-host attestation (SFTP / FTPS only), quarantine, Owner recovery / release, conflict resolution, retiring a destination | implemented (API only, no Settings screen yet) | §12.5, §12.11.4, §12.11.8 |
+| Control socket for host backups of a running gateway with encrypted recordings | implemented | §12.11.3 |
+| Downgrade guard in `deploy.sh` / `rollback.sh` / `upgrade.sh` | implemented | §12.9, INV-14 |
+| Incremental host backups (backup sets `WTBS1`) | **planned for 3.8.1**, design only | §12.10.2 |
+| The database file (SQLCipher) | **not in 3.8.0**; phase 2 after its supply-chain gate | §7 |
+| `agent-signing.key`, `vapid.key`, `setup-token` under the keyring | **not in 3.8.0**: plain files in the volume (the signing pair travels inside the encrypted `WTS1` of every backup) | §10 |
+| Master key rotation command, recovery-kit export (UI / CLI) | **not in 3.8.0** | §3.3, §11 |
+| Re-encryption of `FK_legacy` values (the forward-token HMAC key still derives from it) | **not in 3.8.0** | INV-14 limits |
+| Google Drive / Dropbox as erasure attestation destinations | **not in 3.8.0** | §12.11.4 |
+
+Out of scope by design: a compromised running gateway or root on the live host (N1), and a VM
+snapshot that includes memory (§2). Owner decision 2026-11-22: session recordings and everything
+about clients and users are encrypted at rest, on every installation. 3.8.0 delivers the keys,
+the backups and the recordings; recordings are still an opt-in there (an upgrade never turns them
+on, INSTALL.md lists the checks), and the database follows in a later phase.
 
 ## 1. Where we are today (3.7.1)
 
@@ -1572,7 +1600,8 @@ restores unchanged.
 
 ### 12.10.2 Incremental host backups: backup sets `WTBS1` (3.8, step A)
 
-Normative design, **no code yet**. Host path only (`scripts/backup.sh` → `hostops`, `restore.sh`).
+Normative design, **no code yet: planned for 3.8.1** (3.8.0 ships the single-file host archive of
+§12.10.1, a full copy of the volume every night). Host path only (`scripts/backup.sh` → `hostops`, `restore.sh`).
 The in-app routes (download, scheduled `.wts`, cloud / SFTP / FTPS upload, pre-restore safety copy)
 and the single-file host archive of §12.10.1 stay byte for byte as they are. Where §12.10.1 or
 §12.11.3 differ for a set, this section wins.

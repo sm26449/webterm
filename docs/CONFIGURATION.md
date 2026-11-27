@@ -20,6 +20,9 @@ is the full reference.
 | `WEBTERM_MASTER_KEY_FILE` | 3.8, encryption at rest: path of the master key file inside the container (base64 of 32 bytes; mode 0400/0600, owned by the app user, outside the data volume). `install.sh` / `setup.sh` set it to `/run/webterm-key/master.key` on a new install; empty on an upgraded install = legacy until you opt in. See [INSTALL → Encryption at rest](INSTALL.md#encryption-at-rest) |
 | `WEBTERM_KEY_IN_VOLUME` | `1` keeps the master key inside the data volume (`/data/master.key`, "reduced protection"): for test setups. Never together with a key file |
 | `WEBTERM_MASTER_KEY` | the master key as a value (base64). Discouraged: it is visible in the container's metadata (System health warns); the compose files do not pass it |
+| `WEBTERM_TX_RECORDINGS` | `1` encrypts session recordings (3.8, off by default; needs a protected volume, refused at boot otherwise). Existing plaintext recordings are migrated in the background, and erasure becomes final across restores. Read the checks first: [INSTALL → Encrypting session recordings](INSTALL.md#encrypting-session-recordings) |
+| `WEBTERM_TX_COMPRESS` | `0` writes encrypted recordings uncompressed and stops the background compression of older ones (default on: records are compressed before encryption, so recordings and backups stay near gzip size). Both forms stay readable |
+| `WEBTERM_IMAGE_ERA` | read by `deploy.sh` / `rollback.sh` / `upgrade.sh`, not by the gateway: `3.8` declares a locally built image without a version label as 3.8 for **one run** (`sudo WEBTERM_IMAGE_ERA=3.8 ./deploy.sh <image>`), so the downgrade guard lets it start on a migrated volume. Never put it in `.env` |
 | `WEBTERM_TRUSTED_PROXY_HOSTS` | comma-separated proxy **host names** allowed to set `X-Forwarded-For`, resolved through docker DNS to the proxy container's exact IP. The compose files default it to `traefik` (`docker-compose.prod.yml`) and `caddy` (`docker-compose.yml`). With neither this nor the CIDRs set, the header is ignored and the socket peer is used |
 | `WEBTERM_TRUSTED_PROXY_CIDRS` | comma-separated CIDRs (e.g. `172.18.0.0/16`) also allowed to set `X-Forwarded-For` — an alternative or addition to the host names |
 | `WEBTERM_TRUSTED_PROXY_HOPS` | how many trusted proxies sit in front of the gateway (default 1; Cloudflare → Traefik = 2). The client IP is read that many entries from the right of `X-Forwarded-For` |
@@ -161,7 +164,10 @@ The timer reads `/etc/default/webterm-backup`, not `.env`.
 
 | Variable | Role |
 |---|---|
-| `WEBTERM_BACKUP_PASSPHRASE` | encrypts the archive (`.tar.gz.enc`). Without it a non-interactive run **refuses** — the archive holds the vault key |
+| `WEBTERM_BACKUP_PASSPHRASE` | encrypts the archive (`.tar.gz.enc`; on a protected volume a streamed `.wtbk`, where it is **mandatory**). Without it a non-interactive run **refuses** — a pre-3.8 archive holds the vault key |
+| `WEBTERM_BACKUP_DIR` | where archives go (default `/var/backups/webterm`); preferably another disk than the data volume. Each archive is a full copy, recordings included |
+| `WEBTERM_BACKUP_KEEP` | how many archives to keep (default 14). A whole number ≥ 1; anything else is refused before anything is written. Budget KEEP × the archive size ([INSTALL → Backup sizes and disk space](INSTALL.md#backup-sizes-and-disk-space)) |
+| `WEBTERM_VOLUME` | the Docker volume to back up or restore (default `webterm_webterm-data`, which is right only for `/opt/webterm`); `restore.sh` and the lifecycle scripts refuse one that is not the volume compose mounts at `/data` |
 | `WEBTERM_BACKUP_ALLOW_PLAINTEXT` | `1` overrides that refusal. Not advised |
 | `WEBTERM_BACKUP_RSYNC` | `user@host:/path/` — copy the encrypted archive off-host over rsync/SSH (key auth) |
 | `WEBTERM_BACKUP_FTPS` | `ftp://host/path/` — off-host over FTPS (`curl --ssl-reqd`; plain FTP is refused) |

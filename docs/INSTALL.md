@@ -171,6 +171,15 @@ refuse with nothing changed. Between 3.8.x versions, and on a volume that was ne
 rollback works as before. To go back to 3.7 after a migration, see
 [Going back to 3.7](#going-back-to-37).
 
+<a id="upgrading-from-37-to-38"></a>
+**Upgrading from 3.7 to 3.8.** `sudo ./upgrade.sh v3.8.x` as usual. It changes nothing in the
+data volume: with no master key configured, 3.8 boots a 3.7 volume as 3.7 left it (System health
+says *Encryption at rest is off*), and rolling back to 3.7 still works. Encryption at rest is a
+separate, deliberate step afterwards ([Encryption at rest](#encryption-at-rest), steps 1–5), and
+the point of no return for rollback is that step, not the upgrade. Encrypted recordings are a
+second opt-in on top of it ([Encrypting session recordings](#encrypting-session-recordings)). A
+new installation made with the 3.8 `install.sh` is protected from the start.
+
 <a id="upgrading"></a>
 **Upgrading: one command.** `cd /opt/webterm && sudo ./upgrade.sh` takes the
 latest published version; pass a tag to target one. It resolves the version, checks ghcr auth
@@ -304,7 +313,11 @@ once confirmed — a failure only the IdP can cause, failures from two or more a
 probe; a rejected login code is a user error and never counts),
 risky configuration (forwards on http://, SSO without a group gate), the daily cleanup, database
 size, backup coverage / off-host copy / last verification, the TLS certificates, the dead-man
-switch, a new WebTerm version, and the forward-domain DNS (daily). Two checks watch the roles:
+switch, a new WebTerm version, and the forward-domain DNS (daily). Since 3.8, five checks watch
+encryption at rest: the protection state, backups that still hold the old vault key, and, with
+encrypted recordings on, their migration and compression, the erasure journal and the host backup
+socket (what each message means and what to do:
+[RUNBOOK → Encryption at rest](RUNBOOK.md#encryption-at-rest-alarms-and-what-to-do)). Two checks watch the roles:
 **Permanent Owner** (warning when only time-bound Owners are left, critical when the last one
 ends within 7 days or no Owner is left) and **Break-glass Owner** (warning when no permanent
 Owner has a local password, so an IdP outage would lock every Owner out); both print the
@@ -655,8 +668,17 @@ backup or snapshot the gateway writes is an encrypted `WTS1` container that cann
 without it. A copy of the volume alone no longer gives the credentials away.
 
 Limits, stated plainly: the SQLite database file and its WAL are not encrypted yet (metadata
-such as host names, users and the audit log stay readable in the volume), and session recordings
-are encrypted only once you opt in ([Encrypting session recordings](#encrypting-session-recordings)).
+such as host names, users and the audit log stay readable in the volume; whole-file encryption
+with SQLCipher is planned for a later release), and session recordings are encrypted only once you
+opt in ([Encrypting session recordings](#encrypting-session-recordings)). Encryption at rest
+protects **copies**: of the volume, of a backup, of a disk without the key file. It does not
+protect against a compromised running gateway or root on the live host, which can read the key
+and everything it opens; and a key file on the same disk does not protect a copy of the whole
+disk or VM (keep the key off that host if you need that). The agent signing key
+(`agent-signing.key`), `vapid.key` and `setup-token` stay plain files in the volume; the signing
+key travels inside the encrypted container of every backup.
+What each System health alarm means and what to do:
+[RUNBOOK → Encryption at rest](RUNBOOK.md#encryption-at-rest-alarms-and-what-to-do).
 The rule this follows is
 [INV-14](design/INVARIANTS.md#inv-14); the design is in
 [design/ENCRYPTION-AT-REST.md](design/ENCRYPTION-AT-REST.md).
@@ -790,6 +812,9 @@ no key material:
 | `legacy-key-unproven` | `data/secret` does not decrypt this database (a mixed or foreign volume) |
 | `locked` | another process holds the data directory (a second gateway, or `app.admin vacuum`) |
 | `ambiguous` | the volume mixes old and new key files (for example a 3.7 image was started on a migrated volume and created a new `data/secret`) |
+| `conflict`, `bad-value` | more than one key source is set (`WEBTERM_MASTER_KEY_FILE`, `WEBTERM_MASTER_KEY`, `WEBTERM_KEY_IN_VOLUME`), a key file is configured next to an in-volume `/data/master.key`, or `WEBTERM_KEY_IN_VOLUME` is not `0`/`1` |
+| `bad-encoding`, `unreadable` | the key file is not base64 of 32 bytes, or cannot be read |
+| anything else (`manifest-invalid`, `staged-restore-incomplete`, `io-error`…) | the volume or a staged restore is not in a state the boot can prove; the log line says what to do. Do not edit the data directory by hand |
 
 The gateway never falls back to another key. The recovery commands (`python3 -m app.admin
 passwd`, `promote`, `disable-2fa`…) still run with the gateway up, as before: they change only
@@ -836,7 +861,15 @@ compose up` by hand.
 - System health → **crypto.migration**: *Migrating recordings to encrypted storage: N of M done*,
   then *Every recording is encrypted*. **crypto.erasure**: *Erased recordings are journalled and
   attested off-host*; after the first erasure, a warning *Erasure n is not attested on …* means the
-  destination did not accept or read back the journal yet (it is retried with backoff).
+  destination did not accept or read back the journal yet (it is retried with backoff). Every
+  other message, and what to do about it:
+  [RUNBOOK → Encryption at rest](RUNBOOK.md#encryption-at-rest-alarms-and-what-to-do).
+
+**Disk.** Encrypted recordings take about the size of a gzip of their plaintext on the volume and
+in every backup (compression is on by default); with `WEBTERM_TX_COMPRESS=0` they take their full
+plaintext size. Recordings never shrink a backup: each host archive and each in-app snapshot with
+transcripts carries all of them, so size `WEBTERM_BACKUP_KEEP` accordingly
+([Backup sizes and disk space](#backup-sizes-and-disk-space)).
 
 **Compression.** Encrypted recordings are compressed before they are encrypted (terminal output
 usually shrinks 10–15×), so the volume and the backups stay close to the size of a gzip of the
@@ -930,6 +963,48 @@ host scripts hand the work to the gateway's own code, run in the app image
 - A host-script backup is published only once it is complete: written to a unique temporary file,
   flushed, linked to exactly its final name (never over an existing archive, never into a
   directory of that name), and the directory flushed.
+- With encrypted recordings on and the app running, `backup.sh` never reads the live volume: it
+  asks the gateway over a local control socket (`/data/.ctl/backup.sock`, root or the app user
+  only), which takes the same consistent snapshot as an in-app backup and hands it over once
+  verified. If the socket is unavailable (System health, *Host live backup socket*) the run is
+  refused; a backup with the app stopped does not need it.
+- Rotation keeps the newest `WEBTERM_BACKUP_KEEP` archives (default 14) and deletes the older
+  ones by exact path, so a backup directory whose name has spaces or quotes is safe. The value
+  must be a whole number of at least 1: anything else (`0`, `two`, empty after a typo) is refused
+  before anything is written, because it used to make the rotation delete every archive.
+
+<a id="backup-sizes-and-disk-space"></a>
+### Backup sizes and disk space
+
+- **Each host archive is a full copy** of the volume (database, keys, recordings). Budget
+  `WEBTERM_BACKUP_KEEP` × the archive size in `WEBTERM_BACKUP_DIR`, ideally on another disk than
+  the data volume. Incremental host backups, where a night copies only the recordings that are
+  new, are planned for **3.8.1** (design: [ENCRYPTION-AT-REST.md §12.10.2](design/ENCRYPTION-AT-REST.md#12102-incremental-host-backups-backup-sets-wtbs1-38-step-a)).
+- **Recordings dominate the size.** Encrypted recordings are compressed before encryption, so an
+  archive is close to a gzip of the plaintext (terminal output usually shrinks 10–15×); without
+  compression (`WEBTERM_TX_COMPRESS=0`), or with recordings encrypted by an early 3.8 build that the
+  background rewrite has not reached yet, it is about the plaintext size. Measure yours with
+  `sudo du -sh "$(sudo docker volume inspect webterm_webterm-data -f '{{.Mountpoint}}')/transcripts"`.
+- **A free-space reserve is always kept**: backups and restores leave at least
+  **max(1 GiB, 5 % of the filesystem)** free for the gateway (the recording migration and the
+  background compression check their own need instead: twice the plaintext recording, or once the
+  encrypted one, plus 64 MiB; when that is not free they skip the recording with an error in
+  System health). Before it writes, `backup.sh`
+  counts the archive, its work copy and the database copy on the disks where each will live, and
+  refuses with the sizes when that would cross the reserve; `restore.sh` also counts the safety
+  copy of the current data and refuses before it stops the app; the boot checks the space again
+  before it applies a staged restore (the old data stays). A writer that would cross the reserve
+  while running stops and removes its partial files.
+- **Scratch is on the data volume**, in `/data/backups/.work` (private, one directory per
+  operation, removed at the end, and swept at boot and before each operation), never in `/tmp`
+  or in memory. A backup therefore temporarily needs about one archive's worth of space on the data
+  volume too.
+- **In-app downloads and off-host uploads** of a protected volume are built in memory and limited
+  to 512 MiB, the restore upload limit; a larger one is refused while it is produced
+  (*exceeds a safety limit*). Leave the transcripts out of it, or use `scripts/backup.sh`. Scheduled
+  in-app snapshots (`.wts`) are written to `/data/backups` as a stream and kept 7 days.
+- **A single file of 8 GiB or more** (a very large database) cannot be held by the archive format
+  and is refused at once, with its name.
 
 Pre-3.8 volumes are archived as before (`webterm-<date>.tar.gz[.enc]`), and their archives are
 staged through the same gateway code (with the key proof above, and the same atomic, flushed
@@ -960,7 +1035,9 @@ nothing at all. `WEBTERM_BACKUP_ALLOW_PLAINTEXT=1` overrides it, and is not advi
   the vault key + optionally the transcripts. Because it includes the key (which
   decrypts all credentials), the download is **encrypted with a password you
   choose** (scrypt → AES-256-GCM) — **without the password you cannot restore,
-  don't lose it**.
+  don't lose it**. On a protected volume it holds `keys.wtk` instead of the vault key, inside an
+  encrypted `WTS1` container: restoring it also needs the installation's **master key**, and it is
+  limited to 512 MiB ([Backup sizes and disk space](#backup-sizes-and-disk-space)).
 - **Automatic backup** daily/weekly, kept 7 days on the server. When it's ready
   you get an in-app notification and can download it (encrypted on download).
 - **Restore** from a `.wtbk`: after validation (password + DB integrity), the app

@@ -323,6 +323,81 @@ single-admin model (one client polls, not N).
   (green <20ms), process memory. If the lag keeps climbing, the gateway is
   overloaded — before it stops responding.
 
+<a id="encryption-at-rest-alarms-and-what-to-do"></a>
+
+## Encryption at rest: alarms and what to do (3.8)
+
+How to turn it on, and the boot refusals (`boot refused: <reason>`), are in
+[INSTALL.md → Encryption at rest](INSTALL.md#encryption-at-rest). This table is the operator side
+of **Settings → System health**: every message the 3.8 checks can show, and what to do about it.
+The checks `crypto.erasure`, `crypto.migration` and `crypto.backup_socket` appear only while
+encrypted recordings are on (`WEBTERM_TX_RECORDINGS=1`). Restart the app with
+`cd /opt/webterm && sudo docker compose -f docker-compose.prod.yml restart app`; change `.env` and
+start a new container only with `sudo ./deploy.sh`.
+
+**`crypto.protection` — Encryption at rest**
+
+| Message | Severity | What to do |
+|---|---|---|
+| *Encryption at rest is on (master key: file)* | ok | Nothing. Keep the copy of `secrets/master-key/master.key` off this machine up to date. |
+| *Encryption at rest is off: the vault key is stored in the data volume* | info | A 3.7 volume not migrated yet (legacy). Turn it on when you are ready: INSTALL.md, *Encryption at rest*, steps 1–5. |
+| *Reduced protection: the master key is stored in the data volume* | warning | `WEBTERM_KEY_IN_VOLUME=1` (`/data/master.key`): meant for test setups, since every copy of the volume includes the key. There is no in-place switch to a key file in 3.8.0 (a key file next to `/data/master.key` is refused at boot: `conflict`); for production, start from a new installation with a key file. |
+| *The master key comes from WEBTERM_MASTER_KEY…* | warning | The key is in the container's environment, which `docker inspect` and docker-socket-proxy can read. Put it in a file (0400, owner 10001), set `WEBTERM_MASTER_KEY_FILE`, remove `WEBTERM_MASTER_KEY`, `sudo ./deploy.sh`. |
+
+**`crypto.legacy_copies` — Backups with the old vault key**
+
+| Message | Severity | What to do |
+|---|---|---|
+| *N backup file(s) still contain the old vault key in clear* | warning | 3.7 snapshots (`*.wtsnap`) and pre-restore copies (`*.wtsnap.keep`) in `/data/backups`. The `.wtsnap` files expire after 7 days; delete the `.keep` files from Settings → Backup once you no longer need them. Whoever holds one can read the credentials the old key protected. |
+| *N off-host backup(s) at … were made before the migration…* | warning | Archives at the configured destination named before the migration (listed by name, never opened). Delete them there once newer backups exist, or let the off-host retention remove them. Treat any other copy made before the migration (downloads, `/var/backups/webterm/*.tar.gz.enc`) the same way. |
+| *No stored backup contains the old vault key* | ok | Nothing. |
+
+**`crypto.migration` — Recording migration and compression**
+
+| Message | Severity | What to do |
+|---|---|---|
+| *Migrating recordings to encrypted storage: n of m done…* | info | Wait. The plaintext of each recording is deleted only after its encrypted copy is verified. Keep free disk at least the size of what is left. |
+| *Every recording is encrypted (…)* | ok | Nothing. |
+| *N recording file(s) could not be migrated… Sessions: …* | warning | Their plaintext is kept. Read the error in the message and in `docker logs webterm-app-1 2>&1 \| grep -i migrat`. Fix the cause (disk space, permissions), then, as Owner with a fresh second factor, `POST /api/recordings/migration/<sid>/retry`, or delete the plaintext and erase the session with `…/discard` (confirm = the first 8 characters of the session id). |
+| *Compressing encrypted recordings: n done, m left…* | info | Wait: older encrypted recordings are rewritten compressed in the background, a few hundred MB per minute, and replay the same bytes. |
+| *N encrypted recordings could not be compressed… still readable* | warning | They stay in the older, uncompressed format and replay as before; a transient error (I/O, too many open files) is retried later. Look at the error (usually disk space or I/O). Nothing is lost. `WEBTERM_TX_COMPRESS=0` plus `sudo ./deploy.sh` stops the rewrite, and new recordings are then written uncompressed too. |
+| *N encrypted recording(s) failed their integrity check…* | warning | The listed recordings did not verify whole and were **left untouched**, so the damage stays visible. Check the disk (`dmesg`, SMART). Restore the affected sessions from a backup if you need them; do not delete the files before you have looked. |
+| *N encrypted recording(s) are too large to compress in the background…* | info | Nothing to do: they stay readable in the older format. |
+
+**`crypto.erasure` — Erasure journal** (this check can turn critical)
+
+| Message | Severity | What to do |
+|---|---|---|
+| *Erased recordings are journalled and attested off-host* | ok | Nothing. |
+| *Erasures survive restores on this volume only: no off-host destination is configured* | info | Configure an SFTP or FTPS destination (Settings → Backup → *Cloud copy (off-host)*). Google Drive and Dropbox cannot hold the attestation. |
+| *Erasure n is not attested on … (since …)* | warning | The destination did not accept or read back the journal head; it is retried with a growing delay (up to 30 minutes between attempts). Check the destination with *Upload now* (credentials, host key, free space, permissions on the folder). |
+| *The erasure journal is nearly full* / *is full…* | warning | About one million erasures fit; at the cap new erasures are refused. Report it: there is no rotation command in 3.8.0. |
+| *An erasure did not finish (…): erasure is refused until the gateway restarts* | critical | Restart the app. Its boot completes the interrupted erasure (the erase intent is durable). If it comes back, read `docker logs webterm-app-1 2>&1 \| grep -i erasure`. |
+| *The erasure journal is damaged (…): every recording is quarantined* | critical | Do not delete or edit `/data/erasures.wtj`. Check the disk. The quarantine lifts once a destination proves the history. Meanwhile an Owner can open one recording at a time with `POST /api/sessions/<sid>/recovery`, confirm = `<first 8 characters of the sid> <the diagnosis shown>` (fresh second factor, audited, a security e-mail). |
+| *Erasures after the backup of … cannot be proven: restored recordings stay quarantined* | warning | After a restore. Make sure the destination is reachable: the janitor lifts the quarantine by itself once it proves the history. If the destination is gone for good, retire it (below). Until then `GET /api/recordings/quarantine` lists the recordings, and an Owner can open one with `POST /api/sessions/<sid>/recovery` (confirm = the backup date), then `…/recovery/release` or `…/recovery/requarantine`. |
+| *Two erasure journals disagree: the quarantine cannot be lifted* | critical | Two copies of this installation wrote erasures independently (a parallel restore, an old copy still running against the same destination). Stop the copy that should not run. Then, as Owner, `POST /api/recordings/continuity/conflict/resolve` adopts the branch that holds every erasure seen (every erasure on every branch stays applied). |
+| *The erasure attestations on … are older than recorded (rolled back)* | critical | The destination lost newer journal objects (a restore or clean-up of the destination, a retention job deleting them). Find out what removed them. If the destination is gone for good, retire it: `POST /api/recordings/continuity/destinations/<id>/retire` (Owner, audited; its erasures are kept). |
+| *… holds an erasure journal newer than this server's (n=…) that cannot be verified: every recording is quarantined* | critical | Either another server of this installation is ahead of this one (stop the one that should not run, or let this one catch up once the object verifies), or the object at the destination is damaged or not ours. Removing or repairing that object is the way out; the quarantine lifts when the destination answers an authentic journal. |
+
+**`crypto.backup_socket` — Host live backup socket**
+
+| Message | Severity | What to do |
+|---|---|---|
+| *Host live backups go through the gateway's backup control socket* | ok | Nothing. |
+| *The backup control socket is not available, so host live backups… are refused: …* | warning | `scripts/backup.sh` with the app running fails until it is fixed; in-app and scheduled backups still work. The socket lives in `/data/.ctl` (a directory owned by the app user, mode 0700). Read the error, fix ownership or mode, restart the app. As a stop-gap, a backup with the app stopped does not need the socket. |
+
+**Disk space** (`disk`, and the host backup's own refusals). Backups and restores keep at least
+**max(1 GiB, 5 % of the filesystem)** free for the gateway (the recording migration and the
+background compression need twice the plaintext recording, or once the encrypted one, plus 64 MiB
+free, and report `disk` in their System health message otherwise): a host backup
+or restore that would cross it is refused up front with the sizes (*… MiB stay free for the
+gateway — nothing was written*), and a writer that would cross it while running stops and removes
+its partial files. Their scratch is in `/data/backups/.work` on the data volume (never `/tmp`);
+whatever an interrupted run leaves there is removed at the next boot and before each operation.
+To make room: delete old archives in `WEBTERM_BACKUP_DIR` (or lower `WEBTERM_BACKUP_KEEP`), and
+the `.keep` / old snapshot files in Settings → Backup. Disk usage per backup:
+[INSTALL.md → Backup sizes and disk space](INSTALL.md#backup-sizes-and-disk-space).
+
 ## Disaster recovery (tested, not assumed)
 
 Full drill verified (v1.0.29): live backup → total deletion of DB + vault key
@@ -347,6 +422,14 @@ credentials** recovered and decryptable.
    systemctl status webterm-backup.service      # Result: exit-code = no backups
    ls -l /var/backups/webterm                   # should grow daily, files end in .enc (.wtbk when protected)
    ```
+
+   On a protected volume (3.8) the archive is a streamed `.wtbk` of any size, and each one is a
+   full copy (recordings included): budget `WEBTERM_BACKUP_KEEP` (default 14) times its size in
+   `WEBTERM_BACKUP_DIR`, plus the work copy on the data volume while it runs
+   ([INSTALL.md → Backup sizes and disk space](INSTALL.md#backup-sizes-and-disk-space)). With
+   encrypted recordings on and the app running, the backup goes through the gateway's control
+   socket; if System health shows it unavailable, the run is refused rather than reading the live
+   volume. Incremental host backups (only new recordings copied each night) are planned for 3.8.1.
 2. **Restore**: `sudo [WEBTERM_BACKUP_PASSPHRASE=...] ./scripts/restore.sh <archive.wtbk|.tar.gz|.enc>` —
    makes one private copy of the archive and checks it with the **app's own restore code**
    (and, for a protected volume, the master key this installation is configured with) before
@@ -396,7 +479,7 @@ mkdir -p ~/webterm-recovery
 sudo cp /etc/default/webterm-backup   ~/webterm-recovery/    # THE PASSPHRASE — first
 sudo cp -p /opt/webterm/secrets/master-key/master.key ~/webterm-recovery/ 2>/dev/null || true  # 3.8 master key, if protected
 sudo cp /opt/webterm/.env             ~/webterm-recovery/
-sudo cp /var/backups/webterm/*.enc    ~/webterm-recovery/    # the archives are root-only, 600
+sudo cp /var/backups/webterm/*.enc /var/backups/webterm/*.wtbk ~/webterm-recovery/ 2>/dev/null  # root-only, 600; .wtbk = protected volume
 sudo chown -R "$(id -un)" ~/webterm-recovery
 ```
 
@@ -460,6 +543,13 @@ For the "I have no server access, but I have the app" case: **Settings → Backu
   A **pre-restore** snapshot of the current state is saved automatically to
   `data/backups/` as a safety net.
 - CLI equivalent: same result as `scripts/restore.sh`, but triggered from the UI.
+- **On a protected volume (3.8)** the download is an encrypted `WTS1` container inside the
+  passphrase layer, holding `keys.wtk` and never the master key: restoring it on a new instance
+  needs that instance to run with **the same master key** (put the key file in place before its
+  first boot), otherwise it is refused with the key id it needs. A download or off-host upload is
+  built in memory and limited to 512 MiB (the restore upload limit): a larger one is refused while
+  it is produced; leave the transcripts out, or use `scripts/backup.sh`, which streams any size.
+  The scheduled copies on the server are `.wts` files that only this installation's keys open.
 
 **Off-host destinations from the UI.** Settings → Backup can push a copy of the same
 encrypted `.wtbk` off the box, configured entirely from the interface — no env vars, no
