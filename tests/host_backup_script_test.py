@@ -90,6 +90,7 @@ def base_env():
     return {k: v for k, v in os.environ.items() if not k.startswith(("WT_", "WEBTERM_"))}
 
 
+HOSTOPS_MAIN = "\nimport sys\nfrom app import hostops\nsys.exit(hostops.main(sys.argv[1:]))\n"
 if a[:1] == ["compose"]:
     sys.exit(0)
 if a[:1] in (["image"], ["pull"], ["logs"]):
@@ -155,6 +156,8 @@ if a[:1] == ["exec"]:
         env[k] = v
     env.update(PYTHONPATH=GW, WEBTERM_DATA_DIR=vol(AVOL))
     rest = a[i + 1:]
+    if rd("hostops_pre") and rest[1:3] == ["-m", "app.hostops"]:
+        rest = rest[:1] + ["-c", rd("hostops_pre") + HOSTOPS_MAIN] + rest[3:]
     os.execve(sys.executable, [sys.executable] + rest[1:], env)
 if a[:1] != ["run"]:
     print("fake docker: unexpected %%s" %% a, file=sys.stderr)
@@ -204,6 +207,8 @@ if image == "sha256:fakeapp":
                 "def fs(fd):\n    if st['on']:\n        raise OSError(5, 'injected EIO')\n    return o(fd)\n"
                 "def fault(n):\n    if n == 'flag:renamed':\n        st['on'] = True\n"
                 "backup._fsync = fs\nbackup._fault = fault\nsys.exit(hostops.main())"] + rest[2:]
+    elif rd("hostops_pre") and rest[:2] == ["-m", "app.hostops"]:
+        rest = ["-c", rd("hostops_pre") + HOSTOPS_MAIN] + rest[2:]
 os.execve(sys.executable, [sys.executable] + rest, env)
 '''
 
@@ -218,6 +223,12 @@ class Env:
         with open(d, "w") as f:
             f.write(FAKE_DOCKER % {"py": sys.executable})
         os.chmod(d, 0o755)
+        df = os.path.join(self.fake, "bin", "df")
+        with open(df, "w") as f:
+            # df fals doar când testul îl cere (df_avail); altfel cel real
+            f.write('#!/bin/sh\nif [ -f "$FAKE_DIR/df_avail" ]; then echo Avail; cat "$FAKE_DIR/df_avail"; exit 0; fi\n'
+                    'PATH=/usr/bin:/bin exec df "$@"\n')
+        os.chmod(df, 0o755)
         s = os.path.join(self.fake, "bin", "sleep")
         with open(s, "w") as f:
             f.write("#!/bin/sh\nexit 0\n")
@@ -260,7 +271,7 @@ class Env:
         if mounts is None:
             mounts = "bind||%s|%s\n" % (self.keys, self.keys)   # cheia: aceeaşi cale „în container"
         self.put("app_mounts", mounts)
-        for n in ("others", "ps_fail", "stage_crash", "stage_fsync_fail"):
+        for n in ("others", "ps_fail", "stage_crash", "stage_fsync_fail", "hostops_pre", "df_avail"):
             self.put(n, None)
 
     def state(self, name):
@@ -961,6 +972,344 @@ def test_rcm1(e):
             shutil.rmtree(td, ignore_errors=True)
 
 
+# Un volum protejat cu înregistrări criptate (WTX1) şi jurnal de ştergeri, făcut cu Store-ul real (ca
+# txbackup_test), apoi arhiva lui WTBK2 scrisă de hostops._local_snapshot. `bad`: manifestul arhivei
+# (autentic, semnat de writer) numeşte o înregistrare inclusă drept `legacy` — metadate nepotrivite cu DB-ul.
+TRACKED_FIXTURE = r'''
+import asyncio, json, os, sqlite3, sys, time
+from pathlib import Path
+d, kf, out_good, out_bad, pw = sys.argv[1:6]
+from app import backup, config, db, hostops, keys
+from app import erasure as er
+from app import txstore as ts
+res = keys.boot(d, {"WEBTERM_MASTER_KEY_FILE": kf})
+ring, mk = res.keyring, res.master_key
+res.lock.release()
+hostops._point_at(d)
+os.makedirs(config.ARCHIVE_DIR, exist_ok=True)
+con = sqlite3.connect(str(config.DB_PATH))
+con.executescript(db.SCHEMA)
+for m in db.MIGRATIONS:
+    try:
+        con.execute(m)
+    except sqlite3.OperationalError:
+        pass
+con.commit()
+con.close()
+ts.create_test_volume(config.DB_PATH)
+from cryptography.hazmat.primitives import serialization as ser
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+priv = Ed25519PrivateKey.generate()
+open(os.path.join(d, "agent-signing.key"), "wb").write(
+    priv.private_bytes(ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()))
+open(os.path.join(d, "agent-signing.pub"), "wb").write(
+    (priv.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw).hex() + "\n").encode())
+
+
+async def rec():
+    st = ts.Store(transcripts_dir=config.TRANSCRIPT_DIR, kwk=ring.kwk, installation_id=ring.installation_id,
+                  gen_limits=(2, 1 << 20))
+    await er.boot(st)
+    await st.recover()
+    sid = os.urandom(16).hex()
+    c = sqlite3.connect(str(config.DB_PATH), isolation_level=None)
+    c.execute("INSERT INTO sessions(id, host_id, title, state, created, rows, cols) VALUES(?,?,?,?,?,?,?)",
+              (sid, 1, "t", "live", time.time(), 24, 80))
+    r = await st.start_recorder(sid, track_agent=False)
+    r.feed_cast_only(b'{"version": 2, "width": 80, "height": 24}\n', at=r.received)
+    for i in range(3):
+        o = os.urandom(200)
+        r.feed(o, json.dumps([0.1 * i, "o", o.hex()[:20]]).encode() + b"\n", at=r.received)
+        await r.checkpoint()
+    await r.close()
+    c.execute("UPDATE sessions SET state='closed', closed_at=? WHERE id=?", (time.time(), sid))
+    c.close()
+    await st.shutdown()
+    st.close()
+    er.reset()
+
+asyncio.run(rec())
+hk = backup.HostKeys(ring, mk)
+backup.set_boot_protected(True)
+backup.set_host_keys_provider(lambda: hk)
+with open(out_good, "wb") as f:
+    hostops._local_snapshot(hk, pw, True, f)
+orig = backup._emit_recordings
+
+
+def lying(t, snap, dropped):
+    recs = orig(t, snap, dropped)
+    for r in recs:
+        if r["state"] == "included":
+            r["state"] = "legacy"
+            break
+    return recs
+
+backup._emit_recordings = lying
+with open(out_bad, "wb") as f:
+    hostops._local_snapshot(hk, pw, True, f)
+print("tracked-fixture-ok")
+'''
+
+
+def tracked_archives(e, kf):
+    """(good.wtbk, bad.wtbk) of a tracked protected volume made under key `kf`."""
+    d = e.vol("trksrc")
+    os.makedirs(d)
+    os.chmod(d, 0o700)                          # volumul de test al Store-ului: un director privat
+    good, bad = os.path.join(e.base, "tracked.wtbk"), os.path.join(e.base, "tracked-bad.wtbk")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("WEBTERM_", "WT_"))}
+    env.update(PYTHONPATH=GATEWAY, WEBTERM_DATA_DIR=d, WEBTERM_TX_RECORDINGS="1", WEBTERM_TEST_GATE="1",
+               WEBTERM_PUBLIC_URL="http://127.0.0.1:8000")
+    p = subprocess.run([sys.executable, "-c", TRACKED_FIXTURE, d, kf, good, bad, PASS], env=env,
+                       capture_output=True, text=True, timeout=180)
+    assert "tracked-fixture-ok" in p.stdout, p.stdout[-1500:] + p.stderr[-3000:]
+    return good, bad
+
+
+def test_m1(e):
+    """Codex M1: verify = the staging's acceptance (target policy, recording membership, journal),
+    so restore.sh refuses BEFORE it stops the app what the staging would refuse."""
+    print("── Codex M1: verify runs the staging's recording / erasure acceptance")
+    kf = e.key_file("m1trk.key")
+    good, bad = tracked_archives(e, kf)
+    tx_on = ["WEBTERM_MASTER_KEY_FILE=" + kf, "WEBTERM_TX_RECORDINGS=1"]
+    # controlul pozitiv: o ţintă cu înregistrările criptate active acceptă arhiva bună
+    protected_volume(e, "m1on", kf, email="tinta@x")
+    e.app("m1on", tx_on)
+    rc, out = restore(e, good, "m1on", PE, args=("--verify",))
+    check("M1: tracked WTBK2 → flag-on target: verify passes (control)", rc == 0 and "restore test OK" in out,
+          out[-600:])
+    # ţinta fără flag: staging-ul ar refuza (_erasure_stage) → verify refuză, app-ul nu e oprit
+    t_off = protected_volume(e, "m1off", kf, email="tinta@x")
+    e.app("m1off", ["WEBTERM_MASTER_KEY_FILE=" + kf])
+    before = data_tree(t_off)
+    rc, out = restore(e, good, "m1off", PE)
+    calls = e.calls()
+    check("M1: valid tracked WTBK2 → flag-off target: refused at verify, the app never stopped",
+          rc != 0 and "encrypted recordings" in out and "not confirmed restorable" in out
+          and "stop " not in calls and data_tree(t_off) == before, out[-600:] + calls)
+    rc, out = restore(e, good, "m1off", PE, args=("--verify",))
+    check("M1: …and the restore test (--verify) fails too", rc != 0 and "restore test OK" not in out, out[-400:])
+    # metadate nepotrivite (manifest autentic, dar o înregistrare cu descriptor listată `legacy`)
+    t_bad = protected_volume(e, "m1bad", kf, email="tinta@x")
+    e.app("m1bad", tx_on)
+    before = data_tree(t_bad)
+    rc, out = restore(e, bad, "m1bad", PE)
+    check("M1: mismatched recording metadata → refused at verify, the app never stopped",
+          rc != 0 and "listed as legacy" in out and "stop " not in e.calls() and data_tree(t_bad) == before,
+          out[-600:] + e.calls())
+    # aceeaşi arhivă direct la stage: acelaşi verdict (refuz) — verify şi stage nu se mai despart
+    sha = hashlib.sha256(open(bad, "rb").read()).hexdigest()
+    rc, out = hostops_run(e, "m1bad", ["stage-restore", "--sha256", sha], open(bad, "rb").read(),
+                          {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_TX_RECORDINGS": "1",
+                           "WEBTERM_BACKUP_PASSPHRASE": PASS})
+    check("M1: …stage-restore refuses it the same way (exit 3, nothing staged)",
+          rc == hostops.EXIT_REFUSED and "listed as legacy" in out and data_tree(t_bad) == before, out[-400:])
+
+
+GIB = 1 << 30
+
+
+def work_empty(d):
+    wd = os.path.join(d, "backups", ".work")
+    return not os.path.isdir(wd) or os.listdir(wd) == []
+
+
+def fake_space(total, free, fd_free=None, keep_drop=None):
+    """statvfs / fstatvfs replaced (in this process): a filesystem of `total` bytes with `free`
+    available; `fd_free` = what fstatvfs (the metered writers) sees; `keep_drop` = (dir, bytes):
+    once a pre-restore safety copy exists in `dir`, `free` drops by `bytes`."""
+    real_s, real_f = os.statvfs, os.fstatvfs
+
+    def mk(avail):
+        avail = max(0, avail)
+        return os.statvfs_result((4096, 4096, total // 4096, avail // 4096, avail // 4096, 1 << 20,
+                                  1 << 20, 1 << 20, 0, 255))
+
+    def cur():
+        if keep_drop and any(n.startswith("pre-restore-") for n in os.listdir(keep_drop[0])):
+            return free - keep_drop[1]
+        return free
+
+    def st(p):
+        return mk(cur())
+
+    def fst(fd):
+        return mk(cur() if fd_free is None else fd_free)
+
+    os.statvfs, os.fstatvfs = st, fst
+    return lambda: (setattr(os, "statvfs", real_s), setattr(os, "fstatvfs", real_f))
+
+
+def hostops_pre(e, vol, args, stdin, env_extra, pre):
+    """hostops in a subprocess with `pre` (Python source) run first — the statvfs fakes."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("WEBTERM_", "WT_"))}
+    env.update(PYTHONPATH=GATEWAY, WEBTERM_DATA_DIR=e.vol(vol), **(env_extra or {}))
+    code = pre + "\nimport sys\nfrom app import hostops\nsys.exit(hostops.main(sys.argv[1:]))\n"
+    p = subprocess.run([sys.executable, "-c", code, *args], input=stdin, env=env, capture_output=True, timeout=120)
+    return p.returncode, p.stdout.decode(errors="replace") + p.stderr.decode(errors="replace")
+
+
+FAKE_PRE = r'''
+import os
+_T, _F, _FD = %d, %d, %r
+def _mk(a):
+    a = max(0, a)
+    return os.statvfs_result((4096, 4096, _T // 4096, a // 4096, a // 4096, 1 << 20, 1 << 20, 1 << 20, 0, 255))
+os.statvfs = lambda p: _mk(_F)
+os.fstatvfs = lambda fd: _mk(_F if _FD is None else _FD)
+'''
+
+
+def _with_env(env):
+    saved = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+
+    def undo():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return undo
+
+
+def _open_volume(d, kf):
+    """In-process: config at `d`, its keys opened like hostops (→ hk, undo)."""
+    undo = _with_env({"WEBTERM_MASTER_KEY_FILE": kf})
+    hostops._point_at(d)
+    view = hostops._DirView(d)
+    try:
+        inv = hostops._inventory(view)
+        hk, _r = hostops._open_keys(view, inv)
+    finally:
+        view.release()
+    return hk, undo
+
+
+def test_m2(e):
+    """Codex M2: space accounted per filesystem and phase, a hard write budget with a reserve for
+    the gateway, a recheck at boot before `applying` (statvfs faked)."""
+    print("── Codex M2: disk budget of host backup / restore")
+    kf = e.key_file("m2.key")
+    d = protected_volume(e, "m2src", kf, email="m2@x")
+    hk, undo_env = _open_volume(d, kf)
+    try:
+        dbn, est = backup.db_size(), backup.host_estimate()
+        keep = 5 * GIB                                  # 5 % din 100 GiB
+        # DB mare: copia de lucru încape, copia DB-ului (snapshot / verificare) care coexistă cu ea nu
+        restore_fs = fake_space(100 * GIB, est + keep + dbn // 2)
+        try:
+            out = io.BytesIO()
+            try:
+                hostops._local_snapshot(hk, PASS, True, out)
+                r = "written"
+            except hostops.Refused as ex:
+                r = str(ex)
+        finally:
+            restore_fs()
+        check("M2: large DB — work copy + DB copy + reserve counted: refused before writing",
+              "database copy" in r and "kept free for the gateway" in r and out.getvalue() == b""
+              and work_empty(d), r)
+        # bugetul dur: estimarea trece, dar scrierea ar coborî sub rezervă → oprit, directorul de lucru gol
+        restore_fs = fake_space(100 * GIB, 50 * GIB, fd_free=keep + (1 << 20))
+        try:
+            out = io.BytesIO()
+            try:
+                hostops._local_snapshot(hk, PASS, True, out)
+                r = "written"
+            except (OSError, ValueError) as ex:
+                r = "%s: %s" % (type(ex).__name__, ex)
+        finally:
+            restore_fs()
+        check("M2: hard budget — the writer stops at the reserve (NoSpace) and cleans its work dir",
+              r.startswith("NoSpace") and "reserve for the gateway" in r and out.getvalue() == b""
+              and work_empty(d), r)
+        # fără fake: backup-ul trece (controlul)
+        out = io.BytesIO()
+        hostops._local_snapshot(hk, PASS, True, out)
+        blob = out.getvalue()
+        check("M2: …and with room the same backup is written", blob[:5] == b"WTBK2")
+    finally:
+        undo_env()
+    sha = hashlib.sha256(blob).hexdigest()
+    kenv = {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_BACKUP_PASSPHRASE": PASS}
+    # verify: scratch-ul (DB-ul extras) e contorizat la fel
+    rc, out = hostops_pre(e, "m2src", ["verify", "--sha256", sha], blob, kenv,
+                          FAKE_PRE % (100 * GIB, 50 * GIB, keep + (1 << 20)))
+    check("M2: verify's scratch is metered too → refused at the reserve, nothing left",
+          rc == hostops.EXIT_REFUSED and "reserve for the gateway" in out and work_empty(d), out[-400:])
+
+    # restore mic peste un set de date mare: copia de siguranţă a datelor curente intră în socoteală
+    tgt = protected_volume(e, "m2big", kf, email="mare@x")
+    big = os.path.join(tgt, "transcripts", "big.out")
+    with open(big, "wb") as f:
+        f.truncate(3 * GIB)                             # rar (sparse): 3 GiB pentru lstat, ~0 pe disc
+    e.app("m2big", ["WEBTERM_MASTER_KEY_FILE=" + kf])
+    path = os.path.join(e.base, "m2.wtbk")
+    open(path, "wb").write(blob)
+    before = data_tree(tgt)
+    # 2 GiB peste rezervă: regula veche (2 × unpacked + 64 MiB) trecea; copia de siguranţă (3 GiB) nu încape
+    e.put("hostops_pre", FAKE_PRE % (100 * GIB, keep + 2 * GIB, None))
+    try:
+        rc, out = restore(e, path, "m2big", PE)
+        calls = e.calls()
+        rc_v, out_v = restore(e, path, "m2big", PE, args=("--verify",))
+    finally:
+        e.put("hostops_pre", None)
+    check("M2: small restore replacing a large dataset → refused at verify, the app never stopped",
+          rc != 0 and "safety copy of the current data" in out and "stop " not in calls
+          and data_tree(tgt) == before, out[-600:] + calls)
+    check("M2: …the restore TEST only notes it (the archive itself is fine)",
+          rc_v == 0 and "a restore would be refused until space is freed" in out_v, out_v[-500:])
+    rc, out = hostops_pre(e, "m2big", ["stage-restore", "--sha256", sha], blob, kenv,
+                          FAKE_PRE % (100 * GIB, keep + 2 * GIB, None))
+    check("M2: …stage-restore applies the same rule (exit 3, nothing staged)",
+          rc == hostops.EXIT_REFUSED and "safety copy" in out and data_tree(tgt) == before, out[-400:])
+    os.unlink(big)
+
+    # boot: recheck înainte de `applying` — un set în staging, apoi discul s-a umplut
+    rc, out = hostops_run(e, "m2big", ["stage-restore", "--sha256", sha], blob, kenv)
+    check("M2: staged with room", rc == 0, out[-300:])
+    kdir = os.path.join(tgt, "backups")
+    email0 = sqlite3.connect(os.path.join(tgt, "webterm.db")).execute("SELECT email FROM users").fetchone()[0]
+    restore_fs = fake_space(100 * GIB, 1 << 20)
+    try:
+        mode, _email, _a = boot_check(tgt, {"WEBTERM_MASTER_KEY_FILE": kf})
+    finally:
+        restore_fs()
+    email1 = sqlite3.connect(os.path.join(tgt, "webterm.db")).execute("SELECT email FROM users").fetchone()[0]
+    flag = open(os.path.join(tgt, ".restore-flag"), "rb").read() if os.path.exists(os.path.join(tgt, ".restore-flag")) else b""
+    check("M2: boot with too little space → refused before `applying`, old data kept, nothing copied",
+          str(mode).startswith("refused") and "nothing was changed" in str(mode) and email1 == email0
+          and b'"staged"' in flag and not any(n.startswith("pre-restore-") for n in os.listdir(kdir)),
+          (mode, email1, flag[:200]))
+    # copia de siguranţă încape, dar după ea nu mai e loc pentru copia setului → copia ştearsă, refuz
+    restore_fs = fake_space(100 * GIB, 40 * GIB, keep_drop=(kdir, 40 * GIB - (1 << 20)))
+    try:
+        mode, _email, _a = boot_check(tgt, {"WEBTERM_MASTER_KEY_FILE": kf})
+    finally:
+        restore_fs()
+    flag = open(os.path.join(tgt, ".restore-flag"), "rb").read() if os.path.exists(os.path.join(tgt, ".restore-flag")) else b""
+    check("M2: no room left after the safety copy → refused, the safety copy removed, still `staged`",
+          str(mode).startswith("refused") and b'"staged"' in flag
+          and not any(n.startswith("pre-restore-") for n in os.listdir(kdir)), (mode, os.listdir(kdir)))
+    mode, email, _a = boot_check(tgt, {"WEBTERM_MASTER_KEY_FILE": kf})
+    check("M2: …with room the boot applies it", mode == "protected" and email == "m2@x", (mode, email))
+
+    # backup.sh: destinaţia pe ACELAŞI sistem de fişiere cu volumul → arhiva + copia de lucru + rezerva
+    e.app("m2src", ["WEBTERM_MASTER_KEY_FILE=" + kf], running=False)
+    e.put("df_avail", str(backup.host_estimate() + (64 << 20)))
+    try:
+        rc, out = backup_run(e, "m2src", PE)
+    finally:
+        e.put("df_avail", None)
+    check("M2: backup.sh — destination shares the volume's filesystem → its work copy and reserve "
+          "are counted, refused before writing", rc != 0 and "same filesystem" in out
+          and not (os.path.isdir(e.out) and os.listdir(e.out)), out[-500:])
+
+
 def main():
     global FOREIGN_DB
     FOREIGN_DB = _foreign_db()
@@ -978,6 +1327,8 @@ def main():
         test_restore(e)
         test_hostops(e)
         test_rcm1(e)
+        test_m1(e)
+        test_m2(e)
     finally:
         shutil.rmtree(e.base, ignore_errors=True)
         shutil.rmtree(_BOOT_DIR, ignore_errors=True)

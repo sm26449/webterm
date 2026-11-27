@@ -26,6 +26,7 @@ extractor tar strict pentru WTS1 şi importul 3.7 (M1/M3); writer-ul aplică bug
 şi îşi verifică produsul (M2); un container cere un singur MK, cel din header (M4).
 """
 import contextlib
+import contextvars
 import errno
 import fcntl
 import hashlib
@@ -299,6 +300,7 @@ def make_snapshot(include_transcripts: bool = False) -> bytes:
     buf = io.BytesIO()
     with work_dir() as td:
         dbcopy = os.path.join(td, "webterm.db")
+        reserve_space(td, db_size(), "the database copy of the backup")
         con = sqlite3.connect(str(config.DB_PATH))
         try:
             con.execute("VACUUM INTO ?", (dbcopy,))   # copie curată, crash-consistent
@@ -1505,6 +1507,9 @@ class _TarOut:
         self._max = max_unpacked
 
     def _info(self, name, size, is_dir=False):
+        if size > USTAR_MEMBER_MAX:
+            # L1: un membru USTAR are < 8 GiB (member_preflight o spune înainte, cu numele fişierului)
+            raise wts.SnapshotTooLarge("member-too-large", name[:80])
         ti = tarfile.TarInfo(name)
         ti.size, ti.mtime = size, int(time.time())
         ti.mode = 0o700 if is_dir else 0o600
@@ -1764,6 +1769,7 @@ def _write_wts(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool, l
                    snk=ring.snk if local else None, mk=hk.mk if portable else None, max_plaintext=max_pt)
     with work_dir() as td:
         dbcopy = os.path.join(td, "webterm.db")
+        reserve_space(td, db_size(), "the database copy of the backup")
         con = sqlite3.connect(str(config.DB_PATH))
         try:
             con.execute("VACUUM INTO ?", (dbcopy,))
@@ -1814,6 +1820,7 @@ def _write_wts_tx(out, hk: HostKeys, keys_blob: bytes, include_transcripts: bool
     for attempt in (0, 1):
         with work_dir() as td:
             dbcopy = os.path.join(td, "webterm.db")
+            reserve_space(td, db_size(), "the database copy of the backup")
             try:
                 snap = txstore.backup_snapshot(dbcopy, kwk=ring.kwk, inst=ring.installation_id,
                                                recordings=include_transcripts, cancel=cancel)
@@ -1998,7 +2005,9 @@ def spool_live_snapshot(f, include_transcripts: bool, cancel=None, keys=None) ->
     if not is_protected():
         raise ValueError("the live backup socket serves protected volumes only")
     hk, blob = _host(keys)
-    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, cancel=cancel, host=True)
+    member_preflight(include_transcripts)
+    _write_wts(metered(f, "the backup spool"), hk, blob, include_transcripts, local=True, portable=True,
+               cancel=cancel, host=True)
     f.flush()
     _fsync(f.fileno())
 
@@ -2032,6 +2041,140 @@ def free_bytes(path) -> int:
     return st.f_bavail * st.f_frsize
 
 
+# ── bugetul de disc al operaţiilor host (Codex M2, §12.10.1 "Size budget") ──────────────────────
+# Volumul de date e acelaşi sistem de fişiere pe care rulează gateway-ul (şi, în producţie, restul
+# maşinii): o copie de lucru care îl umple până la ultimul octet lasă gateway-ul fără loc pentru
+# DB-ul viu şi jurnale. Operaţiile host (backup, spool-ul socket-ului, verify, stage) lasă deci
+# liber cel puţin max(1 GiB, 5 % din sistemul de fişiere) şi se opresc — curăţând după ele — când
+# ar trece pragul, nu doar la verificarea de dinainte (o estimare poate greşi, un alt proces scrie).
+HEADROOM_MIN = 1 << 30
+HEADROOM_DIV = 20                  # 5 %
+BUDGET_STEP = 8 << 20              # cât scriem între două citiri ale spaţiului liber
+_BUDGET = contextvars.ContextVar("wt_host_write_budget", default=None)
+
+
+class NoSpace(OSError):
+    """A host operation would leave less than its reserve free (ENOSPC before the disk is full)."""
+
+    def __init__(self, free: int, need: int, what: str):
+        self.free, self.need, self.what = free, need, what
+        super().__init__(errno.ENOSPC, "%s needs %d MiB more than the %d MiB free while keeping the "
+                         "reserve for the gateway — stopped and cleaned up" % (what, max(0, need - free) >> 20, free >> 20))
+
+    def __str__(self):
+        return self.strerror
+
+
+def headroom(path) -> int:
+    """The free space a host operation leaves on the filesystem holding `path`:
+    max(HEADROOM_MIN, 1/HEADROOM_DIV of its size)."""
+    st = os.statvfs(str(path))
+    return max(HEADROOM_MIN, st.f_blocks * st.f_frsize // HEADROOM_DIV)
+
+
+@contextmanager
+def write_budget(reserve: int):
+    """Every file the backup code writes in this context (the work copy, the spool, the files a
+    verification or a staging extracts, the reservation before a VACUUM INTO) is metered: it
+    stops with NoSpace once fewer than `reserve` bytes would stay free on its filesystem.
+    Per thread / task (a ContextVar): a gateway backup on another thread is not affected."""
+    tok = _BUDGET.set(int(reserve))
+    try:
+        yield
+    finally:
+        _BUDGET.reset(tok)
+
+
+def reserve_space(path, n: int, what: str) -> None:
+    """Before a write we cannot meter (sqlite's VACUUM INTO): `n` bytes must fit above the reserve."""
+    keep = _BUDGET.get()
+    if keep is None:
+        return
+    free = free_bytes(path)
+    if free - n < keep:
+        raise NoSpace(free, n + keep, what)
+
+
+class _Budgeted:
+    """A file proxy for write_budget: statvfs every BUDGET_STEP bytes, before writing past it."""
+
+    def __init__(self, f, keep: int, what: str):
+        self._f, self._keep, self._what = f, keep, what
+        self._since = None
+
+    def write(self, b):
+        n = len(b)
+        if self._since is None or self._since + n > BUDGET_STEP:
+            st = os.fstatvfs(self._f.fileno())
+            free = st.f_bavail * st.f_frsize
+            # până la următoarea citire se pot scrie încă BUDGET_STEP octeţi: îi socotim de acum
+            if free - n - BUDGET_STEP < self._keep:
+                raise NoSpace(free, n + BUDGET_STEP + self._keep, self._what)
+            self._since = 0
+        self._since += n
+        return self._f.write(b)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
+def metered(f, what: str):
+    """`f` under the active write_budget (unchanged when there is none)."""
+    keep = _BUDGET.get()
+    return f if keep is None else _Budgeted(f, keep, what)
+
+
+def db_size() -> int:
+    """The live database and its WAL: the size of a VACUUM INTO copy, or of the database a
+    verification extracts, is at most this."""
+    n = 0
+    for p in (config.DB_PATH, config.DATA_DIR / "webterm.db-wal"):
+        with contextlib.suppress(OSError):
+            n += os.lstat(str(p)).st_size
+    return n
+
+
+def host_work_need() -> int:
+    """Bytes `hostops backup` (or the socket's spool) writes on the data volume besides its
+    reserve: the work copy (host_estimate) plus the DB copy taken for the snapshot / extracted to
+    verify it (one at a time, each ≤ db_size)."""
+    return host_estimate() + db_size()
+
+
+def restore_space_need(unpacked_len: int) -> int:
+    """Bytes a protected restore of an archive whose tar stream is `unpacked_len` needs on the
+    data volume, by phase, for its peak: the staged set (≤ unpacked_len), then at the next boot
+    the copy the apply makes of it (≤ unpacked_len) while the staged set, the live data AND the
+    pre-restore safety copy of the live data (≤ host_estimate) exist, the safety copy's
+    verification scratch (≤ db_size) included. The caller adds the reserve."""
+    return 2 * unpacked_len + host_estimate() + db_size()
+
+
+# Limita USTAR a unui membru: câmpul de mărime are 11 cifre octale (< 8 GiB); tarfile refuză abia
+# la antetul membrului, după gigaocteţi scrişi — o verificăm înainte de a scrie ceva (Codex L1)
+USTAR_MEMBER_MAX = 8 ** 11 - 1
+
+
+def member_preflight(include_transcripts: bool = True) -> None:
+    """Refuses early, with the file named, a volume one of whose backup members would not fit a
+    USTAR header (≥ 8 GiB): the database (+ WAL, an upper bound of its VACUUM copy) and, with
+    transcripts, every regular file under transcripts/."""
+    if db_size() > USTAR_MEMBER_MAX:
+        raise ValueError("the database is %d MiB; a single file of a backup is limited to 8 GiB (USTAR) "
+                         "— refused before anything was written. VACUUM the database or prune old data"
+                         % (db_size() >> 20))
+    if not include_transcripts:
+        return
+    for dp, _dn, fn in os.walk(str(config.TRANSCRIPT_DIR)):
+        for name in fn:
+            with contextlib.suppress(OSError):
+                st = os.lstat(os.path.join(dp, name))
+                if stat.S_ISREG(st.st_mode) and st.st_size > USTAR_MEMBER_MAX:
+                    raise ValueError("the recording %s is %d MiB; a single file of a backup is limited to 8 GiB "
+                                     "(USTAR) — refused before anything was written"
+                                     % (name[:80], st.st_size >> 20))
+
+
 def host_estimate() -> int:
     """Upper bound of a host backup (uncompressed): the database (+ its WAL) and every regular file
     under transcripts/ (symlinks not followed), plus the tar overhead and a margin. backup.sh
@@ -2058,7 +2201,9 @@ def write_host_snapshot(f, include_transcripts: bool, keys=None) -> None:
     if not is_protected():
         raise ValueError("this installation is not protected: the host archive is the 3.7 one")
     hk, blob = _host(keys)
-    _write_wts(f, hk, blob, include_transcripts, local=True, portable=True, host=True)
+    member_preflight(include_transcripts)
+    _write_wts(metered(f, "the backup's work copy"), hk, blob, include_transcripts, local=True,
+               portable=True, host=True)
     f.flush()
     _fsync(f.fileno())
 
@@ -2141,13 +2286,16 @@ def _unlock(reader, hk: HostKeys, mk=None, prefer: str = "local") -> None:
                                mk_id=reader.mk_id)
 
 
-def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMPRESSED) -> tuple:
+def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMPRESSED,
+                     placeholder=None) -> tuple:
     """Streams the authenticated tar.gz through the strict extractor into `dest` (a fresh
     private dir; None = hash only, except `webterm.db` into `db_dest` when given — R-M2's
     restorable check of a produced container), then the gzip and WTS1 streams to their
     authenticated end; the extracted set must equal the content manifest and the signing files
     must be a valid pair (R-H2). Returns (info, inner keys.wtk bytes); info["unpacked_len"] is the
-    exact size of the decompressed tar stream."""
+    exact size of the decompressed tar stream. `placeholder(name)` True: that file member is
+    hashed and checked like every other but written EMPTY (the preflight of `hostops verify`,
+    whose checks read only its name — never a staged set that is published)."""
     gz = wts.BoundedGunzip(reader, max_unpacked)
     arc = _Archive(gz, "wts1", mem_only=(CONTENT_MANIFEST,), mem_also=(KEYS_NAME, *_SIGNING))
     try:
@@ -2167,8 +2315,13 @@ def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMP
                 os.makedirs(os.path.join(target, parent), mode=0o700, exist_ok=True)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             with os.fdopen(fd, "wb") as out:
+                if placeholder is not None and placeholder(name):
+                    for _b in arc.data():
+                        pass
+                    continue
+                mo = metered(out, "extracting the archive")
                 for b in arc.data():
-                    out.write(b)
+                    mo.write(b)
         reader.finish()
     except (FileExistsError, NotADirectoryError, IsADirectoryError):
         raise wts.SnapshotError("conflicting-members") from None
@@ -2271,7 +2424,8 @@ def _open_inner(blob: bytes, reader, hk: HostKeys, mk=None) -> kr.Keyring:
 
 
 def _verify_wts(fileobj, hk: HostKeys, dest, mk=None, prefer="local", max_plaintext=wts.MAX_PLAINTEXT,
-                restorable: bool = True, max_unpacked=RESTORE_MAX_UNCOMPRESSED, expect_unpacked=None) -> tuple:
+                restorable: bool = True, max_unpacked=RESTORE_MAX_UNCOMPRESSED, expect_unpacked=None,
+                placeholder=None) -> tuple:
     """Full check of a WTS1. R-M2: `restorable` (default) = structural (header MAC, envelope,
     every chunk, final frame, EOF, strict tar, content manifest, signing pair, inner keys.wtk
     bound to the header) + the database (integrity + minimal schema): extracted into `dest`, or,
@@ -2284,7 +2438,8 @@ def _verify_wts(fileobj, hk: HostKeys, dest, mk=None, prefer="local", max_plaint
     with contextlib.ExitStack() as stack:
         # DB-ul extras pentru verificare: în directorul de lucru de pe volum, nu în /tmp (tmpfs mic)
         tmp = stack.enter_context(work_dir("verify-")) if dest is None and restorable else None
-        info, inner_blob = _unpack_verified(reader, dest, db_dest=tmp, max_unpacked=max_unpacked)
+        info, inner_blob = _unpack_verified(reader, dest, db_dest=tmp, max_unpacked=max_unpacked,
+                                            placeholder=placeholder)
         if expect_unpacked is not None and info["unpacked_len"] != expect_unpacked:
             raise wts.SnapshotError("declared-size-mismatch", "%d unpacked, %d declared"
                                     % (info["unpacked_len"], expect_unpacked))
@@ -2581,12 +2736,7 @@ def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasu
         _refuse_active_journal()
         td = _private_tmpdir()
         try:
-            info, inner = _verify_wts(fileobj, hk, td, mk, prefer, **(budget or {}))
-            content = info.pop("_content", None)
-            summary = _erasure_stage(td, content, inner, erasure_fetch, live_inst=hk.ring.installation_id)
-            if summary is not None:
-                info["erasure"] = summary["state"]
-                info["erasure_proof"] = summary["proof"]
+            info, inner, summary = _preflight_wts(fileobj, hk, td, mk, prefer, budget, erasure_fetch)
             staged = _manifest_for_host(inner, hk)
             kp = os.path.join(td, KEYS_NAME)
             os.unlink(kp)
@@ -2598,14 +2748,57 @@ def _stage_wts(fileobj, keys=None, mk=None, prefer="local", progress=None, erasu
     return _missing_data_note(info)
 
 
-def _live_journal():
+def _preflight_wts(fileobj, hk: HostKeys, td: str, mk=None, prefer="local", budget=None, erasure_fetch=None,
+                   live_root=None, placeholder=None) -> tuple:
+    """Codex M1: the ONE acceptance of a WTS1 for this volume, shared by the staging and by
+    `hostops verify` (preflight_wts): the full check of the container extracted into `td` (strict
+    tar, content manifest, signing pair, inner keys.wtk, database), then the erasure / recording
+    rules of the TARGET (§12.11.4 at stage: the flag policy, recording membership and every WTX
+    generation, the journal against the manifest and the DB, the live head). `live_root`: the
+    target's data dir (default config.DATA_DIR). → (info, inner keyring, erasure summary | None)."""
+    info, inner = _verify_wts(fileobj, hk, td, mk, prefer, placeholder=placeholder, **(budget or {}))
+    content = info.pop("_content", None)
+    summary = _erasure_stage(td, content, inner, erasure_fetch, live_inst=hk.ring.installation_id,
+                             live_root=live_root)
+    if summary is not None:
+        info["erasure"] = summary["state"]
+        info["erasure_proof"] = summary["proof"]
+    return info, inner, summary
+
+
+def _preflight_placeholder(name: str) -> bool:
+    """What the preflight does not need on disk: every file member except the database, the keys,
+    the signing pair, the erasure journal and the WTX generations directly under transcripts/
+    (verified in full). The 3.7 plaintext recordings are checked by name only (membership), so
+    their bytes are hashed against the manifest and not written."""
+    if name in _TOP_FILES:
+        return False
+    head, _sep, base = name.rpartition("/")
+    return not (head == "transcripts" and _TX_GEN.match(base))
+
+
+def preflight_wts(fileobj, keys=None, *, live_root, budget=None) -> dict:
+    """`hostops verify` of a WTS1 (a WTBK2 stream, or a WTBK1's inner bytes): exactly the
+    staging's acceptance (_preflight_wts) in a private scratch dir of the CURRENT data dir (the
+    verify's own scratch: the target volume is only read), without staging anything. Only the
+    members the checks read are written (bounded by the declared unpacked size and the active
+    write budget); the scratch is removed before returning. An archive staging would refuse is
+    refused here, before restore.sh stops the app."""
+    hk, _ = _host(keys)
+    with work_dir("preflight-") as td:
+        info, _inner, _summary = _preflight_wts(fileobj, hk, td, budget=budget, live_root=live_root,
+                                                placeholder=_preflight_placeholder)
+    return info
+
+
+def _live_journal(root=None):
     try:
-        return erasure.Journal(config.DATA_DIR, b"", b"\0" * 16).read_bytes()
+        return erasure.Journal(config.DATA_DIR if root is None else root, b"", b"\0" * 16).read_bytes()
     except (erasure.JournalError, OSError):
         return None                              # necitibil = nu e J_v (deci nici dovadă)
 
 
-def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
+def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None, live_root=None):
     """§12.11.4 "Continuity at restore", at stage. Flag off: an archive with erasure state is
     refused (this build cannot honour it), anything else is the PR5 / 3.7 path (None). Flag on:
     the backup's journal checked against its manifest and its DB, every staged descriptor listed
@@ -2644,9 +2837,10 @@ def _erasure_stage(td: str, content, inner: kr.Keyring, fetch, live_inst=None):
     # H1/M1: capul comis al DB-ului VIU (număr + MAC) şi capetele lui atestate, citite ÎNAINTE de
     # jurnalul viu (o ştergere scrie jurnalul înainte de capul din DB: jurnalul citit după nu poate
     # rămâne în urmă), sub lacătul de restore; pragul intră în rezumat şi apoi în flag
-    live = erasure.live_state(config.DB_PATH, live_inst, inst)
+    live_db = config.DB_PATH if live_root is None else os.path.join(str(live_root), "webterm.db")
+    live = erasure.live_state(live_db, live_inst, inst)
     dec = erasure.decide_restore(k_erase=k, inst=inst, j_b=jb, tracked=content is not None,
-                                 j_v=_live_journal(), dest_results=results,
+                                 j_v=_live_journal(live_root), dest_results=results,
                                  required_dests=set(cfg_ids) | set(ids), known_attested=known, live=live,
                                  staged=staged_terms)
     if dec.short:
@@ -3068,6 +3262,20 @@ def _quarantine_transcripts(gen: str) -> None:
                 "transcripts were moved to %s", os.path.relpath(dst, str(config.DATA_DIR)))
 
 
+def _apply_space(need: int, what: str) -> None:
+    """Boot (state `staged`, nothing changed yet): `need` + DISK_RESERVE free on the data volume,
+    else a clean refusal (ValueError: the boot stops, the old data and the staged set stay)."""
+    try:
+        free = free_bytes(config.DATA_DIR)
+    except OSError as e:
+        raise ValueError("the free space of the data volume cannot be read (%s) — the restore is refused, "
+                         "nothing was changed" % e.strerror) from None
+    if free < need + DISK_RESERVE:
+        raise ValueError("the data volume has %d MiB free; %s needs %d MiB — the restore is refused and "
+                         "nothing was changed (the current data stays). Free some space, then restart"
+                         % (free >> 20, what, (need + DISK_RESERVE) >> 20))
+
+
 def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool:
     """Protected apply as a resumable journal kept in the flag (H1): `staged` → mandatory safety
     copy → `applying` → keys.wtk, signing key, transcripts, DB (each step idempotent and
@@ -3109,6 +3317,16 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
         er_plan = _erasure_apply_plan(rd, doc, staged, keys.mk, listed, flag, hk)
         if flag["state"] == "staged":
             other = doc["installation_id"] != hk.ring.installation_id.hex()
+            # Codex M2: spaţiul se verifică din nou ACUM, înainte de `applying` (staging-ul l-a
+            # socotit, dar între timp volumul s-a putut umple): copia setului (DB + transcripturi) şi
+            # copia de siguranţă a datelor curente (+ copia DB-ului ei); lipsă → refuz curat, nimic
+            # schimbat, datele vechi rămân (boot-ul refuză până se eliberează spaţiu)
+            copy_need = sum(int(e["size"]) for e in doc["files"])
+            safety_need = 0
+            if config.DB_PATH.exists() and not force_without_safety_copy:
+                safety_need = (host_estimate() if has_tx else db_size() + (16 << 20)) + db_size()
+            _apply_space(copy_need + safety_need, "applying this restore (the copy of the staged set and the "
+                         "pre-restore safety copy of the current data)")
             name = ""
             try:
                 if config.DB_PATH.exists():
@@ -3119,6 +3337,14 @@ def _apply_protected(keys=None, force_without_safety_copy: bool = False) -> bool
                                      "is refused; free space and restart, or apply it with "
                                      "force_without_safety_copy" % str(e)[:120]) from None
                 log.warning("the pre-restore safety copy failed, applying WITHOUT it (forced): %s", e)
+            try:
+                _apply_space(copy_need, "applying this restore (the copy of the staged set)")
+            except ValueError:
+                # copia de siguranţă abia făcută nu rămâne: altfel fiecare boot refuzat ar mai adăuga una
+                if name:
+                    with contextlib.suppress(OSError):
+                        os.unlink(str(_backup_dir() / name))
+                raise
             _step("apply:safety")
             flag = dict(flag, state="applying", safety=name, quarantine=bool(other and not has_tx))
             if er_plan is not None:

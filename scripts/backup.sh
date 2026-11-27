@@ -344,6 +344,27 @@ case "$VOLKIND" in
       ''|*[!0-9]*) bk_refuse "the free space of the backup directory is unknown" \
                      "REFUSING: cannot read the free space of $OUT (df) — nothing was written." ;;
     esac
+    # Codex M2: destinaţia pe ACELAŞI sistem de fişiere cu volumul (în producţie de obicei da: ambele pe
+    # discul maşinii) → arhiva creşte cât copia de lucru a gateway-ului (sau spool-ul lui) încă există,
+    # şi gateway-ul îşi păstrează rezerva: nevoia e suma. Dispozitivul necunoscut = presupus comun.
+    WORK=$(printf '%s\n' "$EST_OUT" | sed -n 's/^work: //p')
+    KEEP=$(printf '%s\n' "$EST_OUT" | sed -n 's/^headroom: //p')
+    VDEV=$(printf '%s\n' "$EST_OUT" | sed -n 's/^device: //p')
+    ODEV=$(stat -c %d -- "$OUT" 2>/dev/null || true)
+    case "$WORK$KEEP" in
+      ''|*[!0-9]*) bk_refuse "the backup size could not be estimated" \
+                     "REFUSING: the gateway did not report its work space (an app image older than this script?) — nothing was written." ;;
+    esac
+    if [ -z "$VDEV" ] || [ -z "$ODEV" ] || [ "$VDEV" = "$ODEV" ]; then
+      NEED=$((EST + WORK + KEEP))
+      if [ "$FREE" -lt "$NEED" ]; then
+        bk_refuse "not enough free space in the backup directory" \
+          "REFUSING: $OUT is on the same filesystem as the data volume: it has $((FREE >> 20)) MiB free; this" \
+          "          backup can take up to $((EST >> 20)) MiB, while the gateway's work copy ($((WORK >> 20)) MiB)" \
+          "          still exists and $((KEEP >> 20)) MiB stay free for the gateway — nothing was written." \
+          "          Free some space, or point WEBTERM_BACKUP_DIR at another disk."
+      fi
+    fi
     if [ "$FREE" -lt "$EST" ]; then
       bk_refuse "not enough free space in the backup directory" \
         "REFUSING: $OUT has $((FREE >> 20)) MiB free; this backup can take up to $((EST >> 20)) MiB" \

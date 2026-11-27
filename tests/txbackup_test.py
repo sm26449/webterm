@@ -645,6 +645,45 @@ async def g_socket(st, hk):
     finally:
         ctlsock._estimate = saved_est
         ctlsock._s.worker = None
+    # Codex M2: spaţiul spool-ului pe ACELAŞI volum cu DB-ul viu — estimarea încape, dar nu şi copia
+    # DB-ului (snapshot, apoi verificarea) plus rezerva gateway-ului → noSpace înainte de vreun worker
+    gib = 1 << 30
+    real_f, real_db = os.fstatvfs, backup.db_size
+
+    def fake_vfs(free_spool, free_files):
+        def f(fd):
+            a = free_spool if fd == ctlsock._s.spool_fd else free_files
+            return os.statvfs_result((4096, 4096, (100 * gib) // 4096, a // 4096, a // 4096,
+                                      1 << 20, 1 << 20, 1 << 20, 0, 255))
+        return f
+    start = {"v": 1, "op": "snapshot.start", "id": 7, "profile": "portable", "recordings": "none"}
+    est = ctlsock._estimate()
+    os.fstatvfs = fake_vfs(int(est * ctlsock.SPACE_SLACK) + 5 * gib + gib, 90 * gib)
+    backup.db_size = lambda: 2 * gib                    # un DB „mare": 2 GiB, mai mult decât rămâne
+    try:
+        s1 = await asyncio.to_thread(raw_conn, path)
+        await asyncio.to_thread(send, s1, start)
+        a1 = await asyncio.to_thread(recv, s1)
+        s1.close()
+    finally:
+        os.fstatvfs, backup.db_size = real_f, real_db
+    check("M2: spool + DB copy + gateway reserve counted on the shared volume → backup.noSpace, nothing spooled",
+          a1 and a1.get("code") == "backup.noSpace" and spool_files() == [] and ctlsock._s.inflight is None, a1)
+    # bugetul dur al worker-ului: admis (estimarea încape), dar scrierea spool-ului ar trece sub rezervă
+    os.fstatvfs = fake_vfs(90 * gib, 5 * gib + (1 << 20))
+    try:
+        s1 = await asyncio.to_thread(raw_conn, path)
+        await asyncio.to_thread(send, s1, start)
+        a1 = await asyncio.to_thread(recv, s1)
+        s1.close()
+    finally:
+        os.fstatvfs = real_f
+    for _ in range(100):
+        if ctlsock._s.inflight is None:
+            break
+        await asyncio.sleep(0.02)
+    check("M2: the spool writer stops at the reserve → backup.noSpace, the spool removed, slot free",
+          a1 and a1.get("code") == "backup.noSpace" and spool_files() == [] and ctlsock._s.inflight is None, a1)
     # spool gata, necitit: expiră
     c = await asyncio.to_thread(ctlsock.Client, path)
     try:

@@ -1465,6 +1465,38 @@ def host_stream_tests():
     check("the host writer has no fixed cap (the in-app one keeps 2 GiB)",
           backup._limits(True) == (backup.HOST_MAX, backup.HOST_MAX)
           and backup._limits(False) == (wts.MAX_PLAINTEXT, backup.RESTORE_MAX_UNCOMPRESSED))
+    # Codex L1: un membru USTAR are < 8 GiB — refuzat înainte de a scrie ceva, cu fişierul numit
+    huge = td / "huge.out"
+    with open(huge, "wb") as f:
+        f.truncate(backup.USTAR_MEMBER_MAX + 1)          # rar: 8 GiB pentru lstat, ~0 pe disc
+    try:
+        try:
+            backup.member_preflight(True)
+            msg = "accepted"
+        except ValueError as e:
+            msg = str(e)
+        try:
+            backup.member_preflight(False)
+            no_tx = True
+        except ValueError:
+            no_tx = False
+        spool = io.BytesIO()
+        try:
+            backup.write_host_snapshot(spool, True, keys=hk)
+            wrote = "written"
+        except ValueError as e:
+            wrote = str(e)
+    finally:
+        huge.unlink()
+    check("L1: a member ≥ 8 GiB (USTAR) → refused early, the file named, nothing written",
+          "huge.out" in msg and "8 GiB" in msg and no_tx and "8 GiB" in wrote and spool.getvalue() == b"",
+          (msg, wrote))
+    try:
+        backup._TarOut(io.BytesIO())._info("x", backup.USTAR_MEMBER_MAX + 1)
+        big_ok = False
+    except wts.SnapshotTooLarge as e:
+        big_ok = e.reason == "member-too-large"
+    check("L1: …and the tar writer refuses an oversize member itself (no header written)", big_ok)
     work = tempfile.mkdtemp(dir=ROOT, prefix="hs-work-")
     snap, arc = os.path.join(work, "host.wts"), os.path.join(work, "a.wtbk")
     tracemalloc.start()

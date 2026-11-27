@@ -19,9 +19,12 @@ gateway), never with a shell `tar` or a hand-written swap (PR4 review, H2/H3/M5)
     python3 -m app.hostops estimate
         → `estimate: N`, an upper bound (bytes, uncompressed) of the backup; backup.sh refuses
           early when its destination has less free space.
-    python3 -m app.hostops verify --sha256 HEX [--legacy-import]          (archive on stdin)
-        → the gateway's full restore check (strict extractor, keyring, database) in a private
-          scratch directory; the data volume is only read (no lock: the app may run).
+    python3 -m app.hostops verify --sha256 HEX [--legacy-import] [--for-restore]   (archive on stdin)
+        → the staging's own acceptance (backup.preflight_wts: strict extractor, keyring,
+          database, and the target's recording / erasure rules — flag policy, recording
+          membership, WTX generations, journal) in a private scratch directory; the data volume
+          is only read (no lock: the app may run). `--for-restore` (restore.sh, before it stops
+          the app): too little free space on the volume for the restore is a refusal, not a note.
     python3 -m app.hostops stage-restore --sha256 HEX [--legacy-import]   (archive on stdin)
         → backup.stage_restore under the data directory's `.lock` + exclusive `.maint.lock`
           (the durable, two-generation staged set of PR3); the app applies it at its next boot,
@@ -49,6 +52,7 @@ import argparse
 import contextlib
 import errno
 import hashlib
+import io
 import os
 import secrets
 import shutil
@@ -198,13 +202,17 @@ def _stream_route(inv, legacy_import):
 
 
 def _need_space(path, need, what):
+    """`need` bytes for `what` plus the reserve kept free for the gateway (backup.headroom) must be
+    free on the filesystem of `path`; → the reserve (the caller meters its writes with it)."""
     try:
         free = backup.free_bytes(path)
+        keep = backup.headroom(path)
     except OSError as e:
         raise Refused("the free space of the data volume cannot be read (%s) — refused" % e.strerror) from None
-    if free < need:
-        raise Refused("the data volume has %s free; %s needs at least %s — refused. Free some space, "
-                      "then run this again" % (_mib(free), what, _mib(need)))
+    if free < need + keep:
+        raise Refused("the data volume has %s free; %s needs %s, plus %s kept free for the gateway — "
+                      "refused. Free some space, then run this again" % (_mib(free), what, _mib(need), _mib(keep)))
+    return keep
 
 
 def _mib(n):
@@ -357,8 +365,12 @@ def _local_snapshot(hk, passphrase, include, out):
     """The WTS1 written by the gateway's code into a private file of a work dir on the data volume
     (never /tmp: a 64 MiB tmpfs in production; never memory: the volume may be larger than RAM),
     checked restorable through the portable route, then wrapped in WTBK2 with its exact sizes."""
-    _need_space(config.DATA_DIR, backup.host_estimate() + backup.DISK_RESERVE, "the backup's work copy")
-    with backup.work_dir("hostbk-") as wd:
+    backup.member_preflight(include)
+    # M2: copia de lucru ŞI copia DB-ului (cea a snapshot-ului, apoi cea extrasă la verificare) stau
+    # pe acelaşi volum, peste rezerva gateway-ului; scrierea e contorizată (refuz + curăţenie)
+    keep = _need_space(config.DATA_DIR, backup.host_work_need(),
+                       "the backup's work copy and its database copy")
+    with backup.write_budget(keep), backup.work_dir("hostbk-") as wd:
         fd = os.open(os.path.join(wd, "host.wts"), os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                      | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "w+b") as f:
@@ -439,17 +451,18 @@ def _route(raw, kind, inv, legacy_import):
     return route, inner, blob, pw
 
 
-def _check(raw, kind, inv, hk, legacy_import):
+def _check(raw, kind, inv, hk, legacy_import, live_root):
     """The gateway's restore check against a private scratch data directory that mirrors the
     target volume's kind (its keys.wtk, nothing else): per route, exactly the extraction and
-    proofs the staging makes (RC-M1)."""
-    route, inner, blob, pw = _route(raw, kind, inv, legacy_import)
+    proofs the staging makes (RC-M1); a WTS1 through the staging's own acceptance, the target's
+    recording and erasure rules included (Codex M1: backup.preflight_wts)."""
+    route, inner, _blob, _pw = _route(raw, kind, inv, legacy_import)
     try:
         if route == "legacy-import":
             return route, backup.verify_legacy_import(inner, keys=hk)
         if route == "legacy-volume":
             return route, backup.verify_legacy_volume(inner)
-        return route, backup.verify_restorable(blob, pw, keys=hk)
+        return route, backup.preflight_wts(io.BytesIO(inner), keys=hk, live_root=live_root)
     except Exception as e:                      # noqa: BLE001 — orice eroare a cititorului = refuz
         raise Refused("the archive is refused: %s" % _refusal(e)) from None
 
@@ -475,17 +488,26 @@ def cmd_verify(args):
     raw = None
     if kind != "wtbk2":
         raw, digest = _read_stdin_from(src)
-    view = _DirView(str(config.DATA_DIR))
+    live_root = str(config.DATA_DIR)
+    view = _DirView(live_root)
     stack = contextlib.ExitStack()
     try:
         scratch = _verify_scratch(stack)
         inv = _inventory(view)
         hk = None
+        space = None
         if inv.kind == "protected":
             hk, resolved = _open_keys(view, inv)
             blob = _manifest_bytes(view.dir_fd)
+            # M2: ce cere restore-ul pe volumul ŢINTĂ (măsurat înainte de _point_at, care mută căile)
+            try:
+                space = (backup.free_bytes(live_root), backup.restore_space_need(0), backup.headroom(live_root))
+            except OSError as e:
+                raise Refused("the free space of the data volume cannot be read (%s) — refused" % e.strerror) from None
         view.release()
-        # volumul nu se schimbă: lock-ul operaţiilor şi temporarele stau în scratch (privat, şters la final)
+        # volumul nu se schimbă: lock-ul operaţiilor şi temporarele stau în scratch (privat, şters la
+        # final); scratch-ul păstrează rezerva sistemului lui de fişiere (pe volum: cea a gateway-ului)
+        stack.enter_context(backup.write_budget(backup.headroom(scratch)))
         _point_at(scratch)
         if hk is not None:
             fd = os.open(os.path.join(scratch, keys.MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -495,14 +517,27 @@ def cmd_verify(args):
             route = _stream_route(inv, args.legacy_import)
             r = _open_wtbk2(src)
             try:
-                info = backup.verify_host_stream(r, keys=hk, max_plaintext=r.plain_len,
-                                                 unpacked_len=r.unpacked_len)
+                # M1: aceeaşi acceptare ca staging-ul (politica ţintei, înregistrări, jurnal), nu doar structura
+                info = backup.preflight_wts(r, keys=hk, live_root=live_root,
+                                            budget={"max_plaintext": r.plain_len, "max_unpacked": r.unpacked_len,
+                                                    "expect_unpacked": r.unpacked_len})
                 r.finish()
             except Exception as e:              # noqa: BLE001 — orice eroare a cititorului = refuz
                 raise Refused("the archive is refused: %s" % _refusal(e)) from None
             digest = src.digest
         else:
-            route, info = _check(raw, kind, inv, hk, args.legacy_import)
+            route, info = _check(raw, kind, inv, hk, args.legacy_import, live_root)
+        if space is not None and info.get("unpacked_len") is not None:
+            free, base, keep = space
+            need = base + 2 * info["unpacked_len"]
+            if free < need + keep:
+                msg = ("the data volume has %s free; restoring this archive needs %s (the staged copy, the "
+                       "copy the next start makes, the safety copy of the current data) plus %s kept free "
+                       "for the gateway" % (_mib(free), _mib(need), _mib(keep)))
+                if args.for_restore:
+                    # M2: refuzat ÎNAINTE ca restore.sh să oprească app-ul
+                    raise Refused(msg + " — refused. Free some space, then run this again")
+                _say("note: " + msg + ": a restore would be refused until space is freed")
     finally:
         view.release()
         stack.close()
@@ -534,10 +569,13 @@ def _stage_stream(src, inv, hk, legacy_import, progress):
     at the next boot both hold the declared unpacked size (refused before anything is written)."""
     route = _stream_route(inv, legacy_import)
     r = _open_wtbk2(src)
-    _need_space(config.DATA_DIR, 2 * r.unpacked_len + backup.DISK_RESERVE,
-                "this restore (the staged copy, then the copy the next start makes)")
-    info = backup.stage_host_stream(r, keys=hk, max_plaintext=r.plain_len, unpacked_len=r.unpacked_len,
-                                    progress=progress)
+    # M2: vârful restore-ului pe volum, pe faze (backup.restore_space_need) + rezerva gateway-ului
+    keep = _need_space(config.DATA_DIR, backup.restore_space_need(r.unpacked_len),
+                       "this restore (the staged copy, the copy the next start makes and the safety copy "
+                       "of the current data)")
+    with backup.write_budget(keep):
+        info = backup.stage_host_stream(r, keys=hk, max_plaintext=r.plain_len, unpacked_len=r.unpacked_len,
+                                        progress=progress)
     r.finish()
     return route, info
 
@@ -582,8 +620,9 @@ def cmd_stage(args):
                 route, info = _stage_stream(src, inv, hk, args.legacy_import, progress)
                 digest = src.digest
             else:
-                info = backup.stage_restore(blob, pw, keys=hk, legacy_import=route == "legacy-import",
-                                            progress=progress)
+                with backup.write_budget(backup.headroom(data)):
+                    info = backup.stage_restore(blob, pw, keys=hk, legacy_import=route == "legacy-import",
+                                                progress=progress)
         except Refused:
             if progress.mutated:
                 raise Uncertain("the staging failed after the data volume began to change") from None
@@ -619,6 +658,12 @@ def cmd_estimate(args):
     """An upper bound of the backup's size (backup.sh: refuse early when the destination is too
     small). Reads sizes only (lstat), no lock: the app may run."""
     print("estimate: %d" % backup.host_estimate())
+    # M2: ce scrie backup-ul pe volum pe lângă arhivă (copia de lucru / spool-ul + copia DB-ului), rezerva
+    # gateway-ului şi dispozitivul volumului: backup.sh le adună la nevoia destinaţiei când e ACELAŞI
+    # sistem de fişiere (arhiva creşte cât copia de lucru încă există)
+    print("work: %d" % backup.host_work_need())
+    print("headroom: %d" % backup.headroom(config.DATA_DIR))
+    print("device: %d" % os.stat(str(config.DATA_DIR)).st_dev)
     return EXIT_OK
 
 
@@ -633,6 +678,9 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--sha256", required=True)
         s.add_argument("--legacy-import", action="store_true")
+        if name == "verify":
+            # restore.sh înainte de oprire: lipsa spaţiului pentru restore = refuz, nu o notă
+            s.add_argument("--for-restore", action="store_true")
     args = p.parse_args(argv)
     fn = {"backup": cmd_backup, "verify": cmd_verify, "stage-restore": cmd_stage,
           "estimate": cmd_estimate}[args.cmd]

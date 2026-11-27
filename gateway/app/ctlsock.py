@@ -280,7 +280,8 @@ async def _janitor():
 
 
 def _estimate():
-    """Bytes the spool may need: the DB and every file under transcripts/ (and arhiva/)."""
+    """Bytes the spool may need: the DB and every file under transcripts/ (and arhiva/). The
+    admission adds the DB copy (backup.db_size) and the reserve (backup.headroom)."""
     n = 0
     for p in (config.DB_PATH, config.DATA_DIR / "webterm.db-wal"):
         with contextlib.suppress(OSError):
@@ -295,13 +296,20 @@ def _estimate():
     return n
 
 
+def _fs_size(dir_fd):
+    st = os.fstatvfs(dir_fd)
+    return st.f_blocks * st.f_frsize
+
+
 def _worker(fd, name, include, cancel, spool_fd):
     """Runs in a thread and OWNS the spool from submit: writes the WTS1, fsyncs, verifies it in
     full, and on any failure or cancel unlinks it before returning. → (size, sha256 hex, unpacked
     size of its tar stream)."""
     ok = False
     try:
-        with os.fdopen(os.dup(fd), "w+b") as f:
+        # M2: buget dur pe volumul viu — worker-ul se opreşte (şi şterge spool-ul) înainte de rezervă
+        budget = backup.write_budget(max(backup.HEADROOM_MIN, _fs_size(spool_fd) // backup.HEADROOM_DIV))
+        with budget, os.fdopen(os.dup(fd), "w+b") as f:
             if _s.worker is not None:
                 _s.worker(f, include, cancel)
             else:
@@ -449,11 +457,14 @@ async def _op_start(req, reader, writer, conn, peer):
         try:
             vfs = os.fstatvfs(_s.spool_fd)
             need = await asyncio.to_thread(_estimate)
+            dbn = await asyncio.to_thread(backup.db_size)
             held = sum(sp.size for sp in _s.spools.values())
             total = vfs.f_blocks * vfs.f_frsize
-            # spaţiu liber ≥ estimare + 10 %, iar spool-urile gata + acesta ≤ SPOOL_SHARE din disc
-            # (discul e comun cu restul sistemului)
-            if (vfs.f_bavail * vfs.f_frsize < need * SPACE_SLACK
+            keep = max(backup.HEADROOM_MIN, total // backup.HEADROOM_DIV)
+            # Codex M2: spool-ul (estimare + 10 %) ŞI copia DB-ului care coexistă cu el (cea a
+            # snapshot-ului, apoi cea extrasă la verificare) peste rezerva gateway-ului; spool-urile
+            # gata + acesta ≤ SPOOL_SHARE din disc (discul e comun cu restul sistemului)
+            if (vfs.f_bavail * vfs.f_frsize < need * SPACE_SLACK + dbn + keep
                     or held + need * SPACE_SLACK > total * SPOOL_SHARE):
                 await _audit(peer, "snapshot.start", 507, "no space")
                 await _send(writer, {"ok": False, "id": rid, "code": "backup.noSpace"})
@@ -505,6 +516,10 @@ async def _op_start(req, reader, writer, conn, peer):
         return False
     try:
         size, sha, unpacked = fut.result()
+    except backup.NoSpace:
+        await _audit(peer, "snapshot.start", 507, "no space (budget)")
+        await _send(writer, {"ok": False, "id": rid, "code": "backup.noSpace"})
+        return True
     except backup.SnapshotBusy:
         await _audit(peer, "snapshot.start", 409, "busy")
         await _send(writer, {"ok": False, "id": rid, "code": "backup.busy"})

@@ -265,7 +265,10 @@ if app_running; then VMODE=live; else
   VMODE=ro
 fi
 rc=0
-VOUT=$(hostops "$VMODE" verify --sha256 "$SHA" "${LI[@]}" <"$PINNED" 2>&1) || rc=$?
+FR=(); [ "$VERIFY" = 1 ] || FR=(--for-restore)
+# M2: în modul restore, lipsa spaţiului pentru staging + aplicare + copia de siguranţă se refuză AICI,
+# cu app-ul încă pornit (un restore test doar o notează)
+VOUT=$(hostops "$VMODE" verify --sha256 "$SHA" "${LI[@]}" "${FR[@]}" <"$PINNED" 2>&1) || rc=$?
 if [ "$rc" != 0 ]; then
   if printf '%s' "$VOUT" | grep -q 'No module named'; then
     VOUT="the app image cannot run app.hostops: it is older than 3.8 — restore with the restore.sh of its own version"
