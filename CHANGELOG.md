@@ -9,20 +9,35 @@ back.
 
 ## [Unreleased]
 
+### Upgrade notes (3.7 → 3.8)
+- **Upgrading changes nothing in the data volume.** With no master key configured, 3.8 boots a 3.7
+  volume exactly as 3.7 left it, and rolling back to 3.7 still works. Encryption at rest is a
+  separate, deliberate step you take afterwards (docs/INSTALL.md, *Upgrading from 3.7 to 3.8* and
+  *Encryption at rest*); encrypted recordings are a second opt-in on top of it. New installations
+  made with the 3.8 `install.sh` are protected from the start.
+- **Turning encryption on is one-way.** Once a volume is migrated, no 3.7 image may start on it
+  (the deploy, rollback and upgrade scripts refuse), and the only way back to 3.7 is the backup
+  taken before the migration, restored into a new volume (docs/INSTALL.md, *Going back to 3.7*).
+- **Keep the master key off the machine.** Without `secrets/master-key/master.key` neither the
+  installation nor any backup made after the migration can be opened; it is never inside a backup.
+- **What 3.8 does not cover**, so nobody plans around it: the SQLite database file and its WAL are
+  not encrypted yet (host names, accounts, the audit log stay readable in the volume; SQLCipher is
+  planned for a later release), and a compromised running gateway or root on its host can read the
+  key in use. Incremental host backups, which copy only new recordings each night, are planned for
+  3.8.1; until then every host archive is a full copy.
+
 ### Added
-- **Encryption at rest for the data volume (phase 1).** Until now the key that encrypts every stored
+- **Encryption at rest for the data volume.** Until now the key that encrypts every stored
   credential (agent tokens, SSH passwords and keys, TOTP secrets, SMTP and cloud credentials, the
   agents' CA key) sat in the same volume as the data it protected, as `data/secret`: anyone with a
   copy of the volume or of a backup had everything. A volume can now be protected by a **master key
   kept outside it**: the vault key is wrapped in `keys.wtk`, and every backup or snapshot the gateway
-  writes is an encrypted container that cannot be opened without that key. New installations get a
-  key file from `install.sh` / `setup.sh` (`secrets/master-key/master.key`, mounted read-only);
-  **copy it off the machine**, because without it the installation and its backups cannot be
-  opened. Upgraded installations change nothing until the operator opts in: a 3.7 volume with no key
-  configured boots exactly as before. Turning it on is one key file and one line in `.env`; the next
-  start migrates the volume once, after proving the old key really decrypts the database, and
-  applies a staged restore first if there is one (docs/INSTALL.md, *Encryption at rest*). Not covered
-  yet: the database file itself (stated in System health and the docs).
+  writes (download, scheduled snapshot, cloud / SFTP / FTPS copy, pre-restore copy) is an encrypted
+  container that cannot be opened without that key. New installations get a key file from
+  `install.sh` / `setup.sh` (`secrets/master-key/master.key`, mounted read-only). Upgraded
+  installations opt in with one key file and one line in `.env`; the next start migrates the volume
+  once, after proving the old key really decrypts the database, and applies a staged restore first
+  if there is one (docs/INSTALL.md, *Encryption at rest*). The rule behind it is INV-14.
 - **Encrypted session recordings (opt-in).** Recordings can hold everything typed and shown in a
   terminal, and until now they sat in the volume and in every backup as plaintext. With
   `WEBTERM_TX_RECORDINGS=1` on a protected volume each recording is encrypted under its own key,
@@ -31,42 +46,87 @@ back.
   with Owner *retry* and *discard*), and backups carry the encrypted recordings. It is off by default
   and never turned on by an upgrade: docs/INSTALL.md, *Encrypting session recordings*, lists the
   checks to make first (protected volume, an SFTP/FTPS destination, a fresh backup, free disk).
+- **Encrypted recordings are compressed before encryption** (`WTX1` version 2), on by default.
+  Encrypted data does not compress, so with recording encryption on, the nightly backup of a real
+  installation had grown from 274 MB to 4.1 GB and the volume paid the full plaintext size; now
+  both stay close to a gzip of the plaintext. Recordings encrypted by earlier 3.8 builds are
+  rewritten in the background and replay byte for byte the same (`WEBTERM_TX_COMPRESS=0` turns it
+  off). Before an old recording is replaced it is verified whole, so a damaged one is never swapped
+  for a clean copy that would hide the damage: it is left exactly as it is and named in System
+  health. Each background pass is bounded by the work it attempts, failures included, so a batch of
+  damaged or repeatedly refused recordings cannot saturate the disk in one pass; a transient error
+  opening a recording (too many open files, I/O) is retried later instead of marking it damaged.
 - **Erasing a recording is final, even across restores.** Deleting a file was never enough: a
-  restore of an older backup brought the recording back. An Owner erase now destroys the
-  recording's key and writes the erasure to a journal whose head is copied to the SFTP/FTPS
-  destination and read back. A restore applies every erasure it can see (in the backup, on the
-  volume, at the destination, on any branch of a disagreement), and a server that shares the
-  destination with a newer one picks up its erasures within a minute, so an erased recording does
-  not reappear on an old copy either.
+  restore of an older backup brought the recording back. An Owner erase (fresh second factor, typed
+  confirmation, audited, security e-mail) now destroys the recording's key and writes the erasure to
+  a journal whose head is copied to the SFTP/FTPS destination and read back. A restore applies every
+  erasure it can see (in the backup, on the volume, at the destination, on any branch of a
+  disagreement), and a server that shares the destination with a newer one picks up its erasures on
+  its next pass, so an erased recording does not reappear on an old copy either. Google Drive and
+  Dropbox cannot hold the attestation yet. In 3.8.0 erase, quarantine and recovery are API
+  endpoints for Owners (listed in docs/INSTALL.md), with no Settings screen yet.
 - **Quarantine instead of guessing after a restore.** When a restore cannot prove which erasures
   happened since the backup (no destination, a destination that does not answer, a journal that
   cannot be verified, two journals that disagree), the restored recordings are quarantined instead
   of served. The quarantine lifts by itself once the destination proves the history; until then an
   Owner can open one recording at a time (audited, never one whose key was destroyed), resolve a
   disagreement by adopting the branch that holds every erasure, or retire a destination that is gone
-  for good. System health says which of these applies.
+  for good. System health says which of these applies, and docs/RUNBOOK.md (*Encryption at rest:
+  alarms and what to do*) has the operator action for every message.
+- **Host backups of a running gateway with encrypted recordings go through the gateway.** A copy of
+  the live volume taken from outside would catch the database and the recordings at different
+  moments. `scripts/backup.sh` now asks the gateway over a local control socket (root or the app
+  user only), which takes the same consistent snapshot as an in-app backup and hands it over only
+  once verified; when the socket is unavailable the backup is refused and System health says why,
+  instead of reading the live volume.
 - **System health shows the protection state** (*Encryption at rest*: protected / reduced / legacy,
-  and a warning when the key comes from an environment variable) and **counts the older backups
-  that still hold the old vault key in clear**, including the off-host archives whose names date
-  from before the migration (listed by name, never downloaded), so they can be deleted once no
-  longer needed.
+  and a warning when the key comes from an environment variable), the progress of the recording
+  migration and compression, the erasure journal and its attestation, the backup socket, and
+  **counts the older backups that still hold the old vault key in clear**, including the off-host
+  archives whose names date from before the migration (listed by name, never downloaded), so they
+  can be deleted once no longer needed.
 
 ### Changed
-- **An agent is no longer dropped by a busy database at connect.** With encrypted recordings on, a
-  write on the shared connection racing another coroutine's open read and the recording store's
-  write lock was refused at once ("database is locked", no busy wait), so the hello bookkeeping
-  disconnected the agent; such writes now wait and retry, and a busy DB in control-frame
-  bookkeeping never closes the connection (only a genuine busy or locked refusal: a schema, I/O or
-  full-disk error still ends the connection, as before, instead of being logged as "busy").
-- **Encrypted recordings are compressed before encryption** (WTX1 version 2, raw deflate with a
-  context reset at every seek point): encrypted data does not compress, so with recording
-  encryption on, the nightly backup had grown from 274 MB to 4.1 GB on a real installation and the
-  volume paid the full plaintext size; recordings encrypted by earlier 3.8 builds are rewritten in
-  the background, byte-identical on replay (`WEBTERM_TX_COMPRESS=0` turns it off). Before an old
-  recording is replaced it is verified whole, so a damaged one is never swapped for a clean copy
-  that would hide the damage: it is left exactly as it is and named in System health. Each
-  background pass is bounded by the work it attempts, failures included, so a batch of damaged or
-  repeatedly refused recordings cannot saturate the disk in one pass.
+- **A gateway refuses to start rather than run with the wrong key.** A protected volume needs exactly
+  its own master key: a missing, wrong or badly-permissioned key file stops the boot before anything
+  in the data directory is touched (no clean-up, no restore, no schema change), with one log line
+  naming the reason and never the key. There is no fallback to the old key. A new, empty volume does
+  not start without a key at all (or `WEBTERM_KEY_IN_VOLUME=1` for test setups, shown as reduced
+  protection).
+- **Host backups of protected volumes work at any size.** The encrypted host archive used to be
+  built and encrypted in memory and capped at 2 GiB of data, so a volume with a few GB of
+  transcripts could not be backed up at all ("encrypted backup too large"), where 3.7 had streamed
+  any size. `backup.sh` now writes a streamed format (`.wtbk`, WTBK2: authenticated 1 MiB chunks)
+  and `restore.sh` reads it the same way, in a few MiB of memory whatever the volume's size; both
+  refuse early, with the sizes, when the backup directory or the data volume lacks the space.
+  Archives written by earlier 3.8 release candidates still restore.
+- **Backup and restore scratch lives on the data volume, not in `/tmp`.** The production container
+  is read-only with a 64 MiB `/tmp`, so a protected host backup of a real volume failed with "no
+  space left". Work files now go to a private, per-operation directory under `backups/.work`, swept
+  at boot and before each operation.
+- **Host backups and restores no longer fill the disk.** The space checks counted one copy where
+  several exist at once (the work copy and the database copy, the archive next to the work copy on
+  the same disk, the previous data's safety copy during a restore), so a large database or a small
+  archive replacing a large dataset could pass the check and then run the shared disk out of space,
+  or leave the app unable to apply the restore at its next start. Every phase is now counted, at
+  least max(1 GiB, 5 %) of the disk is kept free for the gateway, a writer that would cross that
+  stops and cleans up, `restore.sh` refuses before stopping the app, and the start checks the space
+  again before it touches anything (the old data stays). A single file of 8 GiB or more (a very
+  large database), which the archive format cannot hold, is now refused at once with its name
+  instead of failing partway.
+- **The host backup and restore scripts understand protected volumes.** `scripts/backup.sh` on a
+  protected volume archives `keys.wtk` instead of `data/secret` and never the master key: keep the
+  key file (`secrets/master-key/master.key`) apart, since the archive cannot be restored without
+  it. `scripts/restore.sh` accepts such an archive only when the master key this installation is
+  configured with opens the archive's `keys.wtk` (checked with the app image before the app is
+  stopped), refuses archives that mix `secret` and `keys.wtk` or carry key material, and no
+  longer moves the data directory's `.lock` aside. Pre-3.8 volumes and archives work as before.
+- **A restore that would be refused is refused before the app is stopped.** `restore.sh`'s check
+  covered the archive's structure and database but not the rules the staging applies to encrypted
+  recordings, so an archive with encrypted recordings restored onto an installation without them, or
+  one whose recording list did not match its database, passed the check, cost a stop of the app, and
+  was then refused. The check now runs the staging's own acceptance, and a restore test reports the
+  same verdict.
 - **A refused deploy leaves the installation as it was.** `deploy.sh <version>` used to write the
   new image into `.env` and the rollback target into `.prev-image` before its checks; when the 3.8
   guard then refused (for example a pre-3.8 image on a migrated volume), the next plain
@@ -81,12 +141,6 @@ back.
   `./deploy.sh`, and a re-run refuses an `--image` that differs from the installation's own: version
   changes go through `./upgrade.sh` or `./deploy.sh`. `deploy.sh`, `rollback.sh` and `upgrade.sh`
   also delete their temporary compose plan on Ctrl-C, and remove plans left by a run that was killed.
-- **A gateway refuses to start rather than run with the wrong key.** A protected volume needs exactly
-  its own master key: a missing, wrong or badly-permissioned key file stops the boot before anything
-  in the data directory is touched (no clean-up, no restore, no schema change), with one log line
-  naming the reason and never the key. There is no fallback to the old key. A new, empty volume does
-  not start without a key at all (or `WEBTERM_KEY_IN_VOLUME=1` for test setups, shown as reduced
-  protection).
 - **`python3 -m app.admin vacuum` now runs with the gateway stopped.** It rewrites the whole database
   file, so it takes the same lock on the data directory as the gateway (one process at a time on
   a protected volume) and, while the gateway runs, refuses and prints the stop / `docker compose
@@ -94,36 +148,21 @@ back.
   break-glass commands (`passwd`, `disable-2fa`, `logout-all`, `promote`, `enable`, `sso-only`)
   still work with `docker exec` while the gateway runs, as before: being locked out is exactly when
   you cannot afford to stop the service, and they change only database rows, never the keys.
-- **The host backup and restore scripts understand protected volumes.** `scripts/backup.sh` on a
-  protected volume archives `keys.wtk` instead of `data/secret` and never the master key: keep the
-  key file (`secrets/master-key/master.key`) apart, since the archive cannot be restored without
-  it. `scripts/restore.sh` accepts such an archive only when the master key this installation is
-  configured with opens the archive's `keys.wtk` (checked with the app image before the app is
-  stopped), refuses archives that mix `secret` and `keys.wtk` or carry key material, and no
-  longer moves the data directory's `.lock` aside. Pre-3.8 volumes and archives work as before.
-- **Host backups of protected volumes work at any size.** The encrypted host archive used to be
-  built and encrypted in memory and capped at 2 GiB of data, so a volume with a few GB of
-  transcripts could not be backed up at all ("encrypted backup too large"), where 3.7 had streamed
-  any size. `backup.sh` now writes a streamed format (`.wtbk`, WTBK2: authenticated 1 MiB chunks)
-  and `restore.sh` reads it the same way, in a few MiB of memory whatever the volume's size; both
-  refuse early, with the sizes, when the backup directory or the data volume lacks the space.
-  Archives written by earlier 3.8 release candidates still restore.
-- **A restore that would be refused is refused before the app is stopped.** `restore.sh`'s check
-  covered the archive's structure and database but not the rules the staging applies to encrypted
-  recordings, so an archive with encrypted recordings restored onto an installation without them, or
-  one whose recording list did not match its database, passed the check, cost a stop of the app, and
-  was then refused. The check now runs the staging's own acceptance, and a restore test reports the
-  same verdict.
-- **Host backups and restores no longer fill the disk.** The space checks counted one copy where
-  several exist at once (the work copy and the database copy, the archive next to the work copy on
-  the same disk, the previous data's safety copy during a restore), so a large database or a small
-  archive replacing a large dataset could pass the check and then run the shared disk out of space,
-  or leave the app unable to apply the restore at its next start. Every phase is now counted, at
-  least max(1 GiB, 5 %) of the disk is kept free for the gateway, a writer that would cross that
-  stops and cleans up, `restore.sh` refuses before stopping the app, and the start checks the space
-  again before it touches anything (the old data stays). A single file of 8 GiB or more (a very
-  large database), which the archive format cannot hold, is now refused at once with its name
-  instead of failing partway.
+
+### Fixed
+- **An agent is no longer dropped by a busy database at connect.** With encrypted recordings on, a
+  write on the shared connection racing another coroutine's open read and the recording store's
+  write lock was refused at once ("database is locked", no busy wait), so the hello bookkeeping
+  disconnected the agent; such writes now wait and retry, and a busy DB in control-frame
+  bookkeeping never closes the connection (only a genuine busy or locked refusal: a schema, I/O or
+  full-disk error still ends the connection, as before, instead of being logged as "busy").
+- **`WEBTERM_BACKUP_KEEP` can no longer delete every archive.** A value of `0`, or anything that was
+  not a number, made the rotation of `scripts/backup.sh` delete all archives, the one just written
+  included. It must now be a whole number of at least 1, and anything else is refused before
+  anything is written.
+- **Backup rotation is safe for any directory name.** Old archives were removed through `xargs`,
+  which split a `WEBTERM_BACKUP_DIR` containing spaces or quotes into several paths; the rotation
+  now deletes the exact files by their full path, newest `WEBTERM_BACKUP_KEEP` kept.
 
 ## [3.7.1] — 2026-11-22 · agent (61)
 
