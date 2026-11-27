@@ -498,6 +498,15 @@ def cmd_verify(args):
         space = None
         if inv.kind == "protected":
             hk, resolved = _open_keys(view, inv)
+            # R-M3: un apply neterminat pe ţintă (flag `applying` / `committed`, sau ilizibil) face
+            # staging-ul imposibil: refuzat ACUM, înainte ca restore.sh să oprească app-ul
+            # (un test de restore doar notează: arhiva în sine e bună, ca la lipsa spaţiului)
+            try:
+                backup.refuse_active_journal(live_root)
+            except ValueError as e:
+                if args.for_restore:
+                    raise Refused("%s — refused" % e) from None
+                _say("note: %s: a restore would be refused until then" % e)
             blob = _manifest_bytes(view.dir_fd)
             # M2: ce cere restore-ul pe volumul ŢINTĂ (măsurat înainte de _point_at, care mută căile)
             try:

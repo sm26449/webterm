@@ -1428,6 +1428,91 @@ def test_rm2(e):
           and _leftovers(tgt) == [], (mode, email, applied))
 
 
+MANIFEST_LEN_PRE = r'''
+import sys
+from app import backup as _b
+_orig = _b._restore_manifest
+def _rm(*a, **k):
+    doc, raw = _orig(*a, **k)
+    print("restore-manifest-len: %d" % len(raw), file=sys.stderr)
+    return doc, raw
+_b._restore_manifest = _rm
+'''
+
+
+def test_rm3(e):
+    """Codex R-M3: what the staging refuses on the TARGET is refused by `verify --for-restore` too,
+    before restore.sh stops the app: an unfinished apply journal, a final restore manifest too large."""
+    print("── Codex R-M3: publication prerequisites in the preflight")
+    kf = e.key_file("rm3.key")
+    d = protected_volume(e, "rm3src", kf, email="rm3@x")
+    hk, undo_env = _open_volume(d, kf)
+    try:
+        out = io.BytesIO()
+        hostops._local_snapshot(hk, PASS, True, out)
+        blob = out.getvalue()
+    finally:
+        undo_env()
+    sha = hashlib.sha256(blob).hexdigest()
+    kenv = {"WEBTERM_MASTER_KEY_FILE": kf, "WEBTERM_BACKUP_PASSPHRASE": PASS}
+    path = os.path.join(e.base, "rm3.wtbk")
+    open(path, "wb").write(blob)
+
+    # 1) ţinta are un jurnal de apply neterminat (`applying`)
+    tgt = protected_volume(e, "rm3tgt", kf, email="alt3@x")
+    rc, out = hostops_run(e, "rm3tgt", ["stage-restore", "--sha256", sha], blob, kenv)
+    fp = os.path.join(tgt, ".restore-flag")
+    flag = json.loads(open(fp, "rb").read())
+    flag.update(state="applying", quarantine=False, safety="")
+    with open(fp, "wb") as f:
+        f.write(backup._canon(flag))
+    e.app("rm3tgt", ["WEBTERM_MASTER_KEY_FILE=" + kf])
+    before = data_tree(tgt)
+    rc, out = restore(e, path, "rm3tgt", PE)
+    calls = e.calls()
+    check("R-M3: unfinished apply journal on the target → refused at verify --for-restore, the app never "
+          "stopped, nothing changed",
+          rc != 0 and "a restore is being applied" in out and "stop " not in calls
+          and data_tree(tgt) == before, out[-500:] + calls)
+    rc, out = hostops_run(e, "rm3tgt", ["verify", "--sha256", sha], blob, kenv)
+    check("R-M3: …a plain verify (restore test) only notes it (the archive itself is fine)",
+          rc == 0 and "a restore would be refused until then" in out, out[-300:])
+    rc, out = hostops_run(e, "rm3tgt", ["stage-restore", "--sha256", sha], blob, kenv)
+    check("R-M3: …and the staging under its lock still refuses (the authoritative check)",
+          rc == hostops.EXIT_REFUSED and "a restore is being applied" in out and data_tree(tgt) == before,
+          out[-300:])
+
+    # 2) manifestul final: preflight-ul îl construieşte exact ca staging-ul (aceeaşi lungime)
+    tgt2 = protected_volume(e, "rm3big", kf, email="alt4@x")
+    rc_v, out_v = hostops_pre(e, "rm3big", ["verify", "--for-restore", "--sha256", sha], blob, kenv,
+                              MANIFEST_LEN_PRE)
+    rc_s, out_s = hostops_pre(e, "rm3big", ["stage-restore", "--sha256", sha], blob, kenv, MANIFEST_LEN_PRE)
+    lv = [ln for ln in out_v.splitlines() if ln.startswith("restore-manifest-len: ")]
+    ls = [ln for ln in out_s.splitlines() if ln.startswith("restore-manifest-len: ")]
+    check("R-M3: the preflight's restore.json has exactly the staging's length",
+          rc_v == 0 and rc_s == 0 and len(lv) == 1 and lv == ls, (lv, ls, out_v[-300:], out_s[-300:]))
+    os.unlink(os.path.join(tgt2, ".restore-flag"))
+    for n in os.listdir(tgt2):
+        if n.startswith(backup.SET_PREFIX):
+            shutil.rmtree(os.path.join(tgt2, n))
+    # plafonul coborât sub mărimea acestui manifest: verify --for-restore refuză, app-ul nu e oprit
+    limit = int(lv[0].split()[-1]) - 1 if lv else 100
+    e.app("rm3big", ["WEBTERM_MASTER_KEY_FILE=" + kf])
+    before = data_tree(tgt2)
+    e.put("hostops_pre", "from app import backup as _b\n_b.RESTORE_MANIFEST_MAX = %d\n" % limit)
+    try:
+        rc, out = restore(e, path, "rm3big", PE)
+        calls = e.calls()
+    finally:
+        e.put("hostops_pre", None)
+    check("R-M3: final restore manifest too large → refused at verify --for-restore, the app never stopped",
+          rc != 0 and "restore-manifest" in out and "stop " not in calls and data_tree(tgt2) == before,
+          out[-500:] + calls)
+    rc, out = restore(e, path, "rm3big", PE)
+    check("R-M3: …control: with the normal limit the same restore goes through",
+          rc == 0, out[-400:])
+
+
 def _est_pre(lines):
     """hostops_pre: `estimate` answers exactly `lines` (a broken / old image)."""
     return ("from app import hostops as _h\n"
@@ -1532,6 +1617,7 @@ def main():
         test_m2(e)
         test_rm1(e)
         test_rm2(e)
+        test_rm3(e)
     finally:
         shutil.rmtree(e.base, ignore_errors=True)
         shutil.rmtree(_BOOT_DIR, ignore_errors=True)

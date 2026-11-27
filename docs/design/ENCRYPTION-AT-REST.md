@@ -1549,6 +1549,19 @@ the verify's private scratch. So an archive the staging would refuse is refused 
 `restore.sh` refuses it before it stops the app. (The in-app verify route keeps its structural
 check; its staging still applies these rules.)
 
+**Publication prerequisites in the preflight** (Codex R-M3). Two things the staging checks only at
+publication are knowable before the app stops, so `hostops verify` checks them too, read-only:
+the target's restore journal (a flag in `applying` / `committed`, or a malformed one, means only
+the boot's apply may finish it — the staging's `_refuse_active_journal`, read on the target without
+the lock), and the final `restore.json` (`_restore_manifest_feasible`: built from the preflight's
+tree as the staging builds it — the staged keys.wtk, the real sizes of the members written as
+placeholders, the erasure summary, digests and generation of their fixed length — and refused when
+it exceeds `RESTORE_MANIFEST_MAX`; the legacy import's verify does the same). With `--for-restore`
+an unfinished journal is a refusal; a plain restore test notes it (the archive itself is fine). A
+too-large manifest is always a refusal. Verify and stage cannot share a lock across the app's
+shutdown, so the checks under the staging lock stay the authoritative ones: a journal that appears
+after the preflight is still refused cleanly at stage.
+
 **Pinned digest** (M5, `hostops verify|stage-restore --sha256`): stdin is hashed as it is read; the
 digest is compared when the input ends, which the WTBK2 reader reaches before it accepts the last
 chunk, so a different file is refused before anything is published. WTBK1 and 3.7 archives are

@@ -2316,6 +2316,7 @@ def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMP
     whose checks read only its name — never a staged set that is published)."""
     gz = wts.BoundedGunzip(reader, max_unpacked)
     arc = _Archive(gz, "wts1", mem_only=(CONTENT_MANIFEST,), mem_also=(KEYS_NAME, *_SIGNING))
+    placeheld = {}
     try:
         for name, is_dir, _size in arc.entries():
             target = dest if dest is not None else (db_dest if name == "webterm.db" else None)
@@ -2334,8 +2335,10 @@ def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMP
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             with os.fdopen(fd, "wb") as out:
                 if placeholder is not None and placeholder(name):
+                    n = 0
                     for _b in arc.data():
-                        pass
+                        n += len(_b)
+                    placeheld[name] = n             # R-M3: mărimea reală, pentru manifestul final
                     continue
                 mo = metered(out, "extracting the archive")
                 for b in arc.data():
@@ -2355,6 +2358,8 @@ def _unpack_verified(reader, dest, db_dest=None, max_unpacked=RESTORE_MAX_UNCOMP
             "has_signing_key": "agent-signing.key" in arc.seen,
             "erasure": "tracked" if extras is not None else "not-tracked", "_content": extras,
             "unpacked_len": gz.out_len}
+    if placeholder is not None:
+        info["_placeheld"] = placeheld
     return info, arc.mem[KEYS_NAME]
 
 
@@ -2621,10 +2626,11 @@ _FLAG_FORMAT = "wt-restore-flag-1"
 _FLAG_STATES = ("staged", "applying", "committed")
 
 
-def _read_flag():
-    """None (no flag), "legacy" (a 3.7 flag: a timestamp), or the 3.8 flag document."""
+def _read_flag(root=None):
+    """None (no flag), "legacy" (a 3.7 flag: a timestamp), or the 3.8 flag document. `root`: the
+    data dir to read (default config.DATA_DIR; `hostops verify` reads the TARGET's, read-only)."""
     try:
-        raw = _read_small(_restore_flag(), FLAG_MAX)
+        raw = _read_small(_restore_flag() if root is None else os.path.join(str(root), ".restore-flag"), FLAG_MAX)
     except FileNotFoundError:
         return None
     if raw[:1] != b"{":
@@ -2669,13 +2675,21 @@ def _set_dir(gen: str):
     return config.DATA_DIR / (SET_PREFIX + gen)
 
 
-def _refuse_active_journal() -> None:
+def _refuse_active_journal(root=None) -> None:
     """R-H1: under the operations lock, before a new set may replace the current one: a flag in
     `applying` or `committed` is a journal that only apply may finish (refused, `backup.restoreInProgress`);
-    a malformed flag is refused too (never silently dropped)."""
-    flag = _read_flag()
+    a malformed flag is refused too (never silently dropped). Codex R-M3: also read-only, without
+    the lock, by `hostops verify` on the target `root` before restore.sh stops the app (the check
+    under the staging lock stays the authoritative one)."""
+    flag = _read_flag(root)
     if isinstance(flag, dict) and flag["state"] != "staged":
         raise ValueError(_IN_PROGRESS)
+
+
+def refuse_active_journal(root) -> None:
+    """Codex R-M3, `hostops verify` on a protected target: its restore journal read-only (no lock);
+    an unfinished apply (`applying` / `committed`) or a malformed flag → ValueError."""
+    _refuse_active_journal(root)
 
 
 def _drop_unflagged_sets(keep) -> None:
@@ -2691,6 +2705,42 @@ def _drop_unflagged_sets(keep) -> None:
         os.rename(str(config.DATA_DIR / n), os.path.join(trash, "set%d" % i))
     _fsync_dir(config.DATA_DIR)
     shutil.rmtree(trash, ignore_errors=True)
+
+
+def _restore_manifest(ring: kr.Keyring, entries: list, dirs, erasure_summary=None, generation=None) -> tuple:
+    """`restore.json` of a staged set → (doc, canonical bytes); larger than RESTORE_MANIFEST_MAX →
+    refused (`restore-manifest`). One builder for the staging and for the preflight's estimate."""
+    doc = {"format": "wt-restore-1", "generation": generation or secrets.token_hex(16), "created": int(time.time()),
+           "installation_id": ring.installation_id.hex(), "epoch": ring.epoch, "mk_id": ring.mk_id.hex(),
+           "files": entries, "dirs": sorted(dirs)}
+    if erasure_summary is not None:
+        doc["erasure"] = erasure_summary
+    raw = _canon(doc)
+    if len(raw) > RESTORE_MANIFEST_MAX:
+        raise wts.SnapshotTooLarge("restore-manifest")
+    return doc, raw
+
+
+def _restore_manifest_feasible(td: str, staged_blob: bytes, mk: bytes, sizes=None, erasure_summary=None) -> None:
+    """Codex R-M3: the preflight builds the `restore.json` the staging would publish for the tree in
+    `td` (without writing it): same files and directories (the staged keys.wtk in place of the
+    archive's, `sizes` = real sizes of members written as placeholders), digests and generation
+    of their fixed length — so an archive whose final manifest is too large is refused before
+    restore.sh stops the app, not after."""
+    ring = _open_ring(staged_blob, mk, "staged keys.wtk")
+    files, dirs = _tree(td)
+    sizes = sizes or {}
+    names = (set(files) | {KEYS_NAME}) - {CONTENT_MANIFEST}
+    entries = []
+    for rel in sorted(names):
+        if not _allowed(rel, False):
+            raise ValueError("unexpected file in the restore staging — refused: %s" % rel[:80])
+        size = len(staged_blob) if rel == KEYS_NAME else sizes.get(rel, os.lstat(files[rel]).st_size)
+        entries.append({"name": rel, "size": int(size), "sha256": "0" * 64})
+    for rel in dirs:
+        if rel not in _TX_DIRS:
+            raise ValueError("unexpected directory in the restore staging — refused")
+    _restore_manifest(ring, entries, dirs, erasure_summary, generation="0" * 32)
 
 
 def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None, erasure_summary=None) -> None:
@@ -2713,14 +2763,7 @@ def _stage_publish(td: str, staged_blob: bytes, mk: bytes, progress=None, erasur
         if rel not in _TX_DIRS:
             raise ValueError("unexpected directory in the restore staging — refused")
         _fsync_dir(os.path.join(td, rel))
-    doc = {"format": "wt-restore-1", "generation": secrets.token_hex(16), "created": int(time.time()),
-           "installation_id": ring.installation_id.hex(), "epoch": ring.epoch, "mk_id": ring.mk_id.hex(),
-           "files": entries, "dirs": sorted(dirs)}
-    if erasure_summary is not None:
-        doc["erasure"] = erasure_summary
-    raw = _canon(doc)
-    if len(raw) > RESTORE_MANIFEST_MAX:
-        raise wts.SnapshotTooLarge("restore-manifest")
+    doc, raw = _restore_manifest(ring, entries, dirs, erasure_summary)
     _write_new(os.path.join(td, RESTORE_MANIFEST), raw)
     _fsync_dir(td)
     _step("stage:manifest")
@@ -2804,8 +2847,10 @@ def preflight_wts(fileobj, keys=None, *, live_root, budget=None) -> dict:
     refused here, before restore.sh stops the app."""
     hk, _ = _host(keys)
     with work_dir("preflight-") as td:
-        info, _inner, _summary = _preflight_wts(fileobj, hk, td, budget=budget, live_root=live_root,
-                                                placeholder=_preflight_placeholder)
+        info, inner, summary = _preflight_wts(fileobj, hk, td, budget=budget, live_root=live_root,
+                                              placeholder=_preflight_placeholder)
+        # R-M3: manifestul final (restore.json) construit ca la staging, fără a-l scrie
+        _restore_manifest_feasible(td, _manifest_for_host(inner, hk), hk.mk, info.pop("_placeheld", {}), summary)
     return info
 
 
@@ -3035,13 +3080,19 @@ def _legacy_import_info(arc, users_since) -> dict:
 def verify_legacy_import(raw: bytes, keys=None) -> dict:
     """R-H2: the legacy import's complete check without staging anything (a private directory,
     removed afterwards): exactly the extraction and proofs _stage_legacy_import makes."""
-    _host(keys)                                  # un volum protejat, cu cheile lui deschise
+    hk, _ = _host(keys)                          # un volum protejat, cu cheile lui deschise
     with _restore_lock():
         td = _private_tmpdir()
         try:
             arc, secret, users_since = _extract_legacy_strict(raw, td)
-            del secret
+            r = hk.ring
+            new = kr.Keyring(r.installation_id, r.epoch, r.mk_id, r.retired_mk_ids, kwk=r.kwk,
+                             snk=r.snk, fk_legacy=secret, fk=r.fk, dbk=r.dbk)
+            staged = _manifest_for_host(new, hk)
+            del secret, new
             arc.mem.clear()
+            # R-M3: manifestul pe care staging-ul l-ar publica încape (construit, nu scris)
+            _restore_manifest_feasible(td, staged, hk.mk)
         finally:
             shutil.rmtree(td, ignore_errors=True)
     return _legacy_import_info(arc, users_since)
