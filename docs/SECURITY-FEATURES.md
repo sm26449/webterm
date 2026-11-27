@@ -98,6 +98,19 @@ the password never crosses in clear; plain FTP is refused). `WEBTERM_BACKUP_REMO
 backend: S3/B2/…) still works too. Every path refuses to upload an unencrypted archive. The same
 `AUTHENTIK_BACKUP_RSYNC`/`_FTPS` options exist for the Authentik backup (`deploy/authentik/backup.sh`).
 
+**Encryption at rest (3.8).** The vault key that encrypts every stored credential is wrapped by
+a master key kept outside the data volume (`keys.wtk` in the volume, the key file in
+`secrets/master-key/`), so a copy of the volume or of a backup no longer gives the credentials
+away. A gateway refuses to start with a missing or wrong key rather than fall back to the old one
+(INV-14). Every backup and snapshot the gateway writes is an encrypted container that needs that
+key; host archives stream at any size. Opt-in **encrypted recordings** (`WEBTERM_TX_RECORDINGS=1`)
+are compressed, then encrypted per session; an Owner **erase** (fresh second factor, typed
+confirmation, audited, security e-mail) destroys the recording's key and is journalled off-host
+over SFTP/FTPS, so a restore cannot bring it back, and a restore that cannot prove the erasure
+history quarantines the recordings instead of serving them. System health shows the protection
+state. Not covered: the database file (SQLCipher later) and a compromised running server. See
+[INSTALL.md → Encryption at rest](INSTALL.md#encryption-at-rest).
+
 **Accounts (Settings → Account).** You can create more than one account, so each person
 signs in with their own password, passkeys and 2FA, and the audit log records *who*. There
 are **roles** (3.6.0, [ROLES.md](ROLES.md)): Owner / Admin / Operator / Viewer bound to all

@@ -146,7 +146,18 @@ gateway/app/
   certmon.py               TLS certificate monitoring + renew
   updatecheck.py           "is there a newer version?"
   admin.py                 recovery from the server: python3 -m app.admin …
-  keys.py · keyring.py · bootkeys.py · snapshot.py   encryption at rest: key manifest, boot wiring, WTS1
+  -- encryption at rest (3.8, docs/design/ENCRYPTION-AT-REST.md; rule INV-14) --
+  keyring.py · keys.py · bootkeys.py   key primitives · key sources, boot contract, lock, keys.wtk ·
+                           wired into the real boot (protection state for System health)
+  legacyvault.py           the 3.7 vault inventory and the proof of the old key (migration, legacy import)
+  snapshot.py · wtbk.py    WTS1 snapshot container (pure codec) · WTBK2 streamed passphrase layer
+  hostops.py               backup.sh / restore.sh run this in the app image: backup, verify, stage
+  ctlsock.py               local control socket for host backups of a running gateway
+  txformat.py · txdesc.py  WTX1 recording codec (v2: compressed records) · recording descriptors
+  txstore.py · txhub.py    encrypted recordings: writer, readers, recompaction · wiring into the hub
+                           and the transcript / replay / search routes (inert unless WEBTERM_TX_RECORDINGS=1)
+  migration.py             background migration of 3.7 plaintext recordings to WTX1
+  erasure.py               WTJ1 erasure journal, off-host attestation, quarantine, Owner recovery
 frontend/src/
   App.tsx                  shell: tabs, split views, hash routing, toasts, global shortcuts
   components/              one file per surface. SessionView = a terminal pane (the largest);
@@ -182,9 +193,10 @@ tests/                     <feature>_test.py: plain Python scripts (no pytest), 
                            scripts/run-tests.sh — a test file that is not listed there fails
                            the runner. ui_review.mjs = the axe-core accessibility gate
 docs/                      user and operator docs, indexed in docs/README.md
-  design/                  architecture notes: ARCHITECTURE · SESSION-LIFECYCLE ·
+  design/                  architecture notes: INVARIANTS · ARCHITECTURE · SESSION-LIFECYCLE ·
                            ROLES-AND-SSH · SPLIT-VIEWS · SIGNED-UPDATES · TELNET-BASTION ·
-                           GIT-PANEL-SUPERVISION · DESIGN-SYSTEM · FUTURE-DIRECTIONS
+                           AGENT-MTLS · ENCRYPTION-AT-REST · GIT-PANEL-SUPERVISION ·
+                           DESIGN-SYSTEM · FUTURE-DIRECTIONS
 deploy.sh · upgrade.sh · rollback.sh   production: first install · upgrade (backup, host files,
                            image pin, health gate) · the panic button
 ```

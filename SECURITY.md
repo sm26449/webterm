@@ -65,9 +65,23 @@ not bugs:
   non-interactive run **without** a passphrase deletes the archive and exits 1 rather than write
   the vault key in cleartext (`WEBTERM_BACKUP_ALLOW_PLAINTEXT=1` is the explicit opt-out). The
   download from Settings → Backup uses a password of your choosing (scrypt → AES-GCM, `WTBK1`).
+  That `openssl enc` layer is the pre-3.8 format; on a protected volume (3.8) the host archive is a
+  streamed `.wtbk` instead (`WTBK2`: scrypt, then AES-GCM in authenticated 1 MiB chunks; the
+  passphrase mandatory), and every archive holds `keys.wtk` instead of the vault key, never the
+  master key.
   The limitation is where the passphrase lives: on the same host as the data. Root on the gateway
   host can read every credential regardless of backup encryption — that is the premise above, not
   a weakness of the archive format.
+- **Encryption at rest (3.8) protects copies, not the running server.** With a master key kept
+  outside the data volume, a copy of the volume or of a backup does not reveal the stored
+  credentials, and opt-in encrypted recordings do not reveal what a terminal showed. It does not
+  protect against code running in the gateway or root on its host (they can read the key in use),
+  nor against a copy of a whole disk or VM that also holds the key file. The database file itself
+  is not encrypted in 3.8.0 (metadata such as host names, accounts and the audit log stays
+  readable in the volume). See [docs/INSTALL.md → Encryption at rest](docs/INSTALL.md#encryption-at-rest)
+  and [docs/design/ENCRYPTION-AT-REST.md](docs/design/ENCRYPTION-AT-REST.md). A way to open a
+  protected volume, backup or recording **without** its master key, or to make an erased recording
+  readable again, **is** in scope.
 - The `insecure` mode (TLS without validation) is an **opt-in**, documented footgun.
 
 If you find a way to break one of these **without** the premises above (e.g. escalation from

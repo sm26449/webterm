@@ -225,12 +225,14 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    install time, so generating a key *after* enrolment makes every existing agent refuse
    updates (correctly) until you reinstall it. The gateway now records that refusal, alerts,
    and tells you the remedy — it used to swallow it.
-5. **Scheduled server-side backups are unencrypted** — the server holds the vault
-   key in cleartext anyway. On **download** they are encrypted with your
+5. **On a pre-3.8 (legacy) volume, scheduled server-side backups are unencrypted** — the
+   server holds the vault key in cleartext anyway. On **download** they are encrypted with your
    passphrase. The ops backup (`scripts/backup.sh`) **is** encrypted with
    `WEBTERM_BACKUP_PASSPHRASE`, which `install.sh` generates: an unattended run without a
    passphrase deletes the archive and exits 1 (only `WEBTERM_BACKUP_ALLOW_PLAINTEXT=1`
-   overrides that).
+   overrides that). On a **protected** volume (3.8, encryption at rest) every backup and snapshot,
+   scheduled ones included, is an encrypted `WTS1` container that needs the master key, and the
+   host archive's passphrase is mandatory.
 6. **Automation tokens bypass 2FA and passkeys by design.** A token is a bearer
    secret: whoever holds it acts without a second factor. That is why they are
    deliberately narrow — an explicit allowlist of read endpoints plus fleet `run`,
@@ -283,6 +285,17 @@ See [design/ARCHITECTURE.md](design/ARCHITECTURE.md) for the agent's resilience
    secrets at the next launch. What *is* defended (since 3.6.34): moving a saved connection, a
    backup destination or an SSH/telnet host to another server, port or protocol asks for its
    password again, so editing a target cannot redirect a password the editor never saw.
+10. **Encryption at rest (3.8) protects copies, not a running server.** With the master key in a
+    file outside the data volume, a copy of the volume or of any backup does not give away the
+    stored credentials, and (with `WEBTERM_TX_RECORDINGS=1`) not the recordings either. What it
+    does **not** defend: code running in the gateway or root on its host (the key is in memory and
+    on that host's disk); a copy of the **whole** disk or VM when the key file is on it (keep the
+    key off the host if you need that); a memory snapshot; and, in 3.8.0, the SQLite database file
+    and its WAL, which stay readable (host names and addresses, accounts, the audit log, command
+    history). The system also cannot detect an attacker who replaces the **whole** state with an
+    older authentic copy. An erased recording stays erased across restores only while the erasure
+    journal reaches an SFTP/FTPS destination; when that cannot be proven the restored recordings are
+    quarantined rather than served. The full matrix: [design/ENCRYPTION-AT-REST.md §2](design/ENCRYPTION-AT-REST.md#2-threat-model-and-what-we-promise).
 
 ## Outbound connections the gateway makes on its own
 
@@ -323,7 +336,11 @@ mismatch through a failed certificate. It sends nothing about you beyond the req
 skipped if it fails, and it never runs again after installation.
 
 Every other outbound path exists only because you set it up: SMTP alerts, the alert webhook, cloud
-backup (Google Drive / Dropbox), and the SSH/telnet hosts you added. Unconfigured, none of them
+backup (Google Drive / Dropbox, SFTP / FTPS), and the SSH/telnet hosts you added. With encrypted
+recordings on (3.8), the gateway also talks to your SFTP / FTPS backup destination on its own:
+it uploads the head of the erasure journal after an erasure, reads it back, and lists the
+destination on its periodic passes to pick up erasures made by another copy of the installation.
+It goes only to the destination you configured and carries only that journal. Unconfigured, none of them
 make a connection. For an air-gapped or egress-filtered install, the switches above (and leaving
 SSO/heartbeat/backup unset) leave only the daily internal cert handshake.
 
@@ -346,7 +363,8 @@ instance is answered locally by the audit log, not by us.
    `data/agent-signing.pub` on disk and restart the gateway.
 4. **Protect the gateway** — it is the security SPOF. Firewall, HSTS, timely updates.
 5. **Off-host + encrypted backups**; an **offline** copy of the signing key
-   (without it you can no longer sign updates).
+   (without it you can no longer sign updates), and on 3.8 an offline copy of the **master key**
+   (`secrets/master-key/master.key`): without it neither the installation nor its backups open.
 6. **Do not expose `insecure`** in production.
 
 ## Reporting an issue

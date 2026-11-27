@@ -351,6 +351,11 @@ Press `?` for the cheatsheet.
   password you choose** (scrypt → AES-256-GCM). Automatic daily/weekly backup
   (kept 7 days, in-UI notification). Validated restore (password + `integrity_check`)
   with a pre-restore snapshot as a safety net
+- **Encryption at rest (3.8)**: the vault key is wrapped by a master key kept outside the data
+  volume, every backup and snapshot is an encrypted container that needs it, and host backups
+  stream at any size with a free-space reserve. Opt-in **encrypted, compressed recordings**, with
+  an Owner erase that a restore cannot undo. The database file is not encrypted yet —
+  [INSTALL.md → Encryption at rest](INSTALL.md#encryption-at-rest)
 
 ### Appearance & accessibility
 

@@ -227,10 +227,14 @@ everything in one page.
   [docs/HOSTS.md](docs/HOSTS.md#client-certificates-mtls)
 - Signed agent updates with your own key, audit log, scoped automation tokens —
   [docs/SECURITY-FEATURES.md](docs/SECURITY-FEATURES.md), [docs/AUTOMATION-TOKENS.md](docs/AUTOMATION-TOKENS.md)
+- Encryption at rest (3.8): a master key kept outside the data volume, encrypted backups and
+  snapshots, opt-in encrypted and compressed session recordings, and an erasure that a restore
+  cannot undo — [docs/INSTALL.md](docs/INSTALL.md#encryption-at-rest)
 
 **Operations**
 - Email and webhook alerts (security events, resource thresholds) — [docs/ALERTS.md](docs/ALERTS.md)
-- Encrypted backups from the UI, scheduled, off-host to Drive/Dropbox/SFTP/FTPS — [docs/INSTALL.md](docs/INSTALL.md#backup)
+- Encrypted backups from the UI, scheduled, off-host to Drive/Dropbox/SFTP/FTPS; host backups of
+  any size, with a free-space reserve — [docs/INSTALL.md](docs/INSTALL.md#backup)
 - One-command upgrade with automatic rollback — [Upgrade and rollback](#upgrade-and-rollback)
 - Recovery procedures, including when the UI is unreachable — [docs/RUNBOOK.md](docs/RUNBOOK.md)
 
@@ -242,6 +246,15 @@ CSP and HSTS. Agents connect with a client certificate checked by Traefik in the
 so a copied agent token alone opens nothing. Hosts can require a 2FA **step-up** to connect and lock their terminals on
 inactivity; a command guardrail can confirm or block dangerous commands, server-side. What you
 type is never recorded — transcripts hold output only.
+
+**Encryption at rest (3.8).** The key that encrypts every stored credential is wrapped by a
+master key kept **outside** the data volume (`secrets/master-key/master.key`, created by
+`install.sh`; copy it off the machine). Every backup and snapshot is an encrypted container that
+cannot be opened without it, and session recordings can be encrypted too
+(`WEBTERM_TX_RECORDINGS=1`), with an Owner erase that survives restores. Not covered: the
+database file itself (planned with SQLCipher), and a compromised running gateway or root on its
+host, which can read the key in use.
+[docs/INSTALL.md → Encryption at rest](docs/INSTALL.md#encryption-at-rest).
 
 **Roles, honestly.** Since 3.6 every account has role bindings — Owner, Admin, Operator or Viewer
 over all hosts, a folder, a tag or a single host ([docs/ROLES.md](docs/ROLES.md)). The gateway
@@ -299,6 +312,12 @@ not become healthy. With `cosign` installed and `WEBTERM_COSIGN_IDENTITY` set, i
 image signature first. EverShell never updates itself; the UI only tells you a release exists.
 Details: [docs/INSTALL.md](docs/INSTALL.md#upgrading); when things go wrong:
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+**From 3.7 to 3.8:** the upgrade itself changes nothing in the data volume, and rollback to 3.7
+still works. Turning on encryption at rest afterwards is a separate, one-way step: once the volume
+is migrated, the scripts refuse to start a 3.7 image on it, and the only way back is the backup
+taken before the migration ([Upgrading from 3.7 to 3.8](docs/INSTALL.md#upgrading-from-37-to-38),
+[Going back to 3.7](docs/INSTALL.md#going-back-to-37)).
 
 <a id="development"></a>
 <a id="tests"></a>
