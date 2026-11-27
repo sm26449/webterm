@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .errors import ApiError
-from . import (audit, authz, backup, cloudbackup, cmdguard, config, conntypes, core, db, email_alerts,
+from . import (audit, authz, backup, bootkeys, cloudbackup, cmdguard, config, conntypes, core, db, email_alerts,
                erasure, migration, replay, security, sessctl, shares, signing, stepup, txhub, txstore, watermark)
 
 log = logging.getLogger("webterm")
@@ -1185,6 +1185,50 @@ async def list_quarantined_recordings(user=Depends(authz.perm('backups.manage'))
     await _require_owner(user)
     st = _erasure_store()
     return await erasure.list_quarantined(st)
+
+
+@router.get("/api/recordings/encryption")
+async def recordings_encryption_status(sid: str = "", user=Depends(authz.perm('backups.manage'))):
+    """The Owner panel "Encryption at rest" (Settings → Backup), in one read: the volume's protection
+    state, the erasure journal / destinations / conflict (erasure.overview), the migration and
+    recompaction progress with the failed rows. `?sid=` adds whether that session's recording is
+    encrypted (the "Erase permanently" action is offered only then). Metadata only, no content;
+    Owner @ all, like every action it leads to. Answers 200 with `active: false` when encrypted
+    recordings are off, so the panel can say so instead of failing."""
+    await _require_owner(user)
+    if sid and not core.valid_sid(sid):
+        raise ApiError(404, "session.missing", "no such session")
+    ks = bootkeys.STATE
+    out = {"protection": {"mode": ks.get("mode") or "", "source": ks.get("source") or None},
+           "active": False, "erasure": None, "migration": None, "failed": [], "recording": None}
+    st = txhub.store()
+    if st is None:
+        return out
+    out["active"] = erasure.active()
+    out["erasure"] = await erasure.overview()
+    mig = await migration.status() if migration.active() else None
+    if mig is not None:
+        out["migration"] = {k: mig[k] for k in ("format", "total", "done", "todo", "left_bytes", "failed",
+                                                "stray", "leftovers", "one_kind", "orphans", "error",
+                                                "format_block", "recompaction")}
+        failed = await migration.failed_details(st)
+        if failed:
+            # titlul şi hostul sesiunii, ca Owner-ul să ştie CE alege (retry / discard)
+            rows = await db.fetchall("SELECT id, host_id, title, state FROM sessions WHERE id IN (%s)"
+                                     % ",".join("?" * len(failed)), *[f["sid"] for f in failed])
+            meta = {r["id"]: r for r in rows}
+            for f in failed:
+                r = meta.get(f["sid"])
+                f.update(title=r["title"] if r else "", host_id=r["host_id"] if r else None,
+                         live=bool(r and r["state"] in ("creating", "live")))
+        out["failed"] = failed
+    if sid:
+        kinds = await erasure.status_of(st, sid)
+        has_key = await st.read(lambda c: c.execute("SELECT 1 FROM session_keys WHERE sid=?",
+                                                    (sid,)).fetchone() is not None)
+        out["recording"] = {"sid": sid, "kinds": kinds, "encrypted": bool(kinds) or has_key,
+                            "tombstoned": sid in st.tombstoned}
+    return out
 
 
 @router.post("/api/sessions/{sid}/recovery")

@@ -560,6 +560,28 @@ async def retry(st, sid, *, live=False):
     return await process(st, sid, live=live)
 
 
+async def failed_details(st, limit=FAILED_LIST_MAX):
+    """The Owner panel's list of failed migrations: per session, the failed kinds, their size, the
+    first error and whether an encrypted recording already exists (then only discard resolves it).
+    Metadata only; the same sessions System health names (`failed_sessions`)."""
+    def load(c):
+        rows = c.execute(
+            "SELECT m.sid, m.kind, m.size, m.error, "
+            "EXISTS (SELECT 1 FROM session_keys k WHERE k.sid=m.sid) "
+            "OR EXISTS (SELECT 1 FROM tx_descriptors d WHERE d.sid=m.sid) "
+            "FROM tx_migration m WHERE m.state='failed' AND m.kind IN ('out','cast') AND m.sid IN "
+            "(SELECT DISTINCT sid FROM tx_migration WHERE state='failed' AND kind IN ('out','cast') "
+            "ORDER BY sid LIMIT ?) ORDER BY m.sid, m.kind", (limit,)).fetchall()
+        out = {}
+        for sid, kind, size, error, enc in rows:
+            e = out.setdefault(sid, {"sid": sid, "kinds": [], "size": 0, "error": "", "encrypted": bool(enc)})
+            e["kinds"].append(kind)
+            e["size"] += size or 0
+            e["error"] = e["error"] or (error or "")[:300]
+        return list(out.values())
+    return await st.read(load)
+
+
 async def failed_sessions(st, limit=FAILED_LIST_MAX):
     return await st.read(lambda c: [r[0] for r in c.execute(
         "SELECT DISTINCT sid FROM tx_migration WHERE state='failed' AND kind IN ('out','cast') "

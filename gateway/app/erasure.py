@@ -3152,6 +3152,64 @@ async def status_of(st, sid):
     return {k: s for k, s in rows}
 
 
+OVERVIEW_DESTS_MAX = KNOWN_MAX
+
+
+async def overview():
+    """The Owner panel's view (GET /api/recordings/encryption): the journal head and diagnosis, the
+    restore-without-proof marker, the recorded conflict (branch heads to choose from) and every
+    destination this volume knows of, with its attestation state and whether it can be retired.
+    Metadata only (no session content); None while erasure is not active."""
+    s = _s
+    if not active():
+        return None
+    # o listă de destinaţii care nu se poate citi nu e „niciuna configurată": `configured_known`
+    # False şi nicio destinaţie marcată retrasabilă (serverul refuză oricum la retragere)
+    try:
+        configured = await _configured_ids_strict()
+        configured_known = True
+    except ErasureError:
+        configured, configured_known = set(), False
+    required = _required_dest_ids()
+    attested = s.attested if isinstance(s.attested, dict) else {}
+    ids = set(configured) | set(required) | set(attested) | set(s.dest_ids or ()) | set(s.dests)
+    head = s.head_db.n
+    dests = []
+    for did in sorted(ids)[:OVERVIEW_DESTS_MAX]:
+        a = attested.get(did) if isinstance(attested.get(did), dict) else {}
+        info = s.dests.get(did) or {}
+        a_n = a.get("n", 0) if type(a.get("n", 0)) is int else 0
+        dests.append({
+            "id": did[:512], "configured": did in configured, "required": did in required,
+            "attested_n": a_n, "attested_time": a.get("time") if type(a.get("time")) is int else None,
+            "state": info.get("state") or ("ok" if a_n else "unknown"),
+            "since": info.get("since"), "error": str(info.get("error") or "")[:200],
+            "behind": head > a_n, "rolled_back": did in s.rolled_back, "ahead": s.ahead.get(did),
+            # retragere: doar o destinaţie obligatorie care nu mai e configurată (retire_destination)
+            "retirable": configured_known and did in required and did not in configured,
+        })
+    cont = continuity()
+    marker = None
+    if cont is not None:
+        terms = _marker_terms(cont)
+        marker = {"since": cont.get("since") or 0, "n": cont.get("n") or 0,
+                  "date": time.strftime("%Y-%m-%d", time.gmtime(cont.get("since") or 0)),
+                  "readable": terms is not None}
+    conf = _marker_conflict(s.continuity)
+    conflict = None
+    if conf is not None or s.conflict:
+        conflict = {"recorded": conf is not None, "diag": s.conflict or "",
+                    "since": (conf or {}).get("since", 0), "heads": list((conf or {}).get("heads", [])),
+                    "bases": list((conf or {}).get("bases", [])), "sids": len((conf or {}).get("sids", [])),
+                    "dests": list((conf or {}).get("dests", [])), "overflow": bool((conf or {}).get("overflow"))}
+    return {"journal": {"n": head, "diag": s.diag or None, "uncertain": s.uncertain or None,
+                        "cap": CAP, "near_cap": head >= WARN_AT},
+            "continuity": marker, "conflict": conflict, "destinations": dests,
+            "destinations_known": configured_known,
+            "health": [{"severity": sev, "key": key, "params": {k: str(v) for k, v in p.items()}}
+                       for sev, key, p in health()]}
+
+
 # ── janitor ──────────────────────────────────────────────────────────────────
 
 

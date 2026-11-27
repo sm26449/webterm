@@ -352,6 +352,16 @@ async def g_boot_and_route(c, uid, host_id):
     check("Admin (no backups.manage) → 403", r.status_code == 403, r.status_code)
     r = await adm.get("/api/recordings/quarantine")
     check("Admin cannot list the quarantine either", r.status_code == 403, r.status_code)
+    r = await adm.get("/api/recordings/encryption")
+    check("Admin cannot read the encryption panel either → 403", r.status_code == 403, r.status_code)
+    r = await c.get(f"/api/recordings/encryption?sid={sid}")
+    body = r.json() if r.status_code == 200 else {}
+    check("Owner: the encryption panel answers (active, journal, protection) and `?sid=` says encrypted",
+          r.status_code == 200 and body.get("active") is True and (body.get("erasure") or {}).get("journal") is not None
+          and "mode" in (body.get("protection") or {}) and (body.get("recording") or {}).get("encrypted") is True
+          and "secret-" not in r.text, r.text[:300])
+    r = await c.get("/api/recordings/encryption?sid=../../x")
+    check("encryption panel: a malformed sid → 404 session.missing", r.status_code == 404, r.status_code)
     anon = client()
     r = await anon.post(f"/api/sessions/{sid}/erase", json={"confirm": sid[:8]})
     check("unauthenticated → 401", r.status_code == 401, r.status_code)
@@ -2104,6 +2114,11 @@ async def g_r7h1_conflict(st, c, uid, host_id):
           and not await rk(victim) and await er.try_prove(st) is False and er.conflict_open())
     url = "/api/recordings/continuity/conflict/resolve"
     ha, hc = er.parse(ja, K, INST).head, er.parse(jc, K, INST).head
+    r = await c.get("/api/recordings/encryption")
+    cf = (r.json().get("erasure") or {}).get("conflict") or {} if r.status_code == 200 else {}
+    check("encryption panel: the recorded conflict lists both branch heads (n + MAC) and the erasure count",
+          cf.get("recorded") is True and len(cf.get("heads", [])) == 2 and cf.get("sids", 0) >= 2
+          and all(len(h.get("mac", "")) == 64 for h in cf["heads"]), r.text[:400])
 
     def body(h, confirm=None):
         return {"n": h.n, "mac": h.mac.hex(), "confirm": confirm if confirm is not None
@@ -2639,6 +2654,13 @@ async def g_retire(st, c, uid, host_id):
     await set_marker(st, dict(base, required=sorted([d.id, gone])))
     check("baseline: the gone mandatory destination blocks the proof",
           await er.try_prove(st) is False and er.continuity() is not None)
+    r = await c.get("/api/recordings/encryption")
+    ds = {x["id"]: x for x in ((r.json().get("erasure") or {}).get("destinations") or [])} if r.status_code == 200 else {}
+    check("encryption panel: the gone mandatory destination is listed as retirable, the configured one is not, "
+          "and the restore marker carries the backup date",
+          ds.get(gone, {}).get("retirable") is True and ds.get(gone, {}).get("configured") is False
+          and ds.get(d.id, {}).get("retirable") is False and ds.get(d.id, {}).get("configured") is True
+          and (r.json()["erasure"].get("continuity") or {}).get("date") == "1970-01-01", r.text[:400])
     url = "/api/recordings/continuity/destinations/%s/retire" % gone
     r = await c.post(url, json={"confirm": "gone", "stepup_grant": grant(uid, 0)})
     check("wrong typed destination name → 400 transcript.retireConfirm",
