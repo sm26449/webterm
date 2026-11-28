@@ -4,7 +4,7 @@ import { startAuthentication } from '@simplewebauthn/browser'
 import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
-import { markAlive, markDetached, markGone, newTabRetention, retainOpenTabs } from '../lib/tabRetention'
+import { markAlive, markGone, newTabRetention, retainOpenTabs } from '../lib/tabRetention'
 import { notifyError, registerToast, upsertToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
 import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
@@ -182,7 +182,6 @@ export default function PopoutView(props: { sid: string }) {
         onDeleted={() => window.close()}
         onGone={() => markGone(retention.current, session.id)}
         onAlive={() => markAlive(retention.current, session.id)}
-        onDetach={() => markDetached(retention.current, session.id)}
       />
       {secretReq && (
         <SecretPromptModal

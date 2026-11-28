@@ -10,15 +10,15 @@ back.
 ## [Unreleased]
 
 ### Fixed
-- **A 2FA terminal left open in a background tab no longer drops out of the tab bar about an
-  hour after it locks.** On a host that requires 2FA, a terminal you leave in the background locks
-  after 5 minutes without input, and a locked terminal is hidden from the session list until you
-  unlock it. 3.8.1 kept such a tab for at most about an hour after the session was last *listed*,
-  so the tab of a live, locked terminal, still connected and waiting for your passkey, vanished
-  while you worked in other tabs. An open connection to the session now counts as proof that it is
-  still alive, so the tab stays for as long as its terminal is connected, and closes as soon as the
-  session ends, is gone or refuses the connection. A tab whose terminal is not connected (with
-  many tabs open, only the most recent few stay loaded) still ages out about an hour after the last sign of life.
+- **A tab on a host that requires 2FA no longer disappears on its own.** A terminal you leave in a
+  background tab locks after 5 minutes without input, and a locked terminal is hidden from the
+  session list until you unlock it. 3.8.1 kept such a tab for at most about an hour after the
+  session was last listed, so the tab of a live, locked terminal waiting for your passkey vanished
+  while you worked in other tabs. On a 2FA host a tab now stays until you close it or the session
+  is known to have ended: it exited, it is gone, the list shows it closed, or you click the tab and
+  the server reports it ended or refuses it. Clicking a tab that was not loaded (with many tabs
+  open, only the most recent few stay loaded) reconnects it locked and asks for your passkey, as
+  before. Tabs on other hosts still close as soon as their session leaves the list.
 
 ## [3.8.1] — 2026-11-27 · agent (61)
 

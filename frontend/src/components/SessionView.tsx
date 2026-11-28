@@ -169,10 +169,8 @@ export default function SessionView(props: {
       sesiunea lipseşte şi din listă (lib/tabRetention.ts). Chemat ÎNAINTE de onChanged. */
   onGone?: () => void
   /** socketul s-a deschis: un `onGone` anterior (ex. handshake refuzat cât gateway-ul era jos) nu
-      mai e valabil; cât socketul rămâne deschis, sesiunea e ştiută vie (reţinerea tabului) */
+      mai e valabil */
   onAlive?: () => void
-  /** socketul s-a închis (reconectare, demontare): pereche cu `onAlive` (lib/tabRetention.ts) */
-  onDetach?: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
       vorbeşte despre el când tunelul agentului lui a căzut */
   viaHost?: Host
@@ -2034,8 +2032,6 @@ export default function SessionView(props: {
       if (remoteResizeReloadRef.current) clearTimeout(remoteResizeReloadRef.current)
       wsRef.current?.close()
       wsRef.current = null
-      // demontat (ex. ieşit din stiva keep-alive): onclose iese devreme fără termRef, deci aici
-      props.onDetach?.()
       for (const d of decorationsRef.current) d.dispose()
       decorationsRef.current = []
       trackerRef.current?.dispose()
@@ -2210,6 +2206,10 @@ export default function SessionView(props: {
           }
         } else if (msg.type === 'init' || msg.type === 'readonly') {
           if (msg.type === 'init') yourIdRef.current = msg.your_id ?? null   // ca să ne marcăm în roster
+          // 3.8.2: un tab 2FA reţinut (nu expiră) care se ataşează la o sesiune deja încheiată
+          // (s-a închis cât tabul era nemontat / ascuns din listă) o raportează încheiată, ca să
+          // poată fi închis — altfel ar rămâne randat din cache ca viu
+          if (msg.type === 'init' && msg.state !== 'live' && msg.state !== 'creating') props.onGone?.()
           // `readonly` la init = ataşare doar-vizualizare; mesajul `readonly` = retrogradat în timp
           // ce erai conectat (rolul s-a schimbat). Nu revenim la scriere pe acelaşi socket.
           // la `init` starea vine din nou de la server (o reconectare după ce ai primit dreptul de
@@ -2391,7 +2391,6 @@ export default function SessionView(props: {
     }
     ws.onclose = (ev) => {
       wsRef.current = null
-      props.onDetach?.()
       clearTimeout(watchdogRef.current)
       if (!termRef.current) return // component unmounted
       // sesiune moartă: fetch-ul de istoric e one-shot — nu reprograma reconnect (gardă

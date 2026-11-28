@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Session } from './api'
-import { markAlive, markDetached, markGone, newTabRetention, RETAIN_MAX_MS, retainOpenTabs } from './tabRetention'
+import { markAlive, markGone, newTabRetention, retainOpenTabs } from './tabRetention'
 
 const GATED = 1
 const PLAIN = 2
@@ -9,7 +9,7 @@ const mk = (id: string, state: Session['state'] = 'live', host_id = GATED): Sess
 
 const T0 = 1_000_000
 // opţiunile unui poll pornit la `at` (implicit: acum, după orice `gone` dat înainte)
-const o = (at = T0, gated: number[] = [GATED]) => ({ gatedHosts: new Set(gated), pollStart: at, now: at })
+const o = (at = T0, gated: number[] = [GATED]) => ({ gatedHosts: new Set(gated), pollStart: at })
 
 describe('retainOpenTabs', () => {
   it('sesiunea prezentă: tabul rămâne, lista neschimbată', () => {
@@ -38,20 +38,6 @@ describe('retainOpenTabs', () => {
     const st = newTabRetention()
     retainOpenTabs([mk('a')], ['a'], st, true, o())
     expect(retainOpenTabs([], ['a'], st, true, o(T0 + 5000, [])).tabs).toEqual([])
-  })
-
-  it('M2: reţinerea expiră după plafonul de step-up + marjă de la ultima apariţie', () => {
-    const st = newTabRetention()
-    retainOpenTabs([mk('a')], ['a'], st, true, o())
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + RETAIN_MAX_MS)).tabs).toEqual(['a'])
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + RETAIN_MAX_MS + 1)).tabs).toEqual([])
-  })
-
-  it('M2: o reapariţie în listă reporneşte ceasul reţinerii', () => {
-    const st = newTabRetention()
-    retainOpenTabs([mk('a')], ['a'], st, true, o())
-    retainOpenTabs([mk('a')], ['a'], st, true, o(T0 + 3_000_000))
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + RETAIN_MAX_MS + 1)).tabs).toEqual(['a'])
   })
 
   it('lipsă + raportată încheiată de SessionView → tabul se închide', () => {
@@ -101,7 +87,7 @@ describe('retainOpenTabs', () => {
     retainOpenTabs([mk('a')], ['a'], st, true, o())
     const pollStart = T0 + 10
     markGone(st, 'a', T0 + 20)                  // 4404 cât poll-ul era în zbor
-    retainOpenTabs([mk('a')], ['a'], st, true, { gatedHosts: new Set([GATED]), pollStart, now: T0 + 30 })
+    retainOpenTabs([mk('a')], ['a'], st, true, { gatedHosts: new Set([GATED]), pollStart })
     expect(st.gone.has('a')).toBe(true)
     expect(retainOpenTabs([], ['a'], st, true, o(T0 + 40)).tabs).toEqual([])
   })
@@ -111,49 +97,45 @@ describe('retainOpenTabs', () => {
     retainOpenTabs([mk('a')], ['a'], st, true, o())
     const r = retainOpenTabs([mk('a', 'closed')], ['a', 'x'], st, false, o())
     expect(r.tabs).toEqual(['a', 'x'])
-    expect(st.cache.get('a')?.s.state).toBe('live')
+    expect(st.cache.get('a')?.state).toBe('live')
   })
 
-  // 3.8.2 (raport Stefan, prod 2026-11-27): terminal 2FA lăsat în fundal → idle-lock după 5 min →
-  // hub-ul blocat iese din listă şi nu mai revine până la deblocare. Plafonul curgea de la ultima
-  // apariţie în listă, deci tabul (ataşat, blocat, sesiune vie) dispărea la ~65 min după blocare.
-  it('3.8.2: socket deschis (blocat în fundal) → tabul rămâne oricât lipseşte din listă', () => {
+  // 3.8.2 (decizia lui Stefan): pe un host 2FA tabul nu expiră cu timpul. Prod 2026-11-27: terminal
+  // lăsat în fundal → idle-lock după 5 min → hub-ul blocat lipseşte din listă până la deblocare →
+  // tabul (sesiune vie, ataşată, blocată) dispărea la plafonul de 65 min de 3.8.1.
+  it('3.8.2: sesiune 2FA lipsă din listă oricât de mult (zile) → tabul rămâne', () => {
     const st = newTabRetention()
-    markAlive(st, 'a')
-    retainOpenTabs([mk('a')], ['a'], st, true, o())
-    for (let t = T0 + 5000; t <= T0 + 3 * RETAIN_MAX_MS; t += 600_000) {
-      expect(retainOpenTabs([], ['a'], st, true, o(t)).tabs).toEqual(['a'])
+    retainOpenTabs([mk('a'), mk('b', 'live', PLAIN)], ['a', 'b'], st, true, o())
+    for (const t of [T0 + 3_900_001, T0 + 86_400_000, T0 + 7 * 86_400_000]) {
+      expect(retainOpenTabs([mk('b', 'live', PLAIN)], ['a', 'b'], st, true, o(t)).tabs).toEqual(['a', 'b'])
     }
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 3 * RETAIN_MAX_MS + 1)).tabs).toEqual(['a'])
   })
 
-  it('3.8.2: după închiderea socketului plafonul curge de la ultima dovadă (socketul), nu de la listă', () => {
+  it('3.8.2: 9 taburi, cel 2FA nemontat (fără socket, fără niciun semnal) → rămâne', () => {
     const st = newTabRetention()
-    markAlive(st, 'a')
+    const plain = Array.from({ length: 8 }, (_, i) => mk('p' + i, 'live', PLAIN))
+    const open = ['a', ...plain.map((x) => x.id)]
+    retainOpenTabs([mk('a'), ...plain], open, st, true, o())
+    const r = retainOpenTabs(plain, open, st, true, o(T0 + 10 * 3_600_000))
+    expect(r.tabs).toEqual(open)
+    expect(r.sessions.map((x) => x.id)).toEqual([...plain.map((x) => x.id), 'a'])
+  })
+
+  it('3.8.2: clic pe tabul reţinut → sesiunea încheiată la ataşare (onGone) → se închide, oricât de târziu', () => {
+    const st = newTabRetention()
     retainOpenTabs([mk('a')], ['a'], st, true, o())
-    const t1 = T0 + 2 * RETAIN_MAX_MS
-    retainOpenTabs([], ['a'], st, true, o(t1))          // încă ataşat: dovadă la t1
-    markDetached(st, 'a')                                // demontat / reconectare picată
-    expect(retainOpenTabs([], ['a'], st, true, o(t1 + RETAIN_MAX_MS)).tabs).toEqual(['a'])
-    expect(retainOpenTabs([], ['a'], st, true, o(t1 + RETAIN_MAX_MS + 1)).tabs).toEqual([])
+    const late = T0 + 5 * 3_600_000
+    expect(retainOpenTabs([], ['a'], st, true, o(late)).tabs).toEqual(['a'])
+    markAlive(st, 'a')               // socketul s-a deschis…
+    markGone(st, 'a', late + 1)      // …şi `init` a spus că sesiunea e încheiată
+    expect(retainOpenTabs([], ['a'], st, true, o(late + 2)).tabs).toEqual([])
   })
 
-  it('3.8.2: sesiune încheiată (onGone) cu socketul de istoric deschis → nu e dovadă de viaţă', () => {
+  it('3.8.2: lista proaspătă o arată încheiată, apoi lipseşte → se închide', () => {
     const st = newTabRetention()
-    markAlive(st, 'a')
     retainOpenTabs([mk('a')], ['a'], st, true, o())
-    markGone(st, 'a', T0 + 1)
-    expect(st.attached.has('a')).toBe(false)
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 2)).tabs).toEqual([])
-  })
-
-  it('3.8.2: socket deschis nu inventează un tab fără cache (ex. după reload) şi nu ocoleşte hostul ne-2FA', () => {
-    const st = newTabRetention()
-    markAlive(st, 'a')
-    expect(retainOpenTabs([], ['a'], st, true, o()).tabs).toEqual([])
-    markAlive(st, 'b')
-    retainOpenTabs([mk('b', 'live', PLAIN)], ['b'], st, true, o())
-    expect(retainOpenTabs([], ['b'], st, true, o(T0 + 5000)).tabs).toEqual([])
+    expect(retainOpenTabs([mk('a', 'closed')], ['a'], st, true, o(T0 + 5000)).tabs).toEqual(['a'])
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 10_000)).tabs).toEqual([])
   })
 
   it('tab închis: cache-ul şi semnalul lui se curăţă', () => {
