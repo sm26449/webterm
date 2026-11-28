@@ -9,6 +9,8 @@ back.
 
 ## [Unreleased]
 
+## [3.8.2] — 2026-11-28 · agent (61)
+
 ### Fixed
 - **A tab on a host that requires 2FA no longer disappears on its own.** A terminal you leave in a
   background tab locks after 5 minutes without input, and a locked terminal is hidden from the
