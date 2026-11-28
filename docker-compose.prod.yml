@@ -416,7 +416,7 @@ services:
   # securitate ale bazei fără schimbare de tag), adică un PR pe săptămână de zgomot; pentru
   # Postgres/Redis/Authentik versiunea de minor e contractul care contează la upgrade.
   authentik-postgresql:
-    image: docker.io/library/postgres:16.15-alpine
+    image: docker.io/library/postgres:16.16-alpine
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
@@ -447,7 +447,7 @@ services:
     networks: [akinternal]
 
   authentik-redis:
-    image: docker.io/library/redis:7.4.11-alpine
+    image: docker.io/library/redis:7.4.12-alpine
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
@@ -478,7 +478,7 @@ services:
   # de configurare (valoarea se citeşte din fişier la pornire). `${X:-file://…}`: dacă .env încă
   # are valoarea (instalare veche, deploy.sh nerulat), ea câştigă; altfel fişierul.
   authentik-server:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.7
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
@@ -511,7 +511,7 @@ services:
       - traefik.http.services.authentik.loadbalancer.server.port=9000
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.7
     profiles: [authentik]
     restart: unless-stopped
     logging: *default-logging
