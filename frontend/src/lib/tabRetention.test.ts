@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Session } from './api'
-import { markAlive, markGone, newTabRetention, retainOpenTabs } from './tabRetention'
+import {
+  authResetNeeded, CONNECT_FAILS_GONE, initMeansGone, markAlive, markConnectFailed, markGone, newTabRetention,
+  reportsAliveOnOpen, retainOpenTabs,
+} from './tabRetention'
 
 const GATED = 1
 const PLAIN = 2
@@ -145,5 +148,73 @@ describe('retainOpenTabs', () => {
     retainOpenTabs([], [], st, true, o())
     expect(st.cache.size).toBe(0)
     expect(st.gone.size).toBe(0)
+  })
+
+  // review L1: tab reţinut montat, reconectările refuzate înainte de accept (1006, după prima deschidere)
+  it('L1: refuzuri consecutive de conectare, listă proaspătă fără sesiune → se închide după prag', () => {
+    const st = newTabRetention()
+    retainOpenTabs([mk('a')], ['a'], st, true, o())
+    for (let i = 1; i < CONNECT_FAILS_GONE; i++) markConnectFailed(st, 'a')
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 5000)).tabs).toEqual(['a'])
+    markConnectFailed(st, 'a')
+    // poll picat (gateway jos): nu tăiem, oricâte refuzuri
+    expect(retainOpenTabs([], ['a'], st, false, o(T0 + 6000)).tabs).toEqual(['a'])
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 10_000)).tabs).toEqual([])
+  })
+
+  it('L1: o deschidere reuşită (onAlive) resetează numărătoarea; sesiunea încă în listă nu e tăiată', () => {
+    const st = newTabRetention()
+    retainOpenTabs([mk('a')], ['a'], st, true, o())
+    for (let i = 0; i < CONNECT_FAILS_GONE; i++) markConnectFailed(st, 'a')
+    expect(retainOpenTabs([mk('a')], ['a'], st, true, o(T0 + 1000)).tabs).toEqual(['a'])
+    markAlive(st, 'a')
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 5000)).tabs).toEqual(['a'])
+  })
+})
+
+describe('SessionView: semnalele pentru reţinere', () => {
+  it('socketul one-shot de istoric al unei sesiuni încheiate nu raportează onAlive', () => {
+    expect(reportsAliveOnOpen(false)).toBe(true)
+    expect(reportsAliveOnOpen(true)).toBe(false)
+  })
+  it('init cu o stare ne-vie = sesiune încheiată (onGone)', () => {
+    expect(initMeansGone('live')).toBe(false)
+    expect(initMeansGone('creating')).toBe(false)
+    for (const st of ['closed', 'lost', undefined, null, '']) expect(initMeansGone(st)).toBe(true)
+  })
+  it('flux complet: tab reţinut nemontat, click → init closed → se închide (exit nu mai e „anulat" de onAlive)', () => {
+    const st = newTabRetention()
+    retainOpenTabs([mk('a')], ['a'], st, true, o())
+    if (reportsAliveOnOpen(false)) markAlive(st, 'a')
+    if (initMeansGone('closed')) markGone(st, 'a', T0 + 1)
+    if (reportsAliveOnOpen(true)) markAlive(st, 'a')      // socketul de istoric de după exit
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 2)).tabs).toEqual([])
+  })
+})
+
+// review M1: taburile 2FA reţinute nu expiră → nu trec de la un cont la altul în acelaşi browser
+describe('authResetNeeded', () => {
+  const A = { authenticated: true, user_id: 1 }
+  it('prima stare a paginii (reload cu sesiune validă): nimic de golit', () => {
+    expect(authResetNeeded(null, A)).toBe(false)
+  })
+  it('acelaşi cont, aceeaşi stare (poll-ul de 5 min): nu goleşte', () => {
+    expect(authResetNeeded(A, { ...A })).toBe(false)
+  })
+  it('ieşire / expirare (wt-unauth) → goleşte', () => {
+    expect(authResetNeeded(A, { authenticated: false, user_id: null })).toBe(true)
+  })
+  it('alt cont (fără 401 între ele) → goleşte', () => {
+    expect(authResetNeeded(A, { authenticated: true, user_id: 2 })).toBe(true)
+  })
+  it('intrare (inclusiv re-intrarea aceluiaşi cont) → goleşte', () => {
+    expect(authResetNeeded({ authenticated: false, user_id: null }, A)).toBe(true)
+  })
+  it('flux: A reţine un tab 2FA, iese, intră B → reţinerea nouă nu mai are tabul', () => {
+    let st = newTabRetention()
+    retainOpenTabs([mk('a')], ['a'], st, true, o())
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 5000)).tabs).toEqual(['a'])
+    if (authResetNeeded(A, { authenticated: false, user_id: null })) st = newTabRetention()
+    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 10_000)).tabs).toEqual([])
   })
 })

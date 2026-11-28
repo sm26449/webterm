@@ -30,10 +30,19 @@ export interface TabRetention {
   cache: Map<string, Session>
   // sid → momentul în care SessionView a raportat sesiunea încheiată/dispărută
   gone: Map<string, number>
+  // sid → reconectări CONSECUTIVE refuzate înainte de deschidere (review L1), resetat la onAlive
+  fails: Map<string, number>
 }
 
+// Review L1 (3.8.2): un tab 2FA reţinut şi montat a cărui reconectare e refuzată înainte de accept
+// (1006: sesiune ştearsă / acces pierdut după prima deschidere) nu raporta niciodată `gone` şi rămânea
+// „reconnecting" pe veci. După atâtea refuzuri la rând, cu lista proaspătă primită (gateway-ul
+// răspunde) şi sesiunea absentă din ea, îl tratăm ca dispărut. Pe un host 2FA fără fereastră serverul
+// acceptă şi blochează (nu refuză), deci asta nu taie un terminal doar blocat.
+export const CONNECT_FAILS_GONE = 3
+
 export function newTabRetention(): TabRetention {
-  return { cache: new Map(), gone: new Map() }
+  return { cache: new Map(), gone: new Map(), fails: new Map() }
 }
 
 /** SessionView a raportat sesiunea încheiată / refuzată (vezi `onGone`). */
@@ -44,6 +53,24 @@ export function markGone(st: TabRetention, sid: string, now = Date.now()): void 
 /** Socketul s-a deschis (din nou): semnalul de „încheiată" nu mai e valabil. */
 export function markAlive(st: TabRetention, sid: string): void {
   st.gone.delete(sid)
+  st.fails.delete(sid)
+}
+
+/** Un socket al tabului s-a închis fără să se fi deschis vreodată (refuz înainte de accept / reţea). */
+export function markConnectFailed(st: TabRetention, sid: string): void {
+  st.fails.set(sid, (st.fails.get(sid) ?? 0) + 1)
+}
+
+/** SessionView, `onopen`: socketul one-shot de istoric al unei sesiuni ÎNCHEIATE nu e dovadă de viaţă
+ *  (altfel ar şterge `gone` raportat la exit, iar tabul unei sesiuni moarte n-ar mai expira niciodată). */
+export function reportsAliveOnOpen(exited: boolean): boolean {
+  return !exited
+}
+
+/** SessionView, mesajul `init`: o sesiune care nu mai e vie la (re)ataşare e încheiată → `gone`
+ *  (tab reţinut, nemontat, a cărui sesiune s-a închis între timp; click → montare → init closed). */
+export function initMeansGone(state: unknown): boolean {
+  return state !== 'live' && state !== 'creating'
 }
 
 const alive = (s: Session) => s.state === 'live' || s.state === 'creating'
@@ -81,11 +108,25 @@ export function retainOpenTabs(
     const c = st.cache.get(sid)
     if (!c || st.gone.has(sid) || !alive(c)) continue
     if (!opts.gatedHosts.has(c.host_id)) continue
+    if (fresh && (st.fails.get(sid) ?? 0) >= CONNECT_FAILS_GONE) continue
     extra.push(c)
     tabs.push(sid)
   }
   // nu ţinem nimic pentru taburi închise: nici cache, nici semnal
   for (const k of [...st.cache.keys()]) if (!openTabs.includes(k)) st.cache.delete(k)
   for (const k of [...st.gone.keys()]) if (!openTabs.includes(k)) st.gone.delete(k)
+  for (const k of [...st.fails.keys()]) if (!openTabs.includes(k)) st.fails.delete(k)
   return { sessions: extra.length ? [...list, ...extra] : list, tabs: fresh ? tabs : openTabs }
+}
+
+export interface AuthSnap { authenticated: boolean; user_id: number | null }
+
+/** Review M1 (3.8.2): taburile reţinute nu expiră, deci nu au voie să treacă de la un cont la altul
+ *  în acelaşi browser. ORICE schimbare de autentificare văzută de pagină (ieşire, expirare/`wt-unauth`,
+ *  intrare, alt `user_id`) goleşte reţinerea şi taburile — inclusiv re-intrarea aceluiaşi cont
+ *  (simplu şi sigur). `prev` null = prima stare a paginii (reload cu sesiunea validă): nimic de golit. */
+export function authResetNeeded(prev: AuthSnap | null, next: AuthSnap): boolean {
+  if (!prev) return false
+  return prev.authenticated !== next.authenticated
+    || (next.authenticated && prev.user_id !== next.user_id)
 }

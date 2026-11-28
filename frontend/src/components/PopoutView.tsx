@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sessionTitle } from '../lib/sessionTitle'
 import { startAuthentication } from '@simplewebauthn/browser'
-import { api, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
+import { api, ApiError, AppState, CommandGuard, Host, Session, setStepupHandler } from '../lib/api'
 import { hostAt } from '../lib/host'
 import { useI18n } from '../lib/i18n'
-import { markAlive, markGone, newTabRetention, retainOpenTabs } from '../lib/tabRetention'
+import { markAlive, markConnectFailed, markGone, newTabRetention, retainOpenTabs } from '../lib/tabRetention'
 import { notifyError, registerToast, upsertToast } from '../lib/notify'
 import { askSecret, registerSecretPrompt, SecretAsk } from '../lib/secretPrompt'
 import { StepupMethod, stepupPrompt, stepupSucceeded, totpCred, type StepupCred, type StepupResult } from '../lib/stepup'
@@ -62,16 +62,22 @@ export default function PopoutView(props: { sid: string }) {
         setHost(h)
         setViaHost(h?.via_host_id ? hosts.find((x) => x.id === h.via_host_id) : undefined)
         document.title = `${sessionTitle(s.title, t) || t('app.sessionFallback')}${h ? ' · ' + hostAt(h) : ''} · EverShell`
-      } catch {
+      } catch (e) {
+        // review L2 (3.8.2): sesiunea web a expirat / s-a închis — reţinerea (fără termen pe 2FA) nu trece
+        // la contul care se loghează după; altfel fereastra păstra sesiunea contului vechi din cache
+        if (e instanceof ApiError && e.status === 401) retention.current = newTabRetention()
         /* retry on next tick */
       }
     }
+    const onUnauth = () => { retention.current = newTabRetention() }
+    window.addEventListener('wt-unauth', onUnauth)
     void load()
     // `t` umbrea funcţia de traducere din componentă
     const timer = setInterval(() => { if (!document.hidden) void load() }, 5000)
     return () => {
       active = false
       clearInterval(timer)
+      window.removeEventListener('wt-unauth', onUnauth)
     }
   }, [props.sid])
 
@@ -182,6 +188,7 @@ export default function PopoutView(props: { sid: string }) {
         onDeleted={() => window.close()}
         onGone={() => markGone(retention.current, session.id)}
         onAlive={() => markAlive(retention.current, session.id)}
+        onConnectFail={() => markConnectFailed(retention.current, session.id)}
       />
       {secretReq && (
         <SecretPromptModal

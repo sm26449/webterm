@@ -18,7 +18,10 @@ back.
   is known to have ended: it exited, it is gone, the list shows it closed, or you click the tab and
   the server reports it ended or refuses it. Clicking a tab that was not loaded (with many tabs
   open, only the most recent few stay loaded) reconnects it locked and asks for your passkey, as
-  before. Tabs on other hosts still close as soon as their session leaves the list.
+  before. A tab that keeps failing to reconnect while the session is missing from the list is
+  closed too. Signing out, signing in, or another account taking over the browser now clears the
+  open tabs, so the next account never inherits the previous one's 2FA tabs or their titles. Tabs
+  on other hosts still close as soon as their session leaves the list.
 
 ## [3.8.1] — 2026-11-27 · agent (61)
 

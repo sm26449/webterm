@@ -6,6 +6,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { IDisposable, Terminal } from '@xterm/xterm'
 import { modeRestoreSeq, pasteModeUntrusted, trustedBracketed } from '../lib/termmodes'
 import { errText, api, CommandGuard, CommandRule, Host, Session, withStepup } from '../lib/api'
+import { initMeansGone, reportsAliveOnOpen } from '../lib/tabRetention'
 import { hostAt, hostColor, protoLabel, reachState } from '../lib/host'
 import { Command, CommandTracker, cmdDuration, matchCommandRule, screenResetScan, splitAfterMarks } from '../lib/commands'
 import { EchoTracker, LineKey, countCprReplies, countCprRequests, reportOnly, sendIsReport, sentArgs } from '../lib/echo'
@@ -171,6 +172,8 @@ export default function SessionView(props: {
   /** socketul s-a deschis: un `onGone` anterior (ex. handshake refuzat cât gateway-ul era jos) nu
       mai e valabil */
   onAlive?: () => void
+  /** un socket s-a închis fără să se fi deschis (refuz înainte de accept / reţea); `onAlive` resetează */
+  onConnectFail?: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
       vorbeşte despre el când tunelul agentului lui a căzut */
   viaHost?: Host
@@ -2153,6 +2156,7 @@ export default function SessionView(props: {
       `${proto}://${window.location.host}/ws/sessions/${session.id}?sb=${SCROLLBACK}&rows=${rows}`)
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
+    let opened = false   // review L1: s-a deschis ACEST socket? (închis înainte = refuz / reţea)
     setConn('connecting')
     setWsDenied(null)
 
@@ -2169,7 +2173,8 @@ export default function SessionView(props: {
       everOpenRef.current = true
       // socketul one-shot de istoric al unei sesiuni ÎNCHEIATE nu e dovadă de viaţă: altfel ar şterge
       // `gone` raportat la exit şi tabul unei sesiuni moarte ar fi reţinut (lib/tabRetention.ts)
-      if (!exitedRef.current) props.onAlive?.()
+      opened = true
+      if (reportsAliveOnOpen(exitedRef.current)) props.onAlive?.()
       petWatchdog()
       expectTailRef.current = true
       setReplaying(true)
@@ -2209,7 +2214,7 @@ export default function SessionView(props: {
           // 3.8.2: un tab 2FA reţinut (nu expiră) care se ataşează la o sesiune deja încheiată
           // (s-a închis cât tabul era nemontat / ascuns din listă) o raportează încheiată, ca să
           // poată fi închis — altfel ar rămâne randat din cache ca viu
-          if (msg.type === 'init' && msg.state !== 'live' && msg.state !== 'creating') props.onGone?.()
+          if (msg.type === 'init' && initMeansGone(msg.state)) props.onGone?.()
           // `readonly` la init = ataşare doar-vizualizare; mesajul `readonly` = retrogradat în timp
           // ce erai conectat (rolul s-a schimbat). Nu revenim la scriere pe acelaşi socket.
           // la `init` starea vine din nou de la server (o reconectare după ce ai primit dreptul de
@@ -2396,6 +2401,8 @@ export default function SessionView(props: {
       // sesiune moartă: fetch-ul de istoric e one-shot — nu reprograma reconnect (gardă
       // directă pe exitedRef, robustă chiar dacă starea conn a fost cumva alterată)
       if (exitedRef.current) return
+      // review L1: refuzurile repetate de dinainte de deschidere se numără (lib/tabRetention.ts decide)
+      if (!opened) props.onConnectFail?.()
       // Codurile TERMINALE ale gateway-ului (api.py browser_ws). Atenţie: un close() ÎNAINTE
       // de accept() ajunge la browser ca handshake 403 = cod 1006, deci 4401/4403/4404 se văd
       // doar când vin DUPĂ accept — 4401 de la revalidarea periodică (cookie expirat/logout),

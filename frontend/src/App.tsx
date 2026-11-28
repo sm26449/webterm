@@ -65,7 +65,7 @@ import { loadSeen, noticeKey, pendingIdleNotices, saveSeen } from './lib/idleSes
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
 import { byText } from './lib/sortText'
-import { markAlive, markGone, newTabRetention, retainOpenTabs } from './lib/tabRetention'
+import { type AuthSnap, authResetNeeded, markAlive, markConnectFailed, markGone, newTabRetention, retainOpenTabs } from './lib/tabRetention'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -581,6 +581,19 @@ function MainApp() {
     }, 5 * 60_000)
     return () => window.clearInterval(id)
   }, [authed])
+  // Review M1 (3.8.2): un tab 2FA reţinut nu expiră, deci la ORICE schimbare de autentificare (ieşire,
+  // expirare, intrare, alt cont) taburile, MRU-ul şi reţinerea contului vechi se aruncă — altfel contul
+  // următor din acelaşi browser moştenea taburile (şi titlurile) sesiunilor 2FA ale celui dinainte
+  const authSnapRef = useRef<AuthSnap | null>(null)
+  useEffect(() => {
+    if (!appState) return
+    const next: AuthSnap = { authenticated: !!appState.authenticated, user_id: appState.user_id ?? null }
+    if (authResetNeeded(authSnapRef.current, next)) {
+      tabRetentionRef.current = newTabRetention()
+      setOpenTabs([]); setMru([]); setActiveSplitId(null)
+    }
+    authSnapRef.current = next
+  }, [appState])
   // deploy nou detectat din headerul X-Webterm-Version (vezi lib/api.ts)
   const [newVersion, setNewVersion] = useState<string | null>(null)
   useEffect(() => {
@@ -1461,6 +1474,7 @@ function MainApp() {
       onDeleted={() => { closeTab(s.id); void refresh() }}
       onGone={() => markGone(tabRetentionRef.current, s.id)}
       onAlive={() => markAlive(tabRetentionRef.current, s.id)}
+      onConnectFail={() => markConnectFailed(tabRetentionRef.current, s.id)}
     />
   )
 
