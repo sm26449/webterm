@@ -65,7 +65,7 @@ import { loadSeen, noticeKey, pendingIdleNotices, saveSeen } from './lib/idleSes
 import { acceptDrop, beginDrag, endDrag, ownDragKind } from './lib/dragState'
 import type { PeerState } from './lib/broadcastGuard'
 import { byText } from './lib/sortText'
-import { markAlive, markGone, newTabRetention, retainOpenTabs } from './lib/tabRetention'
+import { markAlive, markDetached, markGone, newTabRetention, retainOpenTabs } from './lib/tabRetention'
 
 /* localStorage „sigur": Safari cu „Block all cookies" / iframe sandbox aruncă SecurityError chiar la
    getItem (= cădere înainte de primul render), iar QuotaExceededError într-un useEffect ajungea în
@@ -1461,6 +1461,7 @@ function MainApp() {
       onDeleted={() => { closeTab(s.id); void refresh() }}
       onGone={() => markGone(tabRetentionRef.current, s.id)}
       onAlive={() => markAlive(tabRetentionRef.current, s.id)}
+      onDetach={() => markDetached(tabRetentionRef.current, s.id)}
     />
   )
 

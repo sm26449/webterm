@@ -169,8 +169,10 @@ export default function SessionView(props: {
       sesiunea lipseşte şi din listă (lib/tabRetention.ts). Chemat ÎNAINTE de onChanged. */
   onGone?: () => void
   /** socketul s-a deschis: un `onGone` anterior (ex. handshake refuzat cât gateway-ul era jos) nu
-      mai e valabil */
+      mai e valabil; cât socketul rămâne deschis, sesiunea e ştiută vie (reţinerea tabului) */
   onAlive?: () => void
+  /** socketul s-a închis (reconectare, demontare): pereche cu `onAlive` (lib/tabRetention.ts) */
+  onDetach?: () => void
   /** hostul-părinte (`via_host_id`) al unei ţinte SSH/telnet-jump — overlay-ul „host offline"
       vorbeşte despre el când tunelul agentului lui a căzut */
   viaHost?: Host
@@ -2032,6 +2034,8 @@ export default function SessionView(props: {
       if (remoteResizeReloadRef.current) clearTimeout(remoteResizeReloadRef.current)
       wsRef.current?.close()
       wsRef.current = null
+      // demontat (ex. ieşit din stiva keep-alive): onclose iese devreme fără termRef, deci aici
+      props.onDetach?.()
       for (const d of decorationsRef.current) d.dispose()
       decorationsRef.current = []
       trackerRef.current?.dispose()
@@ -2167,7 +2171,9 @@ export default function SessionView(props: {
     ws.onopen = () => {
       retryRef.current.delay = 1000
       everOpenRef.current = true
-      props.onAlive?.()
+      // socketul one-shot de istoric al unei sesiuni ÎNCHEIATE nu e dovadă de viaţă: altfel ar şterge
+      // `gone` raportat la exit şi tabul unei sesiuni moarte ar fi reţinut (lib/tabRetention.ts)
+      if (!exitedRef.current) props.onAlive?.()
       petWatchdog()
       expectTailRef.current = true
       setReplaying(true)
@@ -2385,6 +2391,7 @@ export default function SessionView(props: {
     }
     ws.onclose = (ev) => {
       wsRef.current = null
+      props.onDetach?.()
       clearTimeout(watchdogRef.current)
       if (!termRef.current) return // component unmounted
       // sesiune moartă: fetch-ul de istoric e one-shot — nu reprograma reconnect (gardă
