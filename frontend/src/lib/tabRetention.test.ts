@@ -192,29 +192,57 @@ describe('SessionView: semnalele pentru reţinere', () => {
   })
 })
 
-// review M1: taburile 2FA reţinute nu expiră → nu trec de la un cont la altul în acelaşi browser
+// review M1: taburile 2FA reţinute nu expiră → nu trec la ALT cont; acelaşi cont re-autentificat le păstrează
 describe('authResetNeeded', () => {
   const A = { authenticated: true, user_id: 1 }
-  it('prima stare a paginii (reload cu sesiune validă): nimic de golit', () => {
-    expect(authResetNeeded(null, A)).toBe(false)
+  const B = { authenticated: true, user_id: 2 }
+  const OUT = { authenticated: false, user_id: null }
+  it('prima stare a paginii (reload cu sesiune validă), acelaşi owner sau owner necunoscut: nimic', () => {
+    expect(authResetNeeded(1, null, A)).toBe('none')
+    expect(authResetNeeded(null, null, A)).toBe('none')   // wt_tabs dinainte de 3.8.2, fără owner
   })
-  it('acelaşi cont, aceeaşi stare (poll-ul de 5 min): nu goleşte', () => {
-    expect(authResetNeeded(A, { ...A })).toBe(false)
+  it('acelaşi cont, aceeaşi stare (poll-ul de 5 min): nimic', () => {
+    expect(authResetNeeded(1, A, { ...A })).toBe('none')
   })
-  it('ieşire / expirare (wt-unauth) → goleşte', () => {
-    expect(authResetNeeded(A, { authenticated: false, user_id: null })).toBe(true)
+  it('expirare / wt-unauth: doar reţinerea (taburile rămân pentru re-autentificare)', () => {
+    expect(authResetNeeded(1, A, OUT)).toBe('retention')
+    expect(authResetNeeded(1, OUT, OUT)).toBe('none')
   })
-  it('alt cont (fără 401 între ele) → goleşte', () => {
-    expect(authResetNeeded(A, { authenticated: true, user_id: 2 })).toBe(true)
+  it('acelaşi cont se re-autentifică după expirare: doar reţinerea, taburile rămân', () => {
+    expect(authResetNeeded(1, OUT, A)).toBe('retention')
   })
-  it('intrare (inclusiv re-intrarea aceluiaşi cont) → goleşte', () => {
-    expect(authResetNeeded({ authenticated: false, user_id: null }, A)).toBe(true)
+  it('alt cont după delogare (owner ţinut în memorie / localStorage) → tot', () => {
+    expect(authResetNeeded(1, OUT, B)).toBe('all')
   })
-  it('flux: A reţine un tab 2FA, iese, intră B → reţinerea nouă nu mai are tabul', () => {
+  it('reload pe pagina de login, owner din localStorage, intră alt cont → tot; acelaşi → doar reţinerea', () => {
+    expect(authResetNeeded(1, OUT, B)).toBe('all')
+    expect(authResetNeeded(1, OUT, A)).toBe('retention')
+  })
+  it('owner necunoscut după o delogare (ex. după logout explicit) → tot (fail-closed)', () => {
+    expect(authResetNeeded(null, OUT, A)).toBe('all')
+  })
+  it('alt cont adoptat fără 401 între ele, sau prima stare cu alt cont decât owner-ul → tot', () => {
+    expect(authResetNeeded(1, A, B)).toBe('all')
+    expect(authResetNeeded(1, null, B)).toBe('all')
+  })
+  it('flux: A reţine un tab 2FA, expiră, A se re-autentifică → tabul ascuns cade la poll, cel vizibil rămâne', () => {
     let st = newTabRetention()
-    retainOpenTabs([mk('a')], ['a'], st, true, o())
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 5000)).tabs).toEqual(['a'])
-    if (authResetNeeded(A, { authenticated: false, user_id: null })) st = newTabRetention()
-    expect(retainOpenTabs([], ['a'], st, true, o(T0 + 10_000)).tabs).toEqual([])
+    retainOpenTabs([mk('h'), mk('v')], ['h', 'v'], st, true, o())
+    expect(retainOpenTabs([mk('v')], ['h', 'v'], st, true, o(T0 + 5000)).tabs).toEqual(['h', 'v'])
+    if (authResetNeeded(1, A, OUT) !== 'none') st = newTabRetention()
+    if (authResetNeeded(1, OUT, A) !== 'none') st = newTabRetention()
+    expect(retainOpenTabs([mk('v')], ['h', 'v'], st, true, o(T0 + 10_000)).tabs).toEqual(['v'])
+  })
+  it('flux: A reţine un tab 2FA, expiră, intră B → nici reţinerea, nici taburile nu rămân', () => {
+    let st = newTabRetention()
+    let tabs = ['a']
+    retainOpenTabs([mk('a')], tabs, st, true, o())
+    for (const [prev, next] of [[A, OUT], [OUT, B]] as const) {
+      const r = authResetNeeded(1, prev, next)
+      if (r !== 'none') st = newTabRetention()
+      if (r === 'all') tabs = []
+    }
+    expect(tabs).toEqual([])
+    expect(st.cache.size).toBe(0)
   })
 })

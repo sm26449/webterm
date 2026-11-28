@@ -581,18 +581,26 @@ function MainApp() {
     }, 5 * 60_000)
     return () => window.clearInterval(id)
   }, [authed])
-  // Review M1 (3.8.2): un tab 2FA reţinut nu expiră, deci la ORICE schimbare de autentificare (ieşire,
-  // expirare, intrare, alt cont) taburile, MRU-ul şi reţinerea contului vechi se aruncă — altfel contul
-  // următor din acelaşi browser moştenea taburile (şi titlurile) sesiunilor 2FA ale celui dinainte
+  // Review M1 (3.8.2): un tab 2FA reţinut nu expiră, deci taburile (şi titlurile) contului vechi nu trec la
+  // ALT cont din acelaşi browser; acelaşi cont care se re-autentifică (expirare, re-auth SSO) le păstrează,
+  // cu reţinerea golită. Contul-proprietar stă în memorie peste intervalul delogat şi lângă `wt_tabs`
+  // (doar id-ul, fără titluri), ca un reload pe pagina de login să-l ştie. Vezi lib/tabRetention.ts.
   const authSnapRef = useRef<AuthSnap | null>(null)
+  const tabsOwnerRef = useRef<number | null>((() => {
+    const v = Number(lsGet('wt_tabs_owner') || '')
+    return Number.isInteger(v) && v > 0 ? v : null
+  })())
   useEffect(() => {
     if (!appState) return
     const next: AuthSnap = { authenticated: !!appState.authenticated, user_id: appState.user_id ?? null }
-    if (authResetNeeded(authSnapRef.current, next)) {
-      tabRetentionRef.current = newTabRetention()
-      setOpenTabs([]); setMru([]); setActiveSplitId(null)
-    }
+    const r = authResetNeeded(tabsOwnerRef.current, authSnapRef.current, next)
+    if (r !== 'none') tabRetentionRef.current = newTabRetention()
+    if (r === 'all') { setOpenTabs([]); setMru([]); setActiveSplitId(null) }
     authSnapRef.current = next
+    if (next.authenticated && next.user_id != null && next.user_id !== tabsOwnerRef.current) {
+      tabsOwnerRef.current = next.user_id
+      lsSet('wt_tabs_owner', String(next.user_id))
+    }
   }, [appState])
   // deploy nou detectat din headerul X-Webterm-Version (vezi lib/api.ts)
   const [newVersion, setNewVersion] = useState<string | null>(null)
@@ -2467,6 +2475,11 @@ function MainApp() {
             dropCopyRows(null)
             forgetSelfRow()     // rândul propriu din Settings (parolă locală / passkey) e al contului care pleacă (RB-03)
             await api('/api/logout', { method: 'POST' })
+            // ieşire EXPLICITĂ = intenţionată: taburile, MRU-ul şi reţinerea contului pleacă cu el (review M1)
+            tabRetentionRef.current = newTabRetention()
+            setOpenTabs([]); setMru([]); setActiveSplitId(null)
+            tabsOwnerRef.current = null
+            lsSet('wt_tabs_owner', '')
             setAppState({ ...appState, authenticated: false })
           }}
         />

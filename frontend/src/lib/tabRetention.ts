@@ -121,12 +121,24 @@ export function retainOpenTabs(
 
 export interface AuthSnap { authenticated: boolean; user_id: number | null }
 
-/** Review M1 (3.8.2): taburile reţinute nu expiră, deci nu au voie să treacă de la un cont la altul
- *  în acelaşi browser. ORICE schimbare de autentificare văzută de pagină (ieşire, expirare/`wt-unauth`,
- *  intrare, alt `user_id`) goleşte reţinerea şi taburile — inclusiv re-intrarea aceluiaşi cont
- *  (simplu şi sigur). `prev` null = prima stare a paginii (reload cu sesiunea validă): nimic de golit. */
-export function authResetNeeded(prev: AuthSnap | null, next: AuthSnap): boolean {
-  if (!prev) return false
-  return prev.authenticated !== next.authenticated
-    || (next.authenticated && prev.user_id !== next.user_id)
+/** Ce se aruncă la o schimbare de autentificare: nimic, doar reţinerea, sau tot (taburi, MRU, split). */
+export type AuthReset = 'none' | 'retention' | 'all'
+
+/** Review M1 (3.8.2): taburile 2FA reţinute nu expiră, deci nu au voie să treacă la ALT cont din acelaşi
+ *  browser. Dar aceeaşi persoană care se re-autentifică (sesiune web expirată, SESSION_MAX_HOURS, re-auth
+ *  SSO → `wt-unauth` → login) nu trebuie să-şi piardă taburile — exact clasa de plângere reparată aici.
+ *  `owner` = contul căruia îi aparţin taburile (ţinut şi peste intervalul delogat, şi în localStorage
+ *  lângă `wt_tabs`, ca un reload pe pagina de login să-l ştie); `prev` = starea anterioară văzută de
+ *  pagină (null = prima). Ieşirea EXPLICITĂ goleşte tot direct, în handlerul de logout.
+ *   · intrare / adoptare a ALTUI cont decât `owner` (sau `owner` necunoscut după o delogare) → `all`;
+ *   · acelaşi cont care se re-autentifică → `retention`: nicio sesiune 2FA nu rămâne ţinută din cache
+ *     peste re-auth (una ascunsă cade la primul poll proaspăt, una vizibilă rămâne), taburile rămân;
+ *   · delogare (expirare) → `retention`; prima stare a paginii cu acelaşi cont / fără owner → `none`. */
+export function authResetNeeded(owner: number | null, prev: AuthSnap | null, next: AuthSnap): AuthReset {
+  if (!next.authenticated) return prev?.authenticated ? 'retention' : 'none'
+  if (owner != null && next.user_id !== owner) return 'all'
+  if (!prev) return 'none'
+  if (prev.authenticated) return prev.user_id !== next.user_id ? 'all' : 'none'
+  // venim din starea delogată: doar contul care deţinea taburile le păstrează (owner necunoscut = alt cont)
+  return owner != null && owner === next.user_id ? 'retention' : 'all'
 }
